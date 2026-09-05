@@ -1,6 +1,6 @@
 [project]
 name = "bb-translation"
-version = "1.2.3"
+version = "1.2.4"
 description = "Pipeline dich tai lieu nganh banh (EN -> VI), giu nguyen layout goc"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -2732,3 +2732,63 @@ Copy thẳng `NotoSerif-Regular.ttf` từ cache asset của babeldoc
 
 Release phần đã sửa chắc chắn (3, font family). (5)/(6)/(8)/(1)/(2)/(4)/(7) coi là known issue,
 theo dõi riêng, cần báo upstream lên GitHub project của babeldoc.
+
+## Increment (2026-09-06) — File misclassification là root cause thật của bug ngắt dòng/mất chữ (Tech Lead)
+
+User báo lại đúng loại lỗi đã thấy trước (heading 2 dòng ngắt giữa từ, mất 1 đoạn văn, mất ô giá
+trị trong Bảng 1.1) trên "How Baking Works". Increment trước đã kết luận đây là giới hạn
+third-party của babeldoc (TableParser bị deprecated, typesetting hard-break) — **kết luận đó sai**,
+lật lại hoàn toàn bằng live A/B test thật (babeldoc + DeepSeek, cùng file, cùng trang):
+
+- Dịch trực tiếp PDF gốc (`data/uploads/...-libgen.li.pdf`, không qua OCR bridge) qua babeldoc —
+  cả với prompt cũ lỗi lẫn prompt mặc định — cho output **hoàn toàn đúng**: heading wrap sạch 2
+  dòng, đủ cả 2 đoạn văn, đủ mọi ô Bảng 1.1. Verify bằng `translate_tracking.json` (debug mode) +
+  render trực tiếp mono PDF ra ảnh.
+- Đối chiếu 1 job thật đã chạy trong hệ thống (`8f07529a...`, `file_type=pdf_scan` trong DB) —
+  render đúng y hệt bug user báo cáo (100% khớp: "SỰ C" / "HÍNH XÁC", thiếu đoạn "Most bakery
+  items...", bảng thiếu "1 pound"/"1 quart = 0.95 liters").
+
+**Root cause thật**: `_detect_pdf_type()` (`src/core/file_router.py`) tính tỷ lệ trang có text để
+phân loại `pdf_digital`/`pdf_scan`. Fix trước (commit `abc5ff0`) đã loại trang **ảnh raster nguyên
+trang** (bìa, ảnh minh hoạ) khỏi mẫu số, nhưng bỏ sót trang **chỉ có vector drawing** (trang phân
+chương trang trí, không chữ không ảnh raster). File thật có 4/25 trang loại này → `pages_with_text
+/ countable_pages = 21/25 = 0.84 < 0.9` → toàn bộ sách 415 trang bị phân loại nhầm `pdf_scan`, kéo
+qua OCR bridge (MinerU) oan uổng. Verify trực tiếp bằng `detect_file_type()` trên file thật: trả về
+`pdf_scan` dù mọi trang có text đều extract được ngay bằng PyMuPDF (không cần OCR). Bounding
+box/layout MinerU tái tạo kém chính xác hơn PDF gốc → babeldoc typeset sai (hard-break giữa từ) và
+bỏ sót nội dung khi render trên bản OCR-reconstruct — dù bản thân babeldoc dịch đúng hoàn toàn khi
+chạy trên PDF gốc.
+
+**Đã sửa**:
+- `src/core/file_router.py`: mở rộng điều kiện loại trừ khỏi mẫu số — trang không text nhưng có
+  ảnh **hoặc có vector drawing** (`page.get_drawings()`) đều bị loại (trước chỉ loại trang có ảnh).
+  Đổi tên `pages_image_only` → `pages_without_translatable_content` cho đúng ý nghĩa mới.
+- `tests/test_file_router.py`: thêm `test_detect_pdf_digital_with_vector_only_divider_pages` —
+  tái hiện đúng kịch bản 4/25 trang chỉ có vector drawing, assert phân loại đúng `pdf_digital`.
+- Verify: `detect_file_type()` trên file thật giờ trả về `pdf_digital` đúng.
+
+**Đồng thời sửa 1 bug thật khác phát hiện trong lúc audit** (không phải root cause của bug user báo
+lần này, nhưng đã verify là 1 bug thật riêng): `src/core/job_orchestrator.py` dùng chung
+`write_prompt_file()` (contract `--prompt <file>` của pdf2zh, có `${lang_in}`/`${text}` template
++ footer `Source Text:/Translated Text:`) cho CẢ babeldoc, dù babeldoc's `--custom-system-prompt`
+nhận CHUỖI không qua `string.Template` nào và tự thêm JSON-array output contract riêng ngay sau —
+2 contract xung đột trong cùng 1 system prompt.
+- `src/core/prompt_builder.py`: thêm `build_babeldoc_prompt_text()` + `write_babeldoc_prompt_file()`
+  — nội dung riêng cho babeldoc, không có `${...}` template syntax, không có footer pdf2zh.
+- `src/core/job_orchestrator.py`: Step 5 rẽ nhánh theo `pdf_translate_engine` khi build prompt file.
+- `tests/test_prompt_builder.py`, `tests/integration/test_job_orchestrator.py`: thêm test assert
+  nội dung file (không chỉ "được gọi") theo đúng data-lineage discipline của Protocol 6.
+
+**Quyết định kèm theo**: bỏ kế hoạch dual-engine pdf2zh-fallback-cho-bảng (đã cân nhắc ở increment
+trước dựa trên kết luận sai về babeldoc) — không cần nữa vì babeldoc dịch bảng đúng khi chạy trên
+PDF gốc đúng cách; giữ babeldoc-only cho pipeline dịch.
+
+`pyproject.toml` bump `1.2.3` → `1.2.4`.
+
+**Trạng thái release**: 270/270 test pass, `ruff check`/`ruff format` sạch trên các file đã sửa.
+Theo Protocol 5 R5-03/Protocol 6 R6-03 của CLAUDE.md: **CHƯA có live E2E chạy full
+`JobOrchestrator` với cả 2 fix cùng lúc trên file thật** — 2 lần live test đã chạy (babeldoc trực
+tiếp qua CLI, không qua `JobOrchestrator`/OCR bridge) đều KHÔNG dùng đúng `write_babeldoc_prompt_file()`
+mới. User chấp nhận defer việc verify E2E này sang lần dịch thật tiếp theo thay vì chạy ngay —
+ghi nhận rõ: `release blocked pending live verification: full JobOrchestrator pipeline (file
+classifier fix + babeldoc prompt fix) trên "How Baking Works"`.
