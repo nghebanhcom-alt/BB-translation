@@ -16,6 +16,7 @@ Architecture.md 6.6.2 (R1-R5) and docs/CHANGELOG.md "Increment 4 — Fix Round
 
 import asyncio
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -695,6 +696,24 @@ class JobOrchestrator:
             # `__init__` (6.14.7) — khong co `if engine == ...` o day.
             # `input_path=source_path` == `translation_source_path` cua
             # `run_job()`, TUYET DOI KHONG `job.file_path` (Bug #5, 6.14.4).
+            #
+            # Bug (2026-09-05, QA thuc te tren "How Baking Works"): `chunk_output_dir`
+            # la duong dan CO DINH, khong doi giua cac lan goi ham nay — ca khi
+            # `with_retry` (ngay ben duoi) tu retry trong CUNG 1 lan `_process_chunk()`
+            # (vd rate limit) lan khi ca job bi crash/cancel giua chung roi resume o
+            # Buoc 7 (`chunk.status != "completed"` — dong ~348 — chay lai TU DAU
+            # chunk nay, tuc goi lai ham nay vao DUNG thu muc cu con file
+            # `{stem}-mono.pdf` cua (mot phan) lan chay truoc). Da xac nhan song
+            # bang PyMuPDF tren file output that: trang co doan van dich LAP 2 LAN
+            # o 2 vi tri/co chu khac nhau + PDF co 3 content stream thay vi 1 —
+            # dau hieu pdf2zh/babeldoc ghi chong len file cu thay vi bat dau tu
+            # file nguon sach se. Xoa thu muc o DAU MOI LAN GOI (khong phai 1 lan
+            # truoc `with_retry`) de moi attempt — ke ca cac attempt retry ngam
+            # ben trong `with_retry` — deu ghi vao thu muc rong, khong phu thuoc
+            # gia dinh ve hanh vi ghi-de noi bo cua pdf2zh/babeldoc (external
+            # tool, khong kiem soat duoc source).
+            if chunk_output_dir.exists():
+                shutil.rmtree(chunk_output_dir)
             return await self._translator_runner.translate_pages(
                 input_path=source_path,
                 output_dir=chunk_output_dir,

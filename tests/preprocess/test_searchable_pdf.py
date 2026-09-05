@@ -188,6 +188,37 @@ def test_discarded_blocks_are_not_whited_out(tmp_path: Path) -> None:
     assert "Page 3" not in extracted
 
 
+def test_page_with_existing_text_layer_is_not_double_processed(tmp_path: Path) -> None:
+    """Bug thuc te 2026-09-05 ("How Baking Works"): neu file bi phan loai
+    nham thanh pdf_scan (vd do vai trang bia la anh nguyen trang keo ty le
+    xuong duoi nguong o file_router.py), cau noi nay KHONG duoc de them 1 lop
+    OCR trung lap len tren trang DA CO text that — babeldoc/pdf2zh doc ca 2
+    lop qua text object (pdfminer), dan den dich va ve ca 2 lan (quan sat
+    that: 21/25 trang co 2 ho font Viet chong nhau, moi doan van xuat hien 2
+    lan). Trang da co text phai duoc GIU NGUYEN, bo qua hoan toan.
+    """
+    source_pdf = tmp_path / "mixed.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((20, 30), "Real embedded text already here")
+    doc.save(source_pdf)
+    doc.close()
+
+    # middle.json van co span cho trang nay — mo phong dung kich ban that:
+    # OCR van chay va sinh ra ket qua cho trang nay du no da co text.
+    middle_json_path = _write_middle_json(tmp_path / "middle.json", _middle_json_dict())
+    output_path = tmp_path / "ocr_bridge" / "searchable.pdf"
+
+    result = build_searchable_pdf(source_pdf, middle_json_path, output_path)
+
+    assert result.span_count == 0  # trang bi bo qua hoan toan, khong ghi span OCR nao
+    with fitz.open(output_path) as out_doc:
+        extracted = out_doc[0].get_text()
+    assert extracted.count("Real embedded text already here") == 1
+    # Noi dung OCR tu middle.json KHONG duoc chen de len text goc.
+    assert "Blind bake the tart shell" not in extracted
+
+
 def test_raises_when_middle_json_has_no_pdf_info(tmp_path: Path) -> None:
     source_pdf = tmp_path / "scan.pdf"
     _make_scan_like_pdf(source_pdf)

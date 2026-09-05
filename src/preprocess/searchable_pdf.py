@@ -16,6 +16,20 @@ of the original scan, per page:
 The result is a PDF pdf2zh treats exactly like a born-digital one. Images,
 tables, and figures are left untouched — only text-span bboxes are painted
 over, so anything MinerU classified as non-text keeps its original pixels.
+
+Defense-in-depth (bug thuc te 2026-09-05, "How Baking Works" — verify song
+bang PyMuPDF tren file output that): mot file duoc `file_router.py` phan
+loai la `pdf_scan` van co the co NHUNG TRANG rieng le da co text object that
+(vd router phan loai sai o muc CA FILE, hoac 1 vai trang trong 1 file scan
+that su lai co lop text an tu truoc). Neu buoc 1 (whiteout) chi xoa PIXEL
+ma khong xoa text object goc, va buoc 2 (chen text OCR) van chen them 1 lop
+INVISIBLE text nua len tren, thi trang do se co 2 lop text object cung ton
+tai — pdfminer.six (va do do babeldoc/pdf2zh) doc ca 2 lop, dich va ve ca
+hai (quan sat that: 21/25 trang co 2 ho font Viet chong nhau, moi doan van
+xuat hien 2 lan lech vi tri/co chu). `build_searchable_pdf` vi vay BO QUA
+HOAN TOAN buoc whiteout+chen OCR cho bat ky trang nao DA CO text object that
+(`page.get_text().strip()` khong rong) — giu nguyen lop text goc cua trang
+do, khong phu thuoc vao file_router.py co phan loai dung hay khong.
 """
 
 import json
@@ -74,6 +88,19 @@ def build_searchable_pdf(
                 continue
 
             page = doc[page_idx]
+
+            # Defense-in-depth — xem ghi chu trong module docstring. Trang
+            # da co text object that thi GIU NGUYEN, khong whiteout+chen OCR
+            # de len, bat ke file_router.py co phan loai file nay dung hay
+            # khong.
+            if page.get_text().strip():
+                logger.info(
+                    "Trang %d da co text object that (khong phai scan) — "
+                    "bo qua chen lop OCR de tranh nhan doi noi dung",
+                    page_idx,
+                )
+                continue
+
             spans = _collect_text_spans(page_info)
             if not spans:
                 continue

@@ -2448,3 +2448,69 @@ Claude/Gemini `[UNVERIFIED]`)**:
 Kết quả verify trước release: `pytest -q` → 262/262 pass (9.5s), `ruff check` sạch trên mọi file
 sửa/thêm trong increment này. QA gate sống (Architecture.md 6.14.6, `docs/test-report.md`) PASS
 8/8 trên file thật qua DeepSeek. Reviewer APPROVE (`docs/review-report.md`).
+
+## Fix Bug thật (2026-09-05): sách born-digital bị phân loại nhầm thành pdf_scan, sinh 2 lớp text chồng nhau
+
+User báo cáo bản dịch "How Baking Works" v1.2.0 lỗi hiển thị nặng: trang bìa mất chữ, font nhỏ
+lộn xộn, đè chữ 2 lần, mục lục tràn số. PM tự tay mở TRỰC TIẾP các file output thật bằng PyMuPDF
+(không qua mock) để điều tra — quy trình theo đúng tinh thần Protocol 5.
+
+**Nghi ngờ ban đầu (đã bác bỏ)**: race condition khi job resume gọi lại `translate_pages()` vào
+cùng `chunk_output_dir` cũ (`src/core/job_orchestrator.py`). Đã vá bằng `shutil.rmtree()` ở đầu
+mỗi lần gọi `_call_translator()` — fix này ĐÚNG và VẪN GIỮ (chặn 1 race thật), nhưng Tech Lead
+verify độc lập bằng thực nghiệm PyMuPDF cho thấy đây KHÔNG PHẢI nguyên nhân của lỗi user báo cáo
+(race không giải thích được vì sao 25/25 trang đều hỏng theo cùng 1 pattern, cũng không giải
+thích được 2 họ font Việt chồng nhau).
+
+**Root cause thật (Tech Lead verify bằng dữ liệu thật, không suy đoán)**:
+
+1. `src/core/file_router.py`: `_detect_pdf_type()` tính `pages_with_text / total_pages` — sách
+   này là PDF chữ thật (font nhúng Palatino-Light/Futura-Bold, đọc được ngay bằng pdfminer), 21/25
+   trang có text, nhưng 4 trang là ẢNH NGUYÊN TRANG hợp lệ (bìa, trang phân chương). Công thức cũ
+   tính 4 trang đó là "thiếu text", kéo tỉ lệ xuống 0.84 < ngưỡng 0.9 → phân loại NHẦM cả file
+   thành `pdf_scan`, đẩy vào nhánh OCR bridge.
+2. `src/preprocess/searchable_pdf.py`: nhánh OCR bridge vẽ 1 hình chữ nhật trắng đè lên PIXEL của
+   từng span (`draw_rect(fill=(1,1,1))`) rồi chèn thêm 1 lớp text OCR invisible — nhưng KHÔNG xoá
+   text object gốc bên dưới (docstring cũ giả định "chạy trên bản copy của 1 scan thật", giả định
+   này sai khi (1) đưa nhầm 1 file có text thật vào đây). Kết quả: trang có 2 lớp text object cùng
+   tồn tại.
+3. babeldoc/pdf2zh đọc PDF qua pdfminer.six (text object), không đọc pixel — nên đọc CẢ 2 lớp,
+   dịch và vẽ cả hai → đúng là hiện tượng "đè chữ 2 lần, font lộn xộn" trong ảnh user gửi. Verify
+   trực tiếp: 21/25 trang của file output có `n_contents=3` và 2 họ font Việt cùng lúc (`Noto
+   Serif *` + `BeVietnamPro-Regular`), mỗi đoạn văn xuất hiện 2 lần ở 2 size khác nhau.
+
+Đo lại trên 1 job chạy đúng nhánh `pdf_digital` (không qua OCR bridge): font size, line-fill-ratio
+bình thường, không có tràn dòng dọc hệ thống — xác nhận giả thuyết ban đầu về "tiếng Việt dài hơn
+gây tràn dòng có hệ thống" là SAI, chỉ là artifact của bug (1)+(2) ở trên.
+
+**Sửa**:
+
+- `src/core/file_router.py`: loại trang không-text-nhưng-có-ảnh khỏi mẫu số khi tính tỉ lệ
+  (`countable_pages = total_pages - pages_image_only`). Nếu mọi trang đều là ảnh
+  (`countable_pages == 0`), coi là `pdf_scan` (đúng ngữ nghĩa cũ). Test mới:
+  `test_detect_pdf_digital_with_a_few_image_only_pages`.
+- `src/preprocess/searchable_pdf.py`: thêm guard defense-in-depth — bỏ qua HOÀN TOÀN bước
+  whiteout+chèn OCR cho bất kỳ trang nào ĐÃ CÓ text object thật (`page.get_text().strip()` không
+  rỗng), không phụ thuộc `file_router.py` có phân loại đúng hay không. Test mới:
+  `test_page_with_existing_text_layer_is_not_double_processed`.
+- `src/core/job_orchestrator.py`: giữ nguyên fix `shutil.rmtree(chunk_output_dir)` ở đầu mỗi lần
+  gọi `_call_translator()` (race condition thật, độc lập với bug chính, không nên revert).
+
+**Việc KHÔNG làm**: 1 phiên bản trước đó đã thử viết `_fix_vertical_overlaps`/`_redraw_block`
+trong `font_shrink.py` để xử lý giả thuyết "tràn dòng dọc do tiếng Việt dài hơn" — Tech Lead verify
+bằng thực nghiệm cho thấy hướng này SAI và CÓ HẠI (tự kích hoạt 8-26 lần/trang ngay cả trên trang
+tiếng Anh gốc hoàn hảo, do bbox dòng PyMuPDF luôn bao gồm ascender/descender nên overlap ~1pt là
+nhiễu nền bình thường, không phải tín hiệu lỗi). Đã revert hoàn toàn trước khi commit, không đưa
+vào code.
+
+**Trang bìa**: lỗi mất chữ tiêu đề trên trang bìa (2/3 block tiêu đề lớn "BAKING"/"WORKS" biến mất)
+là hệ quả của chính bug (1)+(2) trên — dự kiến tự hết sau khi sách được phân loại đúng `pdf_digital`
+và chạy lại. User quyết định: nếu vẫn còn lỗi trang bìa sau khi chạy lại, sẽ chỉnh tay, không đầu
+tư thêm code cho trường hợp riêng lẻ này.
+
+Kết quả verify: `pytest -q` → 264/264 pass, `ruff check` sạch trên mọi file sửa/thêm.
+`pyproject.toml` bump `1.2.0` → `1.2.1`.
+
+**Việc cần làm tiếp (chưa làm trong lần sửa này)**: chạy lại chính file "How Baking Works" qua
+pipeline đã sửa để xác nhận sống (chưa re-run thật sau khi vá — mới verify bằng cách đọc lại logic
++ dữ liệu cũ), rồi mới đóng hẳn báo cáo lỗi của user.

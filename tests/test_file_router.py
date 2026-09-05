@@ -60,6 +60,28 @@ def test_detect_pdf_mixed_below_threshold(tmp_path: Path) -> None:
     assert detect_file_type(pdf_path) == FileType.PDF_SCAN
 
 
+def test_detect_pdf_digital_with_a_few_image_only_pages(tmp_path: Path) -> None:
+    """Bug thuc te 2026-09-05 ("How Baking Works"): mot cuon sach born-digital
+    that (21/25 trang co text) van bi phan loai nham thanh pdf_scan chi vi 4
+    trang bia/phan chuong la anh nguyen trang khong co chu. Trang anh nguyen
+    trang khong co gi de dich nen khong duoc tinh la "thieu text".
+    """
+    doc = fitz.open()
+    pixmap = fitz.Pixmap(fitz.csRGB, (0, 0, 100, 100), False)
+    pixmap.set_rect(pixmap.irect, (255, 255, 255))
+    for i in range(25):
+        page = doc.new_page()
+        if i in (0, 5, 12, 20):  # 4 trang la anh nguyen trang, khong co chu
+            page.insert_image(page.rect, pixmap=pixmap)
+        else:
+            page.insert_text((72, 72), "Recipe: 480ml flour, 240ml milk.")
+    pdf_path = tmp_path / "digital_with_covers.pdf"
+    doc.save(pdf_path)
+    doc.close()
+
+    assert detect_file_type(pdf_path) == FileType.PDF_DIGITAL
+
+
 def test_detect_epub(tmp_path: Path) -> None:
     epub_path = tmp_path / "book.epub"
     epub_path.write_bytes(b"fake epub content")
