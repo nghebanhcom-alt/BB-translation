@@ -2514,3 +2514,140 @@ Kết quả verify: `pytest -q` → 264/264 pass, `ruff check` sạch trên mọ
 **Việc cần làm tiếp (chưa làm trong lần sửa này)**: chạy lại chính file "How Baking Works" qua
 pipeline đã sửa để xác nhận sống (chưa re-run thật sau khi vá — mới verify bằng cách đọc lại logic
 + dữ liệu cũ), rồi mới đóng hẳn báo cáo lỗi của user.
+
+## Increment (2026-09-05) — Phân tích 7 lỗi hiển thị bản dịch v1.2.1 (Tech Lead + Dev)
+
+User báo 7 lỗi hiển thị trên bản PDF dịch thật (mục lục, lời nói đầu, danh mục "Thiết bị và dụng
+cụ nhỏ"): (1) không dàn lề 2 bên, (2) ngắt dòng giữa 1 từ, (3) mất chữ (mục 2-19 của 1 danh sách
+biến mất), (4) không căn lề 2 bên như bản gốc, (5) font size lên xuống không đều trong cùng 1
+đoạn, (6) co font chữ nhưng để lại nhiều khoảng trống, (7) giữ cột hẹp cứng nhắc dù trang không có
+cột song song, trong khi tiếng Việt dài hơn tiếng Anh ~15-30%.
+
+**Nguồn xác thực (R5-01)**: Tech Lead đọc trực tiếp source code `babeldoc` đã cài
+(`~/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/typesetting.py`,
+`.../utils/layout_helper.py`) và chạy `babeldoc --help` thật (executable tại
+`~/.local/share/uv/tools/babeldoc/bin/babeldoc`), thay vì suy đoán từ kiến thức chung.
+
+**Kết luận root cause**:
+
+- (1), (4) — không justify: xác nhận `typesetting.py` không có bước justify, chỉ left-align sau
+  khi ngắt dòng; `babeldoc --help` không có flag nào điều khiển alignment. Đây là giới hạn kiến
+  trúc của engine bên thứ 3, không sửa được từ wrapper của ta.
+- (2) — ngắt dòng giữa từ: `LINE_BREAK_REGEX` trong `typesetting.py` (định nghĩa "ký tự không được
+  ngắt dòng ở đây") liệt kê Latin-1/Extended A/B/Additional/C nhưng **thiếu khối Combining
+  Diacritical Marks U+0300–036F**. Verify bằng Python thật: chữ "chính" ở dạng Unicode NFD (base
+  letter + dấu tổ hợp riêng, khác NFC là 1 codepoint đã ghép sẵn) → dấu sắc (U+0301) bị engine coi
+  là điểm ngắt dòng hợp lệ, ngay giữa từ. `[CHƯA VERIFY TRÊN FILE LỖI THẬT]` — mới là giả thuyết
+  đã chứng minh bằng code, cần đối chiếu Unicode form thật của text babeldoc nhận trước khi đầu tư
+  sửa (xem mục "Việc cần làm tiếp" bên dưới).
+- (3) — mất chữ: `_layout_typesetting_units` cố tình không drop nội dung khi tràn dọc (comment gốc
+  của tác giả: "đừng break ở đây, tiếp tục layout phần còn lại"), nhưng vẫn đặt ký tự ra ngoài
+  `box.y2` — có thể rơi ngoài vùng nhìn thấy hoặc bị đè bởi block khác. `[CHƯA VERIFY]` — chưa có
+  file lỗi thật để xác nhận đây đúng là cơ chế gây mất chữ quan sát được.
+- (7) — cột hẹp cứng nhắc: bounding box truyền cho layout engine lấy nguyên từ model doclayout
+  phân tích trên PDF gốc tiếng Anh; không có cơ chế nới box theo ngôn ngữ đích, không có flag CLI
+  nào điều khiển việc này. Xác nhận đây là giới hạn kiến trúc, không phải bug.
+
+**Đã sửa (`src/postprocess/font_shrink.py`, thuộc phạm vi code của ta)**:
+
+- (5) — bug thật: `evaluate_span` (bản cũ) quyết định tỉ lệ shrink **độc lập theo từng span**, nên
+  2 span cùng 1 dòng thị giác có thể ra 2 cỡ chữ cuối khác nhau. Thêm `_shrink_line`: tính 1 tỉ lệ
+  shrink chung cho cả dòng (tỉ lệ khắt khe nhất trong số các span), áp cho mọi span trên dòng đó.
+  `evaluate_span` giữ nguyên chữ ký + hành vi cũ (dùng cho test/caller đơn-span độc lập), phần
+  logic 3-bước tách ra hàm thuần `_compute_fit` dùng chung cho cả 2 đường.
+- (6) — bug thật: `_redraw_span` (bản cũ) luôn neo lại text ở `span_bbox.x0` gốc, để phần rộng
+  co được ra làm khoảng trống bên phải. Khi mọi span trên dòng đều redraw được (không có span nào
+  vẫn tràn sau condense), `_shrink_line` xếp lại các span trái-sang-phải theo tỉ lệ đã chọn rồi
+  canh giữa cả dòng trong `block_bbox`, thay vì để trống dồn 1 bên. Trường hợp dòng có span vẫn
+  tràn ngay cả sau condense (US-05 bước 3, không được cắt chữ) thì giữ nguyên vị trí gốc từng span
+  — không tự tin repack khi có span "để nguyên", rủi ro cao hơn giá trị.
+- Test mới (`tests/test_font_shrink.py`):
+  `test_shrink_line_forces_uniform_font_size_across_spans`,
+  `test_shrink_line_centers_freed_up_space_instead_of_anchoring_left`. 9/9 test file này pass,
+  266/266 toàn bộ suite pass, `ruff check`/`ruff format` sạch.
+- `pyproject.toml` bump `1.2.1` → `1.2.2`.
+
+**Việc cần làm tiếp (chưa làm trong lần sửa này, cần trước khi đầu tư thêm vào (2)/(3)/(7))**:
+1. Chạy `babeldoc --debug --pages <N>` đúng trang "Thiết bị và dụng cụ nhỏ" bị mất chữ, đọc log
+   thật để xác nhận/bác bỏ giả thuyết (3).
+2. Mở file PDF dịch thật bằng PyMuPDF, kiểm tra `unicodedata.normalize("NFC", text) == text` cho
+   text quanh chỗ ngắt dòng lỗi, để xác nhận/bác bỏ giả thuyết NFC/NFD ở (2) trước khi cân nhắc
+   dựng 1 local HTTP shim đứng giữa babeldoc và LLM provider để chuẩn hoá NFC (babeldoc tự gọi LLM
+   trong subprocess của nó, ta không có điểm chặn nào khác để sửa text trước khi vào layout
+   engine).
+3. Thử tắt thử `--split-short-lines` (flag đang hardcode bật ở `babeldoc_runner.py`, mà help text
+   gốc của chính flag này cảnh báo "may cause poor typesetting & bugs") trên 1 file mẫu, xem có
+   giảm lỗi ngắt dòng không.
+
+## Increment (2026-09-05) — Spike xác nhận root cause + sửa (2) và (3) (Tech Lead + Dev)
+
+Chạy spike đã đề ra ở increment trước, dùng luôn output thật đã có sẵn trong
+`data/outputs/7e602723-2844-41f7-8c85-591137001601/translated_vi.pdf` (đúng trang "Thiết bị và
+dụng cụ nhỏ" user gửi ảnh) và toàn bộ dữ liệu trung gian trong `data/processing/` của job đó —
+không cần chạy lại babeldoc.
+
+**(3) — mất chữ: ROOT CAUSE THẬT ĐÃ XÁC NHẬN, KHÔNG PHẢI LỖI babeldoc.**
+
+Lần theo dữ liệu qua từng bước: `ocr_output/document.md` (OCR MinerU) có đủ 35/35 mục (thứ tự bị
+xáo trộn nhẹ, không mất nội dung) → `ocr_bridge/searchable.pdf` (TRƯỚC babeldoc) có đủ 35/35, đúng
+thứ tự → `translated_vi.pdf` (SAU babeldoc) chỉ còn 2/35. Input vào babeldoc hoàn chỉnh, output mất
+gần hết → lỗi nằm ở bước dịch, không phải layout engine. Đọc `data/processing/.../prompt.txt`
+(chính là nội dung `--custom-system-prompt` thật đã gửi cho babeldoc) thấy rule BR-FONT-03 viết
+dưới dạng ràng buộc CỨNG: "Bản dịch KHÔNG được dài hơn 130% bản gốc" — không có câu nào nói đầy đủ
+nội dung quan trọng hơn giới hạn độ dài. Với đoạn 35 mục liệt kê, LLM không thể vừa dịch hết vừa
+giữ ≤130% (tiếng Việt của nhiều thuật ngữ thiết bị dài hơn), nên chọn bỏ mục để tuân đúng ràng buộc
+đã ghi rõ — vi phạm chính nguyên tắc "never truncate/cut text" (US-05) mà `font_shrink.py` tuân thủ
+ở bước sau.
+
+**(2) — ngắt dòng giữa từ: giả thuyết NFC/NFD ở increment trước BỊ BÁC BỎ**, thay bằng root cause
+khác đã verify. Trang mục lục thật của file có lỗi "TỔNG QUAN VỀ QUY TRÌN" / "H NƯỚNG BÁNH 27" —
+đọc từng codepoint qua `unicodedata.name()` thì toàn bộ đã là NFC (`Ì` = U+00CC, ký tự ghép sẵn),
+không phải base+dấu tổ hợp rời — bác bỏ giả thuyết NFD. Đọc lại `typesetting.py` của babeldoc kỹ
+hơn: hàm `_get_width_before_next_break_point` nhận `typesetting_units[i:]` (bắt đầu từ CHÍNH ký tự
+đang xét ở vị trí `i`), nên độ rộng ký tự hiện tại bị cộng 2 LẦN vào điều kiện quyết định ngắt dòng
+(`current_x + unit_width + width_before_next_break_point`) — với 1 từ không ngắt được như "TRÌNH",
+lúc xét đến ký tự cuối "H" điều kiện đòi hỏi khoảng trống dư gấp đôi mức cần thật, khiến engine
+ngắt dòng sớm hơn cần thiết, đẩy đúng ký tự cuối "H" xuống dòng sau — khớp chính xác lỗi quan sát
+được. Đây là bug thật trong source `babeldoc` (bên thứ 3), không sửa được từ code của ta trừ khi
+vendor-patch hoặc báo lỗi lên upstream — **không đưa vào phạm vi sửa lần này**.
+
+**Đã sửa (`src/core/prompt_builder.py`, thuộc phạm vi code của ta — chỉ áp dụng cho (3))**:
+
+- Viết lại `_CONCISENESS_RULE` (dùng cho `build_system_prompt`, out-of-band) và
+  `_FILE_CONCISENESS_RULE` (dùng cho `write_prompt_file`, đường render PDF thật — đây mới là bản
+  babeldoc/pdf2zh thực sự đọc): giữ nguyên target "≤130%" (BR-FONT-03 không đổi ý nghĩa gốc theo
+  PRD.md — vẫn là "target", chưa từng có ý cho phép bỏ nội dung), nhưng nói RÕ đây là mục tiêu chứ
+  không phải giới hạn cứng, và khi đoạn có nhiều ý (danh sách nhiều mục) mà không thể vừa đủ ý vừa
+  đạt target thì BẮT BUỘC ưu tiên dịch đầy đủ, không được bỏ sót mục nào chỉ để đạt độ dài.
+- Test mới (`tests/test_prompt_builder.py`): assert cả 2 đường (`build_system_prompt` và
+  `write_prompt_file`) đều chứa "MUC TIEU" + "KHONG duoc bo sot" — regression guard cho đúng bug
+  vừa sửa.
+- **Lưu ý vận hành phát hiện được khi sửa**: bản đầu tiên của rule mới (diễn giải đầy đủ hơn, dài
+  hơn ~2.5x bản gốc) làm 4 test tích hợp (`test_job_orchestrator.py`,
+  `test_job_cancel.py`) chuyển từ `status == "completed"` sang `status == "cost_capped"` — vì
+  `prompt_overhead_chars` (Architecture.md, `cost_estimator.py`) nhân với `segment_count` mỗi job,
+  nên prompt dài thêm dù chỉ vài trăm ký tự cũng cộng dồn đáng kể qua nhiều segment, đẩy cost
+  estimate vượt `max_cost_per_job_usd` (default $2.00). Đã rút gọn lại rule (giữ đúng ý, bỏ phần
+  diễn giải thừa) để không đổi hành vi cost gate của các job hiện có — nhưng đây là tín hiệu cho
+  thấy cost estimate khá nhạy với độ dài prompt, cần cân nhắc mỗi lần sửa `prompt_builder.py` sau
+  này, không chỉ lần này.
+- Kết quả verify: `pytest -q` → 266/266 pass (bao gồm 23/23 test liên quan
+  `test_prompt_builder.py`/`test_job_orchestrator.py`/`test_job_cancel.py` sau khi rút gọn rule),
+  `ruff check`/`ruff format` sạch.
+
+**Việc cần làm tiếp**: báo lỗi upstream lên GitHub project của `babeldoc` cho bug (2)
+(`_get_width_before_next_break_point` double-count width của unit hiện tại), kèm ví dụ tái hiện
+("TỔNG QUAN VỀ QUY TRÌNH NƯỚNG BÁNH" → "...QUY TRÌN" / "H NƯỚNG BÁNH..."). (1), (4), (7) vẫn là
+giới hạn kiến trúc của babeldoc, chưa có hướng sửa nào được duyệt.
+
+**Live E2E verify (R5-03/R6-03) cho fix (3), CHẠY XONG, GỌI THẬT khong mock**: unit test ở trên chỉ
+assert prompt CHỨA đúng câu chữ mới — không chứng minh được LLM thật có nghe theo hay không. Đã
+tách riêng trang "Equipment and smallwares" (page 13 của
+`ocr_bridge/searchable.pdf`, job 7e602723-...) thành 1 file PDF 1 trang, dựng prompt bằng đúng
+`build_prompt_text()` vừa sửa, gọi thẳng `BabeldocRunner.translate_pages()` thật với DeepSeek API
+key thật từ `.env` (không mock, không stub) — cùng code path `JobOrchestrator` dùng trong
+production. Kết quả: **đủ 35/35 mục** trong output (trước khi sửa: chỉ 2/35). Có 4 mục (12, 24, 32,
+34) ban đầu bị regex kiểm tra bỏ sót vì nằm dính liền cuối dòng trước (không có `\n` phía trước số
+thứ tự — hệ quả của lỗi ngắt dòng (2)/(7) vẫn còn, không phải mất nội dung) — đếm lại bằng regex
+không neo đầu dòng thì xác nhận đủ cả 35. Kết luận: fix (3) hoạt động đúng trên gọi LLM thật, sẵn
+sàng release phần này.

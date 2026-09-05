@@ -30,7 +30,9 @@ _GLOSSARY_INSTRUCTION = (
 )
 
 _CONCISENESS_RULE = (
-    "2. Dich suc tich. Ban dich tieng Viet KHONG duoc dai hon 130% ban goc tieng Anh."
+    "2. Dich suc tich, MUC TIEU la <=130% do dai ban goc tieng Anh (khong phai gioi han "
+    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
+    "muc nao chi de dat muc tieu do dai."
 )
 
 _TYPOGRAPHY_RULES = (
@@ -89,7 +91,9 @@ _FILE_GLOSSARY_INSTRUCTION = (
 _FILE_NO_GLOSSARY = "(Khong co glossary entry nao ap dung cho tai lieu nay.)"
 
 _FILE_CONCISENESS_RULE = (
-    "Dich suc tich. Ban dich ${lang_out} KHONG duoc dai hon 130% ban goc ${lang_in}."
+    "Dich suc tich, MUC TIEU la <=130% do dai ban goc ${lang_in} (khong phai gioi han "
+    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
+    "muc nao chi de dat muc tieu do dai."
 )
 
 _FILE_TYPOGRAPHY_RULES = (

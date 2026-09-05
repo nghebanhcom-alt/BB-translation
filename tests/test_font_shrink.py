@@ -6,6 +6,7 @@ import pytest
 from src.postprocess.font_shrink import (
     CONDENSED_SCALE,
     MAX_FONT_SHRINK_RATIO,
+    _shrink_line,
     evaluate_span,
     font_shrink_page,
 )
@@ -13,6 +14,18 @@ from src.postprocess.font_shrink import (
 
 def _span(text: str, font_size: float, bbox: tuple[float, float, float, float]) -> dict:
     return {"text": text, "size": font_size, "font": "helv", "bbox": bbox}
+
+
+def _line_sizes(page: "fitz.Page") -> list[float]:
+    sizes = []
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if span["text"].strip():
+                    sizes.append(round(span["size"], 3))
+    return sizes
 
 
 @pytest.mark.asyncio
@@ -130,6 +143,84 @@ async def test_redraw_with_font_path_does_not_corrupt_vietnamese_glyphs() -> Non
     )
 
     assert text in page.get_text()
+    doc.close()
+
+
+@pytest.mark.asyncio
+async def test_shrink_line_forces_uniform_font_size_across_spans() -> None:
+    """Regression for the v1.2.1 bug: two spans on the same visual line that
+    overflow by different amounts must not end up at two different final
+    font sizes. `span_a` alone would fit untouched at 14pt; `span_b` needs
+    the full -20% shrink plus condensed scaling. Both must land at the same
+    (span_b-driven) final size."""
+    doc = fitz.open()
+    page = doc.new_page()
+    font_size = 14.0
+    text_a = "Kem phu bo ganache"
+    text_b = "Ganache chocolate thom ngon dam da huong vi"
+
+    # bbox_width == 90% of text_b's natural width: span_b needs a step-1-only
+    # shrink to ~12.6pt (above the -20% floor, so scale stays 1.0 and
+    # PyMuPDF's reported "size" is undistorted — a condensed/morphed span's
+    # reported "size" is sqrt(scale)-distorted, not directly comparable).
+    bbox_width = fitz.get_text_length(text_b, fontname="helv", fontsize=font_size) * 0.9 * 1.001
+    full_width_a = fitz.get_text_length(text_a, fontname="helv", fontsize=font_size)
+    assert full_width_a < bbox_width  # sanity: span_a alone needs no shrink at all
+
+    span_a_bbox = (50, 50, 50 + full_width_a, 70)
+    span_b_bbox = (50 + full_width_a + 2, 50, 50 + full_width_a + 2 + bbox_width, 70)
+    line = {
+        "bbox": (50, 50, span_b_bbox[2], 70),
+        "spans": [
+            _span(text_a, font_size, span_a_bbox),
+            _span(text_b, font_size, span_b_bbox),
+        ],
+    }
+    block_bbox = fitz.Rect(50, 50, 50 + bbox_width, 70)
+
+    entries: list = []
+    _shrink_line(page, line, block_bbox, entries)
+
+    assert entries == []
+    assert text_a in page.get_text()
+    assert text_b in page.get_text()
+    sizes = _line_sizes(page)
+    assert sizes  # something was actually redrawn
+    # PyMuPDF may coalesce the two adjacent same-style runs into one span,
+    # so assert on whatever spans came back rather than requiring exactly
+    # two: every one of them must share the same, actually-shrunk, size.
+    assert all(size == pytest.approx(sizes[0]) for size in sizes)
+    assert sizes[0] < font_size  # actually shrunk, not left at the original 14pt
+    doc.close()
+
+
+@pytest.mark.asyncio
+async def test_shrink_line_centers_freed_up_space_instead_of_anchoring_left() -> None:
+    """Regression for the v1.2.1 bug: after shrinking, the freed-up width
+    must be distributed around the line, not left dangling entirely on the
+    right of a left-anchored span."""
+    doc = fitz.open()
+    page = doc.new_page()
+    font_size = 14.0
+    text = "Ganache chocolate thom ngon dam da huong vi"
+
+    min_width_after_shrink = fitz.get_text_length(
+        text, fontname="helv", fontsize=font_size * MAX_FONT_SHRINK_RATIO
+    )
+    bbox_width = min_width_after_shrink * (CONDENSED_SCALE + 0.05)
+    span_bbox = (50, 50, 50 + bbox_width, 70)
+    line = {"bbox": span_bbox, "spans": [_span(text, font_size, span_bbox)]}
+    block_bbox = fitz.Rect(*span_bbox)
+
+    entries: list = []
+    _shrink_line(page, line, block_bbox, entries)
+
+    assert entries == []
+    rendered = page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]["bbox"]
+    left_margin = rendered[0] - block_bbox.x0
+    right_margin = block_bbox.x1 - rendered[2]
+    assert left_margin > 0  # not simply left-anchored at the block's edge
+    assert right_margin >= 0
     doc.close()
 
 

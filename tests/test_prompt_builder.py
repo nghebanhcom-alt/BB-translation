@@ -45,8 +45,13 @@ async def test_system_prompt_contains_all_required_sections(session: AsyncSessio
     assert "°F" in prompt
     assert "Bot mi (flour)" in prompt
 
-    # Conciseness rule (BR-FONT-03).
+    # Conciseness rule (BR-FONT-03): a target, not a hard cap that licenses
+    # dropping content — regression for the v1.2.2 bug where a dense
+    # numbered list got silently truncated by the model to satisfy a
+    # conciseness rule phrased as an absolute constraint.
     assert "130%" in prompt
+    assert "MUC TIEU" in prompt
+    assert "KHONG duoc bo sot" in prompt
 
     # Typography/structure preservation (BR-TYPO-01..04).
     assert "heading" in prompt
@@ -88,6 +93,10 @@ async def test_write_prompt_file_contains_template_tokens(
     assert "${lang_out}" in content
     assert content.endswith("Source Text: ${text}\nTranslated Text:")
     assert "ganache" in content
+    # Same v1.2.2 regression guard as the out-of-band system prompt above,
+    # but for the FILE contract pdf2zh/babeldoc actually read per segment.
+    assert "MUC TIEU" in content
+    assert "KHONG duoc bo sot" in content
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,22 @@ exported so it can be unit-tested directly against a real `fitz.Page` with a
 deliberately narrow bbox passed in — exercising the real shrink/condense/flag
 control flow and the real PyMuPDF redact+reinsert calls — without depending
 on being able to organically manufacture a self-overflowing span.
+
+Third implementation note (2026-09-05, user-reported v1.2.1 rendering bugs):
+the original version of this module decided font size / condensed scale
+*per span*, independently. Two spans sitting on the same visual line (e.g.
+because the source PDF split one sentence into two font runs) could end up
+overflowing by different amounts and therefore land on two different final
+font sizes — the "font size lên xuống không đều tại chính 1 đoạn" bug. It
+also always re-inserted a shrunk span at its *original* `span_bbox.x0`,
+leaving whatever width the smaller font freed up as dead space on the right
+— the "co font chữ nhưng khoảng trống lại rất nhiều" bug. `font_shrink_page`
+now decides a single shrink ratio per *line* (`_shrink_line`) and, when every
+span on that line ends up redrawable, repacks them left-to-right and centers
+the whole line in the block's width so the freed-up space is distributed
+instead of dangling on one side. `evaluate_span` itself is unchanged (kept
+for the existing single-span test surface and for standalone callers) and
+now shares its core fit math with the line-level path via `_compute_fit`.
 """
 
 from dataclasses import dataclass
@@ -80,13 +96,16 @@ async def font_shrink_page(
     overflow_entries: list[OverflowEntry],
     font_path: str | None = None,
 ) -> list[OverflowEntry]:
-    """Scan every text span on `page`; shrink/condense/flag on overflow.
+    """Scan every text line on `page`; shrink/condense/flag on overflow.
 
-    `overflow_entries` is both mutated in place and returned, so callers can
-    pass one shared list across every page of a document and read it once at
-    the end. `font_path` (see module docstring) should be the real font
-    pdf2zh rendered the page's translated text with — omit only for tests
-    that don't care about actual Vietnamese glyph correctness.
+    Decides one shrink ratio per line (not per span) so that spans sharing a
+    visual line always end up at the same final font size — see the third
+    implementation note in the module docstring. `overflow_entries` is both
+    mutated in place and returned, so callers can pass one shared list across
+    every page of a document and read it once at the end. `font_path` (see
+    module docstring) should be the real font pdf2zh rendered the page's
+    translated text with — omit only for tests that don't care about actual
+    Vietnamese glyph correctness.
     """
     measurer = fitz.Font(fontfile=font_path) if font_path else None
     for block in page.get_text("dict")["blocks"]:
@@ -94,9 +113,40 @@ async def font_shrink_page(
             continue
         block_bbox = fitz.Rect(block["bbox"])
         for line in block["lines"]:
-            for span in line["spans"]:
-                evaluate_span(page, span, block_bbox, overflow_entries, font_path, measurer)
+            _shrink_line(page, line, block_bbox, overflow_entries, font_path, measurer)
     return overflow_entries
+
+
+def _compute_fit(
+    measure_fn: "callable[[float], float]",
+    font_size: float,
+    bbox_width: float,
+) -> tuple[float, float, bool]:
+    """Pure BR-FONT-02 3-step sizing decision, shared by `evaluate_span` (the
+    single-span path, kept for the existing test surface) and `_shrink_line`
+    (the line-level path). Returns `(final_font_size, scale_applied,
+    still_overflow)` — callers decide what to do with that (redraw, flag,
+    fold into a line-wide ratio) rather than this function touching the page.
+    """
+    text_width = measure_fn(font_size)
+    if text_width <= bbox_width:
+        return font_size, 1.0, False
+
+    # Step 1: shrink font size, capped at -20%.
+    min_size = font_size * MAX_FONT_SHRINK_RATIO
+    candidate_size = max(min_size, font_size * (bbox_width / text_width))
+    candidate_width = measure_fn(candidate_size)
+
+    if candidate_width <= bbox_width:
+        return candidate_size, 1.0, False
+
+    # Step 2: horizontal condensed scaling at min font size.
+    scaled_width = candidate_width * CONDENSED_SCALE
+    if scaled_width <= bbox_width:
+        return candidate_size, CONDENSED_SCALE, False
+
+    # Step 3: still overflowing — caller leaves text untouched, flags it.
+    return candidate_size, CONDENSED_SCALE, True
 
 
 def evaluate_span(
@@ -107,6 +157,10 @@ def evaluate_span(
     font_path: str | None = None,
     measurer: "fitz.Font | None" = None,
 ) -> None:
+    """Single-span BR-FONT-02 decision. Kept for standalone callers/tests
+    that exercise one span in isolation; `font_shrink_page` itself uses the
+    line-level `_shrink_line` below so sibling spans on one line agree on a
+    final font size."""
     text = span["text"]
     if not text.strip():
         return
@@ -123,39 +177,128 @@ def evaluate_span(
     span_bbox = fitz.Rect(span["bbox"])
     bbox_width = block_bbox.width or span_bbox.width
 
-    text_width = _measure(font_size)
-    if text_width <= bbox_width:
-        return  # fits, nothing to do
+    final_size, scale, still_overflow = _compute_fit(_measure, font_size, bbox_width)
 
-    # Step 1: shrink font size, capped at -20%.
-    min_size = font_size * MAX_FONT_SHRINK_RATIO
-    candidate_size = max(min_size, font_size * (bbox_width / text_width))
-    candidate_width = _measure(candidate_size)
-
-    if candidate_width <= bbox_width:
-        _redraw_span(page, span_bbox, text, candidate_size, scale=1.0, font_path=font_path)
-        return
-
-    # Step 2: horizontal condensed scaling at min font size.
-    scaled_width = candidate_width * CONDENSED_SCALE
-    if scaled_width <= bbox_width:
-        _redraw_span(
-            page, span_bbox, text, candidate_size, scale=CONDENSED_SCALE, font_path=font_path
+    if still_overflow:
+        overflow_entries.append(
+            OverflowEntry(
+                page_number=page.number,
+                original_text=text,
+                bbox=(block_bbox.x0, block_bbox.y0, block_bbox.x1, block_bbox.y1),
+                font_size_original=font_size,
+                font_size_final=final_size,
+                scaling_applied=CONDENSED_SCALE,
+                still_overflow=True,
+            )
         )
         return
 
-    # Step 3: still overflowing — leave text untouched, flag for review.
-    overflow_entries.append(
-        OverflowEntry(
-            page_number=page.number,
-            original_text=text,
-            bbox=(block_bbox.x0, block_bbox.y0, block_bbox.x1, block_bbox.y1),
-            font_size_original=font_size,
-            font_size_final=candidate_size,
-            scaling_applied=CONDENSED_SCALE,
-            still_overflow=True,
-        )
+    if final_size == font_size and scale == 1.0:
+        return  # fits at original size, nothing to do
+
+    _redraw_span(page, span_bbox, text, final_size, scale=scale, font_path=font_path)
+
+
+def _shrink_line(
+    page: "fitz.Page",
+    line: dict,
+    block_bbox: "fitz.Rect",
+    overflow_entries: list[OverflowEntry],
+    font_path: str | None = None,
+    measurer: "fitz.Font | None" = None,
+) -> None:
+    """Decide a single font-size ratio for every span on `line` (the most
+    aggressive shrink any one span needs), then redraw them all at that
+    uniform size. When none of the spans need step-3 (still overflowing
+    after condensed scaling), also repacks the line left-to-right and centers
+    it in `block_bbox`'s width instead of leaving shrunk spans anchored at
+    their original (English-layout-sized) x position — see module docstring.
+    """
+    entries = [(span, span["text"]) for span in line["spans"] if span["text"].strip()]
+    if not entries:
+        return
+
+    def _measure_for(span: dict, text: str) -> "callable[[float], float]":
+        if measurer is not None:
+            return lambda size: measurer.text_length(text, fontsize=size)
+        return lambda size: fitz.get_text_length(text, fontname=_FALLBACK_FONT, fontsize=size)
+
+    bbox_width = block_bbox.width or fitz.Rect(line["bbox"]).width
+
+    fits = [
+        _compute_fit(_measure_for(span, text), span["size"], bbox_width) for span, text in entries
+    ]
+    line_ratio = min(
+        final_size / span["size"] for (span, _), (final_size, _, _) in zip(entries, fits)
     )
+
+    if line_ratio >= 1.0:
+        return  # every span already fits at its own size, nothing to do
+
+    # Re-evaluate each span's overflow status at the line's shared ratio
+    # (not each span's own, possibly less aggressive, ratio computed above).
+    decisions: list[tuple[dict, str, float, float, bool]] = []
+    for span, text in entries:
+        forced_size = span["size"] * line_ratio
+        measure_fn = _measure_for(span, text)
+        width_at_forced = measure_fn(forced_size)
+        if width_at_forced <= bbox_width:
+            decisions.append((span, text, forced_size, 1.0, False))
+        elif width_at_forced * CONDENSED_SCALE <= bbox_width:
+            decisions.append((span, text, forced_size, CONDENSED_SCALE, False))
+        else:
+            decisions.append((span, text, forced_size, CONDENSED_SCALE, True))
+
+    if any(still_overflow for *_, still_overflow in decisions):
+        # Mixed line (some spans fit at the shared size, at least one still
+        # doesn't): keep every span's own original x-position — repacking
+        # would have to reason about the untouched span's original width
+        # too, which is more risk than this fix is worth. Every span still
+        # gets the uniform font size, which is the bug being fixed here.
+        for span, text, final_size, scale, still_overflow in decisions:
+            span_bbox = fitz.Rect(span["bbox"])
+            if still_overflow:
+                overflow_entries.append(
+                    OverflowEntry(
+                        page_number=page.number,
+                        original_text=text,
+                        bbox=(block_bbox.x0, block_bbox.y0, block_bbox.x1, block_bbox.y1),
+                        font_size_original=span["size"],
+                        font_size_final=final_size,
+                        scaling_applied=CONDENSED_SCALE,
+                        still_overflow=True,
+                    )
+                )
+                continue
+            _redraw_span(page, span_bbox, text, final_size, scale=scale, font_path=font_path)
+        return
+
+    # Every span on the line fits at the shared ratio: repack left-to-right
+    # and center the whole line in the block's width instead of leaving each
+    # span at its original (English-sized) position.
+    widths = [
+        _measure_for(span, text)(final_size) * scale
+        for span, text, final_size, scale, _ in decisions
+    ]
+    gaps = []
+    for i in range(len(decisions) - 1):
+        this_bbox = fitz.Rect(decisions[i][0]["bbox"])
+        next_bbox = fitz.Rect(decisions[i + 1][0]["bbox"])
+        gaps.append(max(0.0, (next_bbox.x0 - this_bbox.x1)) * line_ratio)
+
+    total_width = sum(widths) + sum(gaps)
+    start_x = block_bbox.x0 + max(0.0, (bbox_width - total_width) / 2)
+
+    cursor = start_x
+    for i, (span, text, final_size, scale, _) in enumerate(decisions):
+        span_bbox = fitz.Rect(span["bbox"])
+        origin = fitz.Point(cursor, span_bbox.y1 - final_size * 0.2)
+        _redraw_span(
+            page, span_bbox, text, final_size, scale=scale, font_path=font_path, origin=origin
+        )
+        cursor += widths[i]
+        if i < len(gaps):
+            cursor += gaps[i]
 
 
 def _redraw_span(
@@ -165,10 +308,16 @@ def _redraw_span(
     font_size: float,
     scale: float,
     font_path: str | None = None,
+    origin: "fitz.Point | None" = None,
 ) -> None:
+    """Erases the glyphs at `span_bbox` (the span's *original* position) and
+    re-inserts `text` at `origin` if given, else at `span_bbox`'s own origin
+    — `origin` lets `_shrink_line`'s repack path draw the span somewhere
+    other than where it used to be, while still erasing the right spot."""
     page.add_redact_annot(span_bbox, fill=(1, 1, 1))
     page.apply_redactions()
-    origin = fitz.Point(span_bbox.x0, span_bbox.y1 - font_size * 0.2)
+    if origin is None:
+        origin = fitz.Point(span_bbox.x0, span_bbox.y1 - font_size * 0.2)
     morph = (origin, fitz.Matrix(scale, 1)) if scale != 1.0 else None
     if font_path:
         page.insert_text(
