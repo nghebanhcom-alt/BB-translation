@@ -1,0 +1,3 @@
+[09/05/26 06:06:25] WARNING  WARNING:pdf2zh.translator:RateLimitError <string>:6
+                             , retrying in 3.5 seconds... (Attempt
+                             7/100)

@@ -1,0 +1,90 @@
+[09/05/26 11:47:32] INFO     INFO:babeldoc.docvision.base_doclayout:Loading ONNX model...                                                                                           base_doclayout.py:43
+                    INFO     INFO:babeldoc.docvision.doclayout:Using CoreMLExecutionProvider with static input [1, 3, 1024, 1024]                                                        doclayout.py:64
+[09/05/26 11:47:38] INFO     INFO:babeldoc.format.pdf.high_level:start to translate: /Users/hieutt/Vibe                                                                                high_level.py:533
+                             Code/Baking-tools/BB-Translation/data/uploads/898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking                  
+                             science (2007_2008, Wiley) - libgen.li-1-25.pdf                                                                                                                            
+warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+[09/05/26 11:47:41] INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Found title paragraph: EQUIPMENT AND SMALLWARES                            il_translator_llm_only.py:171
+                    INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Found first title paragraph: EQUIPMENT AND SMALLWARES                      il_translator_llm_only.py:192
+[09/05/26 11:47:42] WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 1 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 1 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 1 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+[09/05/26 11:47:43] WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 1 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+[09/05/26 11:47:45] WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 2 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 2 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 2 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 2 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+[09/05/26 11:47:48] WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 4 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 4 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+                    WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 4 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+[09/05/26 11:47:49] WARNING  WARNING:babeldoc.translator.translator:Retrying babeldoc.translator.translator.OpenAITranslator.do_llm_translate in 4 seconds as it raised               before_sleep.py:64
+                             RateLimitError: Error code: 429 - {'error': {'message': 'rate limited', 'type': 'rate_limit_error', 'code': '429'}}.                                                       
+[09/05/26 11:47:53] WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+[09/05/26 11:47:54] WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+[09/05/26 11:47:55] WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Error Expecting value: line 1 column 1 (char 0) during translation. try il_translator_llm_only.py:854
+                             fallback                                                                                                                                                                   
+[09/05/26 11:48:04] INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Translation completed. Total: 40, Successful: 0, Fallback: 40              il_translator_llm_only.py:255
+[09/05/26 11:48:07] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:Font subsetting completed successfully                                                         pdf_creater.py:1285
+[09/05/26 11:48:09] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:PDF save with clean=True completed successfully                                                pdf_creater.py:1400
+[09/05/26 11:48:11] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:PDF save with clean=True completed successfully                                                pdf_creater.py:1400
+                    INFO     INFO:babeldoc.format.pdf.high_level:Peak memory usage: 2209.50 MB                                                                                         high_level.py:411
+                    INFO     INFO:babeldoc.format.pdf.high_level:finish translate: /Users/hieutt/Vibe                                                                                  high_level.py:688
+                             Code/Baking-tools/BB-Translation/data/uploads/898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking                  
+                             science (2007_2008, Wiley) - libgen.li-1-25.pdf, cost: 33.83438992500305 s                                                                                                 
+                    ERROR    ERROR:babeldoc.format.pdf.high_level:Failed to migrate TOC from /Users/hieutt/Vibe                                                                        high_level.py:716
+                             Code/Baking-tools/BB-Translation/data/uploads/898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking                  
+                             science (2007_2008, Wiley) - libgen.li-1-25.pdf: 'int' object is not iterable                                                                                              
+translate                                              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100/100 0:00:33 0:00:00
+Parse PDF and Create Intermediate Representation (1/1) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/0     0:00:00 0:00:00
+Parse Page Layout (1/1)                                ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:00 0:00:00
+Parse Paragraphs (1/1)                                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Parse Formulas and Styles (1/1)                        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Translate Paragraphs (1/1)                             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 42/42   0:00:23 0:00:00
+Typesetting (1/1)                                      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:00 0:00:00
+Add Fonts (1/1)                                        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 336/336 0:00:00 0:00:00
+Generate drawing instructions (1/1)                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Subset font (1/1)                                      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:02 0:00:00
+Save PDF (1/1)                                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:04 0:00:00
+                    INFO     INFO:babeldoc.main:Translation results:                                                                                                                         main.py:763
+                                     Original PDF: /Users/hieutt/Vibe Code/Baking-tools/BB-Translation/data/uploads/898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_              
+                             exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.pdf                                                                                       
+                                     Total time: 33.83 seconds                                                                                                                                          
+                                     Monolingual PDF:                                                                                                                                                   
+                             /private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/5c3363c4-82d8-4533-83a1-20c2284fc6da/scratchpad/spike/out_b10/898a567a-5034-41ed-8a            
+                             95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.mono.pdf                
+                                     Dual-language PDF:                                                                                                                                                 
+                             /private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/5c3363c4-82d8-4533-83a1-20c2284fc6da/scratchpad/spike/out_b10/898a567a-5034-41ed-8a            
+                             95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.dual.pdf                
+                                     Peak memory usage: 2209.5 MB                                                                                                                                       
+                                     Total valid character count: 2873                                                                                                                                  
+                                     Total valid text token count (gpt-4o): 791                                                                                                                         
+                    INFO     INFO:babeldoc.main:Total tokens: 720                                                                                                                            main.py:772
+                    INFO     INFO:babeldoc.main:Prompt tokens: 480                                                                                                                           main.py:773
+                    INFO     INFO:babeldoc.main:Completion tokens: 240                                                                                                                       main.py:774
+                    INFO     INFO:babeldoc.main:Cache hit prompt tokens: 0                                                                                                                   main.py:775
+                    INFO     INFO:babeldoc.main:Term extraction tokens: total=0 prompt=0 completion=0 cache_hit_prompt=0                                                                     main.py:778
+                    INFO     INFO:babeldoc.format.pdf.high_level:Waiting for translation to finish...                                                                                  high_level.py:375
+                    INFO     INFO:babeldoc.format.pdf.translation_config:cleanup temp files: /var/folders/pz/847t8wr57bqc2h625lj9j_8w0000gn/T/tmpfja8ax40                      translation_config.py:472

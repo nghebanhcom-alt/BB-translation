@@ -1,0 +1,202 @@
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    claude_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-5-20250514"
+    claude_max_tokens: int = 8192
+    claude_temperature: float = 0.3
+    claude_use_prompt_caching: bool = True
+
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    # Increment 6: doi tu "gpt-4o" -> "gpt-4o-mini" (re hon ~16 lan, du dung
+    # cho hau het truong hop dich thuat) — day la nguyen nhan chinh khien user
+    # thay uoc tinh $3.22 cho 1 cuon sach, dat hon can thiet.
+    openai_model: str = "gpt-4o-mini"
+    openai_max_tokens: int = 8192
+    openai_temperature: float = 0.3
+
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
+    deepseek_max_tokens: int = 8192
+    deepseek_temperature: float = 0.3
+
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-pro"
+    gemini_max_tokens: int = 8192
+    gemini_temperature: float = 0.3
+
+    deepl_api_key: str = ""
+    deepl_formality: str = "default"
+
+    ollama_endpoint: str = "http://localhost:11434"
+    ollama_model: str = "gemma2:27b"
+    ollama_max_tokens: int = 8192
+    ollama_temperature: float = 0.3
+
+    # MinerU OCR service — real contract verified in Architecture.md section 6.9.
+    # MinerU's own default port is 8000, which this app already binds, so both the
+    # native macOS process and the Docker port mapping expose it on host 8010.
+    mineru_endpoint: str = "http://localhost:8010"
+    # A real 200-500 page scan takes far longer than the previous 300s ceiling; the
+    # async /tasks flow means only the per-request timeout needs to stay small.
+    mineru_task_timeout_seconds: float = 3600.0
+    mineru_request_timeout_seconds: float = 120.0
+    # AC-11.2 threshold. Provisional — the metric it applies to is now computed by
+    # BB-Translation from MinerU span scores, not supplied by MinerU (6.9.5/6.9.7),
+    # so it must stay tunable until calibrated against real scans.
+    ocr_confidence_threshold: float = 0.80
+
+    database_url: str = "sqlite+aiosqlite:///data/bb_translation.db"
+
+    max_concurrent_files: int = 3
+    max_upload_size_mb: int = 500
+
+    # pdf2zh renders any character outside the original PDF's embedded font
+    # (i.e. all translated Vietnamese text) using whatever font `NOTO_FONT_PATH`
+    # points to, defaulting to its own auto-downloaded GoNotoKurrent if unset
+    # (see `pdf2zh/high_level.py::download_remote_fonts`). Pinning it here
+    # instead and exporting the same path to the subprocess
+    # (`Pdf2zhServiceMapper`) guarantees `font_shrink_page`'s width
+    # measurement/redraw uses the IDENTICAL font pdf2zh rendered the page
+    # with — "helv" (PDF base-14) silently corrupts Vietnamese characters
+    # outside Latin-1 (verified: "thơm" -> "th·m") and its metrics understate
+    # real Vietnamese glyph width by ~30-45%. Be Vietnam Pro (OFL, Google
+    # Fonts) chosen over GoNotoKurrent's default fallback: purpose-built for
+    # Vietnamese, verified full glyph coverage for diacritics + common
+    # cookbook symbols (°, fractions, bullets, em-dash, curly quotes).
+    noto_font_path: str = "fonts/BeVietnamPro-Regular.ttf"
+
+    log_level: str = "info"
+
+    # PDF pipeline (Architecture.md 6.6.8) — provider mac dinh la DeepSeek: re nhat, ho
+    # tro native qua pdf2zh -s deepseek, co context caching phia server (PRD US-14).
+    default_provider: str = "deepseek"
+    max_glossary_entries_in_prompt: int = 80
+    pdf2zh_ignore_cache: bool = False
+    pdf2zh_timeout_seconds: int = 3600
+    # BR-FONT-03 (VI <= 130% EN) + he so token/ky tu tieng Viet co dau, dung trong
+    # estimate_chunk_cost() (Architecture.md 6.6.6) — cost la UOC LUONG, khong phai so do dem.
+    vi_expansion_factor: float = 1.3
+    vi_token_factor: float = 1.5
+    metering_proxy_enabled: bool = False
+
+    # Financial Safety Lop 2 (Architecture.md 6.11.4) — su co $6.50 that
+    # (2026-09-04, RC-3: "KHONG CO hard cap o bat ky lop nao"). Nguong nay
+    # chan job/batch TRUOC KHI tao, dua tren estimate_job_cost_v2().
+    max_cost_per_job_usd: float = 2.00
+    max_cost_per_batch_usd: float = 5.00
+    cost_cap_enabled: bool = True
+
+    # AIMD concurrency controller (Architecture.md 6.12.6/6.12.8).
+    adaptive_concurrency_enabled: bool = True
+    # Kill switch — `.env`-only, NOT in SETTINGS_DB_OVERRIDABLE_FIELDS below:
+    # a safe rollback if AIMD misbehaves in production, falls back to
+    # ADAPTIVE_THREAD_FLOOR[provider] fixed for every chunk.
+    ollama_thread: int = 2
+    # Ollama has no AIMD (6.12.6 — no countable rate-limit signal exists for
+    # a local model; throttling shows up as generic slowness/CPU-GPU-RAM
+    # pressure, not a discrete event). Deliberate exception: IS in
+    # SETTINGS_DB_OVERRIDABLE_FIELDS, because the right value depends on the
+    # user's own hardware (VRAM/cores) — the app cannot infer or learn it.
+
+    # Engine dich PDF (Architecture.md 6.14). Default doi sang "babeldoc"
+    # 2026-09-05 sau QA gate 6.14.6 (PASS 8/8, xem docs/test-report.md): sua duoc
+    # loi gop dong danh sach cua pdf2zh (31/35 vs 0/35) doi lay ~108x thoi gian
+    # dich (do tren 1 file 25 trang, N=1 - AIMD constants babeldoc van con
+    # ⚠️ ASSUMED). Nguoi dung chap nhan danh doi nay (quyet dinh Protocol 2).
+    # "pdf2zh" van giu nguyen lam duong rollback - `.env`-only, KHONG vao
+    # SETTINGS_DB_OVERRIDABLE_FIELDS: doi engine khong phai thao tac user thuong
+    # lam tu UI, va rollback phai la 1 thao tac co chu dich (sua .env + restart).
+    pdf_translate_engine: Literal["pdf2zh", "babeldoc"] = "babeldoc"
+    babeldoc_executable: str = "babeldoc"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+#: Increment 5 design decision (docs/CHANGELOG.md "Increment 5"): the `PUT
+#: /api/settings` endpoint lets the user set API keys through the web UI
+#: instead of editing `.env` by hand. `Settings` itself stays a cached
+#: `pydantic-settings` singleton read once from `.env` (`get_settings()`
+#: above, unchanged) — DB-stored values are layered on top of it at read
+#: time via this function, never mutated in place, so `get_settings()`
+#: remains a pure `.env` snapshot for anything that doesn't need DB access
+#: (e.g. `Pdf2zhServiceMapper` unit tests). Only fields a user would
+#: plausibly want to change from the UI are overridable; everything else
+#: (chunking, cost heuristics, etc.) stays `.env`/code-only.
+SETTINGS_DB_OVERRIDABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "claude_api_key",
+        "claude_model",
+        "openai_api_key",
+        "openai_base_url",
+        "openai_model",
+        "deepseek_api_key",
+        "deepseek_base_url",
+        "deepseek_model",
+        "gemini_api_key",
+        "gemini_model",
+        "deepl_api_key",
+        "ollama_endpoint",
+        "ollama_model",
+        "ollama_thread",
+        "default_provider",
+        "max_concurrent_files",
+        "max_cost_per_job_usd",
+        "max_cost_per_batch_usd",
+        "cost_cap_enabled",
+    }
+)
+
+
+def _cast_setting_value(raw: str, current: object) -> object:
+    """Cast a DB-stored string back to the type `Settings` declares for that
+    field. `bool` must be checked before `int` — `bool` is an `int` subclass
+    in Python, so `isinstance(current, int)` alone would wrongly stringify a
+    bool field back into `int(raw)`.
+    """
+    if isinstance(current, bool):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(current, int):
+        return int(raw)
+    if isinstance(current, float):
+        return float(raw)
+    return raw
+
+
+async def get_effective_settings(session: "AsyncSession") -> Settings:
+    """`get_settings()` (.env) with any DB-stored overrides from the
+    `settings` table layered on top. Call this instead of `get_settings()`
+    anywhere a DB session is already available and the caller cares about
+    user-configured API keys/provider choice (job execution, cost estimate,
+    the settings endpoints themselves) — see docs/CHANGELOG.md "Increment 5"
+    for why this exists instead of writing directly into the cached
+    `Settings` singleton.
+    """
+    from sqlmodel import select
+
+    from src.models.settings import Setting
+
+    base = get_settings()
+    result = await session.exec(select(Setting))
+    rows = {row.key: row.value for row in result.all() if row.key in SETTINGS_DB_OVERRIDABLE_FIELDS}
+    if not rows:
+        return base
+
+    data = base.model_dump()
+    for key, raw_value in rows.items():
+        data[key] = _cast_setting_value(raw_value, data[key])
+    return Settings(**data)

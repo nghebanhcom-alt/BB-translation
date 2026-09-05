@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../data:/data
+      - ../fonts:/app/fonts
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////data/bb_translation.db
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEEPL_API_KEY=${DEEPL_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OLLAMA_ENDPOINT=${OLLAMA_ENDPOINT:-http://host.docker.internal:11434}
+      - MINERU_ENDPOINT=${MINERU_ENDPOINT:-http://mineru:8000}
+      - MINERU_TASK_TIMEOUT_SECONDS=${MINERU_TASK_TIMEOUT_SECONDS:-3600}
+      - MINERU_REQUEST_TIMEOUT_SECONDS=${MINERU_REQUEST_TIMEOUT_SECONDS:-120}
+      - OCR_CONFIDENCE_THRESHOLD=${OCR_CONFIDENCE_THRESHOLD:-0.80}
+      - NOTO_FONT_PATH=/app/fonts/GoNotoKurrentRegular.ttf
+      - MAX_CONCURRENT_FILES=${MAX_CONCURRENT_FILES:-3}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-500}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+          cpus: "6"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Sidecar MinerU — CHI chay duoc tren Linux/WSL2 + NVIDIA GPU (Architecture.md 6.9.8).
+  # Tren macOS KHONG bat profile "ocr": cai MinerU native tren host
+  #   uv pip install "mineru[core]" && mineru-api --host 127.0.0.1 --port 8010
+  # roi dat MINERU_ENDPOINT=http://localhost:8010 trong .env
+  mineru:
+    # `opendatalab/mineru:latest` KHONG ton tai tren Docker Hub. Phai tu build:
+    #   wget https://raw.githubusercontent.com/opendatalab/MinerU/master/docker/global/Dockerfile
+    #   docker build -t mineru:latest -f Dockerfile .
+    image: mineru:latest
+    profiles:
+      - ocr
+    entrypoint: mineru-api
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8010:8000"
+    volumes:
+      - ../data:/data
+    environment:
+      - MINERU_MODEL_SOURCE=local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4"
+
+volumes:
+  data:

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Glossary — BB-Translation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+  <nav class="bg-white border-b px-6 py-3 flex items-center gap-6">
+    <span class="font-bold text-lg">BB-Translation</span>
+    <a href="/index.html" class="text-sm text-gray-600 hover:text-amber-700">Dịch tài liệu</a>
+    <a href="/glossary.html" class="text-sm font-medium text-amber-700">Glossary</a>
+    <a href="/history.html" class="text-sm text-gray-600 hover:text-amber-700">Lịch sử</a>
+    <a href="/settings.html" class="text-sm text-gray-600 hover:text-amber-700">Cài đặt</a>
+  </nav>
+
+  <main class="max-w-5xl mx-auto p-6" x-data="glossaryApp()" x-init="load()">
+    <div class="flex justify-between items-center mb-4">
+      <h1 class="text-xl font-bold">Quản lý Glossary</h1>
+      <div class="flex gap-2">
+        <label class="border rounded px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-100">
+          Import Excel
+          <input type="file" class="hidden" accept=".xlsx,.xlsm" @change="previewImport($event.target.files[0])" />
+        </label>
+        <a href="/api/glossary/export" class="border rounded px-3 py-1.5 text-sm hover:bg-gray-100">Export Excel</a>
+      </div>
+    </div>
+
+    <!-- Import preview (2-step: preview -> confirm) -->
+    <section x-show="importPreview" class="bg-amber-50 border border-amber-200 rounded p-4 mb-6">
+      <p class="mb-2 text-sm">Xem trước <span x-text="importPreview?.count"></span> entry sẽ được import:</p>
+      <div class="max-h-48 overflow-y-auto border rounded bg-white mb-3">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-100 sticky top-0"><tr><th class="p-2 text-left">EN</th><th class="p-2 text-left">VI</th><th class="p-2 text-left">Notes</th></tr></thead>
+          <tbody>
+            <template x-for="(e, i) in importPreview?.entries || []" :key="i">
+              <tr class="border-t"><td class="p-2" x-text="e.term_en"></td><td class="p-2" x-text="e.term_vi"></td><td class="p-2" x-text="e.notes"></td></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="flex gap-2">
+        <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm" @click="confirmImport()">Xác nhận import</button>
+        <button class="border px-3 py-1.5 rounded text-sm" @click="importPreview = null">Hủy</button>
+      </div>
+    </section>
+
+    <!-- Filter -->
+    <div class="flex gap-2 mb-3 items-center">
+      <select x-model="scopeFilter" @change="offset = 0; load()" class="border rounded px-2 py-1 text-sm">
+        <option value="">Tất cả scope</option>
+        <option value="global">Global</option>
+      </select>
+      <select :value="limit" @change="changePageSize($event.target.value)" class="border rounded px-2 py-1 text-sm">
+        <option value="25">25 / trang</option>
+        <option value="50">50 / trang</option>
+      </select>
+      <span class="text-sm text-gray-500"
+            x-text="total === 0 ? '0 entries' : `${offset + 1}-${Math.min(offset + limit, total)} / ${total} entries`"></span>
+    </div>
+
+    <!-- Entries table -->
+    <table class="w-full bg-white border rounded text-sm">
+      <thead class="bg-gray-100">
+        <tr><th class="p-2 text-left">EN</th><th class="p-2 text-left">VI</th><th class="p-2 text-left">Notes</th><th class="p-2 text-left">Scope</th><th class="p-2"></th></tr>
+      </thead>
+      <tbody>
+        <template x-for="entry in entries" :key="entry.id">
+          <tr class="border-t">
+            <td class="p-2" x-text="entry.term_en"></td>
+            <td class="p-2">
+              <input x-show="editingId !== entry.id" @click="startEdit(entry)" class="cursor-text" :value="entry.term_vi || '(keep)'" readonly />
+              <input x-show="editingId === entry.id" x-model="editDraft.term_vi" class="border rounded px-1 w-full" />
+            </td>
+            <td class="p-2">
+              <input x-show="editingId !== entry.id" @click="startEdit(entry)" class="cursor-text" :value="entry.notes || ''" readonly />
+              <input x-show="editingId === entry.id" x-model="editDraft.notes" class="border rounded px-1 w-full" />
+            </td>
+            <td class="p-2 text-gray-500" x-text="entry.scope"></td>
+            <td class="p-2 text-right whitespace-nowrap">
+              <button x-show="editingId === entry.id" @click="saveEdit(entry)" class="text-amber-700 text-xs mr-2">Lưu</button>
+              <button x-show="editingId === entry.id" @click="editingId = null" class="text-gray-500 text-xs mr-2">Hủy</button>
+              <button @click="deleteEntry(entry)" class="text-red-600 text-xs">Xóa</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+
+    <div class="flex justify-end items-center gap-2 mt-3 text-sm text-gray-500">
+      <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset === 0" @click="prevPage()">Trước</button>
+      <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset + limit >= total" @click="nextPage()">Sau</button>
+    </div>
+  </main>
+
+  <script src="/js/glossary.js"></script>
+</body>
+</html>

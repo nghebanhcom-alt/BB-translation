@@ -1,0 +1,27 @@
+{
+  "_comment": "Golden file cho Architecture.md 6.11.6 — trich tu ~/.cache/pdf2zh/cache.v1.db (bang _translationcache) doc ngay 2026-09-04, sau su co chi phi $6.50. Cache goc co the bi xoa; file nay la ban luu duy nhat cua so lieu do.",
+  "source_db": "~/.cache/pdf2zh/cache.v1.db",
+  "source_pdf": "Figoni, Paula - How baking works (2007/2008, Wiley), 415 trang",
+  "model": "gpt-4o",
+  "requests_cached": 2941,
+  "requests_openai_billed": 2989,
+  "prompt_chars_total": 3864474,
+  "prompt_chars_per_request": 1314,
+  "source_text_chars": 699103,
+  "translation_chars": 809717,
+  "openai_reported_tokens": 1548096,
+  "openai_reported_cost_usd": 6.50,
+  "pages_translated_approx": 270,
+  "derived": {
+    "input_tokens_est": 1140894,
+    "output_tokens_est": 404858,
+    "total_tokens_est": 1545753,
+    "cost_est_gpt4o_usd": 6.90,
+    "cost_if_gpt4o_mini_usd": 0.414,
+    "prompt_share_of_input_pct": 84.7,
+    "chars_per_token_vi_measured": 2.0,
+    "vi_char_expansion_measured": 1.158
+  },
+  "glossary_entries_in_run": 0,
+  "_glossary_note": "Lan chay nay KHONG co glossary entry nao. Voi cap 80 entry (6.6.5) prompt phinh ~3.4x -> chi phi that cua use-case day du con cao hon."
+}

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lịch sử — BB-Translation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+  <nav class="bg-white border-b px-6 py-3 flex items-center gap-6">
+    <span class="font-bold text-lg">BB-Translation</span>
+    <a href="/index.html" class="text-sm text-gray-600 hover:text-amber-700">Dịch tài liệu</a>
+    <a href="/glossary.html" class="text-sm text-gray-600 hover:text-amber-700">Glossary</a>
+    <a href="/history.html" class="text-sm font-medium text-amber-700">Lịch sử</a>
+    <a href="/settings.html" class="text-sm text-gray-600 hover:text-amber-700">Cài đặt</a>
+  </nav>
+
+  <main class="max-w-5xl mx-auto p-6" x-data="historyApp()" x-init="load()">
+    <div class="flex justify-between items-center mb-4">
+      <h1 class="text-xl font-bold">Lịch sử dịch (US-12)</h1>
+      <select x-model="statusFilter" @change="load()" class="border rounded px-2 py-1 text-sm">
+        <option value="">Tất cả trạng thái</option>
+        <option value="completed">Hoàn thành</option>
+        <option value="failed">Thất bại</option>
+        <option value="translating">Đang dịch</option>
+        <option value="queued">Đang chờ</option>
+        <option value="cancelled">Đã dừng</option>
+        <option value="cost_capped">Dừng do vượt trần chi phí</option>
+      </select>
+    </div>
+
+    <table class="w-full bg-white border rounded text-sm">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="p-2 text-left">Tên file</th>
+          <th class="p-2 text-left">Loại</th>
+          <th class="p-2 text-left">Ngày tạo</th>
+          <th class="p-2 text-left">Trạng thái</th>
+          <th class="p-2 text-left">Chi phí</th>
+          <th class="p-2"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="job in jobs" :key="job.id">
+          <tr class="border-t">
+            <td class="p-2" x-text="job.filename"></td>
+            <td class="p-2 text-gray-500" x-text="job.job_type"></td>
+            <td class="p-2 text-gray-500" x-text="new Date(job.created_at).toLocaleString('vi-VN')"></td>
+            <td class="p-2">
+              <span class="text-xs px-2 py-1 rounded" :class="statusBadgeClass(job.status)" x-text="job.status"></span>
+              <p x-show="job.status === 'cost_capped'" class="text-xs text-purple-700 mt-1">
+                Dừng để bảo vệ chi phí — không phải lỗi, không phải bạn hủy. Tăng trần trong Cài đặt rồi bấm Tiếp tục.
+              </p>
+            </td>
+            <td class="p-2 text-gray-500">
+              <template x-if="job.actual_cost != null">
+                <span>~$<span x-text="job.actual_cost.toFixed(2)"></span> (<span x-text="job.cost_source"></span>)</span>
+              </template>
+            </td>
+            <td class="p-2 text-right whitespace-nowrap">
+              <a x-show="job.status === 'completed'" :href="`/api/jobs/${job.id}/download`" class="text-amber-700 underline text-xs mr-2">Tải VI</a>
+              <a x-show="job.status === 'completed' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs">Tải song ngữ</a>
+            </td>
+          </tr>
+        </template>
+        <tr x-show="jobs.length === 0"><td colspan="6" class="p-4 text-center text-gray-400">Chưa có job nào</td></tr>
+      </tbody>
+    </table>
+
+    <div class="flex justify-between items-center mt-3 text-sm text-gray-500">
+      <span x-text="`${total} job`"></span>
+      <div class="flex gap-2">
+        <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset === 0" @click="offset = Math.max(0, offset - limit); load()">Trước</button>
+        <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset + limit >= total" @click="offset += limit; load()">Sau</button>
+      </div>
+    </div>
+  </main>
+
+  <script src="/js/history.js"></script>
+</body>
+</html>

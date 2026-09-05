@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cài đặt — BB-Translation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+  <nav class="bg-white border-b px-6 py-3 flex items-center gap-6">
+    <span class="font-bold text-lg">BB-Translation</span>
+    <a href="/index.html" class="text-sm text-gray-600 hover:text-amber-700">Dịch tài liệu</a>
+    <a href="/glossary.html" class="text-sm text-gray-600 hover:text-amber-700">Glossary</a>
+    <a href="/history.html" class="text-sm text-gray-600 hover:text-amber-700">Lịch sử</a>
+    <a href="/settings.html" class="text-sm font-medium text-amber-700">Cài đặt</a>
+  </nav>
+
+  <main class="max-w-3xl mx-auto p-6" x-data="settingsApp()" x-init="load()">
+    <h1 class="text-xl font-bold mb-4">Cài đặt</h1>
+
+    <section class="bg-white border rounded-lg p-4 mb-6">
+      <label class="block text-sm font-medium mb-1">Provider mặc định</label>
+      <select x-model="defaultProvider" class="border rounded px-2 py-1 text-sm w-full md:w-64">
+        <template x-for="name in Object.keys(providers)" :key="name">
+          <option :value="name" x-text="providerLabel(name)"></option>
+        </template>
+      </select>
+
+      <label class="block text-sm font-medium mt-4 mb-1">Số file dịch đồng thời tối đa</label>
+      <input type="number" min="1" x-model="maxConcurrentFiles" class="border rounded px-2 py-1 text-sm w-24" />
+    </section>
+
+    <section class="bg-white border rounded-lg p-4 mb-6">
+      <h2 class="font-semibold mb-1">Trần chi phí (sau sự cố $6.50 tiền thật)</h2>
+      <p class="text-xs text-gray-500 mb-3">
+        Chặn job/batch TRƯỚC KHI chạy nếu chi phí ước tính vượt trần, và dừng job giữa chừng nếu chi phí
+        tích lũy thực tế vượt trần (ước tính có thể sai — không phải số đo thật).
+      </p>
+
+      <label class="flex items-center gap-2 mb-3 text-sm">
+        <input type="checkbox" x-model="costCapEnabled" />
+        Bật trần chi phí
+      </label>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3" :class="!costCapEnabled && 'opacity-50'">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Trần cho 1 job (USD)</label>
+          <input type="number" min="0" step="0.01" x-model="maxCostPerJobUsd" :disabled="!costCapEnabled"
+                 class="border rounded px-2 py-1 text-sm w-full" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Trần cho 1 batch (USD)</label>
+          <input type="number" min="0" step="0.01" x-model="maxCostPerBatchUsd" :disabled="!costCapEnabled"
+                 class="border rounded px-2 py-1 text-sm w-full" />
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-white border rounded-lg p-4 mb-6">
+      <h2 class="font-semibold mb-3">API key &amp; model theo provider</h2>
+
+      <template x-for="name in Object.keys(providers)" :key="name">
+        <div class="border-t first:border-t-0 pt-3 mt-3 first:pt-0 first:mt-0">
+          <div class="flex justify-between items-center mb-2">
+            <p class="font-medium text-sm" x-text="providerLabel(name)"></p>
+            <span class="text-xs px-2 py-0.5 rounded"
+                  :class="providers[name]?.has_key ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                  x-text="providers[name]?.has_key ? 'Đã có key' : 'Chưa có key'"></span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1"
+                     x-text="name === 'ollama' ? 'Endpoint (vd http://localhost:11434)' : 'API key (để trống nếu không đổi)'"></label>
+              <input :type="name === 'ollama' ? 'text' : 'password'"
+                     x-model="apiKeyDrafts[name]"
+                     :placeholder="providers[name]?.has_key ? '••••••••' : ''"
+                     class="border rounded px-2 py-1 text-sm w-full" />
+            </div>
+
+            <div x-show="hasModel(name)">
+              <label class="block text-xs text-gray-500 mb-1">Model</label>
+              <template x-if="name === 'ollama'">
+                <input type="text" x-model="modelDrafts[name]" placeholder="vd gemma2:27b"
+                       class="border rounded px-2 py-1 text-sm w-full" />
+              </template>
+              <template x-if="name !== 'ollama'">
+                <select x-model="modelDrafts[name]" class="border rounded px-2 py-1 text-sm w-full">
+                  <template x-for="m in modelOptions(name)" :key="m">
+                    <option :value="m" x-text="m"></option>
+                  </template>
+                </select>
+              </template>
+            </div>
+          </div>
+
+          <div x-show="name === 'ollama' && providers[name]?.has_key" class="mt-2">
+            <label class="block text-xs text-gray-500 mb-1">Số luồng dịch song song</label>
+            <input type="number" min="1" x-model="ollamaThread" class="border rounded px-2 py-1 text-sm w-24" />
+            <p class="text-xs text-gray-500 mt-1">Tăng nếu máy có nhiều VRAM; giảm về 1 nếu máy treo.</p>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <button class="bg-amber-600 text-white px-4 py-2 rounded hover:bg-amber-700" @click="save()">Lưu cài đặt</button>
+    <p x-show="saveMessage" x-text="saveMessage" class="text-green-700 text-sm mt-2"></p>
+    <p x-show="saveError" x-text="saveError" class="text-red-600 text-sm mt-2"></p>
+  </main>
+
+  <script src="/js/settings.js"></script>
+</body>
+</html>

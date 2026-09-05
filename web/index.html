@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BB-Translation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+  <nav class="bg-white border-b px-6 py-3 flex items-center gap-6">
+    <span class="font-bold text-lg">BB-Translation</span>
+    <a href="/index.html" class="text-sm font-medium text-amber-700">Dịch tài liệu</a>
+    <a href="/glossary.html" class="text-sm text-gray-600 hover:text-amber-700">Glossary</a>
+    <a href="/history.html" class="text-sm text-gray-600 hover:text-amber-700">Lịch sử</a>
+    <a href="/settings.html" class="text-sm text-gray-600 hover:text-amber-700">Cài đặt</a>
+  </nav>
+
+  <main class="max-w-5xl mx-auto p-6" x-data="translationApp()" x-init="init()">
+
+    <!-- Upload area -->
+    <section class="bg-white border-2 border-dashed rounded-lg p-8 text-center mb-6"
+              :class="dragOver ? 'border-amber-500 bg-amber-50' : 'border-gray-300'"
+              @dragover.prevent="dragOver = true"
+              @dragleave.prevent="dragOver = false"
+              @drop.prevent="dragOver = false; handleFiles($event.dataTransfer.files)">
+      <p class="text-gray-600 mb-3">Kéo thả file PDF/EPUB vào đây, hoặc</p>
+      <label class="inline-block bg-amber-600 text-white px-4 py-2 rounded cursor-pointer hover:bg-amber-700">
+        Chọn file
+        <input type="file" class="hidden" multiple accept=".pdf,.epub" @change="handleFiles($event.target.files)" />
+      </label>
+      <p class="text-xs text-gray-400 mt-2">Chỉ hỗ trợ .pdf và .epub, tối đa 500MB/file</p>
+      <p x-show="uploadError" x-text="uploadError" class="text-red-600 text-sm mt-2"></p>
+    </section>
+
+    <!-- File list + config -->
+    <section x-show="files.length > 0" class="bg-white border rounded-lg p-4 mb-6">
+      <h2 class="font-semibold mb-3">File đã upload (<span x-text="files.length"></span>)</h2>
+
+      <template x-for="f in files" :key="f.file_id || f.job?.id">
+        <div class="border rounded p-3 mb-3">
+          <div class="flex justify-between items-start mb-2">
+            <div>
+              <p class="font-medium" x-text="f.filename"></p>
+              <p class="text-xs text-gray-500">
+                <span x-text="f.file_type"></span> ·
+                <span x-text="(f.size_bytes / 1024 / 1024).toFixed(1)"></span> MB
+                <template x-if="f.page_count"> · <span x-text="f.page_count"></span> trang</template>
+              </p>
+            </div>
+            <span class="text-xs px-2 py-1 rounded"
+                  :class="statusBadgeClass(f.job?.status)"
+                  x-text="f.job?.status || 'chưa dịch'"></span>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2" x-show="!f.job">
+            <select x-model="f.job_type" class="border rounded px-2 py-1 text-sm">
+              <option value="translate">Dịch</option>
+              <option value="parse_only">Chỉ xuất Markdown (không dịch)</option>
+            </select>
+            <select x-model="f.provider" @change="rememberChoice(f)" class="border rounded px-2 py-1 text-sm" x-show="f.job_type === 'translate'">
+              <template x-for="p in availableProviders(f.file_type)" :key="p">
+                <option :value="p" x-text="providerLabel(p)"></option>
+              </template>
+            </select>
+            <select x-model="f.output_mode" @change="rememberChoice(f)" class="border rounded px-2 py-1 text-sm" x-show="f.job_type === 'translate'">
+              <option value="monolingual">Đơn ngữ (chỉ VI)</option>
+              <option value="bilingual">Song ngữ (VI + EN)</option>
+            </select>
+            <div class="flex gap-2">
+              <button class="border rounded px-2 py-1 text-sm hover:bg-gray-100" @click="estimateCost(f)"
+                      x-show="f.job_type === 'translate'">
+                Xem chi phí ước tính
+              </button>
+              <button class="bg-amber-600 text-white rounded px-2 py-1 text-sm hover:bg-amber-700"
+                      @click="createJob(f)">
+                Dịch
+              </button>
+            </div>
+          </div>
+
+          <div x-show="f.costEstimate" class="text-xs text-gray-500 mb-2 bg-amber-50 border border-amber-200 rounded p-2">
+            <p>
+              Ước tính: $<span x-text="f.costEstimate?.estimated_cost_usd?.toFixed(2)"></span>
+              – $<span x-text="f.costEstimate?.estimated_cost_usd_high?.toFixed(2)"></span>
+              (<span x-text="f.costEstimate?.provider_name"></span>) —
+              <span class="font-medium">đây là khoảng ước tính, chi phí thật có thể cao hơn</span>
+              (pdf2zh không báo token thật).
+            </p>
+            <p class="mt-1">
+              Số đoạn văn ước tính sẽ gửi API: <span class="font-medium" x-text="f.costEstimate?.estimated_segment_count"></span>
+              — mỗi đoạn văn là 1 request LLM riêng.
+            </p>
+            <p x-show="isExpensiveModel(f)" class="mt-1 text-red-700 font-medium">
+              ⚠ Model này đắt hơn ~16.7× so với gpt-4o-mini — cân nhắc đổi model trong Cài đặt.
+            </p>
+          </div>
+
+          <p x-show="f.jobError" x-text="f.jobError" class="text-xs text-red-600 mb-2"></p>
+
+          <!-- Progress -->
+          <div x-show="f.job && ['queued','translating','post_processing','merging','chunking'].includes(f.job.status)">
+            <div class="w-full bg-gray-200 rounded-full h-2 mb-1">
+              <div class="bg-amber-600 h-2 rounded-full transition-all"
+                   :style="`width: ${f.job?.progress_percent || 0}%`"></div>
+            </div>
+            <p class="text-xs text-gray-500">
+              <span x-show="!f.job?.cancel_requested">
+                <span x-text="f.job?.progress_percent || 0"></span>% ·
+                chunk <span x-text="f.job?.current_chunk ?? '-'"></span>/<span x-text="f.job?.total_chunks ?? '-'"></span>
+              </span>
+              <span x-show="f.job?.cancel_requested" class="text-amber-700">Đang dừng (sau khi xong chunk hiện tại)...</span>
+            </p>
+            <button x-show="isCancellable(f)" @click="cancelJob(f)"
+                    class="text-xs text-red-600 underline mt-1">Dừng</button>
+          </div>
+
+          <p x-show="f.job?.status === 'failed'" class="text-xs text-red-600" x-text="f.job?.error_message"></p>
+          <p x-show="f.job?.status === 'cancelled'" class="text-xs text-gray-500">Đã dừng theo yêu cầu — có thể tiếp tục dịch từ chỗ dở dang.</p>
+          <p x-show="f.job?.status === 'cost_capped'" class="text-xs text-purple-700">
+            Đã dừng để bảo vệ chi phí (không phải lỗi, không phải bạn hủy) — chi phí ước tính đã vượt trần.
+            Tăng trần trong Cài đặt rồi bấm Tiếp tục dịch để chạy tiếp từ chỗ dở dang.
+          </p>
+
+          <div class="mt-2 flex gap-2" x-show="f.job?.status === 'completed'">
+            <a :href="`/api/jobs/${f.job.id}/download`" class="text-sm text-amber-700 underline">Tải bản VI</a>
+            <a x-show="f.job?.bilingual_path" :href="`/api/jobs/${f.job.id}/download?format=bilingual`"
+               class="text-sm text-amber-700 underline">Tải bản song ngữ</a>
+          </div>
+
+          <button x-show="['failed', 'cancelled', 'cost_capped'].includes(f.job?.status)" @click="retryJob(f)"
+                  class="text-sm text-amber-700 underline mt-1">Tiếp tục dịch</button>
+        </div>
+      </template>
+
+      <div class="flex gap-2">
+        <button class="bg-amber-600 text-white px-4 py-2 rounded hover:bg-amber-700 disabled:opacity-50"
+                :disabled="!files.some(f => !f.job)"
+                @click="translateAll()">
+          Dịch tất cả
+        </button>
+        <button class="border border-red-300 text-red-700 px-4 py-2 rounded hover:bg-red-50 disabled:opacity-50"
+                :disabled="!files.some(f => isCancellable(f))"
+                @click="stopAllJobs()">
+          Dừng tất cả job
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

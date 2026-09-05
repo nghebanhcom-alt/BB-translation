@@ -1,0 +1,12 @@
+/* Minimal custom styles — Tailwind utility classes (CDN, see Architecture.md
+   section 1) cover almost everything used across web/*.html. */
+
+[x-cloak] {
+  display: none !important;
+}
+
+table input[readonly] {
+  background: transparent;
+  border: none;
+  width: 100%;
+}

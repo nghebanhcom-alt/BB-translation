@@ -1,0 +1,1 @@
+2026-09-05 11:46:23.411 python[37227:1038902] 2026-09-05 11:46:23.411140 [W:onnxruntime:, coreml_execution_provider.cc:137 GetCapability] CoreMLExecutionProvider::GetCapability, number of partitions supported by CoreML: 7 number of nodes in the graph: 681 number of nodes supported by CoreML: 657

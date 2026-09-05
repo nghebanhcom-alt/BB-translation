@@ -1,0 +1,13 @@
+/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/5c3363c4-82d8-4533-83a1-20c2284fc6da/scratchpad/spike/out_b10:
+total 672
+drwxr-xr-x@  4 hieutt  wheel     128 Sep  5 11:48 .
+drwxr-xr-x@ 15 hieutt  wheel     480 Sep  5 11:47 ..
+-rw-r--r--@  1 hieutt  staff  218366 Sep  5 11:48 898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.dual.pdf
+-rw-r--r--@  1 hieutt  staff  122234 Sep  5 11:48 898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.mono.pdf
+
+/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/5c3363c4-82d8-4533-83a1-20c2284fc6da/scratchpad/spike/out_b6b:
+total 672
+drwxr-xr-x@  4 hieutt  wheel     128 Sep  5 11:46 .
+drwxr-xr-x@ 15 hieutt  wheel     480 Sep  5 11:47 ..
+-rw-r--r--@  1 hieutt  staff  218367 Sep  5 11:46 898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.dual.pdf
+-rw-r--r--@  1 hieutt  staff  122233 Sep  5 11:46 898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.no_watermark.vi.mono.pdf
