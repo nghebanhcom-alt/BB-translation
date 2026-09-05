@@ -210,6 +210,97 @@ async def test_translate_pages_success_hardcodes_all_required_flags(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_translate_pages_deepseek_disables_thinking(tmp_path: Path, mocker) -> None:
+    """DeepSeek phai duoc gui `--openai-thinking disabled` VA dung thu tu cap
+    flag/value. Ly do: babeldoc hardcode `max_tokens=2048`; voi reasoning model
+    (`deepseek-v4-flash`) toan bo ngan sach token bi reasoning an het,
+    `message.content` rong -> `json.loads("")` raise -> ca batch roi xuong
+    fallback -> mat noi dung hang loat. Live-verified 2026-09-06, xem docstring
+    cua `_thinking_args`."""
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner()
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    args = list(create_exec.call_args.args)
+    assert "--openai-thinking" in args
+    assert args[args.index("--openai-thinking") + 1] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_non_deepseek_omits_thinking_flag(tmp_path: Path, mocker) -> None:
+    """`thinking` la truong rieng cua DeepSeek API — gui cho OpenAI-compat khac
+    co the bi tu choi 400, nen flag nay KHONG duoc xuat hien voi provider khac."""
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner()
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_OPENAI_SERVICE,
+    )
+    assert "--openai-thinking" not in create_exec.call_args.args
+
+
+def _gemini_service(model: str) -> Pdf2zhService:
+    return Pdf2zhService(
+        service_arg=f"gemini:{model}",
+        envs={"GEMINI_API_KEY": "fake", "GEMINI_MODEL": model},
+        supports_custom_prompt=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_rejects_unverified_gemini_model_before_spawning(
+    tmp_path: Path, mocker
+) -> None:
+    """Model Gemini co thinking dot het `max_tokens=2048` cua babeldoc -> JSON
+    hong -> babeldoc bo ca batch -> PDF mat noi dung nhung job van 'completed'.
+    Phai chan TRUOC khi spawn subprocess, khong duoc chay roi giao file hong.
+    Live-verified 2026-09-06 (`gemini-3-flash-preview`: thinking=1963,
+    finish_reason='length', JSON khong parse duoc)."""
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=_FakeProcess(returncode=0))
+    )
+    with pytest.raises(UnsupportedForPdfPipelineError, match="gemini-3-flash-preview"):
+        await BabeldocRunner().translate_pages(
+            input_path=tmp_path / "input.pdf",
+            output_dir=tmp_path / "out",
+            page_range="1-10",
+            service=_gemini_service("gemini-3-flash-preview"),
+        )
+    create_exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_allows_verified_gemini_model(tmp_path: Path, mocker) -> None:
+    """`gemini-3.1-flash-lite` da verify song 2026-09-06: thinking=0,
+    finish_reason='stop', JSON parse duoc -> khong bi chan."""
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=_FakeProcess(returncode=0))
+    )
+    await BabeldocRunner().translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_gemini_service("gemini-3.1-flash-lite"),
+    )
+    create_exec.assert_awaited_once()
+    # `thinking` bi Gemini tra HTTP 400 (`Unknown name "thinking"`) — flag nay
+    # KHONG duoc lot sang nhanh Gemini.
+    assert "--openai-thinking" not in create_exec.call_args.args
+
+
+@pytest.mark.asyncio
 async def test_translate_pages_without_prompt_file_omits_flag(tmp_path: Path, mocker) -> None:
     fake_process = _FakeProcess(returncode=0, stderr=b"")
     create_exec = mocker.patch(

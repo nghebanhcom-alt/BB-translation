@@ -18,6 +18,7 @@ matches a job outliving the HTTP call that started it.
 
 import asyncio
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -33,8 +34,10 @@ from src.core.cost_gate import check_cap, estimate_translation_cost, gate_error_
 from src.core.job_orchestrator import BatchOrchestrator, JobOrchestrator
 from src.core.ocr_warning import build_ocr_warning
 from src.models.batch import Batch
+from src.models.chunk import Chunk
 from src.models.database import get_session_factory
 from src.models.job import Job
+from src.models.overflow import OverflowReport
 from src.services.mineru_runner import MinerURunner
 from src.services.pdf2zh_service_map import Pdf2zhServiceMapper, UnsupportedForPdfPipelineError
 from src.services.provider_factory import ProviderConfigError, ProviderFactory, UnknownProviderError
@@ -565,7 +568,9 @@ _RETRYABLE_STATUSES = {"failed", "cancelled", "cost_capped"}
 
 
 @router.post("/{job_id}/retry", response_model=RetryResponse)
-async def retry_job(job_id: str, session: SessionDep, request: RetryRequest | None = None) -> RetryResponse:
+async def retry_job(
+    job_id: str, session: SessionDep, request: RetryRequest | None = None
+) -> RetryResponse:
     job = await session.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job khong ton tai")
@@ -634,6 +639,76 @@ async def cancel_job(job_id: str, session: SessionDep) -> CancelResponse:
     await session.commit()
 
     return CancelResponse(job_id=job.id, status=job.status, cancel_requested=True)
+
+
+#: Job dang chay pipeline — xoa luc nay se de lai file dang duoc
+#: JobOrchestrator ghi do dang chay, va Chunk row co the bi ghi lai ngay sau
+#: khi xoa (resumable, BR-CHUNK-05). Phai dung/huy job truoc (POST .../cancel)
+#: roi moi xoa duoc.
+_ACTIVE_JOB_STATUSES = {
+    "created",
+    "queued",
+    "chunking",
+    "translating",
+    "post_processing",
+    "merging",
+}
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(job_id: str, session: SessionDep) -> Response:
+    """Xoa 1 job da dich (US moi, theo yeu cau user 2026-09-06): xoa row DB
+    (Job + Chunk + OverflowReport lien quan, khong co ON DELETE CASCADE nao
+    cau hinh trong schema SQLite hien tai nen phai xoa tay) va thu muc
+    `data/processing/{job_id}`/`data/outputs/{job_id}` tren dia. KHONG dong
+    toi file goc trong `data/uploads/` — file do co the dang duoc job KHAC
+    (dich lai voi provider/output_mode khac) tham chieu, xoa xuyen tay upload
+    la trach nhiem cua `DELETE /api/upload/{file_id}` (chi ap dung truoc khi
+    co job nao duoc tao).
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job khong ton tai")
+    if job.status in _ACTIVE_JOB_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Job dang '{job.status}', khong the xoa khi dang chay — "
+                "dung job (POST .../cancel) roi doi status doi truoc khi xoa."
+            ),
+        )
+
+    # BatchOrchestrator.run_batch() (src/core/job_orchestrator.py) chi dem
+    # status == "completed" vao Batch.completed_files va status == "failed"
+    # vao Batch.failed_files (cost_capped/cancelled khong duoc dem vao ben
+    # nao ca) — xoa job phai giam dung counter tuong ung de tranh lech so
+    # (Protocol 6 R6-04: nguoi xoa phai suy nguoc dung logic dem cua buoc
+    # truoc, khong duoc doan).
+    if job.batch_id is not None:
+        batch = await session.get(Batch, job.batch_id)
+        if batch is not None:
+            if job.status == "completed":
+                batch.completed_files = max(0, batch.completed_files - 1)
+                session.add(batch)
+            elif job.status == "failed":
+                batch.failed_files = max(0, batch.failed_files - 1)
+                session.add(batch)
+
+    chunk_rows = (await session.exec(select(Chunk).where(Chunk.job_id == job_id))).all()
+    for chunk_row in chunk_rows:
+        await session.delete(chunk_row)
+    overflow_rows = (
+        await session.exec(select(OverflowReport).where(OverflowReport.job_id == job_id))
+    ).all()
+    for overflow_row in overflow_rows:
+        await session.delete(overflow_row)
+    await session.delete(job)
+    await session.commit()
+
+    for stray_dir in (Path("data/processing") / job_id, Path("data/outputs") / job_id):
+        shutil.rmtree(stray_dir, ignore_errors=True)
+
+    return Response(status_code=204)
 
 
 @router.get("/{job_id}/cost-estimate", response_model=CostEstimateResponse)

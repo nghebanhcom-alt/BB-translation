@@ -57,7 +57,8 @@ def test_get_settings_reports_current_model_per_provider(client: TestClient) -> 
 
 def test_put_provider_models_overrides_effective_settings(client: TestClient) -> None:
     response = client.put(
-        "/api/settings", json={"provider_models": {"openai": "gpt-4o", "deepseek": "deepseek-reasoner"}}
+        "/api/settings",
+        json={"provider_models": {"openai": "gpt-4o", "deepseek": "deepseek-reasoner"}},
     )
     assert response.status_code == 200
     body = response.json()
@@ -82,7 +83,11 @@ def test_put_provider_models_overrides_effective_settings(client: TestClient) ->
     assert effective.openai_model == "gpt-4o"
     assert effective.deepseek_model == "deepseek-reasoner"
     # Untouched providers keep their untouched default.
-    assert effective.gemini_model == "gemini-2.5-pro"
+    # Provider khong duoc PUT giu nguyen default cua `Settings`. Default doi
+    # 2026-09-06: `gemini-2.5-pro` da bi Google tra HTTP 404 "no longer
+    # available to new users" (verified song), thay bang model da verify an
+    # toan cho babeldoc — xem `Settings.gemini_model`.
+    assert effective.gemini_model == "gemini-3.1-flash-lite"
 
 
 def test_put_provider_models_ignores_unknown_provider_name(client: TestClient) -> None:
@@ -108,7 +113,11 @@ def test_get_settings_reports_cost_cap_defaults(client: TestClient) -> None:
 def test_put_cost_cap_settings_overrides_effective_settings(client: TestClient) -> None:
     response = client.put(
         "/api/settings",
-        json={"max_cost_per_job_usd": 0.5, "max_cost_per_batch_usd": 1.5, "cost_cap_enabled": False},
+        json={
+            "max_cost_per_job_usd": 0.5,
+            "max_cost_per_batch_usd": 1.5,
+            "cost_cap_enabled": False,
+        },
     )
     assert response.status_code == 200
     body = response.json()

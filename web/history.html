@@ -61,7 +61,8 @@
             </td>
             <td class="p-2 text-right whitespace-nowrap">
               <a x-show="job.status === 'completed'" :href="`/api/jobs/${job.id}/download`" class="text-amber-700 underline text-xs mr-2">Tải VI</a>
-              <a x-show="job.status === 'completed' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs">Tải song ngữ</a>
+              <a x-show="job.status === 'completed' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs mr-2">Tải song ngữ</a>
+              <button @click="deleteJob(job)" class="text-red-600 underline text-xs">Xoá</button>
             </td>
           </tr>
         </template>

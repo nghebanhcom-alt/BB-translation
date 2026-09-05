@@ -2792,3 +2792,298 @@ tiếp qua CLI, không qua `JobOrchestrator`/OCR bridge) đều KHÔNG dùng đ�
 mới. User chấp nhận defer việc verify E2E này sang lần dịch thật tiếp theo thay vì chạy ngay —
 ghi nhận rõ: `release blocked pending live verification: full JobOrchestrator pipeline (file
 classifier fix + babeldoc prompt fix) trên "How Baking Works"`.
+
+## Increment (2026-09-06) — Reasoning model + `max_tokens=2048` của babeldoc là root cause thật của mất nội dung hàng loạt (Tech Lead)
+
+User gửi ảnh bản dịch mới (trang Mục lục + Bảng 1.3 "How Baking Works") báo 2 vấn đề: (1) chữ to
+nhỏ bất thường trong cùng 1 trang, (2) mất nội dung trầm trọng hơn trước. Đây chính là lần chạy
+E2E đầu tiên sau v1.2.4 mà increment trước đã defer
+(`release blocked pending live verification: full JobOrchestrator pipeline`).
+
+### Dữ liệu gốc điều tra (job thật, không dựng lại)
+
+Job `425567c9-b959-46bd-9d1e-4e7601155939` (bảng `jobs`, `data/bb_translation.db`):
+`file_type=pdf_digital`, `ocr_bridge_path=NULL`, `model=deepseek`, 25 trang, `status=completed`,
+35 giây, $0.0623. → **fix file classifier của v1.2.4 hoạt động đúng**: sách KHÔNG còn bị kéo qua
+OCR bridge nữa. `data/processing/425567c9-.../prompt.txt` đúng là bản
+`build_babeldoc_prompt_text()` mới (không có `${text}`, không có footer `Source Text:`) → **fix
+prompt babeldoc cũng đang chạy đúng**. Cả 2 fix v1.2.4 đều KHÔNG phải nguyên nhân lần này.
+
+### Tách bạch babeldoc vs `font_shrink.py` mà không tốn thêm API call
+
+`JobOrchestrator` chạy `font_shrink_page()` trên chính file mono rồi `doc.saveIncr()`
+(`src/core/job_orchestrator.py`, Step post_processing) — incremental save nên **revision trước
+font_shrink vẫn nằm nguyên trong file**. Cắt file tại `%%EOF` đầu tiên (offset 856835 / tổng
+39522799 byte) khôi phục được bản RAW babeldoc. So text từng trang, RAW vs MONO chênh nhau ≤1 ký
+tự mỗi trang → **`font_shrink.py` KHÔNG làm mất nội dung**. Mất nội dung đã có sẵn trong output
+babeldoc:
+
+| trang | SRC (EN) | RAW babeldoc | mất |
+|---|---|---|---|
+| 6 (Mục lục) | 1494 | 850 | 43% |
+| 7 (Mục lục) | 2074 | 1167 | 44% |
+| 13 (Equipment list) | 2798 | 1693 | 39% (chỉ còn mục 1 và 20 trong 35 mục) |
+| 20 | 2593 | 1207 | 53% |
+| 21 (Bảng 1.3) | 3347 | 1038 | **69%** |
+
+Trang 21 RAW khớp chính xác ảnh user gửi: Bảng 1.3 chỉ còn `" 48 thìa cà phê"` + `"1 pint"`,
+mất hẳn các đoạn "Refer to Table 1.3…", "Consider feathers and bullets…".
+
+### (A) ROOT CAUSE — mất nội dung: reasoning model ăn hết `max_tokens=2048` hardcode của babeldoc
+
+Chuỗi bằng chứng (tất cả đều verify trực tiếp, không suy đoán):
+
+1. **Model thật đang dùng là `deepseek-v4-flash`, không phải `deepseek-chat`.** `Settings.deepseek_model`
+   default là `deepseek-chat` nhưng bảng `settings` trong DB override thành `deepseek-v4-flash`
+   (`deepseek_model` nằm trong `SETTINGS_DB_OVERRIDABLE_FIELDS`). `GET https://api.deepseek.com/models`
+   (gọi thật) trả về đúng 3 model: `deepseek-v4-flash`, `deepseek-v4-pro`,
+   `deepseek-v4-flash-vision-exp` — đều là dòng reasoning.
+2. **babeldoc hardcode `max_tokens=2048`** cho đường dịch chính:
+   `babeldoc/translator/translator.py:324` (`OpenAITranslator.do_llm_translate`) và
+   `babeldoc/tools/executor/translator.py:74`. Không có flag CLI nào đổi được (grep toàn package
+   babeldoc 0.6.4 đã cài: chỉ 2 chỗ này).
+3. **Gọi API thật** `deepseek-v4-flash`, `max_tokens=2048`, prompt đúng shape babeldoc
+   (`PROMPT_TEMPLATE` + JSON array input):
+   `finish_reason="length"`, `usage.completion_tokens_details.reasoning_tokens=2048`,
+   `message.content == ""`, `reasoning_content` dài 7839 ký tự. **Toàn bộ ngân sách token bị
+   reasoning ăn hết, không còn token nào cho câu trả lời.**
+4. **Hệ quả trong babeldoc**: `json.loads("")` →
+   `Expecting value: line 1 column 1 (char 0)` → rơi vào `except Exception` ở
+   `babeldoc/format/pdf/document_il/midend/il_translator_llm_only.py:852` → cả batch paragraph
+   rớt xuống nhánh fallback → nội dung biến mất trên PDF (babeldoc đã xoá glyph gốc rồi).
+5. **Tái hiện A/B thật, cùng file, cùng trang 22, cùng prompt.txt, cùng bộ flag của
+   `BabeldocRunner`, `--ignore-cache`**:
+   - `--openai-model deepseek-chat` → output **3316 ký tự**, đủ Bảng 1.3 (1 tablespoon / 1 cup /
+     1 pint / 1 quart / 1 gallon + mọi dòng quy đổi), 0 fallback.
+   - `--openai-model deepseek-v4-flash` (đúng production) → output **647 ký tự**, 8 lần
+     `try fallback`, Bảng 1.3 chỉ còn `" 2 pints"` — **tái hiện đúng bug user báo**.
+   - `--openai-model deepseek-v4-flash --openai-thinking disabled` → output **3292 ký tự**,
+     **0 fallback**, đủ Bảng 1.3. Gọi API thật với `thinking={"type":"disabled"}`:
+     `finish_reason="stop"`, không còn `reasoning_tokens`, JSON hợp lệ, 147 completion token.
+
+**Lật lại kết luận cũ**: increment 2026-09-05 kết luận bug (3) "LLM bỏ sót mục vì rule độ dài
+BR-FONT-03" đã sửa xong và live-verify 35/35 mục trang Equipment. Live-verify đó chạy với
+`deepseek-chat`; production chạy `deepseek-v4-flash` — nên trang Equipment trong job thật lại chỉ
+còn 2/35 mục (mục 1 và 20). Fix prompt vẫn đúng và vẫn giữ, nhưng **nó chưa bao giờ là ràng buộc
+duy nhất**; ràng buộc thật sự khống chế là `max_tokens` + reasoning.
+
+**Đã sửa** (`src/services/babeldoc_runner.py`): thêm `_is_deepseek()` + `_thinking_args()`, chèn
+`--openai-thinking disabled` vào `args` của `translate_pages()` **chỉ khi provider là DeepSeek**
+(`thinking` là trường riêng của DeepSeek API; gửi cho OpenAI/Gemini/Ollama có thể bị 400).
+`--openai-thinking` nằm trong `add_cache_impact_parameters("thinking", ...)`
+(`babeldoc/translator/translator.py:255`) nên bật nó tự động invalidate cache babeldoc cũ, không
+cần `--ignore-cache`. `_resolve_openai_compat()` giữ nguyên chữ ký (không ảnh hưởng test cũ).
+
+Test mới (`tests/test_babeldoc_runner.py`, assert giá trị cụ thể chứ không chỉ "đã gọi", theo
+R6-02): `test_translate_pages_deepseek_disables_thinking` (assert flag CÓ mặt và giá trị ngay sau
+nó đúng bằng `"disabled"`), `test_translate_pages_non_deepseek_omits_thinking_flag` (assert flag
+KHÔNG có với `_OPENAI_SERVICE`).
+
+**Rủi ro còn lại đã nhận diện, CHƯA sửa**: `max_tokens=2048` là trần cứng của babeldoc cho MỌI
+provider. Bất kỳ model reasoning nào khác (`gemini-2.5-flash` đang là default `gemini_model`,
+model o-series của OpenAI) đều dính đúng cơ chế này và **không có flag `--openai-thinking` tương
+đương** — cần verify riêng trước khi cho phép chọn các model đó cho pipeline PDF.
+`[CHƯA VERIFY]` cho gemini/openai.
+
+### (B) ROOT CAUSE — chữ to nhỏ bất thường: babeldoc scale từng paragraph độc lập
+
+Đếm số cỡ chữ khác nhau trên đúng trang Mục lục (page index 6), `get_text("dict")` span-level:
+
+| bản | số cỡ chữ khác nhau | phân bố |
+|---|---|---|
+| SRC (EN gốc) | 4 | `{9.0: 48, 10.0: 1, 14.0: 14, 30.0: 1}` |
+| RAW babeldoc (trước font_shrink) | **9** | `{5.4:1, 6.3:1, 7.65:4, 8.1:24, 10.0:1, 11.2:1, 11.9:5, 12.6:8, 27.0:1}` |
+| MONO (sau font_shrink) | **10** | thêm `7.47: 1` (dòng "Hạt lúa mì 68" 8.1 → 7.47) |
+
+Bản gốc: **toàn bộ 48 span mục lục cùng 9.0pt**, heading chương cùng 14.0pt. Sau babeldoc: cùng
+loại mục lục đó bị vỡ thành 5.4 / 6.3 / 7.65 / 8.1pt, heading chương vỡ thành 11.2 / 11.9 / 12.6pt.
+→ **Nguồn chính của triệu chứng (1) là babeldoc**, không phải code của ta: babeldoc co từng
+paragraph độc lập cho vừa bbox riêng của nó (tiếng Việt dài hơn tiếng Anh, mỗi paragraph cần tỉ lệ
+co khác nhau), không có cơ chế nào đồng bộ cỡ chữ giữa các paragraph anh em cùng 1 danh sách/bảng.
+Không có flag CLI nào của babeldoc 0.6.4 điều khiển việc này.
+
+**Nguồn phụ, thuộc code của ta**: `font_shrink_page()` (`src/postprocess/font_shrink.py`) lặp
+`for line in block["lines"]` và gọi `_shrink_line()` **cho từng dòng độc lập** — fix (5)/(6) ở
+increment trước chỉ đồng bộ cỡ chữ GIỮA CÁC SPAN TRONG 1 DÒNG, không đồng bộ giữa các DÒNG trong
+1 block, càng không giữa các block anh em. Bằng chứng: trên MONO page 6 đúng 1 dòng
+("Hạt lúa mì 68") bị co 8.1 → 7.47 trong khi 23 dòng mục lục anh em giữ nguyên 8.1 — lệch 7.8%,
+nhìn thấy được. Đây đúng là cơ chế bug (5)/(6) nhưng ở cấp DÒNG thay vì cấp SPAN, và lần này CÓ
+bằng chứng thật trên sách này (khác với increment trước, khi không tìm được ca multi-span nào).
+Bảng `overflow_reports` cho job này rỗng — vì `OverflowEntry` chỉ được ghi khi `still_overflow`,
+mọi lần co thành công đều không để lại dấu vết nào để audit. **CHƯA SỬA** cả 2 điểm này — cần
+thiết kế riêng (đồng bộ tỉ lệ co ở cấp block, và log mọi lần co chứ không chỉ lần thất bại).
+
+### Live E2E qua ĐÚNG code path production (R5-03 / R6-03)
+
+3 lần A/B ở trên gọi `babeldoc` CLI trực tiếp. Chạy thêm 1 lần nữa qua đúng chuỗi production
+`Settings` → `Pdf2zhServiceMapper().map("deepseek", settings)` → `BabeldocRunner.translate_pages()`
+(cùng `prompt.txt` thật của job 425567c9, `deepseek_model="deepseek-v4-flash"` như bảng `settings`,
+DeepSeek API key thật, không mock): `service_arg=deepseek:deepseek-v4-flash`, output trang 22 =
+**3265 ký tự** (trước fix: 647), có đủ `"16 tablespoon"`, `"gallon"`, `"quart"`, `"Bảng 1.3"`,
+và đoạn `"lông vũ"` (Consider feathers and bullets) trước đó biến mất hoàn toàn.
+
+### Trạng thái
+
+| # | Mô tả | Trạng thái |
+|---|---|---|
+| A | Mất nội dung hàng loạt (reasoning ăn hết `max_tokens=2048`) | **Đã sửa + live-verify A/B/C trên file thật** |
+| B1 | Chữ to nhỏ — babeldoc scale từng paragraph độc lập | Third-party, không có flag; chưa sửa được |
+| B2 | Chữ to nhỏ — `font_shrink_page` co từng DÒNG độc lập | Đã xác định root cause, **chưa sửa**, cần thiết kế riêng |
+| — | `max_tokens=2048` với gemini/openai reasoning model | `[CHƯA VERIFY]` — chặn việc chọn các model đó cho PDF |
+| 8 | Sót glyph gốc tiếng Anh chưa clean | babeldoc third-party, vẫn mở |
+| 1,2,4,7 | Không justify / ngắt dòng / cột hẹp | babeldoc third-party, vẫn mở |
+
+`pyproject.toml` bump `1.2.4` → `1.2.5`. 272/272 test pass, `ruff check`/`ruff format` sạch.
+
+## Increment (2026-09-06, tiếp) — Giá/chất lượng DeepSeek + Gemini dính đúng bẫy `max_tokens=2048`, đã chặn fail-fast (Tech Lead)
+
+### (1) `deepseek-chat` vs `deepseek-v4-flash`: CÙNG MỘT MODEL, cùng giá
+
+Gọi thật `POST https://api.deepseek.com/chat/completions` và đọc field `model` trong response:
+**`deepseek-chat` chỉ là ALIAS, server resolve về đúng `deepseek-v4-flash`.** Khác biệt duy nhất
+là mặc định thinking:
+
+| model gửi lên | `model` server trả về | thinking mặc định | `reasoning_tokens` (batch 2 đoạn, `max_tokens=2048`) | `content` |
+|---|---|---|---|---|
+| `deepseek-chat` | `deepseek-v4-flash` | TẮT | không có | 176 ký tự, JSON hợp lệ |
+| `deepseek-v4-flash` | `deepseek-v4-flash` | BẬT | 446 | 303 ký tự (batch nhỏ nên vẫn lọt) |
+| `deepseek-v4-flash` + `thinking:{"type":"disabled"}` | `deepseek-v4-flash` | TẮT | không có | 189 ký tự, JSON hợp lệ |
+
+→ A/B ở increment trước ("`deepseek-chat` 3316 ký tự tốt vs `deepseek-v4-flash` 647 ký tự hỏng")
+**không phải khác biệt model, mà là khác biệt cờ thinking**. Fix `_thinking_args()` đưa
+`deepseek-v4-flash` về đúng hành vi của alias `deepseek-chat`.
+
+**Giá** — nguồn: WebFetch https://api-docs.deepseek.com/quick_start/pricing (fetch thật
+2026-09-06). Bảng giá **không còn liệt kê `deepseek-chat`** (đúng với việc nó chỉ là alias);
+chỉ còn 3 model, `deepseek-v4-flash` (USD/1M token):
+
+| | cache hit | cache miss | output |
+|---|---|---|---|
+| off-peak | $0.007 | $0.22 | $0.66 |
+| peak | $0.014 | $0.44 | $1.32 |
+
+Peak = 01:00–04:00 và 06:00–10:00 UTC, T2–T6; giờ còn lại off-peak (= 1/2 giá peak).
+→ **Giá 2 tên model giống hệt nhau vì là cùng 1 model.** Không có lựa chọn giá nào phải cân nhắc.
+
+**Chất lượng dịch**: cùng model + cùng thinking-off ⇒ tương đương về mặt cấu trúc. Đối chiếu 1
+đoạn văn xuôi (không phải bảng số) trên 3 lần chạy thật cùng trang 22 — chỉ khác ở mức chọn từ
+đồng nghĩa, **không có đổi nghĩa hay lệch văn phong**: "mật mía" vs "mật đường" (molasses),
+"ounce khối lượng" vs "ounce trọng lượng" (weight ounce), "Hãy chú ý rằng" vs "Lưu ý rằng".
+Kết luận: **không cần đổi model DeepSeek; giữ `deepseek-v4-flash` + `--openai-thinking disabled`.**
+
+### (2) Gemini: key hoạt động, nhưng dính ĐÚNG bẫy `max_tokens=2048` và babeldoc KHÔNG tắt được
+
+Key user cấp (`AQ.Ab8...`, 53 ký tự — khác định dạng `AIzaSy...` cũ) **hoạt động bình thường** với
+endpoint OpenAI-compat `_GEMINI_OPENAI_COMPAT_BASE_URL` mà `babeldoc_runner.py` đang dùng:
+`GET .../openai/models` trả về danh sách model đầy đủ. Key hợp lệ, đúng scope.
+
+**Phát hiện 1 — default của project đã chết**: `gemini-2.5-flash` (giá trị trong bảng `settings`)
+và `gemini-2.5-pro` (default trong `Settings`) đều trả HTTP 404:
+`"no longer available to new users"`. Mọi job Gemini hiện tại sẽ fail ngay từ request đầu tiên.
+
+**Phát hiện 2 — bẫy reasoning tồn tại, giống hệt DeepSeek**. Test thật với batch 30 đoạn (kích
+thước thật của 1 trang mục lục/bảng), `max_tokens=2048`. Gemini không trả `reasoning_tokens`
+riêng, nhưng tính được: `thinking = total_tokens - prompt_tokens - completion_tokens`:
+
+| model | `finish_reason` | thinking token | `json.loads(content)` |
+|---|---|---|---|
+| `gemini-flash-latest` | **length** | **2104** | **HỎNG** |
+| `gemini-3-flash-preview` | **length** | **1963** | **HỎNG** |
+| `gemini-3.1-flash-lite` | stop | 0 | OK |
+
+→ Đúng cơ chế đã gây mất nội dung ở DeepSeek: thinking đốt hết `max_tokens`, nội dung bị cắt,
+`json.loads` raise, babeldoc bỏ cả batch, PDF mất nội dung nhưng job vẫn báo `completed`.
+
+**Phát hiện 3 — babeldoc 0.6.4 KHÔNG có knob nào tắt được thinking của Gemini**. Test thật từng
+tham số:
+
+| tham số | nguồn | kết quả trên Gemini |
+|---|---|---|
+| `thinking:{"type":"disabled"}` | flag `--openai-thinking` của babeldoc | **HTTP 400** `Unknown name "thinking": Cannot find field` |
+| `reasoning:{"effort":"none"}` | flag `--openai-reasoning` của babeldoc | **HTTP 400** `Unknown name "reasoning": Cannot find field` |
+| `reasoning_effort:"none"` | tham số top-level riêng của Gemini | **thinking=0, JSON OK** |
+| `extra_body.google.thinking_config.thinking_budget=0` | tham số riêng của Gemini | thinking=0, JSON OK |
+
+Knob DUY NHẤT có tác dụng (`reasoning_effort`) **không có đường nào để babeldoc gửi** — cả 2 flag
+babeldoc đều làm Gemini trả 400 (tức là bật lên còn hỏng nặng hơn: fail toàn bộ job).
+
+**Đã sửa (quyết định của Tech Lead — chặn fail-fast thay vì để mất nội dung âm thầm)**:
+
+- `src/services/babeldoc_runner.py`: thêm `_GEMINI_VERIFIED_SAFE_MODELS`
+  (`frozenset({"gemini-3.1-flash-lite"})`) + `_assert_gemini_model_safe()`, gọi ở đầu
+  `translate_pages()` **trước khi spawn subprocess**. Model Gemini chưa verify → raise
+  `UnsupportedForPdfPipelineError` với thông điệp nêu rõ lý do và cách verify để thêm model mới.
+  Cùng kỷ luật fail-fast với DeepL (Architecture.md 6.6.1 F7): **một lỗi rõ ràng tốt hơn một file
+  PDF mất nội dung mà job báo `completed`** — đây chính xác là kiểu silent failure của Bug #5.
+- `src/core/config.py`: `gemini_model` default `gemini-2.5-pro` (đã 404) → `gemini-3.1-flash-lite`.
+- Bảng `settings` trong `data/bb_translation.db`: `gemini_model` `gemini-2.5-flash` (đã 404) →
+  `gemini-3.1-flash-lite`. Giá trị DB override default nên phải sửa cả 2 chỗ.
+- Test mới (assert giá trị cụ thể + assert KHÔNG spawn subprocess, theo R6-02):
+  `test_translate_pages_rejects_unverified_gemini_model_before_spawning` (assert
+  `create_exec.assert_not_awaited()`), `test_translate_pages_allows_verified_gemini_model` (assert
+  có spawn VÀ `--openai-thinking` không lọt sang nhánh Gemini).
+- `tests/integration/test_settings_api.py`: cập nhật assert default `gemini_model` theo giá trị mới.
+
+**Cần user quyết (không phải quyết định kỹ thuật)**: `gemini-3.1-flash-lite` là model Gemini DUY
+NHẤT hiện an toàn cho pipeline PDF, nhưng là dòng "lite" — chất lượng dịch nhiều khả năng thấp hơn
+`deepseek-v4-flash`. Đề xuất: **giữ DeepSeek làm provider mặc định cho PDF**, coi Gemini là dự
+phòng. Muốn dùng model Gemini mạnh hơn thì cần vá `max_tokens` của babeldoc hoặc chờ babeldoc
+thêm hỗ trợ `reasoning_effort` — cả hai đều là việc upstream.
+
+**Trạng thái**: 281/281 test pass, `ruff check` sạch trên toàn repo, `ruff format` sạch trên các
+file đã sửa (drift sẵn có ở `tests/integration/test_settings_api.py` dòng 60/111 KHÔNG do increment
+này, đã xác nhận bằng `git stash`).
+
+## Tính năng mới (2026-09-06, theo yêu cầu trực tiếp của user, không thuộc PRD gốc)
+
+PM tự implement (chưa qua Dev riêng ở lượt đầu — xem Protocol 7 mới thêm vào CLAUDE.md, sự cố
+này chính là lý do protocol đó ra đời), Reviewer duyệt sau đó (`docs/review-report.md`, APPROVE).
+
+**1. Nút xoá nội dung đã upload/đã dịch**:
+- `DELETE /api/upload/{file_id}` (`src/api/routes/upload.py`): xoá file thô + sidecar JSON trên
+  đĩa cho file mới upload, CHƯA có Job nào tạo ra từ nó. Không đụng tới Job nào (upload chưa có
+  Job cho tới khi `POST /api/jobs` được gọi).
+- `DELETE /api/jobs/{job_id}` (`src/api/routes/jobs.py`): xoá 1 Job đã dịch — Job row + `Chunk`/
+  `OverflowReport` liên quan (xoá tay, SQLite không cấu hình `ON DELETE CASCADE`) + thư mục
+  `data/processing/{job_id}`/`data/outputs/{job_id}`. Từ chối (400) nếu job đang ở trạng thái
+  active (`created/queued/chunking/translating/post_processing/merging`) — phải dừng job trước.
+  KHÔNG đụng file gốc trong `data/uploads/` (có thể được job khác tham chiếu).
+- Frontend: nút "Xoá" trong `web/index.html`/`web/js/app.js` (file card — gọi cả 2 endpoint nếu
+  đã có job) và `web/history.html`/`web/js/history.js` (job row — chỉ gọi endpoint job).
+
+**2. Timestamp trong tên file tải về** (`src/api/routes/download.py`): 2 lần dịch cùng 1 file gốc
+(vd retry với provider khác) trước đây luôn tải về TRÙNG TÊN (`{stem}_vi.pdf`), không phân biệt
+được trong thư mục Downloads. Giờ thêm hậu tố `_{completed_at hoặc fallback updated_at}` định
+dạng `%Y%m%d-%H%M%S` vào tên file trả về (Content-Disposition) — không đổi tên file lưu trên đĩa
+(`data/outputs/{job_id}/translated_vi.pdf` giữ nguyên), chỉ đổi tên hiển thị khi tải.
+
+Test mới: `tests/integration/test_delete_and_download_naming.py` (7 test ban đầu + 3 test bổ
+sung ở "Fix Round" bên dưới cho phần đồng bộ `Batch` counter).
+
+**Trạng thái**: 281/281 test pass tại thời điểm viết tính năng này (trước khi Reviewer nêu 3 issue
+non-blocking, xem "Fix Round" ngay dưới đây).
+
+## Fix Round — Reviewer non-blocking findings (2026-09-06)
+
+Dev sửa 3 issue non-blocking nêu trong `docs/review-report.md` (approve tổng thể, không tính vào
+Circuit Breaker Dev↔Reviewer vì đây là non-blocking, không phải reject).
+
+1. **`uv.lock` lệch version**: chạy `uv lock` (không `--upgrade`) để đồng bộ `bb-translation`
+   1.2.4 → 1.2.5 theo `pyproject.toml`, không đổi version dependency nào khác.
+2. **`tests/integration/test_settings_api.py` chưa qua `ruff format`**: chạy `ruff format`, chỉ
+   đổi whitespace, không đổi hành vi test (đã re-run, vẫn pass).
+3. **`DELETE /api/jobs/{job_id}` không đồng bộ `Batch.completed_files`/`failed_files`** khi xoá
+   job thuộc 1 batch (Protocol 6 R6-04 — lỗi data-lineage: `BatchOrchestrator.run_batch()`
+   (`src/core/job_orchestrator.py` cuối hàm) chỉ đếm đúng `status == "completed"` vào
+   `completed_files` và đúng `status == "failed"` vào `failed_files` — `cancelled`/`cost_capped`
+   không được đếm vào bên nào). Sửa `delete_job()` (`src/api/routes/jobs.py`): trước khi xoá Job
+   row, nếu `job.batch_id` khác None, load `Batch` tương ứng (bỏ qua an toàn nếu không tìm thấy)
+   và giảm đúng 1 trong 2 counter tương ứng theo `job.status` lúc xoá, clamp tối thiểu 0.
+   Test mới trong `tests/integration/test_delete_and_download_naming.py`:
+   `test_delete_completed_job_decrements_batch_completed_files`,
+   `test_delete_failed_job_decrements_batch_failed_files` (assert giá trị counter cụ thể sau khi
+   xoá, đúng tinh thần R6-02, không chỉ assert status code 204),
+   `test_delete_job_without_batch_does_not_error` (job không thuộc batch nào vẫn xoá bình thường).
+
+**Trạng thái**: 284/284 test pass (`.venv/bin/python -m pytest tests/ -q`), `ruff check` và
+`ruff format --check` sạch trên mọi file đã sửa trong round này.

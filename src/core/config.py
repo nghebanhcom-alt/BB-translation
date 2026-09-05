@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     deepseek_temperature: float = 0.3
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-pro"
+    # VERIFIED 2026-09-06 (goi that endpoint OpenAI-compat cua Gemini):
+    # `gemini-2.5-pro`/`gemini-2.5-flash` tra HTTP 404 "no longer available to
+    # new users" — default cu da chet. `gemini-3.1-flash-lite` la model Gemini
+    # DUY NHAT da verify khong sinh thinking token, nen la model duy nhat an
+    # toan voi tran `max_tokens=2048` hardcode cua babeldoc — xem
+    # `_GEMINI_VERIFIED_SAFE_MODELS` (src/services/babeldoc_runner.py).
+    gemini_model: str = "gemini-3.1-flash-lite"
     gemini_max_tokens: int = 8192
     gemini_temperature: float = 0.3
 

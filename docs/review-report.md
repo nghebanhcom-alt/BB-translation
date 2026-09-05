@@ -2052,3 +2052,214 @@ non-blocking suggestion (`_DEEPSEEK_BASE_URL` nên đọc từ `Settings` thay v
 Dev cân nhắc, không cần sửa trước khi merge. QA gate 6.14.6 (live E2E 2 engine, R5-03/R6-03) vẫn
 là điều kiện bắt buộc riêng trước khi đổi default hoặc release — review này KHÔNG thay thế yêu
 cầu đó.
+
+---
+
+# Review Report — 2026-09-06
+
+## Phạm vi review
+
+Toàn bộ working tree chưa commit, 2 nguồn:
+- Tech Lead: `src/services/babeldoc_runner.py`, `tests/test_babeldoc_runner.py`,
+  `src/core/config.py`, `tests/integration/test_settings_api.py`,
+  `docs/CHANGELOG.md`, `pyproject.toml`, `uv.lock`.
+- PM (tính năng UI theo yêu cầu trực tiếp user): `src/api/routes/upload.py`,
+  `src/api/routes/jobs.py`, `src/api/routes/download.py`, `web/index.html`,
+  `web/history.html`, `web/js/app.js`, `web/js/history.js`,
+  `tests/integration/test_delete_and_download_naming.py`.
+
+## Kết quả tự chạy lại (không tin số báo cáo trước)
+
+- `.venv/bin/python -m pytest tests/ -q` → **281 passed** (khớp con số PM báo).
+- `.venv/bin/ruff check <các file đổi>` → All checks passed.
+- `.venv/bin/ruff format --check <các file đổi>` → 7/8 file đã format đúng;
+  `tests/integration/test_settings_api.py` cần reformat ở 2 chỗ — **không phải
+  do diff của session này gây ra** (drift có sẵn từ trước, dòng không nằm
+  trong hunk mới), nhưng vẫn tồn tại trong working tree → non-blocking.
+
+## R5-04 checklist (External Dependency Verification)
+
+**`src/services/babeldoc_runner.py`** — External contract verified against
+real source: **YES**.
+- Lý do: đọc trực tiếp source `babeldoc/translator/translator.py` (dòng cụ thể
+  324, 253-255) để xác nhận `max_tokens=2048` hardcode và cú pháp
+  `--openai-thinking`; gọi thật API DeepSeek (`api.deepseek.com`) và Gemini
+  OpenAI-compat endpoint với batch thật ~30 đoạn để đo `reasoning_tokens`,
+  `finish_reason`, và test `json.loads()` — số liệu đo được (thinking=0 vs
+  2104 vs 1963, 404 cho model cũ) được ghi lại nguyên văn trong docstring
+  `_thinking_args`/`_GEMINI_VERIFIED_SAFE_MODELS`. Đây đúng tinh thần R5-02
+  (spike verify trước khi implement đầy đủ) chứ không phải suy đoán từ trí
+  nhớ. Tôi (Reviewer) không tự gọi lại API thật để re-verify con số (không có
+  key trong phiên review), nhưng bằng chứng được trích dẫn đủ cụ thể (số liệu
+  đo, dòng source, ngày verify) để phân biệt với "lời kể miệng không nguồn" —
+  đúng yêu cầu R5-01.
+
+**`src/api/routes/upload.py`, `jobs.py`, `download.py`** — N/A cho R5-04 (đây
+không phải wrapper gọi external tool/service, chỉ là CRUD nội bộ trên
+DB/filesystem của chính app).
+
+## Đánh giá theo Protocol 6 (Data Lineage)
+
+- **R6-04 (trace tay orchestrator)**: `DELETE /api/jobs/{job_id}` không phải
+  orchestrator gọi tuần tự external tool, nhưng áp dụng tinh thần tương tự:
+  đã tự grep `foreign_key="jobs.id"` toàn repo → chỉ có `Chunk` và
+  `OverflowReport` tham chiếu `jobs.id`; cả hai đều được xoá tay đúng trước
+  khi xoá `Job` (không có SQLite `ON DELETE CASCADE`, code tự xoá thủ công —
+  khớp docstring). Guard `_ACTIVE_JOB_STATUSES` (6 giá trị) khớp CHÍNH XÁC với
+  comment enum đầy đủ trong `src/models/job.py` (9 giá trị: 6 active + 4
+  terminal, trừ đi 1 trùng "completed" tính cả 2 phía) — không thiếu status
+  nào, đã tự đối chiếu bằng grep `job.status = "..."` trên toàn bộ
+  `job_orchestrator.py`/`jobs.py`.
+- Phát hiện 1 lỗ hổng data-lineage nhỏ: **không đồng bộ lại `Batch` counters**
+  khi xoá 1 `Job` thuộc batch — xem finding chi tiết trong danh sách issue
+  (non-blocking, không phải data corruption, chỉ là con số đếm hiển thị sai).
+- **R6-02 (test assert giá trị cụ thể, không chỉ assert "đã gọi")**: cả 2 phía
+  đều tuân thủ tốt:
+  - `tests/test_babeldoc_runner.py`: assert vị trí cặp flag/value cụ thể
+    (`args.index("--openai-thinking") + 1 == "disabled"`), assert model string
+    cụ thể trong exception message, assert `create_exec.assert_not_awaited()`
+    trước khi raise — không chỉ `assert_called()`.
+  - `tests/integration/test_delete_and_download_naming.py`: assert số lượng
+    row cụ thể còn lại sau xoá (`(0, 0, 0)`), assert tên file tải về có đúng
+    timestamp format bằng regex, assert file thật trên đĩa còn/mất — không
+    chỉ tin status code.
+
+## Security / correctness khác đã kiểm tra
+
+- Path traversal qua `file_id`/`job_id`: cả hai đều là UUID server sinh, không
+  nhận trực tiếp làm path segment tuỳ ý mà phải match được row đã tồn tại
+  trong DB (`job_id`) hoặc sidecar JSON đã tồn tại (`file_id`) trước khi bất kỳ
+  thao tác xoá nào chạy — không có cách nào để giá trị "độc hại" (`../../etc`)
+  vượt qua bước lookup/exists-check này. Không có validate format tường minh
+  (regex UUID) trên input, nhưng rủi ro thực tế thấp vì Starlette route
+  matching cho path segment mặc định loại `/` (không thể tạo request path
+  chứa `/` để traversal qua nhiều cấp thư mục). Không blocking.
+- `web/js/app.js` `removeFile()`: thứ tự xoá Job trước rồi mới xoá upload file
+  là đúng — nếu xoá Job thất bại (400 do job đang active) thì hàm return sớm,
+  không tiếp tục xoá file gốc và không xoá khỏi `this.files` — không có race
+  condition rõ ràng.
+- Tên file cũ `translated_vi.pdf`/`{stem}_vi.pdf` chỉ là tên file NỘI BỘ trên
+  đĩa (`data/outputs/{job_id}/...`) và tên hiển thị Content-Disposition khi
+  tải — cả 2 nơi đều KHÔNG bị đổi ở đường dẫn lưu trữ, chỉ thêm hậu tố
+  timestamp vào tên file trả về trình duyệt → không phá hợp đồng nào khác
+  trong `job_orchestrator.py`/Architecture.md (đã grep xác nhận).
+
+## Danh sách issue
+
+Đã gửi qua `ReportFindings` (3 mục, tất cả non-blocking):
+1. `uv.lock` version (1.2.4) lệch với `pyproject.toml` (1.2.5) — chạy `uv lock`
+   để đồng bộ.
+2. `tests/integration/test_settings_api.py` chưa qua `ruff format` (drift có
+   sẵn, không phải do diff lần này).
+3. `DELETE /api/jobs/{job_id}` không đồng bộ lại `Batch.total_files` /
+   `completed_files` / `failed_files` khi job xoá thuộc về 1 batch — counter
+   của batch sẽ sai sau khi xoá (không gây mất dữ liệu, chỉ sai số hiển thị).
+
+Không phát hiện issue blocking nào (không có security vulnerability, không có
+data lineage bug gây mất dữ liệu, không có external contract chưa verify mà
+vẫn được implement như thật).
+
+## Kết luận
+
+**APPROVE** — cho phép merge/tiếp tục. 3 issue trên là non-blocking, có thể
+xử lý ở increment sau hoặc kèm 1 fix nhỏ (đặc biệt khuyến nghị chạy `uv lock`
+trước khi release, vì lệch version lock file dễ gây nhầm lẫn về sau).
+
+---
+
+# Review Report — 2026-09-06 (Iteration 2 — verify fix cho 3 issue của Iteration trước)
+
+## Phạm vi review
+
+Chỉ phần Dev vừa sửa (3 issue non-blocking từ vòng review trước ở trên), không review lại từ
+đầu toàn bộ đợt thay đổi lớn (Tech Lead babeldoc fix + PM 2 tính năng UI) — phần đó đã APPROVE.
+
+## Đã tự chạy lại (không tin số Dev báo)
+
+```
+.venv/bin/python -m pytest tests/ -q  → 284 passed  (281 vòng 1 + 3 test mới cho batch counter)
+.venv/bin/ruff check <8 file .py đổi>  → All checks passed
+.venv/bin/ruff format --check <8 file .py đổi>  → 8 files already formatted (bao gồm test_settings_api.py — issue #2 đã hết)
+```
+
+## Issue #1 — `uv.lock` version sync
+
+`git diff uv.lock` chỉ có đúng 2 dòng: `version = "1.2.3"` → `"1.2.5"` cho package
+`bb-translation` (`pyproject.toml` cũng 1.2.5). Không có dependency nào khác bị bump/hạ version.
+**Đúng.**
+
+## Issue #2 — format lại `test_settings_api.py`
+
+`git diff tests/integration/test_settings_api.py` có 2 hunk thuần whitespace (tách
+`client.put(...)` thành multi-line) + 1 hunk đổi
+`assert effective.gemini_model == "gemini-2.5-pro"` → `"gemini-3.1-flash-lite"` kèm comment giải
+thích. Hunk thứ 3 không phải whitespace nhưng đã đối chiếu `git diff src/core/config.py` xác nhận
+default `gemini_model` đã đổi (do Google trả 404, verified ở vòng review trước) — đây là hệ quả
+bắt buộc của thay đổi Tech Lead đã approve trước đó, không phải Dev tự ý đổi assertion ngoài
+phạm vi. **Đúng.**
+
+## Issue #3 — `delete_job()` đồng bộ `Batch` counters (trọng tâm)
+
+Đã tự đọc `BatchOrchestrator.run_batch()` (`src/core/job_orchestrator.py:1080-1089`):
+```python
+completed = sum(1 for r in job_results if r.status == "completed")
+failed = sum(1 for r in job_results if r.status == "failed")
+batch.completed_files = completed
+batch.failed_files = failed
+```
+Chỉ 2 status `"completed"`/`"failed"` được đếm; `"cost_capped"` và `"cancelled"` không rơi vào
+bên nào. `delete_job()` (`src/api/routes/jobs.py:697-711`) khớp **chính xác**: chỉ giảm
+`completed_files` khi `job.status == "completed"`, chỉ giảm `failed_files` khi
+`job.status == "failed"` — không có case nào coi `cancelled`/`cost_capped` là `failed`.
+
+### Race condition — CÓ THẬT, ghi lại tường minh (không im lặng bỏ qua theo R6)
+
+`run_batch()` không cộng dồn incremental mà **ghi đè toàn bộ** `batch.completed_files`/
+`failed_files` ở cuối, tính lại từ `job_results` (danh sách in-memory nó tự thu thập trong lần
+gọi đó, không đọc lại DB). Nếu user gọi `DELETE /api/jobs/{job_id}` cho 1 job đã `completed`
+**trong lúc batch vẫn đang chạy** các job khác (guard `_ACTIVE_JOB_STATUSES` chỉ chặn theo status
+của CHÍNH job đó, không chặn theo status của batch), trình tự có thể là:
+1. `delete_job()` đọc `batch.completed_files=N`, ghi `N-1`, commit.
+2. `run_batch()` (đang chạy song song) sau đó chạy xong, ghi đè `batch.completed_files = completed`
+   (tính từ `job_results` nội bộ, không biết job đã bị xoá) — **giá trị `N-1` bị mất tác dụng**,
+   quay lại như chưa xoá.
+
+Race thật, không phải suy đoán — do `run_batch()` dùng "recompute + overwrite" thay vì
+"increment/decrement", hai writer ghi cùng field mà không có coordination. Impact: chỉ sai số
+hiển thị (không mất Job/Chunk row, không crash), window hẹp (chỉ trong lúc batch đang chạy, tự
+"lành" sau khi batch xong vì `run_batch()` chỉ overwrite đúng 1 lần ở cuối).
+
+**Đề xuất: non-blocking**, khuyến nghị fix bằng cách đổi `run_batch()` sang increment thay vì
+overwrite, hoặc chỉ overwrite nếu batch chưa bị ai sửa counter kể từ lúc bắt đầu — để lại cho
+increment sau.
+
+### Clamp `max(0, ...)`
+
+Có thật trong code (`batch.completed_files = max(0, batch.completed_files - 1)`,
+`jobs.py:715,718`). Cần thiết trong tình huống race ở trên: nếu `run_batch()` overwrite counter
+xuống thấp hơn thực tế sau đó lại có thêm 1 lần xoá dựa trên giá trị đã sai, phép trừ có thể chạm
+0 hoặc âm nếu không clamp — phòng thủ hợp lý, không thừa.
+
+### Test mới
+
+`tests/integration/test_delete_and_download_naming.py` có 3 test assert **giá trị cụ thể**
+(`test_delete_completed_job_decrements_batch_completed_files` assert `== 1` sau khi giảm từ 2;
+`test_delete_failed_job_decrements_batch_failed_files` tương tự;
+`test_delete_job_without_batch_does_not_error` cho case `batch_id is None`) — đúng tinh thần
+R6-02, không chỉ assert status code 204.
+
+## Kết luận
+
+**APPROVE.**
+
+Danh sách issue:
+- Non-blocking (đã fix đúng, không còn vấn đề): issue #1, #2 gốc.
+- Non-blocking (mới phát hiện ở vòng này, cần ghi vào report, không được bỏ qua): race condition
+  giữa `delete_job()` decrement và `run_batch()` overwrite counter khi xoá job giữa lúc batch còn
+  đang chạy các job khác — khuyến nghị đổi `run_batch()` sang cộng dồn/increment thay vì tính lại
+  từ đầu, xử lý ở increment sau.
+
+File liên quan: `src/api/routes/jobs.py` (dòng ~672-717),
+`src/core/job_orchestrator.py` (dòng 1080-1089),
+`tests/integration/test_delete_and_download_naming.py`,
+`tests/integration/test_settings_api.py`, `uv.lock`, `pyproject.toml`.

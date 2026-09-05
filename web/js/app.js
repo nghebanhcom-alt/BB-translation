@@ -168,6 +168,33 @@ function translationApp() {
       }
     },
 
+    // US moi (2026-09-06): xoa 1 file khoi danh sach "File da upload". Xoa ca
+    // Job (neu da dich, DB row + thu muc processing/output — backend tu choi
+    // neu job dang chay, 400) LAN file goc trong data/uploads (neu chinh
+    // session nay upload, `f.file_id` != null — app nay la "1-user local
+    // app" nen khong lo file bi job KHAC dung chung theo huong nguoi dung
+    // mong doi "xoa la mat het", khac voi API backend rieng le van tach 2
+    // thao tac de an toan hon cho truong hop dung qua API truc tiep).
+    async removeFile(f) {
+      if (!confirm(`Xoá "${f.filename}" khỏi danh sách?`)) return;
+      try {
+        if (f.job) {
+          const res = await fetch(`/api/jobs/${f.job.id}`, { method: "DELETE" });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            f.jobError = body.detail || "Không xoá được job.";
+            return;
+          }
+        }
+        if (f.file_id) {
+          await fetch(`/api/upload/${f.file_id}`, { method: "DELETE" });
+        }
+        this.files = this.files.filter((x) => x !== f);
+      } catch (err) {
+        f.jobError = "Lỗi kết nối khi xoá: " + err;
+      }
+    },
+
     rememberChoice(f) {
       localStorage.setItem("bb_last_provider", f.provider);
       localStorage.setItem("bb_last_output_mode", f.output_mode);

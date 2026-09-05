@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import fitz  # PyMuPDF
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
 from src.core.config import get_settings
@@ -151,3 +151,23 @@ async def upload_file(file: UploadFile) -> UploadResponse:
         size_bytes=size_bytes,
         page_count=page_count,
     )
+
+
+@router.delete("/{file_id}", status_code=204)
+async def delete_upload(file_id: str) -> Response:
+    """Xoa 1 file vua upload (US moi, theo yeu cau user 2026-09-06) — chi xoa
+    file thuc + sidecar json tren dia, KHONG dong toi Job/DB nao (upload
+    chua co Job cho toi khi `POST /api/jobs` duoc goi, xem docstring dau
+    module). Neu `file_id` da duoc dung de tao Job roi, xoa upload nay KHONG
+    xoa Job do — Job da tu doc xong `file_path` tu luc tao va van chay/xem
+    duoc binh thuong; dung `DELETE /api/jobs/{job_id}` de xoa Job.
+    """
+    try:
+        metadata = resolve_upload(file_id)
+    except UploadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    Path(metadata.file_path).unlink(missing_ok=True)
+    _metadata_path(file_id).unlink(missing_ok=True)
+
+    return Response(status_code=204)

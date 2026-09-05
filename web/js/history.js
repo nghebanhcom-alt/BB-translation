@@ -30,5 +30,19 @@ function historyApp() {
       this.jobs = body.jobs;
       this.total = body.total;
     },
+
+    // US moi (2026-09-06): xoá 1 job khỏi lịch sử — chỉ xoá DB row + file kết
+    // quả (backend từ chối job đang chạy, 400: phải Dừng trước). Không đụng
+    // tới file gốc trong data/uploads (xem docstring DELETE /api/jobs/{id}).
+    async deleteJob(job) {
+      if (!confirm(`Xoá job "${job.filename}" khỏi lịch sử? Không thể hoàn tác.`)) return;
+      const res = await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.detail || "Không xoá được job.");
+        return;
+      }
+      await this.load();
+    },
   };
 }

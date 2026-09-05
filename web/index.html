@@ -49,9 +49,12 @@
                 <template x-if="f.page_count"> · <span x-text="f.page_count"></span> trang</template>
               </p>
             </div>
-            <span class="text-xs px-2 py-1 rounded"
-                  :class="statusBadgeClass(f.job?.status)"
-                  x-text="f.job?.status || 'chưa dịch'"></span>
+            <div class="flex items-center gap-2">
+              <span class="text-xs px-2 py-1 rounded"
+                    :class="statusBadgeClass(f.job?.status)"
+                    x-text="f.job?.status || 'chưa dịch'"></span>
+              <button class="text-xs text-red-600 underline" @click="removeFile(f)" title="Xoá khỏi danh sách">Xoá</button>
+            </div>
           </div>
 
           <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2" x-show="!f.job">

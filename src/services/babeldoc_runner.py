@@ -65,6 +65,95 @@ def _resolve_openai_compat(
     )
 
 
+def _is_deepseek(service: Pdf2zhService) -> bool:
+    """True khi `service` tro toi DeepSeek — dung de quyet dinh co gui
+    `--openai-thinking disabled` hay khong (xem `_thinking_args`)."""
+    return {"DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"} <= service.envs.keys()
+
+
+def _thinking_args(service: Pdf2zhService) -> list[str]:
+    """`--openai-thinking disabled` cho DeepSeek, rong cho provider khac.
+
+    VERIFIED 2026-09-06 (goi that api.deepseek.com + chay that babeldoc 0.6.4
+    tren trang 22 cua "How baking works", xem CHANGELOG increment cung ngay):
+
+    - `babeldoc/translator/translator.py:324` hardcode `max_tokens=2048` cho
+      `do_llm_translate()` — duong dich chinh (il_translator_llm_only), khong
+      co flag CLI nao doi duoc.
+    - `deepseek-v4-flash` (model that dang dung, ghi trong bang `settings`) la
+      reasoning model, MAC DINH bat thinking. Goi that voi `max_tokens=2048`:
+      `finish_reason="length"`, `completion_tokens_details.reasoning_tokens=2048`,
+      `message.content == ""` — toan bo ngan sach token bi reasoning an het,
+      khong con token nao cho cau tra loi.
+    - `json.loads("")` raise -> babeldoc bat exception o
+      `il_translator_llm_only.py:852` -> ca batch roi xuong nhanh fallback ->
+      mat noi dung hang loat tren PDF ket qua (trang 22: 647 ky tu thay vi
+      3292).
+    - Gui `thinking={"type":"disabled"}` (dung flag `--openai-thinking
+      disabled` cua babeldoc, `translator.py:253-255`) -> `finish_reason="stop"`,
+      khong con reasoning token, JSON hop le, 0 fallback, 3292 ky tu.
+
+    CHI gui cho DeepSeek: `thinking` la truong rieng cua DeepSeek API.
+    VERIFIED 2026-09-06 rang gui cho Gemini bi tu choi ngay:
+    `{"thinking": {"type": "disabled"}}` -> HTTP 400 `Unknown name "thinking":
+    Cannot find field` (xem `_assert_gemini_model_safe`). `--openai-thinking`
+    cung nam trong `add_cache_impact_parameters("thinking", ...)`
+    (`translator.py:255`), nen bat no tu dong lam invalidate cache cu — khong
+    can `--ignore-cache`.
+    """
+    return ["--openai-thinking", "disabled"] if _is_deepseek(service) else []
+
+
+#: Cac model Gemini DA VERIFY SONG (2026-09-06) la an toan cho duong babeldoc:
+#: khong sinh thinking token, nen khong dung cham tran `max_tokens=2048`
+#: hardcode cua babeldoc (`babeldoc/translator/translator.py:324`).
+#:
+#: Cach verify (lap lai y het khi muon them model vao day): goi that endpoint
+#: OpenAI-compat cua Gemini voi `max_tokens=2048` va 1 batch ~30 doan (kich
+#: thuoc that cua 1 trang muc luc/bang), roi kiem tra
+#: `total_tokens - prompt_tokens - completion_tokens == 0` (khong co thinking
+#: token) VA `json.loads(content)` chay duoc.
+#:
+#: Ket qua do that tren cung 1 batch 30 doan:
+#: - `gemini-3.1-flash-lite` -> thinking=0, `finish_reason="stop"`, JSON parse OK.
+#: - `gemini-flash-latest`   -> thinking=2104, `finish_reason="length"`, JSON HONG.
+#: - `gemini-3-flash-preview`-> thinking=1963, `finish_reason="length"`, JSON HONG.
+#: - `gemini-2.5-flash` (default CU cua project) -> HTTP 404 "no longer
+#:   available to new users" — model nay da chet, khong con goi duoc.
+#:
+#: babeldoc 0.6.4 KHONG co flag nao tat duoc thinking cua Gemini: ca
+#: `--openai-thinking` (gui `thinking`) lan `--openai-reasoning` (gui
+#: `reasoning`) deu bi Gemini tra ve HTTP 400 `Unknown name ... Cannot find
+#: field`. Knob DUY NHAT co tac dung la `reasoning_effort: "none"` (tham so
+#: top-level rieng cua Gemini) — babeldoc khong co duong nao gui no. Vi vay
+#: cach an toan duy nhat hien tai la chan tu dau, thay vi de job chay xong roi
+#: tra ve PDF mat noi dung am tham.
+_GEMINI_VERIFIED_SAFE_MODELS = frozenset({"gemini-3.1-flash-lite"})
+
+
+def _assert_gemini_model_safe(service: Pdf2zhService) -> None:
+    """Fail-fast TRUOC khi spawn subprocess neu model Gemini chua duoc verify
+    la khong sinh thinking token — cung ky luat voi DeepL o
+    `Pdf2zhServiceMapper` (Architecture.md 6.6.1 F7): tha bao loi ro rang con
+    hon de pipeline chay het roi giao 1 file PDF mat noi dung ma khong ai biet.
+    Xem `_GEMINI_VERIFIED_SAFE_MODELS` cho cach verify va so lieu do that.
+    """
+    model = service.envs.get("GEMINI_MODEL")
+    if model is None or model in _GEMINI_VERIFIED_SAFE_MODELS:
+        return
+    raise UnsupportedForPdfPipelineError(
+        f"Model Gemini '{model}' chua duoc verify an toan cho pipeline PDF (babeldoc). "
+        "babeldoc hardcode max_tokens=2048; cac model Gemini co thinking dot het ngan "
+        "sach token nay vao suy luan, tra ve noi dung bi cat -> babeldoc bo ca batch -> "
+        "PDF ket qua mat noi dung ma job van bao 'completed'. babeldoc 0.6.4 khong co "
+        "flag nao tat thinking cua Gemini (ca --openai-thinking lan --openai-reasoning "
+        "deu bi Gemini tra HTTP 400). "
+        f"Model da verify an toan: {sorted(_GEMINI_VERIFIED_SAFE_MODELS)}. "
+        "Hoac dung DeepSeek (da co --openai-thinking disabled). "
+        "Xem `_GEMINI_VERIFIED_SAFE_MODELS` de biet cach verify them model moi."
+    )
+
+
 class BabeldocError(RuntimeError):
     """Raised when the babeldoc subprocess exits with a non-zero code.
 
@@ -153,6 +242,7 @@ class BabeldocRunner:
         cau noi searchable PDF cua nhanh pdf_scan), `--split-short-lines` (ly
         do ton tai cua ca engine nay — fix loi gop dong danh sach cua pdf2zh).
         """
+        _assert_gemini_model_safe(service)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         base_url, api_key, model = _resolve_openai_compat(
@@ -177,6 +267,7 @@ class BabeldocRunner:
             api_key,
             "--openai-model",
             model,
+            *_thinking_args(service),
             "--pool-max-workers",
             str(thread),
             "--watermark-output-mode",
