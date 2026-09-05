@@ -1,6 +1,6 @@
 """Build translation prompts (Architecture.md sections 6.2, 6.6.4/6.6.5).
 
-Two distinct outputs live here, matching the "out-of-band vs render path"
+Three distinct outputs live here, matching the "out-of-band vs render path"
 split from Architecture.md 6.6.2 R1/R3:
 
 - `build_system_prompt()` — a single string, passed as `system_prompt=` to
@@ -10,7 +10,18 @@ split from Architecture.md 6.6.2 R1/R3:
 - `write_prompt_file()` — writes the `--prompt <path>` FILE pdf2zh reads and
   re-substitutes (`${lang_in}`/`${lang_out}`/`${text}` via `string.Template`)
   for every segment of the real render. This is the ONLY place glossary/unit
-  rules reach the actual translated output (Architecture.md 6.6.2 R2).
+  rules reach the actual translated output when engine == pdf2zh
+  (Architecture.md 6.6.2 R2).
+- `write_babeldoc_prompt_file()` — writes the CONTENT passed verbatim (no
+  template substitution) as babeldoc's `--custom-system-prompt <string>`.
+  MUST NOT reuse `write_prompt_file()`'s content: babeldoc has no
+  `string.Template` mechanism for this value (verified against installed
+  babeldoc 0.6.4 source, `il_translator_llm_only.py`) and appends its OWN
+  Structure Rules + mandatory per-paragraph JSON output contract right after
+  this string. Feeding it pdf2zh's `${text}`/"only print the translation"
+  content produces a system prompt with two contradicting protocols, which
+  was the confirmed root cause of babeldoc silently dropping paragraphs
+  (root-cause investigation, 2026-09-05).
 """
 
 from pathlib import Path
@@ -184,8 +195,115 @@ async def write_prompt_file(
     stable. `only_terms_present_in` should be the full EN text extracted from
     the document (PyMuPDF) — passing it filters the glossary down to terms
     that actually occur, capped at `max_glossary_entries` (6.6.5).
+
+    pdf2zh ONLY — do not reuse this file's content for babeldoc, see
+    `write_babeldoc_prompt_file()`.
     """
     content = await build_prompt_text(
+        glossary_manager,
+        project_id=project_id,
+        only_terms_present_in=only_terms_present_in,
+        max_glossary_entries=max_glossary_entries,
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+# === babeldoc `--custom-system-prompt <string>` contract ===
+#
+# Passed through by BabeldocRunner VERBATIM as the LLM system prompt's
+# `role_block` — no `string.Template` substitution happens on this value
+# (verified against installed babeldoc 0.6.4 source,
+# `il_translator_llm_only.py`). babeldoc appends its own Structure Rules and
+# mandatory per-paragraph JSON array output contract right after this string,
+# so this content must NOT contain `${...}` template syntax (never
+# substituted — would reach the LLM as a literal, confusing token) nor any
+# instruction that contradicts babeldoc's JSON contract (e.g. "print only the
+# translation, no other output" — directly conflicts with "respond with a
+# JSON array"). babeldoc also documents its own placeholder syntax (`{v1}`,
+# single-brace) to the LLM already, so this content omits pdf2zh's
+# double-brace `{{v0}}` placeholder hint, which uses a different convention.
+
+_BABELDOC_INTRO = (
+    "Ban la chuyen gia dich thuat tai lieu nganh banh. Dich tu tieng Anh sang tieng Viet."
+)
+
+_BABELDOC_GLOSSARY_INSTRUCTION = (
+    'Dich cac thuat ngu theo bang duoi day. Neu cot VI la "(keep)" hoac trong, '
+    "GIU NGUYEN tieng Anh:"
+)
+
+_BABELDOC_NO_GLOSSARY = "(Khong co glossary entry nao ap dung cho tai lieu nay.)"
+
+_BABELDOC_CONCISENESS_RULE = (
+    "Dich suc tich, MUC TIEU la <=130% do dai ban goc tieng Anh (khong phai gioi han "
+    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
+    "muc nao chi de dat muc tieu do dai."
+)
+
+_BABELDOC_TYPOGRAPHY_RULES = (
+    "Giu nguyen typography va cau truc tai lieu: font size/cap heading, bullet/numbered "
+    "list, bold/italic/underline, va indentation level cua nested list phai giu dung vi tri "
+    "va cap bac tuong ung ban goc."
+)
+
+
+async def build_babeldoc_prompt_text(
+    glossary_manager: GlossaryManager,
+    project_id: str | None = None,
+    only_terms_present_in: str | None = None,
+    max_glossary_entries: int = 80,
+) -> str:
+    """Build babeldoc's `--custom-system-prompt` CONTENT (no template syntax,
+    no `${text}`/footer — see module docstring and the contract note above).
+    Mirrors `build_prompt_text()`'s glossary-filtering/unit-hint logic so both
+    engines get the same glossary/unit coverage, just packaged for babeldoc's
+    different substitution contract.
+    """
+    glossary_snippet = await glossary_manager.build_prompt_snippet(
+        project_id=project_id,
+        only_terms_present_in=only_terms_present_in,
+        max_entries=max_glossary_entries,
+    )
+    glossary_block = (
+        f"{_BABELDOC_GLOSSARY_INSTRUCTION}\n\n{glossary_snippet}"
+        if glossary_snippet
+        else _BABELDOC_NO_GLOSSARY
+    )
+
+    include_units = (
+        _has_unit_conversion_hint(only_terms_present_in)
+        if only_terms_present_in is not None
+        else True
+    )
+    unit_block = build_unit_conversion_section() if include_units else ""
+
+    sections = [_BABELDOC_INTRO, "", glossary_block]
+    if unit_block:
+        sections += ["", unit_block]
+    sections += ["", _BABELDOC_CONCISENESS_RULE, "", _BABELDOC_TYPOGRAPHY_RULES]
+
+    return "\n".join(sections)
+
+
+async def write_babeldoc_prompt_file(
+    glossary_manager: GlossaryManager,
+    path: Path,
+    project_id: str | None = None,
+    only_terms_present_in: str | None = None,
+    max_glossary_entries: int = 80,
+) -> Path:
+    """Write babeldoc's `--custom-system-prompt` CONTENT to disk for one job.
+
+    `BabeldocRunner.translate_pages()` reads this file's TEXT and passes it as
+    the flag's STRING value (unlike pdf2zh's `--prompt <path>`) — writing to
+    disk here only lets Job Orchestrator reuse the same "build once per job,
+    reuse per chunk" pattern as `write_prompt_file()`. babeldoc ONLY — do not
+    use for pdf2zh, see `write_prompt_file()`.
+    """
+    content = await build_babeldoc_prompt_text(
         glossary_manager,
         project_id=project_id,
         only_terms_present_in=only_terms_present_in,

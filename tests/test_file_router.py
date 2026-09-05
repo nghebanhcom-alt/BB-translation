@@ -82,6 +82,34 @@ def test_detect_pdf_digital_with_a_few_image_only_pages(tmp_path: Path) -> None:
     assert detect_file_type(pdf_path) == FileType.PDF_DIGITAL
 
 
+def test_detect_pdf_digital_with_vector_only_divider_pages(tmp_path: Path) -> None:
+    """Regression for the real 2026-09-06 bug ("How Baking Works", confirmed
+    via live A/B against babeldoc + MinerU on the actual upload): a
+    born-digital book with a few chapter-divider pages that carry ONLY
+    vector drawings (no text, no raster image — e.g. a decorative rule/logo
+    drawn with lines/rects) still got misclassified as `pdf_scan`, because
+    the earlier fix (`test_detect_pdf_digital_with_a_few_image_only_pages`)
+    only excluded raster-image-only pages from the ratio, not vector-only
+    ones. Live-verified consequence: routing through the OCR bridge
+    unnecessarily corrupted output (dropped paragraphs, mid-word heading
+    wrap) that does NOT occur when babeldoc translates the clean original
+    PDF directly.
+    """
+    doc = fitz.open()
+    for i in range(25):
+        page = doc.new_page()
+        if i in (0, 5, 12, 20):  # 4 trang phan chuong, chi ve vector, khong chu
+            page.draw_line((10, 10), (90, 10))
+            page.draw_rect((10, 20, 90, 80))
+        else:
+            page.insert_text((72, 72), "Recipe: 480ml flour, 240ml milk.")
+    pdf_path = tmp_path / "digital_with_vector_dividers.pdf"
+    doc.save(pdf_path)
+    doc.close()
+
+    assert detect_file_type(pdf_path) == FileType.PDF_DIGITAL
+
+
 def test_detect_epub(tmp_path: Path) -> None:
     epub_path = tmp_path / "book.epub"
     epub_path.write_bytes(b"fake epub content")

@@ -505,6 +505,49 @@ def _fake_babeldoc_runner() -> BabeldocRunner:
 
 
 @pytest.mark.asyncio
+async def test_babeldoc_engine_writes_babeldoc_prompt_contract_not_pdf2zh(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Regression guard for the confirmed root cause (2026-09-05): when
+    `pdf_translate_engine="babeldoc"`, the `prompt_file` Job Orchestrator
+    hands to `BabeldocRunner.translate_pages()` must be built by
+    `write_babeldoc_prompt_file()` (no `${...}` template tokens, no pdf2zh
+    `Source Text:/Translated Text:` footer) — NOT `write_prompt_file()`'s
+    pdf2zh-only content, which babeldoc has no substitution mechanism for and
+    which contradicts babeldoc's own JSON-array output contract, previously
+    causing silently dropped paragraphs. This asserts the actual FILE
+    CONTENT the babeldoc subprocess would receive, not just that the runner
+    was called (Architecture.md Protocol 6 R6-02 style: data lineage, not
+    call-count)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    settings = Settings(pdf_translate_engine="babeldoc")
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert babeldoc_runner.translate_pages.await_args_list
+    for call in babeldoc_runner.translate_pages.await_args_list:
+        prompt_content = call.kwargs["prompt_file"].read_text(encoding="utf-8")
+        assert "${lang_in}" not in prompt_content
+        assert "${text}" not in prompt_content
+        assert "Source Text:" not in prompt_content
+        assert "Translated Text:" not in prompt_content
+        assert "chi in ra ban dich" not in prompt_content.lower()
+
+
+@pytest.mark.asyncio
 async def test_pdf_scan_babeldoc_engine_translates_bridge_not_original(
     session: AsyncSession, tmp_path: Path
 ) -> None:

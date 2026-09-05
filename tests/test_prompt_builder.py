@@ -8,7 +8,11 @@ from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.glossary_manager import GlossaryManager
-from src.core.prompt_builder import build_system_prompt, write_prompt_file
+from src.core.prompt_builder import (
+    build_system_prompt,
+    write_babeldoc_prompt_file,
+    write_prompt_file,
+)
 from src.utils.excel_utils import GlossaryEntryData
 
 
@@ -142,6 +146,56 @@ async def test_write_prompt_file_includes_unit_conversion_when_hints_present(
     path = tmp_path / "prompt.txt"
 
     await write_prompt_file(manager, path=path, only_terms_present_in="2 cups flour")
+
+    content = path.read_text(encoding="utf-8")
+    assert "cups" in content
+
+
+@pytest.mark.asyncio
+async def test_write_babeldoc_prompt_file_has_no_pdf2zh_template_contract(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Regression guard for the confirmed root cause (2026-09-05): babeldoc's
+    `--custom-system-prompt` has NO `string.Template` substitution, so this
+    file must NEVER contain pdf2zh's `${...}` tokens or its `Source
+    Text:/Translated Text:` footer — babeldoc appends its own JSON-array
+    output contract right after this content, and the pdf2zh footer/"only
+    print the translation" instruction directly contradicts it, which was
+    observed causing babeldoc to silently drop paragraphs."""
+    manager = GlossaryManager(session)
+    await manager.bulk_import(
+        [GlossaryEntryData(term_en="ganache", term_vi="(keep)")],
+        scope="global",
+        project_id=None,
+    )
+
+    path = tmp_path / "job-1" / "prompt.txt"
+    result_path = await write_babeldoc_prompt_file(
+        manager, path=path, only_terms_present_in="a ganache cake"
+    )
+
+    assert result_path == path
+    content = path.read_text(encoding="utf-8")
+    assert "${lang_in}" not in content
+    assert "${lang_out}" not in content
+    assert "${text}" not in content
+    assert "Source Text:" not in content
+    assert "Translated Text:" not in content
+    assert "chi in ra ban dich" not in content.lower()
+    assert "{{v0}}" not in content
+    assert "ganache" in content
+    assert "MUC TIEU" in content
+    assert "KHONG duoc bo sot" in content
+
+
+@pytest.mark.asyncio
+async def test_write_babeldoc_prompt_file_includes_unit_conversion_when_hints_present(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    manager = GlossaryManager(session)
+    path = tmp_path / "prompt.txt"
+
+    await write_babeldoc_prompt_file(manager, path=path, only_terms_present_in="2 cups flour")
 
     content = path.read_text(encoding="utf-8")
     assert "cups" in content

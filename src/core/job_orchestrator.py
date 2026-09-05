@@ -40,7 +40,7 @@ from src.core.file_router import FileType
 from src.core.glossary_manager import GlossaryManager
 from src.core.ocr_warning import build_ocr_warning
 from src.core.progress_tracker import BroadcastFn, ProgressTracker
-from src.core.prompt_builder import write_prompt_file
+from src.core.prompt_builder import write_babeldoc_prompt_file, write_prompt_file
 from src.models.batch import Batch
 from src.models.chunk import Chunk
 from src.models.concurrency_state import ConcurrencyState
@@ -288,18 +288,38 @@ class JobOrchestrator:
             )
 
         # Step 5: build + write prompt file (1 lan/job, tai su dung moi chunk).
+        # RE NHANH BAT BUOC theo engine tu day: pdf2zh doc file nay qua
+        # `string.Template` (${lang_in}/${lang_out}/${text}) MOI SEGMENT,
+        # babeldoc nhan noi dung file lam 1 CHUOI TINH cho `--custom-system-
+        # prompt`, khong co co che template nao (prompt_builder.py, xem
+        # `write_babeldoc_prompt_file()`). Dung chung 1 file/1 builder cho
+        # ca 2 engine tung nhoi contract cua pdf2zh (${text}, "chi in ban
+        # dich khong giai thich") vao prompt cua babeldoc — mau thuan voi
+        # JSON contract rieng cua babeldoc, xac nhan la nguyen nhan khien
+        # babeldoc am tham bo sot doan van (root-cause investigation,
+        # 2026-09-05).
         glossary_manager = GlossaryManager(db_session)
         prompt_path = self._processing_dir / job.id / "prompt.txt"
-        await write_prompt_file(
-            glossary_manager,
-            path=prompt_path,
-            project_id=job.batch_id,
-            only_terms_present_in=full_text,
-            max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
-        )
-        prompt_overhead_chars = max(
-            len(prompt_path.read_text(encoding="utf-8")) - len("${text}"), 0
-        )
+        if self._settings.pdf_translate_engine == "babeldoc":
+            await write_babeldoc_prompt_file(
+                glossary_manager,
+                path=prompt_path,
+                project_id=job.batch_id,
+                only_terms_present_in=full_text,
+                max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
+            )
+            prompt_overhead_chars = len(prompt_path.read_text(encoding="utf-8"))
+        else:
+            await write_prompt_file(
+                glossary_manager,
+                path=prompt_path,
+                project_id=job.batch_id,
+                only_terms_present_in=full_text,
+                max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
+            )
+            prompt_overhead_chars = max(
+                len(prompt_path.read_text(encoding="utf-8")) - len("${text}"), 0
+            )
 
         # Out-of-band provider, dung DUY NHAT cho estimate_cost() o buoc 7c.
         pricing_provider = self._provider or self._provider_factory.create(
