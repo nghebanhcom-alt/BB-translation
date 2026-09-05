@@ -144,3 +144,53 @@ không (đọc code, theo dõi tên biến từ chỗ gán tới chỗ dùng) �
 tương tự sau này (`src/pipelines/*.py`) — bất cứ đâu output của 1 lời gọi (external tool hay
 internal function) trở thành input của lời gọi tiếp theo.
 test thay vì chỉ lộ khi có input thật.
+
+## Protocol 7 — Mandatory Reviewer Gate
+
+### Bối cảnh (tại sao protocol này tồn tại)
+
+Sự cố (2026-09-06): qua nhiều session liên tiếp, PM (Sonnet) tự viết code (2 tính năng UI:
+xoá file đã upload, thêm timestamp vào tên file tải về) rồi tự review bằng cách đọc lại diff +
+chạy test, KHÔNG spawn agent `Reviewer` riêng — bỏ qua hoàn toàn handoff "Reviewer →
+`docs/review-report.md`" mà Protocol 1 (global CLAUDE.md) đã mô tả. User phát hiện bằng cách tự
+hỏi "sao không thấy Reviewer?" — không có cơ chế nào trong hệ thống tự phát hiện ra lỗ hổng này.
+
+**Root cause**: Protocol 1 mô tả handoff như 1 quy trình ("Reviewer → review-report.md"), không
+viết dưới dạng **cấm đoán tường minh**. Một mô tả quy trình dễ bị agent tự diễn giải là "tuỳ chọn
+khi việc phức tạp" thay vì bắt buộc mọi lần — đặc biệt dưới áp lực ẩn "làm nhanh, đừng hỏi lặt
+vặt" của auto mode. Đây là lỗi hệ thống (CLAUDE.md viết chưa đủ chặt), không phải lỗi 1 lần của
+riêng model nào.
+
+### Quy tắc bắt buộc
+
+**R7-01 (Cấm tự báo cáo code hoàn tất khi thiếu Reviewer thật)**: PM/Dev **KHÔNG ĐƯỢC PHÉP** báo
+cáo bất kỳ thay đổi code nào (backend, frontend, script, config ảnh hưởng hành vi) là "xong"/"đã
+review"/"sẵn sàng" nếu chưa có ít nhất 1 lần spawn agent `Reviewer` (Agent tool, `subagent_type:
+"Reviewer"`) TRONG CHÍNH session đó, và kết quả được ghi vào `docs/review-report.md`. Tự đọc lại
+diff, tự chạy test, tự chạy `ruff` — dù kỹ đến đâu — KHÔNG được tính là thay thế Reviewer. Ngoại
+lệ DUY NHẤT: thay đổi chỉ gồm comment/docs không ảnh hưởng hành vi (Reviewer có thể tự xác nhận
+`N/A` cho trường hợp này thay vì skip hoàn toàn).
+
+**R7-02 (Gate kỹ thuật, không chỉ dựa trí nhớ)**: Repo này có 1 git pre-commit hook
+(`.git/hooks/pre-commit`, cài 2026-09-06) tự động chặn `git commit` nếu commit đó đổi file trong
+`src/`/`web/` mà `docs/review-report.md` không nằm trong cùng commit. Đây là backstop kỹ thuật
+cho R7-01 — không phụ thuộc agent có "nhớ" quy tắc hay không. Giới hạn đã biết: hook chỉ kiểm tra
+file `review-report.md` có được touch hay không, KHÔNG kiểm tra được nội dung review có nghiêm
+túc hay không — R7-01 vẫn là quy tắc chính, R7-02 chỉ là lưới an toàn cho trường hợp quên hoàn
+toàn.
+
+### Phạm vi áp dụng
+
+Áp dụng cho MỌI thay đổi code trong repo này, bất kể do PM tự viết trực tiếp hay do Dev/Tech Lead
+(agent con) viết — không có ngoại lệ "việc nhỏ nên bỏ qua". Không áp dụng cho thay đổi thuần
+`docs/*.md` (trừ chính `review-report.md`/`test-report.md`), `.env`, hoặc file cấu hình không
+ảnh hưởng hành vi runtime.
+
+**R7-03 (Append, không overwrite, vào các file handoff dùng chung)**: Sự cố (2026-09-06): 1 agent
+Reviewer được giao ghi kết quả vào `docs/review-report.md` đã GHI ĐÈ toàn bộ file (2054 dòng lịch
+sử review từ Increment 1 tới thời điểm đó bị mất, chỉ còn lại report của riêng nó) thay vì đọc
+file hiện có và append thêm section mới — vì agent mới không có ký ức về việc file này đã có lịch
+sử, chỉ được giao "ghi kết quả vào file X". Bất kỳ ai giao việc ghi vào `docs/review-report.md`,
+`docs/test-report.md`, `docs/CHANGELOG.md`, hoặc `project_state.json` cho 1 agent (Reviewer, QA,
+Dev, Tech Lead) PHẢI nói rõ trong brief: "đọc file hiện có trước, APPEND section mới vào cuối,
+KHÔNG được xoá/ghi đè nội dung cũ" — không được mặc định agent tự hiểu ý này.
