@@ -22,10 +22,17 @@ have no base-14 mapping) and understates real Vietnamese glyph width by
 the real Noto font pdf2zh renders with vs. 20.0pt via "helv") — both false-fit
 decisions here that let translated text spill past its box, and outright
 glyph corruption whenever a span this code touches gets redrawn. `font_path`
-must be the SAME file pdf2zh itself rendered the page with (wired via
-`NOTO_FONT_PATH` in `Pdf2zhServiceMapper`) — measuring/redrawing against a
-different font than what's already on the page would just substitute one
-mismatch for another.
+must be the SAME font FILE already on the page — measuring/redrawing against
+a different font than what's already there would just substitute one
+mismatch for another. For `pdf2zh` this is enforced directly (`NOTO_FONT_PATH`
+in `Pdf2zhServiceMapper` pins pdf2zh's own render font to this same path).
+For `babeldoc`, `NOTO_FONT_PATH` has no effect — babeldoc always draws with
+its own bundled font asset (verified 2026-09-05 by reading
+`babeldoc.assets.embedding_assets_metadata`: "vi" resolves to `EN_FONT_FAMILY`,
+whose "normal" font is `NotoSerif-Regular.ttf`/`NotoSerif-Bold.ttf`) — so
+`Settings.noto_font_path` is instead pointed at a local copy of that SAME
+font file, chosen to match what babeldoc already put on the page rather than
+to change what babeldoc renders with.
 
 Second implementation note: `font_shrink_page`'s outer loop derives the
 "allowed width" for a span from that span's own block bbox via

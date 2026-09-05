@@ -2651,3 +2651,84 @@ production. Kết quả: **đủ 35/35 mục** trong output (trước khi sửa:
 thứ tự — hệ quả của lỗi ngắt dòng (2)/(7) vẫn còn, không phải mất nội dung) — đếm lại bằng regex
 không neo đầu dòng thì xác nhận đủ cả 35. Kết luận: fix (3) hoạt động đúng trên gọi LLM thật, sẵn
 sàng release phần này.
+
+## Increment (2026-09-05) — Live verify fix (5)/(6) phát hiện bug MỚI (8) + đổi font
+
+### Live verify fix (5)/(6) trên trang "Contents" thật: không tìm thấy cơ chế đã "sửa"
+
+Dịch lại thật trang Mục lục (page 6, đúng trang trong ảnh gốc) qua babeldoc + DeepSeek, áp
+`_shrink_line` mới lên bản dịch tươi (chưa qua xử lý lần nào): 0/0 dòng có nhiều span khác size
+— kể cả nếu chạy lại thuật toán CŨ (per-span, có bug) trên đúng dữ liệu này cũng ra 0. Trường hợp
+"khác size trong 1 block" duy nhất tìm được (`CHƯƠNG 1` 11.2pt vs tên chương `NHẬP MÔN LÀM BÁNH`
+11.9pt) đối chiếu lại ảnh gốc tiếng Anh thì đây là 2 cấp typography khác nhau CÓ CHỦ ĐÍCH từ bản
+gốc (số chương nhỏ, tên chương to+đậm), không phải bug. Kết luận: **chưa có bằng chứng thật nào
+cho thấy fix (5)/(6) giải quyết đúng cái user thấy trong ảnh gốc** — cơ chế multi-span-per-line
+mà code nhắm tới có thể hiếm/không xảy ra trên đúng cuốn sách này.
+
+### Bug MỚI (8) phát hiện khi đào tiếp: babeldoc để sót glyph gốc tiếng Anh, không "clean"
+
+Tìm đúng trang gây ấn tượng "font/size lộn xộn, nhiều khoảng trắng" (trang 20, "Density and
+Thickness", nơi hiển thị `h / liter o f th / d / low. If` rời rạc trong ảnh user gửi). Dump
+span-level: các mảnh `"so"`, `"h"`, `"l"`, `"f th"`, `"d"`, `"low. If"` đều mang
+`font=Palatino-Light` size=10pt — **chính là font nhúng gốc của sách tiếng Anh** (không phải font
+nào code mình từng gán). Input vào babeldoc (`searchable.pdf`) sạch, `n_contents=1`, đủ câu gốc —
+corruption xảy ra HOÀN TOÀN bên trong babeldoc.
+
+Test giả thuyết "babeldoc nhầm đoạn văn này thành nội dung bảng nên bỏ qua không dịch" (đoạn nằm
+sát 1 bảng số liệu thật, không bật `--translate-table-text`): dịch lại thật trang này với cờ đó
+bật — **bác bỏ**, 6 mảnh tiếng Anh vẫn còn nguyên **y hệt toạ độ bbox** dù bản dịch xung quanh đổi
+hoàn toàn câu chữ (2 lần chạy LLM cho ra 2 bản dịch khác nhau). Toạ độ bbox giống hệt bất kể nội
+dung dịch chứng minh: đây là glyph gốc bị babeldoc **quên xoá (bước "clean" nội bộ)** khi vẽ đè bản
+dịch lên, hoàn toàn không phụ thuộc bản dịch — 1 bug babeldoc khác hẳn (2), đặt tên **bug (8):
+"leftover original-language glyphs not cleaned"**. Third-party, không sửa được từ code wrapper,
+cùng nhóm với (1)/(2)/(4)/(7) — cần báo upstream.
+
+### Phát hiện phụ: `NOTO_FONT_PATH` là no-op với engine `babeldoc`
+
+Đọc trực tiếp source `babeldoc.assets.embedding_assets_metadata.get_font_family()`: "vi" không
+phải mã ngôn ngữ babeldoc nhận diện, rơi vào nhánh mặc định `EN_FONT_FAMILY`, mà font "normal"
+của nhóm này là `NotoSerif-Regular.ttf`/`NotoSerif-Bold.ttf` — khớp đúng tên font thấy trong PDF
+output thật (`font=Noto Serif Regular`). `FontMapper.__init__` lấy font hoàn toàn từ
+`babeldoc.assets` (tự tải + verify SHA3-256), **không đọc `NOTO_FONT_PATH`** ở đâu cả — biến này
+chỉ có tác dụng với `pdf2zh` (đúng như comment gốc trong `Pdf2zhServiceMapper` đã ghi, nhưng chưa
+từng ai verify lại điều này áp dụng đúng cho babeldoc hay không kể từ khi đổi engine — giờ đã
+verify: KHÔNG áp dụng). Không có flag CLI nào của babeldoc nhận 1 file font tuỳ ý (`--primary-
+font-family` chỉ chọn NHÓM serif/sans-serif/script trong số font babeldoc có sẵn).
+
+### Đã sửa (đổi font `noto_font_path`, KHÔNG sửa được bug (8))
+
+User quyết định: bỏ BeVietnamPro-Regular.ttf, đổi sang font **đồng nhất với font babeldoc tự vẽ**
+(vì không có cách nào an toàn ép babeldoc dùng font tuỳ ý — đã thử: tráo file cache bị chặn bởi
+SHA3-256 checksum verify của babeldoc, vá source package thì rủi ro mất khi babeldoc update).
+Copy thẳng `NotoSerif-Regular.ttf` từ cache asset của babeldoc
+(`~/.cache/babeldoc/fonts/NotoSerif-Regular.ttf`) vào `fonts/` của project — verify đủ glyph cho
+146/146 ký tự tiếng Việt test (đủ mọi tổ hợp dấu) trước khi dùng, round-trip render/extract khớp
+100%.
+
+- `src/core/config.py`: `noto_font_path` default đổi `fonts/BeVietnamPro-Regular.ttf` →
+  `fonts/NotoSerif-Regular.ttf`, viết lại comment cho đúng thực tế (babeldoc không đọc biến này,
+  file này chỉ để MATCH font babeldoc đã vẽ, không phải để ĐIỀU KHIỂN babeldoc).
+- `.env` (không commit git, đã gitignore): `NOTO_FONT_PATH` cập nhật theo.
+- `src/services/pdf2zh_service_map.py`, `src/postprocess/font_shrink.py`: cập nhật comment/docstring
+  khớp phát hiện ở trên.
+- `fonts/BeVietnamPro-Regular.ttf` xoá khỏi repo (không còn nơi nào tham chiếu).
+- `tests/test_font_shrink.py`: `_NOTO_FONT_PATH` trỏ sang font mới, cập nhật docstring liên quan.
+- Verify: 266/266 test pass, `ruff check`/`ruff format` sạch. Chạy lại `font_shrink_page` (font
+  mới) trên đúng output babeldoc thật đã có (equipment list, không tốn thêm API call) — 0 lỗi, chữ
+  tiếng Việt không vỡ.
+- **Lưu ý rõ**: đây CHỈ sửa vấn đề font-family không đồng nhất giữa phần `font_shrink.py` tự vẽ và
+  phần babeldoc tự vẽ (thẩm mỹ) — KHÔNG sửa bug (8) (nội dung tiếng Anh sót lại), bug đó vẫn mở,
+  cần báo upstream.
+
+### Trạng thái release
+
+| # | Mô tả | Trạng thái |
+|---|---|---|
+| 3 | Mất chữ (LLM bỏ sót mục vì rule độ dài) | **Đã sửa, live-verify xong** — release được |
+| 5/6 | Font size/khoảng trống (per-span) | Fix đã lên (không sai), nhưng chưa chứng minh được là root cause thật trên sách này |
+| 8 (mới) | Sót glyph gốc tiếng Anh chưa clean | babeldoc third-party, chưa sửa được, cần báo upstream |
+| font family | font_shrink.py dùng font khác babeldoc | **Đã sửa** — giờ cùng 1 file font |
+| 1, 2, 4, 7 | Không justify / ngắt dòng / cột hẹp | babeldoc third-party, chưa sửa được, cần báo upstream |
+
+Release phần đã sửa chắc chắn (3, font family). (5)/(6)/(8)/(1)/(2)/(4)/(7) coi là known issue,
+theo dõi riêng, cần báo upstream lên GitHub project của babeldoc.

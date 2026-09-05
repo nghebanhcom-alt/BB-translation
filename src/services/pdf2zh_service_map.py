@@ -58,7 +58,15 @@ class Pdf2zhServiceMapper:
             # Pin pdf2zh to the SAME font file `font_shrink_page` measures/
             # redraws with (Architecture.md 6.3) — without this, pdf2zh falls
             # back to auto-downloading its own copy, which our post-process
-            # step has no way to locate or match.
+            # step has no way to locate or match. NOTE: `babeldoc` does NOT
+            # read this env var at all (verified 2026-09-05 by reading
+            # `babeldoc.assets.embedding_assets_metadata` — it always uses its
+            # own bundled font asset for the target language, ignoring any
+            # env var). For babeldoc, `noto_font_path` matters only because it
+            # points at a local copy of that SAME bundled font file, so
+            # `font_shrink_page` matches babeldoc's rendering rather than
+            # actually redirecting babeldoc to use it — see font_shrink.py's
+            # module docstring.
             service = replace(
                 service, envs={**service.envs, "NOTO_FONT_PATH": str(font_path.resolve())}
             )

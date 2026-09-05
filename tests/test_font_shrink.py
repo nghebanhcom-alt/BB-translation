@@ -115,7 +115,7 @@ async def test_font_shrink_page_full_scan_no_overflow_for_normal_text() -> None:
     doc.close()
 
 
-_NOTO_FONT_PATH = str(Path(__file__).resolve().parent.parent / "fonts" / "BeVietnamPro-Regular.ttf")
+_NOTO_FONT_PATH = str(Path(__file__).resolve().parent.parent / "fonts" / "NotoSerif-Regular.ttf")
 
 
 @pytest.mark.asyncio
@@ -227,8 +227,8 @@ async def test_shrink_line_centers_freed_up_space_instead_of_anchoring_left() ->
 @pytest.mark.asyncio
 async def test_helv_measurement_understates_real_vietnamese_width() -> None:
     """Documents why "helv"-based overflow detection is unreliable for
-    Vietnamese: it can report a span as fitting when the font pdf2zh actually
-    rendered it with (Noto/Be Vietnam Pro) would overflow the same box."""
+    Vietnamese: it can report a span as fitting when the font pdf2zh/babeldoc
+    actually rendered it with (Noto Serif) would overflow the same box."""
     text = "bánh"
     helv_width = fitz.get_text_length(text, fontname="helv", fontsize=12)
     real_width = fitz.Font(fontfile=_NOTO_FONT_PATH).text_length(text, fontsize=12)

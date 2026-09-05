@@ -62,20 +62,28 @@ class Settings(BaseSettings):
     max_concurrent_files: int = 3
     max_upload_size_mb: int = 500
 
-    # pdf2zh renders any character outside the original PDF's embedded font
-    # (i.e. all translated Vietnamese text) using whatever font `NOTO_FONT_PATH`
-    # points to, defaulting to its own auto-downloaded GoNotoKurrent if unset
-    # (see `pdf2zh/high_level.py::download_remote_fonts`). Pinning it here
-    # instead and exporting the same path to the subprocess
-    # (`Pdf2zhServiceMapper`) guarantees `font_shrink_page`'s width
-    # measurement/redraw uses the IDENTICAL font pdf2zh rendered the page
-    # with — "helv" (PDF base-14) silently corrupts Vietnamese characters
-    # outside Latin-1 (verified: "thơm" -> "th·m") and its metrics understate
-    # real Vietnamese glyph width by ~30-45%. Be Vietnam Pro (OFL, Google
-    # Fonts) chosen over GoNotoKurrent's default fallback: purpose-built for
-    # Vietnamese, verified full glyph coverage for diacritics + common
-    # cookbook symbols (°, fractions, bullets, em-dash, curly quotes).
-    noto_font_path: str = "fonts/BeVietnamPro-Regular.ttf"
+    # `NOTO_FONT_PATH` only affects the legacy `pdf2zh` engine (it reads this
+    # env var itself, see `Pdf2zhServiceMapper`) — `babeldoc` ignores it
+    # entirely and always draws translated text with its OWN bundled font
+    # asset, chosen by `babeldoc.assets.embedding_assets_metadata.get_font_family`
+    # (verified 2026-09-05 by reading that source directly: "vi" isn't a
+    # recognized language code there, so it falls through to `EN_FONT_FAMILY`,
+    # whose "normal" entry is `NotoSerif-Regular.ttf`/`NotoSerif-Bold.ttf` —
+    # confirmed live in a real translated PDF's font names too). This path
+    # therefore points at the SAME font FILE (copied from babeldoc's own
+    # asset cache into `fonts/`), not because we can make babeldoc use it,
+    # but so `font_shrink_page`'s own redraws match babeldoc's rendering
+    # instead of introducing a second, different font family on the page.
+    # Verified full glyph coverage for the Vietnamese alphabet (146/146 test
+    # chars incl. all tone-mark combinations) before switching to it.
+    #
+    # Previously "fonts/BeVietnamPro-Regular.ttf" (also OFL, also full
+    # Vietnamese coverage) — switched away from it 2026-09-05: it was a
+    # DIFFERENT font family than whatever babeldoc itself draws the rest of
+    # the page with, which is exactly the kind of "measuring/redrawing
+    # against a font different from what's already on the page" mismatch
+    # this setting exists to prevent (see `font_shrink.py` module docstring).
+    noto_font_path: str = "fonts/NotoSerif-Regular.ttf"
 
     log_level: str = "info"
 
