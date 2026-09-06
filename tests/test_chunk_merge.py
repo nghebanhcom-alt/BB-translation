@@ -153,6 +153,73 @@ async def test_merge_chunk_pdfs_golden_fixture_real_pdf2zh_output(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_merge_chunk_pdfs_golden_fixture_real_babeldoc_output(tmp_path: Path) -> None:
+    """Bug #8 regression test: uses real `babeldoc` output extracted from a
+    completed production job (see tests/fixtures/babeldoc/README.md) where
+    each chunk's mono.pdf is scoped to just that chunk's own page range
+    (`chunk_doc.page_count == page_end - page_start + 1`), unlike the
+    full-document shape `tests/fixtures/pdf2zh/` verifies. Before the Bug #8
+    fix, this merge silently dropped all but the last 1-2 pages of chunk 1.
+    """
+    fixtures_dir = Path(__file__).parent / "fixtures" / "babeldoc"
+    chunk0_sample = fixtures_dir / "job3594a7a3_chunk0_sample_mono.pdf"
+    chunk1_sample = fixtures_dir / "job3594a7a3_chunk1_sample_mono.pdf"
+    assert chunk0_sample.exists(), "golden fixture missing - see tests/fixtures/babeldoc/README.md"
+    assert chunk1_sample.exists(), "golden fixture missing - see tests/fixtures/babeldoc/README.md"
+
+    # The samples are truncated extracts (5 and 4 pages respectively, see
+    # README) rather than full chunks, so `page_start`/`page_end` here
+    # describe the sample files' own coverage — a small contiguous
+    # doc-in-miniature, same trick `tests/fixtures/pdf2zh/`'s 6-page fixture
+    # uses — with a 1-page overlap between them, not the real job's actual
+    # 40/42-page chunk boundaries.
+    chunks = [
+        Chunk(
+            job_id="job-babeldoc",
+            chunk_index=0,
+            page_start=1,
+            page_end=5,
+            overlap_start=None,
+            overlap_end=None,
+            output_path=str(chunk0_sample),
+        ),
+        Chunk(
+            job_id="job-babeldoc",
+            chunk_index=1,
+            page_start=5,
+            page_end=8,
+            overlap_start=5,
+            overlap_end=5,
+            output_path=str(chunk1_sample),
+        ),
+    ]
+
+    output_path = tmp_path / "merged.pdf"
+    await merge_chunk_pdfs(chunks, output_path)
+
+    with fitz.open(output_path) as merged:
+        # chunk 0 contributes all 5 of its pages; chunk 1 contributes its
+        # remaining 3 pages after the 1-page overlap (local page 0) is
+        # trimmed. Before the Bug #8 fix, absolute indexing into chunk 1's
+        # 4-page file (indices computed from page_start=5 upward) would run
+        # off the end of the file and drop pages instead.
+        assert merged.page_count == 8
+        texts = [page.get_text().strip() for page in merged]
+
+    # Chunk 0's own 5 sampled pages pass through untouched.
+    assert "HOWBAKINGWORKS" in texts[0]
+    assert "HOWBAKINGWORKS" in texts[2]
+    assert "khuôn" in texts[3]
+
+    # Chunk 1 must contribute pages sliced RELATIVE to its own page_start
+    # (local pages 1-3), skipping local page 0 (the overlap duplicate) —
+    # not absolute-indexed into a file that only has 4 pages total.
+    assert "Giấy nến" in texts[5]
+    assert "BÀI TẬP VÀ THÍ NGHIỆM" in texts[6]
+    assert "KẾT LUẬN" in texts[7]
+
+
+@pytest.mark.asyncio
 async def test_merge_chunk_pdfs_single_chunk_no_overlap(tmp_path: Path) -> None:
     total_pages = 30
     chunk0_path = tmp_path / "chunk_000-mono.pdf"

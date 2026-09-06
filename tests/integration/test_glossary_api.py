@@ -133,3 +133,40 @@ def test_update_nonexistent_entry_returns_404(client: TestClient) -> None:
 def test_delete_nonexistent_entry_returns_404(client: TestClient) -> None:
     response = client.delete("/api/glossary/does-not-exist")
     assert response.status_code == 404
+
+
+# === POST /api/glossary — them 1 entry don le (US moi 2026-09-06) ===
+
+
+def test_create_single_entry(client: TestClient) -> None:
+    response = client.post(
+        "/api/glossary", json={"term_en": "proofing", "term_vi": "u bot", "notes": "step"}
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["term_en"] == "proofing"
+    assert body["term_vi"] == "u bot"
+    assert body["notes"] == "step"
+    assert body["scope"] == "global"
+
+    list_response = client.get("/api/glossary")
+    assert list_response.json()["total"] == 1
+
+
+def test_create_single_entry_rejects_blank_term_en(client: TestClient) -> None:
+    response = client.post("/api/glossary", json={"term_en": "   "})
+    assert response.status_code == 400
+
+
+def test_create_single_entry_updates_existing_duplicate(client: TestClient) -> None:
+    # BR-GLOSS-03 "last-updated-wins": tao lai voi cung term_en (case-insensitive,
+    # BR-GLOSS-02) phai CAP NHAT entry cu, khong tao ban trung.
+    first = client.post("/api/glossary", json={"term_en": "ganache", "term_vi": "(keep)"})
+    assert first.status_code == 201
+
+    second = client.post("/api/glossary", json={"term_en": "Ganache", "term_vi": "sot ganache"})
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["term_vi"] == "sot ganache"
+
+    assert client.get("/api/glossary").json()["total"] == 1

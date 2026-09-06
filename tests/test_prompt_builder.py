@@ -9,6 +9,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.glossary_manager import GlossaryManager
 from src.core.prompt_builder import (
+    build_babeldoc_prompt_text,
     build_system_prompt,
     write_babeldoc_prompt_file,
     write_prompt_file,
@@ -186,6 +187,32 @@ async def test_write_babeldoc_prompt_file_has_no_pdf2zh_template_contract(
     assert "ganache" in content
     assert "MUC TIEU" in content
     assert "KHONG duoc bo sot" in content
+
+
+@pytest.mark.asyncio
+async def test_babeldoc_prompt_tells_llm_input_is_single_fragment_no_newlines(
+    session: AsyncSession,
+) -> None:
+    """F4 (Architecture.md "Root Cause Analysis: Line-break/List Regression",
+    RC-3, 2026-09-06): babeldoc calls the LLM per already-split paragraph
+    fragment (VERIFIED babeldoc 0.6.4 source, `il_translator_llm_only.py`),
+    not per whole list block — the OLD instruction ("bullet list phai dich
+    thanh bullet list") caused the LLM to re-invent bullet markers/newlines
+    on a fragment that no longer had one, and babeldoc only `.strip()`s the
+    2 ends (internal newlines survive). The babeldoc-specific prompt variant
+    must instead say: translate into exactly ONE paragraph, never insert an
+    internal newline, and never invent a bullet/number marker that was not
+    already there."""
+    manager = GlossaryManager(session)
+    prompt = await build_babeldoc_prompt_text(manager)
+
+    assert "MOT doan van" in prompt or "DUNG MOT doan van" in prompt
+    assert "KHONG tu chen ky tu xuong dong" in prompt
+    assert "TUYET DOI KHONG tu them bullet" in prompt
+    # Regression guard: must NOT still carry the old instruction that told
+    # the LLM to preserve/produce bullet-list-as-bullet-list at the WHOLE
+    # LIST level — that phrasing is what caused RC-3 on a per-fragment call.
+    assert "Bullet list phai dich thanh bullet list" not in prompt
 
 
 @pytest.mark.asyncio

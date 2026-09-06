@@ -7,6 +7,10 @@ function historyApp() {
     limit: 20,
     offset: 0,
     statusFilter: "",
+    // US moi (2026-09-06): "+ Glossary" tren tung job — modal them 1 entry.
+    addGlossaryJob: null,
+    glossaryDraft: { term_en: "", term_vi: "" },
+    glossaryError: "",
 
     statusBadgeClass(status) {
       const map = {
@@ -20,6 +24,45 @@ function historyApp() {
         queued: "bg-blue-100 text-blue-700",
       };
       return map[status] || "bg-gray-100 text-gray-600";
+    },
+
+    // b. US moi (2026-09-06): hien chi phi THAT (actual_cost) khi job da
+    // hoan tat; hien uoc tinh (estimated_cost) khi chua; "-" khi khong co
+    // du lieu nao (job vua tao, chua uoc tinh lan nao).
+    formatCost(job) {
+      if (job.actual_cost != null) {
+        return `$${job.actual_cost.toFixed(2)} (${job.cost_source})`;
+      }
+      if (job.estimated_cost != null) {
+        return `ước tính: $${job.estimated_cost.toFixed(2)}`;
+      }
+      return "-";
+    },
+
+    // a. Mo modal them 1 cap thuat ngu vao glossary, goi tu hang cua 1 job.
+    openAddGlossary(job) {
+      this.addGlossaryJob = job;
+      this.glossaryDraft = { term_en: "", term_vi: "" };
+      this.glossaryError = "";
+    },
+
+    async saveGlossaryTerm() {
+      const term_en = this.glossaryDraft.term_en.trim();
+      if (!term_en) {
+        this.glossaryError = "Thuật ngữ (EN) không được để trống.";
+        return;
+      }
+      const res = await fetch("/api/glossary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ term_en, term_vi: this.glossaryDraft.term_vi || null }),
+      });
+      if (res.ok) {
+        this.addGlossaryJob = null;
+      } else {
+        const body = await res.json().catch(() => ({}));
+        this.glossaryError = body.detail || "Không thêm được thuật ngữ.";
+      }
     },
 
     async load() {

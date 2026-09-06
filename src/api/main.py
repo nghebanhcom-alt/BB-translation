@@ -1,3 +1,4 @@
+import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,23 @@ from src.api.websocket import router as websocket_router
 from src.models.database import init_db
 
 _WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PYPROJECT_PATH = _PROJECT_ROOT / "pyproject.toml"
+
+
+def _read_app_version() -> str:
+    """GET /api/version (US moi 2026-09-06): doc truc tiep `pyproject.toml`
+    o runtime thay vi hardcode/import metadata, vi app nay chay tu source
+    (khong `pip install`), nen `importlib.metadata.version()` khong dam bao
+    tim thay package da cai. `tomllib` la stdlib tu Python 3.11+ (pyproject.toml
+    yeu cau requires-python >=3.12) nen khong can them dependency moi.
+    """
+    try:
+        with _PYPROJECT_PATH.open("rb") as f:
+            data = tomllib.load(f)
+        return data["project"]["version"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "unknown"
 
 
 @asynccontextmanager
@@ -42,6 +60,11 @@ app.include_router(websocket_router, tags=["websocket"])
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def get_version() -> dict[str, str]:
+    return {"version": _read_app_version()}
 
 
 # Static frontend (Architecture.md section 1: HTML + Alpine.js + Tailwind CDN,

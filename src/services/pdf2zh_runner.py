@@ -95,8 +95,18 @@ class Pdf2zhRunner:
         ignore_cache: bool = False,
         timeout_seconds: int = 3600,
         thread: int = 4,
+        split_short_lines: bool = False,
+        short_line_split_factor: float | None = None,
     ) -> Pdf2zhResult:
         """Run pdf2zh for one chunk's page range and return the rendered PDFs.
+
+        `split_short_lines`/`short_line_split_factor` accepted-but-unused here:
+        they are a babeldoc-only CLI concept (Architecture.md "Root Cause
+        Analysis: Line-break/List Regression" F2, `BabeldocRunner.translate_pages()`).
+        Kept on this signature purely so `JobOrchestrator._translator_runner`
+        (Architecture.md 6.14.7 "DIEM CHON ENGINE DUY NHAT") can call either
+        engine with the exact same kwargs and never branch on `if engine ==
+        ...` at the call site — pdf2zh has no equivalent flag.
 
         `output_dir` MUST be unique per chunk (Architecture.md 6.6.1 F9): pdf2zh
         names its output after the input file's stem (`{stem}-mono.pdf` /

@@ -45,10 +45,26 @@ function translationApp() {
     // Nhiem vu 2: provider -> { has_key, model } tu GET /api/settings, dung
     // de hien "OpenAI (gpt-4o-mini)" trong dropdown chon provider.
     providerSettings: {},
+    // US moi (2026-09-06): hien thi version app o footer, doc tu GET /api/version
+    // (ban than doc pyproject.toml o runtime — xem src/api/main.py).
+    appVersion: "",
 
     async init() {
       await this.loadProviderSettings();
+      await this.loadVersion();
       await this.restoreRecentJobs();
+    },
+
+    async loadVersion() {
+      try {
+        const res = await fetch("/api/version");
+        if (res.ok) {
+          const body = await res.json();
+          this.appVersion = body.version || "";
+        }
+      } catch (err) {
+        // non-fatal — footer just shows no version.
+      }
     },
 
     async loadProviderSettings() {
@@ -86,12 +102,43 @@ function translationApp() {
           provider: job.model,
           output_mode: job.bilingual_path ? "bilingual" : "monolingual",
           costEstimate: null,
+          // Khong co uploaded_at rieng cho job phuc hoi tu server (khong di
+          // qua POST /api/upload trong session nay) — dung job.created_at
+          // lam moc thoi gian de sap xep + hien thi (formatUploadDate()).
+          uploaded_at: job.created_at,
           job,
         }));
+        this.sortFilesDesc();
         this.files.forEach((f) => this.trackJob(f));
       } catch (err) {
         // non-fatal — user just sees an empty list, same as before this fix.
       }
+    },
+
+    // US moi (2026-09-06): file moi upload/dich gan day nhat len dau danh
+    // sach. Sap xep theo uploaded_at (upload session nay) hoac job.created_at
+    // (job phuc hoi tu server) — bat ky field nao co gia tri, giam dan.
+    sortFilesDesc() {
+      this.files.sort((a, b) => {
+        const ta = new Date(a.uploaded_at || a.job?.created_at || 0).getTime();
+        const tb = new Date(b.uploaded_at || b.job?.created_at || 0).getTime();
+        return tb - ta;
+      });
+    },
+
+    // Hien thi gio upload/tao job dang de doc, vd "06/09/2026 14:30".
+    formatUploadDate(f) {
+      const raw = f.uploaded_at || f.job?.created_at;
+      if (!raw) return "";
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) return "";
+      return d.toLocaleString("vi-VN", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     },
 
     availableProviders(fileType) {
@@ -166,6 +213,7 @@ function translationApp() {
           this.uploadError = "Loi ket noi khi upload: " + err;
         }
       }
+      this.sortFilesDesc();
     },
 
     // US moi (2026-09-06): xoa 1 file khoi danh sach "File da upload". Xoa ca
@@ -177,21 +225,48 @@ function translationApp() {
     // thao tac de an toan hon cho truong hop dung qua API truc tiep).
     async removeFile(f) {
       if (!confirm(`Xoá "${f.filename}" khỏi danh sách?`)) return;
+      const ok = await this._deleteFileRecord(f);
+      if (ok) this.files = this.files.filter((x) => x !== f);
+    },
+
+    // US moi (2026-09-06): "Xóa tất cả" — 1 xác nhận duy nhất cho cả danh
+    // sách (khac removeFile() tung file, moi lan hoi 1 lan) roi xoa tuan tu
+    // qua 2 endpoint da co san (khong them endpoint bulk-delete moi o backend
+    // — danh sach nay thuong chi vai file/session, xoa tuan tu du nhanh va
+    // tai su dung dung logic/loi cua removeFile() thay vi nhan doi).
+    async removeAllFiles() {
+      if (this.files.length === 0) return;
+      if (!confirm(`Xoá tất cả ${this.files.length} file khỏi danh sách? Không thể hoàn tác.`))
+        return;
+      const remaining = [];
+      for (const f of this.files) {
+        const ok = await this._deleteFileRecord(f);
+        if (!ok) remaining.push(f);
+      }
+      this.files = remaining;
+    },
+
+    // Logic xoá dùng chung giữa removeFile() và removeAllFiles(): xoá Job
+    // (nếu đã dịch) rồi xoá upload gốc (nếu có file_id). Trả về true nếu xoá
+    // thành công (hoặc không có gì phải xoá), false nếu backend từ chối
+    // (vd job đang chạy) — gọi nơi khác tự quyết định giữ item lại.
+    async _deleteFileRecord(f) {
       try {
         if (f.job) {
           const res = await fetch(`/api/jobs/${f.job.id}`, { method: "DELETE" });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
             f.jobError = body.detail || "Không xoá được job.";
-            return;
+            return false;
           }
         }
         if (f.file_id) {
           await fetch(`/api/upload/${f.file_id}`, { method: "DELETE" });
         }
-        this.files = this.files.filter((x) => x !== f);
+        return true;
       } catch (err) {
         f.jobError = "Lỗi kết nối khi xoá: " + err;
+        return false;
       }
     },
 

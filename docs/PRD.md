@@ -165,6 +165,21 @@ Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu 
 - Chế độ này bỏ qua hoàn toàn Translation Engine và Glossary injection — chỉ chạy Parsing Engine (MinerU)
 - Vì không gọi LLM dịch, chi phí = 0 (chỉ tốn compute local cho OCR/parse)
 
+### US-16: Nén ảnh sau khi ghép (giảm dung lượng output)
+**As a** người dịch sách, **I want** file PDF dịch xong có dung lượng nhỏ gọn, **so that** dễ lưu trữ/chia sẻ (case thật: 1 job 415 trang engine babeldoc ra file 808MB do ảnh minh hoạ bị nhúng lại dạng bitmap thô thay vì JPEG gốc).
+
+**Quyết định phạm vi (chốt 2026-09-06, PM hỏi trực tiếp user)**:
+- Chỉ áp dụng cho job dùng engine `babeldoc` (engine mặc định hiện tại — `src/core/config.py:135`). Engine `pdf2zh` giữ nguyên hành vi, không đổi.
+- Mức nén JPEG **cố định quality=85**, không lộ ra config/UI.
+- Dedupe ảnh trùng lặp (cùng ảnh, nhiều xref khác nhau): **có điều kiện** — chỉ đưa vào implementation chính thức nếu spike đo được dedupe mang lại mức giảm dung lượng **thêm ≥ 20%** so với chỉ nén JPEG (không dedupe), đo trên dữ liệu thật. Nếu spike cho kết quả < 20%, dừng ở bước nén JPEG, ghi lại kết quả đo vào `docs/Architecture.md` và defer dedupe về backlog.
+
+**Acceptance Criteria:**
+- **Given** job dùng engine `babeldoc` và file PDF đã ghép (`merge_chunk_pdfs()` output) chứa ảnh raw/uncompressed (`Filter: null`) → **Then** hệ thống re-encode các ảnh đó sang JPEG quality=85 trước khi ghi file output cuối cùng, dung lượng file giảm rõ rệt so với hiện tại
+- **Given** job dùng engine `pdf2zh` → **Then** KHÔNG áp dụng bước nén này, hành vi merge giữ nguyên như hiện tại
+- **Given** ảnh trong file đã ở dạng đã nén sẵn (`DCTDecode`/JPEG) → **Then** giữ nguyên, không re-encode lại (tránh generation loss do nén JPEG chồng JPEG)
+- **Given** bước nén chạy xong → **Then** file PDF output vẫn mở được, số trang không đổi, nội dung/text không bị mất (không phải lỗi tương tự Bug #7/#8 ở `chunk_merge.py`)
+- Nếu spike dedupe đạt ngưỡng ≥ 20%: **Given** cùng 1 ảnh xuất hiện ở nhiều trang với xref khác nhau → **Then** hệ thống gộp về 1 xref dùng chung, không nhúng lại nhiều bản sao
+
 ---
 
 ## 4. Business Rules
@@ -219,6 +234,12 @@ Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu 
 - **BR-PARSE-03**: Output gồm 1 file `.md` + 1 thư mục `images/` chứa ảnh extract kèm theo, đường dẫn ảnh trong Markdown là relative path
 - **BR-PARSE-04**: Không tính vào "translation history" (US-12) vì không phải bản dịch — lưu riêng vào "parse history"
 - **BR-PARSE-05**: Không tốn chi phí LLM API — chỉ hiển thị thời gian xử lý ước tính, không hiển thị estimated cost
+
+### 4.9. Image Compression (US-16)
+- **BR-IMGCOMP-01**: Chỉ áp dụng cho job dùng engine `babeldoc` (`settings.pdf_translate_engine == "babeldoc"`). Job dùng `pdf2zh` không đổi hành vi.
+- **BR-IMGCOMP-02**: Chạy sau `merge_chunk_pdfs()`, trước khi file được coi là `job.output_path` cuối cùng. Chỉ re-encode ảnh đang ở dạng raw/uncompressed (`Filter: null`); ảnh đã là JPEG (`DCTDecode`) giữ nguyên, không nén chồng lần 2.
+- **BR-IMGCOMP-03**: Mức nén JPEG cố định quality=85, không cấu hình qua `.env` hay UI.
+- **BR-IMGCOMP-04**: Dedupe ảnh trùng lặp (nhiều xref cùng nội dung ảnh) là tính năng có điều kiện — chỉ implement chính thức nếu spike đo trên dữ liệu thật cho thấy mức giảm dung lượng thêm ≥ 20% so với chỉ nén JPEG. Kết quả spike (đạt hay không đạt ngưỡng) phải được ghi vào Architecture.md kèm số liệu đo, không được quyết định bằng suy đoán (theo tinh thần Protocol 5 R5-02 của project — dù PyMuPDF là thư viện nội bộ không thuộc phạm vi Protocol 5 bắt buộc, nguyên tắc "đo thật trước khi quyết định" vẫn nên áp dụng vì đây là ngưỡng số liệu cụ thể user đặt ra).
 
 ---
 
@@ -370,6 +391,28 @@ Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu 
 - PDF annotation/highlight differences
 - Mobile responsive UI
 - Webhook/email notification
+
+---
+
+## 9. Backlog — đề xuất chưa triển khai (ghi nhận 2026-09-06)
+
+User liệt kê 8 mục dưới đây để **ghi nhớ, chưa yêu cầu làm ngay, không xếp theo thứ tự ưu
+tiên**. PM dịch sang dev language kèm bản gốc để đối chiếu; mỗi mục cần BA/Tech Lead làm rõ
+thêm trước khi lên kế hoạch implement.
+
+| # | User nói (nguyên văn) | Dev language (PM tóm tắt) | Ghi chú |
+|---|---|---|---|
+| 1 | Nén ảnh lại sau khi ghép | **→ ĐÃ CHỐT thành US-16 + §4.9 (BR-IMGCOMP-01..04), 2026-09-06** — chỉ áp dụng engine babeldoc, quality cố định 85, dedupe có điều kiện (cần spike ≥20% mới implement). Xem chi tiết ở §3/§4.9. |
+| 2 | Trong tab Glossary bổ sung nút "thêm từ mới" | Thêm nút "Add new term" trên Glossary UI (`web/index.html` hoặc trang glossary riêng), mở form/modal tạo 1 glossary entry mới (source term + target term + note), gọi API tạo (`src/api/routes/glossary.py`). |
+| 3 | Bổ sung tính năng search trong Glossary | Thêm ô search/filter trên Glossary UI, lọc theo source hoặc target term (client-side filter hoặc query param cho API list). |
+| 4 | Trong tab Lịch sử, bổ sung: thời gian dịch, số trang, xóa mục | 3 việc riêng trên trang History (`web/history.html`/`web/js/history.js`): (a) hiển thị thời gian dịch (`started_at`→`completed_at` hoặc duration tính từ đó), (b) hiển thị `total_pages` của job, (c) thêm action xoá 1 job khỏi lịch sử (cần API DELETE job + xác nhận trước khi xoá, vì đây là destructive action). |
+| 5 | Thêm mục "Các từ mới" — thuật ngữ chuyên môn rút ra từ tài liệu vừa dịch, sẵn sàng để thêm vào glossary hiện tại | Tính năng mới, cần thiết kế riêng: sau khi job dịch xong, chạy 1 bước trích xuất thuật ngữ chuyên ngành (LLM-based term extraction) từ nội dung đã dịch, hiển thị danh sách candidate terms trên UI kèm action "Add to glossary" cho từng từ. Cần BA làm rõ: tiêu chí "thuật ngữ chuyên môn" là gì, extract từ bước nào trong pipeline (trước/sau dịch), cost/latency phát sinh. |
+| 6 | Hiện phiên bản của BB-Translation | Hiển thị version string (vd đọc từ `pyproject.toml` hoặc 1 hằng số `APP_VERSION`) ở đâu đó trên UI (footer hoặc header) — lưu ý: `tests/integration/test_version_and_upload_timestamp.py` đã tồn tại (untracked) trong working tree, có thể đã có code liên quan dở dang, cần Dev kiểm tra lại trước khi làm mới. |
+| 7 | Dịch EPUB | Đã có trong scope v1.0 (mục "Pipeline dịch EPUB" ở §8) nhưng **CHƯA implement thật** — job thật gần nhất với `.epub` bị fail với lỗi `"EPUB pipeline (bilingual_book_maker) chua duoc implement trong increment nay"` (xem job `971b7c0a-45e4-4f3f-b079-4d042ab41624`, 2026-09-05). Đây là hoàn thiện tính năng đã cam kết, không phải feature mới. |
+| 8 | Convert định dạng Markdown, giữ nguyên vị trí | Liên quan US-15 (§3, "Xuất Markdown parse-only") — đã **HOÃN sang v1.1** theo quyết định trước đó. "Giữ nguyên vị trí" cần BA làm rõ nghĩa là gì trong context Markdown (Markdown không có khái niệm vị trí/layout như PDF) — có thể user đang muốn giữ nguyên cấu trúc heading/section thay vì layout toạ độ. |
+
+*Không mục nào ở trên đã bắt đầu implement. Khi user yêu cầu làm 1 mục cụ thể, PM cần đưa qua
+BA (nếu cần làm rõ nghiệp vụ) rồi Tech Lead trước khi Dev bắt tay vào, theo Protocol 1/2 chuẩn.*
 
 ---
 

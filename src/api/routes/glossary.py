@@ -94,9 +94,7 @@ async def preview_import(file: UploadFile) -> GlossaryImportPreviewResponse:
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    entries = [
-        GlossaryEntryIn(term_en=e.term_en, term_vi=e.term_vi, notes=e.notes) for e in parsed
-    ]
+    entries = [GlossaryEntryIn(term_en=e.term_en, term_vi=e.term_vi, notes=e.notes) for e in parsed]
     return GlossaryImportPreviewResponse(entries=entries, count=len(entries))
 
 
@@ -113,6 +111,31 @@ async def confirm_import(
     return GlossaryImportConfirmResponse(
         imported=result.imported, updated=result.updated, skipped=result.skipped
     )
+
+
+@router.post("", response_model=GlossaryEntryOut, status_code=201)
+async def create_entry(request: GlossaryEntryIn, session: SessionDep) -> GlossaryEntryOut:
+    """US moi (2026-09-06): them 1 cap thuat ngu don le tu UI (khac `/import`
+    danh cho ca file Excel qua `import_glossary_from_excel()`). Dung lai
+    `GlossaryManager.bulk_import()` (BR-GLOSS-03 "last-updated-wins" tren
+    trung `term_en`, case-insensitive theo BR-GLOSS-02) voi list 1 phan tu de
+    khong nhan doi logic tao-hoac-cap-nhat entry. Scope co dinh "global" —
+    UI hien tai (`web/history.html`) chua co lua chon project glossary.
+    """
+    term_en = request.term_en.strip()
+    if not term_en:
+        raise HTTPException(status_code=400, detail="term_en khong duoc de trong")
+
+    manager = GlossaryManager(session)
+    await manager.bulk_import(
+        [GlossaryEntryData(term_en=term_en, term_vi=request.term_vi, notes=request.notes)],
+        scope="global",
+        project_id=None,
+    )
+    entry = await manager.get_entry(term_en)
+    if entry is None:  # pragma: no cover - bulk_import vua ghi xong o tren
+        raise HTTPException(status_code=500, detail="Loi noi bo: khong tim thay entry vua tao")
+    return _to_out(entry, "global")
 
 
 @router.get("", response_model=GlossaryListResponse)
@@ -179,8 +202,7 @@ async def delete_entry(entry_id: str, session: SessionDep) -> dict[str, bool]:
 async def export_entries(session: SessionDep) -> FileResponse:
     result = await session.exec(select(GlossaryEntry).order_by(GlossaryEntry.term_en))
     entries = [
-        GlossaryEntryData(term_en=e.term_en, term_vi=e.term_vi, notes=e.notes)
-        for e in result.all()
+        GlossaryEntryData(term_en=e.term_en, term_vi=e.term_vi, notes=e.notes) for e in result.all()
     ]
 
     tmp_path = Path(tempfile.mkstemp(suffix=".xlsx")[1])

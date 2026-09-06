@@ -49,6 +49,7 @@ from src.models.overflow import OverflowReport
 from src.postprocess.bilingual_merge import create_bilingual_pdf
 from src.postprocess.chunk_merge import merge_chunk_pdfs
 from src.postprocess.font_shrink import OverflowEntry, font_shrink_page
+from src.postprocess.image_compress import compress_pdf_images
 from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
 from src.services.mineru_runner import MinerUError, MinerURunner, MinerUUnavailableError
@@ -488,6 +489,14 @@ class JobOrchestrator:
                         f"'{self._settings.pdf_translate_engine}' khong tim thay text de dich. "
                         "Job that bai thay vi tra ve file trong."
                     )
+
+            # US-16/BR-IMGCOMP-01: only babeldoc jobs get the raw-image ->
+            # JPEG re-encode (Architecture.md S5 data lineage — this must run
+            # on `merged_path`, the file merge_chunk_pdfs() just wrote, and
+            # AFTER the BR-OCR-03 guard above so a compression bug reports as
+            # a compression failure instead of a false "no text" diagnosis).
+            if self._settings.pdf_translate_engine == "babeldoc":
+                await compress_pdf_images(merged_path)
         except Exception as exc:  # noqa: BLE001 — same failure shape as Step 7
             job.status = "failed"
             job.error_message = str(exc)
@@ -743,6 +752,18 @@ class JobOrchestrator:
                 ignore_cache=self._settings.pdf2zh_ignore_cache,
                 timeout_seconds=self._settings.pdf2zh_timeout_seconds,
                 thread=thread,
+                # F2 (Architecture.md "Root Cause Analysis: Line-break/List
+                # Regression"): tham so nay chi co y nghia voi BabeldocRunner
+                # (Pdf2zhRunner nhan roi bo qua — xem docstring
+                # `pdf2zh_runner.translate_pages()`), nhung van truyen dong
+                # nhat cho ca 2 engine, khong re nhanh `if engine == ...` o
+                # day (6.14.7 "DIEM CHON ENGINE DUY NHAT").
+                split_short_lines=self._settings.babeldoc_split_short_lines,
+                short_line_split_factor=(
+                    self._settings.babeldoc_short_line_split_factor
+                    if self._settings.babeldoc_split_short_lines
+                    else None
+                ),
             )
 
         timeout_budget = self._settings.pdf2zh_timeout_seconds

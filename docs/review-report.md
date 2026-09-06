@@ -2263,3 +2263,503 @@ File liên quan: `src/api/routes/jobs.py` (dòng ~672-717),
 `src/core/job_orchestrator.py` (dòng 1080-1089),
 `tests/integration/test_delete_and_download_naming.py`,
 `tests/integration/test_settings_api.py`, `uv.lock`, `pyproject.toml`.
+
+---
+
+## Review vòng mới — 2026-09-06 (5 tính năng bổ sung theo yêu cầu PM, Protocol 7 gate)
+
+Phạm vi: `GET /api/version`, `POST /api/glossary` (tạo 1 entry đơn lẻ), field `uploaded_at`
+cho upload metadata, frontend "Xóa tất cả" + sort mới nhất + timestamp (`web/index.html`,
+`web/js/app.js`), frontend "+ Glossary" modal + hiển thị chi phí thực tế trong history
+(`web/history.html`, `web/js/history.js`), `docs/CHANGELOG.md` append, test mới
+(`tests/integration/test_glossary_api.py` +3, `tests/integration/test_version_and_upload_timestamp.py` mới 5 test).
+Chưa commit — đọc trực tiếp working tree qua `git status`/`git diff`.
+
+### 1. Correctness
+
+- `GET /api/version` (`src/api/main.py`): đọc `pyproject.toml` bằng `tomllib` (stdlib, project
+  yêu cầu Python 3.12+ nên không cần dependency mới) thay vì `importlib.metadata.version()` — lý
+  do đúng vì app chạy từ source, chưa `pip install`. Bắt đúng 3 loại lỗi (`OSError`, `KeyError`,
+  `tomllib.TOMLDecodeError`), fallback `"unknown"` thay vì 500 — hợp lý cho 1 endpoint hiển thị ở
+  footer, không phải endpoint nghiệp vụ.
+- `POST /api/glossary` (`src/api/routes/glossary.py`): tái dùng `GlossaryManager.bulk_import()`
+  với list 1 phần tử thay vì viết logic tạo/cập nhật riêng — đúng nguyên tắc không nhân đôi logic,
+  và kế thừa đúng BR-GLOSS-02 (case-insensitive) + BR-GLOSS-03 (last-updated-wins) đã có sẵn.
+  Response schema (`GlossaryEntryOut`, status 201) nhất quán với các endpoint glossary khác cùng
+  file. Nhánh `entry is None` sau `bulk_import()` về mặt logic không thể xảy ra (đã strip và check
+  rỗng trước đó) — dùng `HTTPException 500` + `pragma: no cover` là xử lý phòng thủ hợp lý, không
+  phải bug.
+- `uploaded_at`: gán đúng tại nơi tạo `UploadMetadata` (`src/api/routes/upload.py` dòng 142-151),
+  không phải trường hợp "thêm field nhưng quên set giá trị" — đã verify bằng cách đọc trực tiếp,
+  không tin lời khai của Dev. Test
+  `test_upload_sidecar_metadata_persists_uploaded_at` xác nhận giá trị round-trip qua sidecar JSON
+  đúng như lo ngại nêu trong nhiệm vụ.
+- Backward-compat cho sidecar cũ: `UploadMetadata.uploaded_at: str = ""` (default, không phải
+  `None`/thiếu field) để `UploadMetadata(**data)` không `TypeError` khi đọc sidecar tạo trước khi
+  field này tồn tại — có test riêng `test_resolve_upload_tolerates_sidecar_without_uploaded_at`
+  verify đúng case này. Xử lý migration-less đúng cách.
+- Frontend `removeAllFiles()` (`web/js/app.js`): không thêm endpoint bulk-delete mới ở backend,
+  tái dùng `_deleteFileRecord()` (logic đã refactor ra từ `removeFile()`) lặp tuần tự qua danh sách
+  hiện có — tránh nhân đôi logic lỗi/xoá Job trước rồi mới xoá upload. 1 confirm duy nhất cho cả
+  batch, đúng yêu cầu UX. Item xoá thất bại (vd job đang chạy) được giữ lại trong `remaining`,
+  không bị xoá nhầm khỏi UI — kiểm tra kỹ nhánh lỗi, đúng.
+- `sortFilesDesc()`: dùng `uploaded_at || job?.created_at`, gọi lại sau cả `restoreRecentJobs()`
+  và sau vòng lặp upload — đúng vì file phục hồi từ server không có `uploaded_at` riêng (chỉ có từ
+  session upload hiện tại).
+- `formatCost()` (`web/js/history.js`) và migration trong `history.html`: thay `x-if` cũ (chỉ hiện
+  `actual_cost`) bằng hàm xử lý cả 3 case (`actual_cost` / `estimated_cost` / không có gì) — đúng
+  yêu cầu "hiển thị chi phí thực tế" mà không làm mất hiển thị ước tính cho job chưa hoàn tất.
+
+### 2. Security
+
+- **Input validation `POST /api/glossary`**: `term_en` rỗng/toàn whitespace bị chặn với 400 (test
+  `test_create_single_entry_rejects_blank_term_en` verify). `term_vi`/`notes` không có validation
+  độ dài — không phải lỗ hổng mới, endpoint `PUT` hiện có cũng không có, nhất quán với pattern cũ
+  của project (non-blocking, ghi nhận để theo dõi nếu sau này có giới hạn kích thước glossary).
+- **XSS**: đã `grep -rn "x-html" web/` toàn bộ thư mục — **0 kết quả**. Mọi chỗ hiển thị dữ liệu
+  glossary/job (`x-text`) đều qua Alpine `x-text`, tự động escape HTML entity. Không có vector XSS
+  nào được mở bởi 5 tính năng này.
+- **SQL injection**: `bulk_import()`/`get_entry()`/`_find_entry_in_scope()` (đã đọc
+  `src/core/glossary_manager.py`) dùng SQLModel `select()` + `func.lower()` với bind param qua
+  ORM, không có raw SQL string nào — như PM đã dự đoán, không có khả năng injection.
+- **Path traversal**: `POST /api/glossary`, `GET /api/version`, `uploaded_at` không nhận bất kỳ
+  input nào liên quan tới file path từ client — N/A cho cả 3. `DELETE /api/upload/{file_id}` (đã
+  tồn tại từ trước, không đổi trong diff này) vẫn dùng `resolve_upload()` tra sidecar theo
+  `file_id` (UUID do server sinh, không phải path client cung cấp trực tiếp) — không có
+  path-traversal mới phát sinh từ các thay đổi lần này.
+
+### 3. Protocol 5 R5-04 checklist (external contract)
+
+Không endpoint/module nào trong phạm vi review này gọi external tool (pdf2zh/MinerU/babeldoc/LLM
+SDK) — tất cả đều là CRUD nội bộ (SQLModel), đọc file cấu hình cục bộ (`pyproject.toml`), hoặc
+thao tác file trên đĩa do chính app quản lý (`data/uploads/`).
+
+**External contract verified against real source: N/A** cho toàn bộ 3 file thay đổi
+(`src/api/main.py`, `src/api/routes/glossary.py`, `src/api/routes/upload.py`) — đúng phạm vi loại
+trừ ghi trong CLAUDE.md project ("không áp dụng cho thư viện nội bộ Python thuần code logic").
+
+### 4. Tự verify (không tin báo cáo của Dev)
+
+- `pytest tests/ -q` → **291 passed** (khớp đúng claim "291/291 pass" của Dev, tự chạy lại, không
+  suy từ lời khai).
+- `ruff check .` → **All checks passed!**
+- `git diff docs/CHANGELOG.md | grep '^-' | grep -v '^--- '` → **0 dòng bị xoá** — xác nhận
+  CHANGELOG chỉ được append, không mất lịch sử cũ (đúng yêu cầu Protocol 7 R7-03 tinh thần chung,
+  dù R7-03 nói riêng về review-report/test-report/CHANGELOG/project_state.json).
+
+### 5. Vấn đề phát hiện (non-blocking)
+
+1. Deviation route pattern có sẵn từ trước (không phải do 5 tính năng này gây ra, chỉ ghi nhận vì
+   review lần này chạm vào): Architecture.md section 5.1 mô tả API glossary dạng
+   `/glossaries/{id}/entries` (nested theo glossary_id), nhưng code thực tế dùng route phẳng
+   `/api/glossary` (không có `{id}` cha, scope cố định qua field `scope` trong body/query). Đây là
+   drift đã tồn tại trước khi có 5 tính năng này, `POST /api/glossary` mới chỉ theo đúng pattern
+   phẳng hiện có của file — không phải lỗi mới, nhưng Architecture.md section 5.1 nên được cập
+   nhật lại cho khớp thực tế ở lần chỉnh sửa Architecture.md tiếp theo.
+2. `POST /api/glossary` không cho chọn `scope`/`project_id` (cố định `"global"`) — đúng như
+   docstring Dev đã ghi rõ lý do (UI `history.html` hiện tại chưa có project glossary), không phải
+   thiếu sót, chỉ ghi nhận để không quên khi có project-scoped glossary trong tương lai.
+
+## Kết luận
+
+**APPROVE.**
+
+Không có issue mức blocking. Correctness, security, data lineage (uploaded_at gán đúng nơi tạo,
+không phải field mồ côi), và test coverage (bao gồm cả case backward-compat sidecar cũ) đều đạt.
+291/291 test pass và `ruff check` sạch đã tự verify lại, không dựa vào báo cáo của Dev.
+
+File liên quan: `src/api/main.py`, `src/api/routes/glossary.py`, `src/api/routes/upload.py`,
+`web/index.html`, `web/js/app.js`, `web/history.html`, `web/js/history.js`,
+`tests/integration/test_glossary_api.py`, `tests/integration/test_version_and_upload_timestamp.py`,
+`docs/CHANGELOG.md`.
+
+# Review Report — Fix bug line-break/paragraph-splitting babeldoc (F1/F2/F4)
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-06
+- **Phạm vi**: `src/services/babeldoc_runner.py`, `src/services/pdf2zh_runner.py`,
+  `src/core/config.py`, `src/core/job_orchestrator.py`, `src/core/prompt_builder.py`,
+  `docs/CHANGELOG.md`, `tests/test_babeldoc_runner.py`, `tests/test_prompt_builder.py`,
+  `tests/integration/test_job_orchestrator.py`, fixture `tests/fixtures/babeldoc/page14_*.pdf`.
+  (F3 không có code trong diff — Dev tự dừng sau spike thất bại, không review phần đó.)
+
+## 1. F1 — Bỏ hardcode `--split-short-lines`
+
+`grep -rn "split-short-lines\|split_short_lines" src/` xác nhận: không còn nơi nào trong `src/`
+tự động append `"--split-short-lines"` vào `args` mà không qua tham số `split_short_lines`. Chỗ
+hardcode cũ (`babeldoc_runner.py:278` theo Architecture.md N1) đã thay bằng `if split_short_lines:
+args.append(...)`. Không có code path chết nào còn gọi `True` trực tiếp. Đạt.
+
+## 2. F2 — Setting mới, data lineage (Protocol 6)
+
+- `Settings.babeldoc_split_short_lines: bool = False`, `babeldoc_short_line_split_factor: float =
+  0.5` — default đúng `False` tại nguồn duy nhất (`config.py`), không có nơi nào override default
+  thành `True` (`grep` không thấy).
+- Trace tay theo R6-04 (không chỉ tin "cả 2 bước gọi đúng tham số riêng"):
+  `job_orchestrator.py` → `split_short_lines=self._settings.babeldoc_split_short_lines` và
+  `short_line_split_factor=(self._settings.babeldoc_short_line_split_factor if
+  self._settings.babeldoc_split_short_lines else None)` → truyền thẳng vào `translate_pages()` →
+  `babeldoc_runner.py` chỉ `args.extend(["--short-line-split-factor", str(...)])` khi
+  `split_short_lines` cũng `True`. Dây nối liền mạch, đúng field, không có bước nào bị đứt gãy.
+  Factor chỉ gửi kèm flag chính — đúng L4 (`paragraph_finder.py:891` dùng `and`).
+- Test `test_babeldoc_split_short_lines_defaults_to_disabled` và
+  `..._setting_reaches_translate_pages_call` (`tests/integration/test_job_orchestrator.py`) assert
+  `call.kwargs["split_short_lines"]`/`["short_line_split_factor"]` bằng giá trị cụ thể, không chỉ
+  `assert_awaited()` — đúng tinh thần R6-02.
+
+## 3. `pdf2zh_runner.py` — 2 tham số bị bỏ qua có chủ đích
+
+Không phải code path chết gây nhầm lẫn: docstring giải thích rõ WHY (đồng bộ signature 2 engine để
+`JobOrchestrator` gọi chung 1 lời, tránh `if engine == ...`, trích Architecture.md 6.14.7). Đây là
+comment giải thích WHY đúng convention project, không phải WHAT. An toàn vì tham số chỉ bị bỏ qua
+lặng lẽ (không raise), đúng ý đồ — nhưng đây cũng là điểm cần lưu ý cho người đọc sau: nếu sau này
+`pdf2zh` có flag tương đương thật, phải nhớ update chỗ này (non-blocking, không phải bug).
+
+## 4. Test chất lượng theo Protocol 6 R6-02 / N4
+
+`tests/test_babeldoc_runner.py`: assertion cũ `"--split-short-lines" in args` (assert tự xác nhận
+giả định sai, bị N4 phê bình) đã bị **xoá hẳn**, không còn sót lại. Thay bằng: (a) 3 test đơn vị
+assert flag/factor có/không có mặt tuỳ tham số; (b) 3 golden-file test đọc PDF thật bằng PyMuPDF
+(`page14_*.pdf`, capture từ live spike thật, không viết tay) đếm block/số mục — đúng N6 mục 2
+"assert cấu trúc, không assert flag". Golden test còn tự trung thực báo cáo tradeoff (31/35 vs
+4/35 numbered item giữ dòng riêng) thay vì giả vờ fix hoàn hảo — đúng tinh thần Protocol 5.
+
+## 5. Protocol 5 R5-01 — nguồn xác thực cho claim CLI flag
+
+Mọi claim cụ thể về `--split-short-lines`/`--short-line-split-factor` trong code/comment/docstring
+đều trích `file:line` cụ thể của babeldoc 0.6.4 đã cài (`main.py:179-182`, `main.py:184-189`,
+`paragraph_finder.py:891`), khớp với bảng nguồn L1/L2/L4 trong Architecture.md N2. Không có claim
+nào chỉ ghi theo trí nhớ. Đạt.
+
+## 6. Tự verify độc lập (không tin báo cáo Dev)
+
+- `.venv/bin/python -m pytest tests/ -q` → **300 passed** (khớp đúng claim "300/300", tự chạy lại).
+- `.venv/bin/python -m ruff check .` → **All checks passed!**
+- `.venv/bin/python -m ruff format --check .` trên đúng 8 file trong phạm vi review (`babeldoc_runner.py`,
+  `pdf2zh_runner.py`, `config.py`, `job_orchestrator.py`, `prompt_builder.py`,
+  `test_babeldoc_runner.py`, `test_prompt_builder.py`, `test_job_orchestrator.py`) → **đều "already
+  formatted"**. Ghi chú: chạy `ruff format --check .` trên toàn repo có 19 file bị flag reformat,
+  nhưng KHÔNG file nào nằm trong phạm vi diff này — pre-existing drift từ trước, không phải do Dev
+  gây ra ở task này (khớp đúng claim CHANGELOG "sạch trên đúng các file đã sửa, không chạy tràn
+  lan").
+- `git diff docs/CHANGELOG.md | grep '^-' | grep -v '^---'` → **0 dòng bị xoá** — CHANGELOG chỉ được
+  append đúng Protocol 7 R7-03.
+
+## 7. Protocol 5 R5-04 checklist (bắt buộc cho service wrapper gọi external tool)
+
+**External contract verified against real source: YES** — cho cả `babeldoc_runner.py` (nguồn:
+`babeldoc/main.py:179-189`, `format/pdf/document_il/midend/paragraph_finder.py:891-901` của
+babeldoc 0.6.4 đã cài tại máy Dev, trích dẫn tường minh trong docstring và Architecture.md N2) và
+`pdf2zh_runner.py` (N/A cho 2 tham số mới — không map sang flag CLI thật nào của pdf2zh, chủ đích
+bỏ qua, có docstring giải thích).
+
+## 8. Vấn đề phát hiện (non-blocking)
+
+1. RC-3 (F4) vẫn đang ở trạng thái `⚠️ CHƯA VERIFY` theo chính Architecture.md N3 — chưa đo tần
+   suất LLM thực sự tự thêm newline trước khi có prompt mới, và chưa verify renderer babeldoc xử lý
+   `\n` nội bộ ra sao. Không blocking vì đây là cải thiện phòng ngừa hợp lý dựa trên nguồn L8 đã
+   verify (babeldoc chỉ `.strip()` 2 đầu), nhưng QA nên lưu ý đo thêm nếu có điều kiện, đúng
+   khuyến nghị chính Tech Lead đã ghi.
+2. Tradeoff F1/F2 cho numbered list (31/35 → 4/35 giữ dòng riêng) là hạn chế đã biết trước
+   (RC-2), không phải regression của lần sửa này — nhưng đây là UX-facing behavior change cần PM
+   quyết định có cần bật `babeldoc_split_short_lines=True` mặc định cho một số loại tài liệu hay
+   không trước khi release rộng.
+
+## Kết luận
+
+**APPROVE.**
+
+Không có blocking issue. F1 loại bỏ hardcode sạch, F2 data lineage đúng từ config → orchestrator →
+runner (đã trace tay), test đã sửa đúng lỗ hổng N4 chỉ ra (không còn assert tự xác nhận giả định),
+golden-file test dùng dữ liệu live thật. R5-01/R5-04 đều có nguồn xác thực tường minh. Tự chạy lại
+pytest (300/300) và ruff (sạch trên phạm vi review) độc lập, không dựa vào báo cáo Dev. 2 issue
+non-blocking ghi ở trên không cản trở merge nhưng cần theo dõi.
+
+File liên quan: `src/services/babeldoc_runner.py`, `src/services/pdf2zh_runner.py`,
+`src/core/config.py`, `src/core/job_orchestrator.py`, `src/core/prompt_builder.py`,
+`docs/CHANGELOG.md`, `tests/test_babeldoc_runner.py`, `tests/test_prompt_builder.py`,
+`tests/integration/test_job_orchestrator.py`, `tests/fixtures/babeldoc/page14_numbered_list_source.pdf`,
+`tests/fixtures/babeldoc/page14_split_short_lines_false_mono.pdf`,
+`tests/fixtures/babeldoc/page14_split_short_lines_true_mono.pdf`.
+
+---
+
+## Review vòng 2 — Đảo ngược default `babeldoc_split_short_lines`/`babeldoc_short_line_split_factor` (2026-09-06)
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-06
+- **Bối cảnh**: đây là **vòng 2** (Dev↔Reviewer) cho cùng vấn đề line-break/bullet-list — vòng 1
+  ở trên đã APPROVE F1/F2/F4 (default `split_short_lines=False`, `factor=0.5`) dựa trên đo 1 trang.
+  Dev (theo yêu cầu Tech Lead + quyết định User, không tự ý) vừa **đảo ngược** default đó sang
+  `True`/`0.8` sau khi Tech Lead đo lại 21 lần chạy thật/7 trang. **Còn trong giới hạn Protocol 3**
+  (max 3 vòng) — đây không phải trường hợp cần escalate.
+- **Phạm vi thay đổi lần này** (đúng như PM giao, đã đối chiếu `git status`): `src/core/config.py`,
+  `src/services/babeldoc_runner.py` (docstring), `tests/integration/test_job_orchestrator.py`,
+  `tests/test_babeldoc_runner.py` (ghi chú CORRECTION), `docs/CHANGELOG.md`.
+
+### 1. Số liệu 21-lần-chạy có đủ thuyết phục để đảo ngược không
+
+Đọc trực tiếp bảng thô Q3 và phân tích từng trang Q4 trong Architecture.md (không chỉ tin tóm tắt
+Q5/Q6):
+
+- Phương pháp chặt: live thật (babeldoc 0.6.4 + DeepSeek thật), qua đúng production code path
+  (`BabeldocRunner.translate_pages()` + `Pdf2zhServiceMapper`), 7 trang chọn có chủ đích theo 5 loại
+  bố cục (đã quét thống kê để chọn, không chọn tuỳ tiện), đo theo **vùng nội dung** (văn xuôi tách
+  riêng danh sách/caption) — đúng bài học mà chính P2 rút ra từ sai lầm đo lần 1 (đo tổng block là
+  proxy sai).
+- Dữ liệu tự nhất quán nội bộ: trang 13/21 (văn xuôi/bảng thuần) — cả 3 arm **giống hệt nhau từng
+  ký tự** — là bằng chứng mạnh nhất rằng RC-1 không lan ra ngoài phạm vi caption, vì đây chính là
+  loại nội dung chiếm phần lớn một cuốn sách.
+- Phát hiện `factor=0.5` là tệ nhất trong 3 có cơ sở dữ liệu rõ ràng (trang 8: 7 lỗi dính chữ y hệt
+  `false`; trang 14: 21/28 lỗi còn nguyên) — không phải suy luận, là số đếm cụ thể trên PDF output
+  thật.
+- Điểm cần lưu ý (không đủ để bác bỏ kết luận, nhưng nên ghi nhận): mẫu 7 trang trên 1 cuốn sách,
+  vẫn là **n nhỏ** ở cấp độ "loại tài liệu" (chỉ 1 cuốn, 1 ngôn ngữ nguồn tiếng Anh, 1 LLM). Trang
+  22 cho kết quả trái chiều (mỗi arm hỏng 1 chỗ) — Architecture.md không giấu diếm điều này, xếp
+  đúng vào "hoà"/"trái chiều" thay vì gộp mờ vào "thắng". Đây là dấu hiệu tốt về tính trung thực của
+  báo cáo, không phải điểm yếu của lập luận.
+- **Kết luận**: số liệu 21-lần-chạy đủ thuyết phục hơn hẳn số liệu 1 trang ban đầu — không chỉ vì
+  cỡ mẫu lớn hơn, mà vì nó **sửa đúng lỗi phương pháp** (đo theo vùng thay vì tổng block) đã gây ra
+  kết luận sai ở vòng 1. Đây không phải "đổi ý vì thêm dữ liệu tình cờ khác đi" mà là phát hiện ra
+  bằng chứng gốc bị diễn giải sai (P2 trong Architecture.md), điều mà cả Reviewer vòng 1 cũng không
+  bắt được — self-review không phát hiện, nhưng lần đo mở rộng đã tự sửa được.
+
+### 2. `src/core/config.py`
+
+`git diff` xác nhận: `babeldoc_split_short_lines: bool = True` và
+`babeldoc_short_line_split_factor: float = 0.8` — đúng số PM/Tech Lead khuyến nghị (Q6). Comment
+mới **không xoá** lý do cũ (giữ nguyên đoạn giải thích lần đổi 1 kèm nhãn rõ "SAI" khi cần), có ghi
+rõ "LICH SU QUYET DINH (2 lan doi...)" — đúng tinh thần "không phải 1 quyết định tuỳ tiện" mà PM
+yêu cầu review làm rõ. Không còn đoạn nào ngầm ý `0.5`/`False` là default đúng.
+
+### 3. `test_job_orchestrator.py` — 2 test viết lại
+
+Đã đọc trực tiếp diff (không tin tóm tắt CHANGELOG):
+
+- `test_babeldoc_split_short_lines_defaults_to_enabled_with_babeldoc_factor`: assert
+  `settings.babeldoc_split_short_lines is True` / `== 0.8` ở cấp `Settings`, RỒI assert
+  `call.kwargs["split_short_lines"] is True` / `call.kwargs["short_line_split_factor"] == 0.8` trên
+  chính lời gọi `translate_pages()` thật — đúng R6-02 (assert giá trị cụ thể xuyên suốt pipeline,
+  không chỉ `assert_awaited()`).
+- `test_babeldoc_split_short_lines_can_be_opted_out_via_settings`: che phủ đúng trường hợp opt-out
+  PM yêu cầu kiểm tra — set `babeldoc_split_short_lines=False` tường minh trong `Settings`, assert
+  `call.kwargs["split_short_lines"] is False` VÀ `call.kwargs["short_line_split_factor"] is None`
+  (không chỉ kiểm tra flag mà còn kiểm tra factor bị vô hiệu đúng theo điều kiện `and` của
+  `paragraph_finder.py:891` — đúng cả 2 vế R6-02).
+- Cả 2 test đều tự chạy `orchestrator.run_job()` thật (không mock `JobOrchestrator`), lấy
+  `await_args_list` từ mock `babeldoc_runner` — đúng cách trace R6-04, không chỉ tin tham số ở tầng
+  `Settings` là đã "chảy" xuống tầng dưới.
+
+### 4. `test_babeldoc_runner.py` — ghi chú CORRECTION
+
+Đọc toàn văn ghi chú mới (2 khối, trước nhóm test flag opt-in và trước 2 golden-file test). Cả 2
+đều: (a) nói rõ số liệu fixture (31/35, 4/35, block 36/11) là **snapshot lịch sử của 1 lần đo đơn
+lẻ**, (b) nói rõ default hiện tại nằm ở `Settings` (tầng trên), không phải ở default riêng của
+`translate_pages()`, (c) trỏ đường dẫn cụ thể tới nơi có kết luận đúng hiện hành
+(`test_job_orchestrator.py` test tên cụ thể + Architecture.md tên section cụ thể) thay vì chỉ nói
+chung chung "xem thêm". Không có chỗ nào còn sót câu khẳng định ngầm "False là default nên dùng".
+Đủ rõ để người đọc sau (kể cả không đọc CHANGELOG) không hiểu nhầm. Đạt yêu cầu PM đặt ra ở mục 4.
+
+### 5. Tự verify độc lập
+
+- `.venv/bin/python -m pytest tests/ -q` → **300 passed** — khớp đúng claim CHANGELOG "300/300",
+  tự chạy lại chứ không tin báo cáo.
+- `.venv/bin/python -m ruff check .` trên toàn repo → **4 lỗi**, nhưng cả 4 đều nằm ở
+  `tests/fixtures/babeldoc/ab_split_short_lines/run_measure.py` (harness đo 21-lần-chạy, file mới,
+  KHÔNG nằm trong phạm vi 5 file PM giao review lần này) — `RUF100` (noqa thừa) + `I001` (import
+  chưa sort). Không phải regression của diff đang review, nhưng cần Dev dọn trước khi commit file
+  này vào repo (non-blocking cho scope hiện tại, xem mục 6).
+- `.venv/bin/python -m ruff format --check src/core/config.py src/services/babeldoc_runner.py
+  tests/integration/test_job_orchestrator.py tests/test_babeldoc_runner.py` → **cả 4 file "already
+  formatted"**.
+- `git diff docs/CHANGELOG.md docs/review-report.md | grep '^-' | grep -v '^---'` (trước khi tự
+  append section này) → 0 dòng bị xoá ở CHANGELOG — đúng Protocol 7 R7-03 (append, không overwrite).
+
+### 6. Vấn đề phát hiện (non-blocking)
+
+1. `tests/fixtures/babeldoc/ab_split_short_lines/run_measure.py` (harness đo 21-lần-chạy, untracked)
+   fail `ruff check` (3× `RUF100` noqa thừa + 1× `I001` import chưa sort). Không nằm trong phạm vi
+   review lần này và không ảnh hưởng production code, nhưng nếu Dev/Tech Lead commit thư mục
+   `tests/fixtures/babeldoc/ab_split_short_lines/` vào repo (khuyến nghị nên commit, vì đây là
+   golden-file artifact tái tạo được — Protocol 5 mục 3), cần chạy `ruff check --fix` trước.
+2. Bằng chứng "trái chiều" ở trang 22 (mỗi arm hỏng 1 chỗ khác nhau) là điểm mềm nhất trong lập
+   luận Q5 — không đủ để bác bỏ kết luận chung (2 hoà, 1 thua nhẹ, 3 thắng rõ vẫn nghiêng hẳn về
+   `True`/`0.8`), nhưng QA nên biết rằng "known limitation: caption có thể bị cắt fragment" (đã ghi
+   trong khuyến nghị Q6 mục 4) là NGUY CƠ THẬT đã đo được, không phải lý thuyết — nên xác nhận lại
+   qua ít nhất 1 lần release-candidate thật có trang chứa caption bảng/ảnh trước khi đóng hẳn.
+
+### 7. Protocol 3 — Circuit Breaker
+
+Đếm vòng Dev↔Reviewer cho riêng bug line-break/bullet-list (không tính review 5 tính năng UI riêng
+ở giữa 2 section): vòng 1 (F1/F2/F4, APPROVE) → vòng 2 (đảo ngược default, review này). **2/3 vòng
+— chưa vượt giới hạn**, không cần escalate theo Protocol 3.
+
+## Kết luận (vòng 2)
+
+**APPROVE việc đảo ngược default.**
+
+Số liệu 21-lần-chạy/7-trang đáng tin hơn số liệu 1-trang ban đầu vì nó sửa đúng lỗi phương pháp đo
+(theo vùng thay vì tổng block) đã gây ra kết luận sai lần trước, không chỉ vì cỡ mẫu lớn hơn. Default
+mới (`True`/`0.8`) đúng theo khuyến nghị Q6, comment lịch sử đầy đủ 2 lần đổi không xoá lý do cũ, 2
+test data-lineage viết lại đúng R6-02 (assert giá trị cụ thể, che phủ cả default và opt-out), ghi
+chú CORRECTION đủ rõ để không gây hiểu nhầm về sau. Tự chạy lại pytest (300/300) và ruff trên đúng
+phạm vi diff (sạch) độc lập, không dựa báo cáo Dev. 2 issue non-blocking ở mục 6 không cản trở coi
+bug này là closed, nhưng khuyến nghị QA làm thêm 1 lượt kiểm tra caption thật trước khi release rộng
+rãi theo mục 6.2. Còn trong giới hạn Protocol 3 (2/3 vòng), không cần escalate.
+
+---
+
+## US-16 — Nén ảnh sau khi ghép (`compress_pdf_images`) — Review (2026-09-06, vòng 1)
+
+Phạm vi: `src/postprocess/image_compress.py` (mới), `tests/test_image_compress.py` (mới),
+`src/core/job_orchestrator.py` (wiring), `tests/integration/test_job_orchestrator.py` (3 test
+lineage mới), `docs/CHANGELOG.md` (append, đã tự kiểm tra không xoá lịch sử — xem mục 4). Đọc
+Architecture.md "US-16 — Nen anh sau khi ghep" (S1-S10) + PRD.md §3/§4.9 trước khi review, tự đọc
+diff thật bằng `git diff`/`git status` + đọc trọn từng file, không tin báo cáo Dev suông.
+
+### 1. R6-04 — Trace tay data lineage trong `job_orchestrator.py`
+
+Đã tự đọc từng dòng, không chỉ tin comment:
+
+- `job_orchestrator.py:477` — `merged_path = self._output_dir / job.id / "translated_vi.pdf"`.
+- `:479` — `await merge_chunk_pdfs(chunks, merged_path)` — `merged_path` là biến được gán ở `:477`,
+  truyền thẳng vào, không qua biến trung gian nào.
+- `:483` — guard BR-OCR-03 mở `fitz.open(merged_path)` — cùng biến.
+- `:495-496` — `if self._settings.pdf_translate_engine == "babeldoc": await
+  compress_pdf_images(merged_path)` — **cùng chính xác biến `merged_path` đó**, không phải
+  `job.file_path`, không phải biến mới nào khác. Đứng **sau** khối guard BR-OCR-03 (kết thúc ở
+  `:491`) và **trước** `job.output_path = str(merged_path)` (`:508`, ngoài khối `try`).
+- Điều kiện engine đọc đúng field đã verify trong Architecture.md
+  (`self._settings.pdf_translate_engine == "babeldoc"`, khớp `src/core/config.py:135`), không bị
+  đảo ngược (test `test_pdf2zh_engine_does_not_compress_images` xác nhận `pdf2zh` → không gọi).
+- Toàn bộ nằm trong cùng khối `try` của Step 8 — một lỗi ở bước nén sẽ rơi vào cùng `except
+  Exception` phía dưới (`job.status = "failed"`), không rơi ra ngoài job hiện tại — đúng ý "1 lỗi
+  không crash cả batch" ở cấp job.
+
+**Kết luận R6-04: lineage đúng 100% theo thiết kế S5. Không phát hiện sai lệch.**
+
+Test đi kèm (`test_babeldoc_engine_compresses_merged_output_with_correct_lineage`,
+`tests/integration/test_job_orchestrator.py:854-890`) assert đúng giá trị cụ thể — không phải
+`assert_awaited()` trần:
+```python
+called_path = compress_spy.await_args.args[0]
+assert Path(called_path) == Path(result.output_path)
+assert Path(called_path) != Path(job.file_path)
+```
+Đây đúng dạng ràng buộc Bug #5 đã thiếu (so khớp giá trị input của bước sau với output bước
+trước, không chỉ "đã gọi chưa"). `test_empty_translation_fails_before_compress_runs` xác nhận
+đúng thứ tự (guard BR-OCR-03 chạy trước, nén không chạy khi job đã fail sớm hơn) bằng cách tạo
+babeldoc runner giả trả về file không có chữ, rồi assert `compress_spy.assert_not_awaited()` +
+message đúng của guard, không phải message lỗi nén.
+
+### 2. R5-04 — External contract checklist cho `image_compress.py`
+
+**External contract verified against real source: YES** — nguồn: Architecture.md US-16 S1 (chạy
+thật `inspect.signature` trên PyMuPDF 1.28.2 đã cài trong `.venv`, kèm output thật). Tự đối chiếu
+lại từng lệnh gọi trong `image_compress.py` với bảng signature đã verify ở S1, không phát hiện
+lệch:
+
+- `doc.get_page_images(pno, full=True)` (`image_compress.py:74`) — khớp signature verify, và code
+  dùng `info[0]` (xref) / `info[1]` (smask) đúng thứ tự đã đo ở S1 (không nhầm với `info[8]` như
+  cạm bẫy Architecture.md đã ghi lại đã từng mắc phải).
+- `doc.xref_get_key(xref, "Filter")` / `"ImageMask"` (`:81`, `:86`) — dùng đúng, kiểm tra
+  `filter_type != "null"` khớp cách diễn đạt BR-IMGCOMP-02.
+- `pymupdf.Pixmap(doc, xref)` + `.tobytes("jpeg", jpg_quality=jeg_quality)` (`:107`, `:111`) —
+  **đúng** `jpg_quality`, không phải `quality` (đúng cạm bẫy Architecture.md S1 đã cảnh báo tên
+  tham số). Không dùng `extract_image()`/`replace_image()` — khớp quyết định S4 (Pillow không có
+  trong `.venv`).
+- `doc.update_stream(xref, jpeg_bytes, new=1, compress=0)` (`:117`) — **đúng** `compress=0`, đúng
+  điểm S6 bước 8 nhấn mạnh ("để `compress=1` mặc định sẽ bọc thêm 1 lớp Flate vô ích").
+- `doc.xref_set_key(...)` ghi lại `Filter`/`BitsPerComponent`/`ColorSpace`/`Width`/`Height`
+  (`:118-124`) — đủ 5 key theo S6 bước 8, `ColorSpace` map theo `pix.n` (`_COLORSPACE_BY_CHANNELS`)
+  khớp bảng `4→/DeviceCMYK, 3→/DeviceRGB, còn lại→/DeviceGray` — không bị bỏ sót (Architecture.md
+  nhấn mạnh đây là bắt buộc, bỏ sẽ ra màu sai vì ICC profile cũ không còn khớp JPEG mới).
+- `doc.save(tmp_path, garbage=4, deflate=True)` → `close()` → `os.replace(tmp_path, pdf_path)`
+  (`:138-142`) — đúng thứ tự S5/S6 bước 9, dùng file tạm cùng thư mục (`tempfile.mkstemp(dir=...)`)
+  rồi `os.replace` atomic, không save-đè file đang mở (đã verify PyMuPDF raise
+  `ValueError: save to original must be incremental` nếu làm vậy — Architecture.md S5).
+
+Không có API nào bị gọi khác với bảng đã verify. `image_compress.py` cũng dùng `import fitz` cố ý
+(không đổi sang `import pymupdf`) để nhất quán với `chunk_merge.py` — đúng quyết định đã ghi ở S1,
+không phải sơ suất.
+
+### 3. Các gate đã chốt — kiểm tra không bị vi phạm
+
+- **Dedupe**: `grep -rn "hashlib\|sha256\|dedupe" src/postprocess/image_compress.py` → không có
+  kết quả. Không có code dedupe nào lọt vào — đúng quyết định S3 (4.2% < 20%, loại khỏi scope).
+- **`chunk_merge.py` — không thêm deflate cho pdf2zh trong scope US-16**: `git diff --
+  src/postprocess/chunk_merge.py` có thay đổi thật, NHƯNG đọc kỹ nội dung thì đây là fix Bug #8
+  (babeldoc chunk-scoped vs full-document page-indexing, tự phát hiện shape qua
+  `chunk_doc.page_count >= chunk.page_end`) — **không liên quan gì đến `deflate`/US-16**, không
+  đụng tới lời gọi `output_doc.save(...)` ở dòng gây ra vấn đề S8. Xác nhận bằng
+  `grep -n "deflate\|garbage=" src/postprocess/chunk_merge.py` → không có kết quả. Đây là diff
+  tồn tại từ trước trong working tree (không thuộc 5 file Dev báo cáo cho US-16), **không phải
+  Dev vi phạm gate US-16**. Quyết định (A)/(B) ở Architecture.md S8 đúng là vẫn đang treo, chưa ai
+  tự ý chọn (B) — khớp CHANGELOG.md Dev tự ghi.
+- **Gate `pdf_translate_engine == "babeldoc"`**: đã trace tay ở mục 1 — đúng vị trí, đúng chiều
+  (không đảo ngược), có test cả 2 nhánh (babeldoc gọi, pdf2zh không gọi).
+- **Vị trí sau guard BR-OCR-03**: đã trace tay ở mục 1 bằng số dòng thật (`:481-491` guard, `:495`
+  compress) — đúng, không phải chỉ tin comment.
+- **SMask/ImageMask skip**: `image_compress.py:86-103` — cả 2 đều `continue` sau khi log warning
+  và tăng `images_skipped_unsupported`, không crash, không đụng vào ảnh (giữ nguyên stream/filter
+  gốc). Đúng thiết kế S6 bước 4. Nhánh này chưa có dữ liệu thật nào chạy qua (0/357 mẫu có
+  SMask/ImageMask) — Architecture.md tự đánh dấu `[UNVERIFIED]` ở S10 cho đúng, không giấu.
+- **DCTDecode không bị nén chồng lần 2**: `image_compress.py:81-84` — bất kỳ filter nào khác
+  `"null"` đều bị skip trước khi tới bước Pixmap/encode. Có test trực tiếp
+  (`test_compress_pdf_images_does_not_recompress_already_compressed_images`) so sánh **byte
+  stream** (không phải xref số, vì xref renumber qua `garbage=4`) — đã tự chạy lại, pass.
+
+### 4. Protocol 7 R7-03 — kiểm tra CHANGELOG.md không bị Dev ghi đè
+
+`git diff docs/CHANGELOG.md | grep '^-' | grep -v '^---'` → 0 dòng bị xoá. Section US-16 Dev thêm
+nằm ở cuối file (dòng 3320-3373), sau toàn bộ lịch sử review/fix trước đó (bug line-break, 5 tính
+năng UI...) — đúng append, không overwrite.
+
+### 5. Tự chạy lại độc lập (không tin báo cáo Dev)
+
+```
+.venv/bin/python -m pytest tests/test_image_compress.py tests/integration/test_job_orchestrator.py -q
+→ 22 passed
+.venv/bin/python -m pytest tests/ -q
+→ 307 passed (đúng con số Dev báo cáo trong CHANGELOG)
+.venv/bin/python -m ruff check src/postprocess/image_compress.py src/core/job_orchestrator.py \
+  tests/test_image_compress.py tests/integration/test_job_orchestrator.py
+→ All checks passed!
+```
+
+### 6. Vấn đề phát hiện (non-blocking)
+
+1. **Rò file tạm khi `doc.save()` thất bại** (`image_compress.py:133-142`): nếu `doc.save(tmp_path,
+   ...)` raise (ví dụ hết dung lượng đĩa giữa chừng), khối `finally` chỉ đóng `doc`, không xoá
+   `tmp_path` — file `.tmp.pdf` rác sẽ ở lại thư mục output. Không phải lỗi correctness nghiêm
+   trọng (job vẫn `failed` đúng, `merged_path` gốc không bị hỏng vì `os.replace` chưa chạy tới),
+   nhưng nên thêm `try/except`/`tmp_path.unlink(missing_ok=True)` quanh nhánh lỗi để tránh rác tích
+   luỹ qua nhiều lần retry job.
+2. **Filter dạng array chưa được cân nhắc tường minh**: `doc.xref_get_key(xref, "Filter")` với 1
+   ảnh có filter chain (ví dụ `[/ASCII85Decode /DCTDecode]`, PDF hợp lệ dù hiếm) sẽ trả `type`
+   không phải `"null"` nên vẫn được skip đúng (an toàn), nhưng Architecture.md S6 bước 3 chỉ liệt
+   kê filter đơn (`DCTDecode`, `CCITTFaxDecode`...), không nói rõ trường hợp mảng. Hành vi hiện tại
+   tình cờ đúng (skip an toàn) chứ không phải được thiết kế có chủ đích cho case này — nên ghi chú
+   1 dòng trong docstring nếu có thời gian, không chặn approve vì không có dữ liệu thật nào cho
+   thấy case này xảy ra (giống tinh thần S10 với SMask/ImageMask).
+3. Không phát hiện vấn đề correctness/security/style/performance nào khác trong phạm vi review.
+
+### 7. Protocol 3 — Circuit Breaker
+
+Vòng 1 cho US-16 — APPROVE ngay từ vòng đầu, không cần vòng 2.
+
+## Kết luận (US-16, vòng 1)
+
+**APPROVE.**
+
+R6-04: lineage `merged_path` → `compress_pdf_images` đã trace tay bằng số dòng thật, đúng 100%
+thiết kế S5, không phải chỉ tin comment. R5-04: External contract verified against real source:
+**YES** (Architecture.md S1, chạy `inspect.signature` thật trên PyMuPDF 1.28.2) — đối chiếu từng
+lệnh gọi trong code với bảng đã verify, không lệch. Các gate đã chốt (không dedupe, không đụng
+`chunk_merge.py` cho deflate pdf2zh, gate engine đúng chiều, vị trí sau BR-OCR-03, skip
+SMask/ImageMask an toàn, không nén chồng DCTDecode) đều được giữ đúng. Test chạy thật trên fixture
+thật (không mock nội dung ảnh tay), assert nội dung cụ thể (byte stream, lineage path) chứ không
+chỉ trạng thái/`assert_called()`. Tự chạy lại pytest (307/307) và ruff (sạch) độc lập, khớp báo cáo
+Dev. 2 issue non-blocking ở mục 6 (rò file tạm khi save lỗi, filter-array chưa ghi chú) không cản
+trở approve — khuyến nghị Dev dọn ở lần sửa tiếp theo liên quan tới file này. CHANGELOG.md được
+Dev append đúng cách (Protocol 7 R7-03), không mất lịch sử.

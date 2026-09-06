@@ -230,6 +230,8 @@ class BabeldocRunner:
         ignore_cache: bool = False,
         timeout_seconds: int = 3600,
         thread: int = 4,
+        split_short_lines: bool = False,
+        short_line_split_factor: float | None = None,
     ) -> BabeldocResult:
         """Run babeldoc for one chunk's page range and return the rendered PDFs.
 
@@ -239,8 +241,35 @@ class BabeldocRunner:
         (thieu flag nay: mono output chua CA tai lieu thay vi rieng chunk, B8),
         `--no-auto-extract-glossary` (chan 4 request LLM phu ngoai chi phi da
         uoc tinh, B9), `--skip-scanned-detection` (tranh ScannedPDFError tren
-        cau noi searchable PDF cua nhanh pdf_scan), `--split-short-lines` (ly
-        do ton tai cua ca engine nay — fix loi gop dong danh sach cua pdf2zh).
+        cau noi searchable PDF cua nhanh pdf_scan).
+
+        `--split-short-lines` KHONG con hardcode (Architecture.md "Root Cause
+        Analysis: Line-break/List Regression", F1/F2, 2026-09-06). Docstring
+        cu (truoc F1) bien minh flag nay la "fix loi gop dong danh sach cua
+        pdf2zh" — SAI theo nguon xac thuc that (source babeldoc 0.6.4 da cai,
+        `paragraph_finder.py:891-901`): nhanh tach bullet (`is_bullet_point`)
+        chay DOC LAP voi flag nay; flag chi them 1 heuristic hinh hoc
+        ("dong truoc hep hon median_width toan trang * factor thi tach") ma
+        chinh babeldoc canh bao trong help text la "may cause poor
+        typesetting & bugs" (`main.py:179-182`).
+
+        Tham so nay (`split_short_lines`/`short_line_split_factor`) CHI la co
+        che ky thuat de bat/tat + chinh factor — GIA TRI MAC DINH production
+        thuc te nam o `Settings.babeldoc_split_short_lines`/
+        `babeldoc_short_line_split_factor` (`src/core/config.py`), va gia tri
+        do DA DOI 2 LAN dua tren 2 lan do that khac nhau — xem
+        `src/core/config.py` va Architecture.md section "Đo lại F1 trên
+        nhiều trang — kết quả live A/B/C" (2026-09-06) cho ly do đầy đủ va so
+        lieu 21 lan chay that/7 trang: ket luan cuoi cung la BAT flag nay VOI
+        factor bang dung default goc cua babeldoc (`0.8`) xu ly numbered
+        list/muc luc tot hon RO RET (vd trang 35-muc: 28 loi dinh chu -> 3),
+        va tac hai RC-1 that te ra CHI gioi han o vai caption bang/anh ngan
+        (khong phai doan van thuong lan rong nhu suy doan tu doc source ban
+        dau — xem `tests/fixtures/babeldoc/page14_*` cho 1 lan do don le cu
+        va Architecture.md cho bang do day du hon). Doc them chi tiet o
+        `src/core/config.py` truoc khi doi lai gia tri nay — dung suy doan
+        lai tu dau, 2 lan doi truoc do deu tung "suy doan hop ly" nhung sai vi
+        chua do du du lieu.
         """
         _assert_gemini_model_safe(service)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -275,8 +304,18 @@ class BabeldocRunner:
             "--only-include-translated-page",
             "--no-auto-extract-glossary",
             "--skip-scanned-detection",
-            "--split-short-lines",
         ]
+        if split_short_lines:
+            args.append("--split-short-lines")
+            if short_line_split_factor is not None:
+                # VERIFIED 2026-09-06 doc truc tiep tu babeldoc 0.6.4 da cai
+                # (`main.py:184-189`): `--short-line-split-factor` la
+                # `type=float, default=0.8`, chi co tac dung khi
+                # `--split-short-lines` cung duoc bat (`paragraph_finder.py:891`
+                # dung ca 2 gia tri trong cung 1 dieu kien `and`) — vi vay chi
+                # gui flag nay khi `split_short_lines` cung True, tranh gui 1
+                # flag mo côi khong anh huong gi.
+                args.extend(["--short-line-split-factor", str(short_line_split_factor)])
         if prompt_file is not None:
             # babeldoc `--custom-system-prompt` nhan CHUOI, khong nhan duong
             # dan file (Architecture.md 6.14.2) — khac han `pdf2zh --prompt`.

@@ -36,7 +36,10 @@
 
     <!-- File list + config -->
     <section x-show="files.length > 0" class="bg-white border rounded-lg p-4 mb-6">
-      <h2 class="font-semibold mb-3">File đã upload (<span x-text="files.length"></span>)</h2>
+      <div class="flex justify-between items-center mb-3">
+        <h2 class="font-semibold">File đã upload (<span x-text="files.length"></span>)</h2>
+        <button class="text-xs text-red-600 underline" @click="removeAllFiles()">Xóa tất cả</button>
+      </div>
 
       <template x-for="f in files" :key="f.file_id || f.job?.id">
         <div class="border rounded p-3 mb-3">
@@ -47,6 +50,7 @@
                 <span x-text="f.file_type"></span> ·
                 <span x-text="(f.size_bytes / 1024 / 1024).toFixed(1)"></span> MB
                 <template x-if="f.page_count"> · <span x-text="f.page_count"></span> trang</template>
+                <template x-if="formatUploadDate(f)"> · Tải lên: <span x-text="formatUploadDate(f)"></span></template>
               </p>
             </div>
             <div class="flex items-center gap-2">
@@ -151,6 +155,10 @@
       </div>
     </section>
   </main>
+
+  <footer class="max-w-5xl mx-auto px-6 py-4 text-xs text-gray-400">
+    BB-Translation <span x-text="appVersion ? `v${appVersion}` : ''"></span>
+  </footer>
 
   <script src="/js/app.js"></script>
 </body>

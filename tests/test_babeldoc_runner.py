@@ -14,9 +14,11 @@ machine (Protocol 5 muc 3 — no hand-written mocks):
   ~3x undercount Architecture.md 6.14.1/6.14.5 documents.
 """
 
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import fitz  # PyMuPDF
 import pytest
 
 from src.services.babeldoc_runner import (
@@ -148,6 +150,99 @@ def test_resolve_openai_compat_unknown_provider_raises() -> None:
         _resolve_openai_compat(service)
 
 
+# --- split_short_lines (F1/F2, Architecture.md "Root Cause Analysis:
+# Line-break/List Regression", 2026-09-06) -----------------------------------
+#
+# `--split-short-lines` used to be hardcoded True (F1: removed, see
+# `translate_pages()` docstring for the live-verified tradeoff). These tests
+# assert the FLAG ITSELF is no longer force-passed, and that the new opt-in
+# parameter actually controls it — the exact gap Architecture.md N4 calls
+# out in the OLD test this replaces (`assert "--split-short-lines" in args`
+# only proved the flag was passed, never that passing it produced a correct
+# layout).
+#
+# NOTE on defaults: `BabeldocRunner.translate_pages()` ITSELF still defaults
+# `split_short_lines` to `False` — a caller must opt in explicitly. The
+# PRODUCTION default lives one layer up, on `Settings.babeldoc_split_short_lines`
+# (`src/core/config.py`), which `JobOrchestrator` reads and passes through
+# (see `tests/integration/test_job_orchestrator.py`
+# `test_babeldoc_split_short_lines_defaults_to_enabled_with_babeldoc_factor`).
+# That Settings default was flipped to `True`/`0.8` (2026-09-06, Architecture.md
+# "Đo lại F1 trên nhiều trang") AFTER this file's tests were first written
+# against the original `False`/`0.5` default — do not read "defaults to
+# False" in the test names below as the current recommended production
+# behavior; it only describes this raw method's own signature default when
+# called with no `split_short_lines` argument at all.
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_omits_split_short_lines_by_default(tmp_path: Path, mocker) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner()
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    args = create_exec.call_args.args
+    assert "--split-short-lines" not in args
+    assert "--short-line-split-factor" not in args
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_enables_split_short_lines_when_requested(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner()
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+        split_short_lines=True,
+        short_line_split_factor=0.5,
+    )
+    args = list(create_exec.call_args.args)
+    assert "--split-short-lines" in args
+    assert "--short-line-split-factor" in args
+    assert args[args.index("--short-line-split-factor") + 1] == "0.5"
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_omits_factor_flag_when_split_short_lines_disabled(
+    tmp_path: Path, mocker
+) -> None:
+    """A caller passing a factor WITHOUT also enabling `split_short_lines` is
+    a caller bug (the factor has no effect on its own per babeldoc's own
+    `and` condition, VERIFIED `paragraph_finder.py:891`) — defense in depth:
+    never emit an orphaned `--short-line-split-factor` with no
+    `--split-short-lines` alongside it."""
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner()
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+        split_short_lines=False,
+        short_line_split_factor=0.5,
+    )
+    args = create_exec.call_args.args
+    assert "--split-short-lines" not in args
+    assert "--short-line-split-factor" not in args
+
+
 # --- translate_pages ---------------------------------------------------------
 
 
@@ -198,7 +293,6 @@ async def test_translate_pages_success_hardcodes_all_required_flags(tmp_path: Pa
     assert "--only-include-translated-page" in args
     assert "--no-auto-extract-glossary" in args
     assert "--skip-scanned-detection" in args
-    assert "--split-short-lines" in args
     # `--custom-system-prompt` nhan NOI DUNG file, khong phai duong dan.
     assert "--custom-system-prompt" in args
     assert "Dich chinh xac." in args
@@ -403,6 +497,95 @@ async def test_translate_pages_counts_rate_limit_hits_from_golden_stdout(
     )
 
     assert result.rate_limit_hits == 12
+
+
+# --- Golden-file structural regression (N6 point 2, "assert cau truc, khong
+# assert flag") -----------------------------------------------------------
+#
+# `tests/fixtures/babeldoc/page14_*.pdf` are REAL output from 2 live spikes
+# (2026-09-06) run against the REAL installed `babeldoc` 0.6.4 CLI + real
+# DeepSeek API, translating page 14 of the actual "How baking works" upload
+# already in `data/uploads/` — chosen because it is a real numbered list
+# (items "1." to "35.") laid out in a narrow 2-column format, exactly the
+# median_width-skew condition Architecture.md RC-1 describes. NOT hand-typed
+# mocks (Protocol 5 muc 3): `page14_numbered_list_source.pdf` is the source
+# page extracted verbatim with PyMuPDF; the two `_mono.pdf` outputs are
+# babeldoc's actual rendered result with `--split-short-lines`
+# included/omitted, nothing else changed.
+#
+# These assertions document the MEASURED tradeoff from Architecture.md N5/N8
+# honestly — they do NOT claim the "false" (F1-fixed) output is fully
+# correct for this specific numbered-list page. Per Architecture.md RC-2,
+# digit markers ("1.", "2.") are outside babeldoc's `BULLET_POINT_PATTERN`
+# (VERIFIED `layout_helper.py:50-52`) and entirely depended on the removed
+# heuristic to be split at all — so removing it measurably INCREASES
+# same-line merging for numbered items on THIS page, while measurably
+# DECREASING total block count page-wide on THIS ONE page.
+#
+# CORRECTION (2026-09-06, Architecture.md "Đo lại F1 trên nhiều trang — kết
+# quả live A/B/C"): a later 21-run/7-page study found the drop in block count
+# above is NOT evidence that RC-1 was fragmenting ORDINARY BODY TEXT — across
+# all 7 pages tested (including this one's own body paragraphs), no prose
+# paragraph was ever split by RC-1 in any configuration; the only real RC-1
+# damage found was to a couple of short table/image captions on 2 of the 7
+# pages. `Settings.babeldoc_split_short_lines` default was flipped back to
+# `True` (with `factor=0.8`, not the `0.5` this file's numbers do NOT use —
+# see below) BECAUSE of that broader finding — do not use the single-page
+# numbers below to argue for keeping the flag off; they undercount the flag's
+# benefit for numbered lists (this fixture used babeldoc's own default
+# `factor=0.8` for the "true" arm, same as the now-current `Settings`
+# default) and say nothing about the caption-only cost measured elsewhere.
+# Both facts are still asserted below so this exact fixture pair cannot
+# silently drift without a test failure — they are a historical snapshot,
+# not a recommendation.
+
+
+def _load_golden_text(filename: str) -> str:
+    path = _FIXTURES / filename
+    with fitz.open(path) as doc:
+        return doc[0].get_text()
+
+
+def test_golden_source_page_has_35_numbered_items() -> None:
+    """Sanity check on the fixture's provenance: the real source page really
+    does contain a 35-item numbered list (not a synthetic stand-in) — the
+    2 golden outputs below are babeldoc's actual translation of it."""
+    with fitz.open(_FIXTURES / "page14_numbered_list_source.pdf") as doc:
+        source_text = doc[0].get_text()
+    assert source_text.count("35.") == 1
+    assert "EQUIPMENT AND SMALLWARES" in source_text
+
+
+def test_split_short_lines_true_golden_output_over_fragments_numbered_list() -> None:
+    """With `--split-short-lines` (the OLD hardcoded behavior): 31/35
+    numbered items land on their own line (babeldoc's own text-block count:
+    36) — most items ARE separated, but RC-1 also mis-splits ordinary body
+    text elsewhere on the page (see the "false" golden counterpart below for
+    the page-wide block-count contrast)."""
+    text = _load_golden_text("page14_split_short_lines_true_mono.pdf")
+    own_line_items = len(re.findall(r"(?:^|\n)\s*\d{1,2}\.\s", text))
+    assert own_line_items == 31
+
+    with fitz.open(_FIXTURES / "page14_split_short_lines_true_mono.pdf") as doc:
+        blocks = doc[0].get_text("blocks")
+    assert len(blocks) == 36
+
+
+def test_split_short_lines_false_golden_output_reduces_page_wide_fragmentation() -> None:
+    """F1 fix (`--split-short-lines` no longer sent): page-wide text-block
+    count drops from 36 to 11 (less over-fragmentation of ordinary
+    paragraphs — the RC-1 symptom user reported as "xuong dong chua chinh
+    xac"). Documented tradeoff: only 4/35 numbered items keep their own
+    line — see module-level comment above and Architecture.md RC-2. This is
+    the honest empirical baseline this fix produces on a real numbered-list
+    page, not an aspirational target."""
+    text = _load_golden_text("page14_split_short_lines_false_mono.pdf")
+    own_line_items = len(re.findall(r"(?:^|\n)\s*\d{1,2}\.\s", text))
+    assert own_line_items == 4
+
+    with fitz.open(_FIXTURES / "page14_split_short_lines_false_mono.pdf") as doc:
+        blocks = doc[0].get_text("blocks")
+    assert len(blocks) == 11
 
 
 def test_golden_mono_output_filename_matches_live_spike_listing() -> None:

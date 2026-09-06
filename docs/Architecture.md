@@ -4045,3 +4045,992 @@ Khi chuyen len cloud (VPS/AWS/GCP), can thay doi:
 *Document version: 1.0*
 *Author: Tech Lead*
 *Status: Draft — Pending user review (Human Checkpoint 2)*
+
+---
+
+## Root Cause Analysis: Line-break/List Regression (2026-09-06)
+
+**Tác giả**: Tech Lead — phân tích, KHÔNG implement. Dev implement ở bước sau.
+**Triệu chứng user báo**: "Đôi chỗ bóc tách xuống dòng chưa chính xác" + "Xuống dòng ở
+các chỗ bulleted/numbered".
+
+### N1. Kết luận ngắn
+
+Root cause **KHÔNG nằm trong code của team**. Nó nằm ở heuristic tách đoạn của babeldoc,
+được kích hoạt bởi flag `--split-short-lines` mà `BabeldocRunner` hardcode bật:
+
+- `src/services/babeldoc_runner.py:278` — `"--split-short-lines"` trong list `args`.
+
+Commit `250709c` **không tạo ra** bug này. `git log -S "--split-short-lines" --
+src/services/babeldoc_runner.py` chỉ trả về đúng 1 commit: `b29a54b` (Initial commit
+v1.2.0, 2026-09-05) — flag đã có từ đầu. `250709c` chỉ đụng `_thinking_args` và
+`_assert_gemini_model_safe`.
+
+**Vì sao bug xuất hiện "sau" 250709c**: đây là bug latent bị **bóc trần** (unmask) chứ
+không phải bug mới — cùng dạng với Bug #5 trong bối cảnh Protocol 6. Trước 250709c,
+`deepseek-v4-flash` đốt hết `max_tokens=2048` vào thinking token → `json.loads("")` raise →
+babeldoc rơi cả batch xuống nhánh fallback (giữ nguyên text gốc, không render lại layout
+đã tách đoạn). Sau khi 250709c gửi `--openai-thinking disabled`, dịch **thành công** →
+babeldoc lần đầu tiên thực sự **render theo cấu trúc đoạn mà `paragraph_finder` đã tách**.
+Cấu trúc đó vốn đã sai từ đầu, chỉ là trước đây không ai nhìn thấy vì nội dung bị mất
+trước khi tới bước render.
+
+### N2. Nguồn xác thực (Protocol 5 / R5-01)
+
+Toàn bộ claim dưới đây đọc trực tiếp từ **source thật của babeldoc 0.6.4 đã cài**
+(`babeldoc --version` → `babeldoc 0.6.4`), tại
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`.
+Không có claim nào từ trí nhớ.
+
+| # | Claim | Nguồn (file:line) |
+|---|-------|-------------------|
+| L1 | `--split-short-lines` là `store_true`, help ghi rõ **"may cause poor typesetting & bugs"** | `babeldoc/main.py:179-182` |
+| L2 | `--short-line-split-factor` default `0.8` | `babeldoc/main.py:184-189`; `format/pdf/translation_config.py:179` |
+| L3 | Heuristic tách đoạn nằm ở `process_independent_paragraphs()` | `format/pdf/document_il/midend/paragraph_finder.py:841-925` |
+| L4 | Điều kiện tách: `split_short_lines AND prev_width < median_width * factor` **OR** `is_bullet_point(chars[0])` của dòng hiện tại | `paragraph_finder.py:891-901` |
+| L5 | `median_width` tính trên **TẤT CẢ dòng của cả trang**, gộp chung mọi paragraph (heading, caption, ô bảng, footnote, số trang) | `paragraph_finder.py:822-839`, gọi tại `:284` |
+| L6 | `BULLET_POINT_PATTERN` chỉ khớp **glyph bullet**: `■•⚫⬤◆◇○●◦‣⁃▪▫∗†‡¹²³…·`. **KHÔNG có** `-` (hyphen-minus), `–`, `*`, và **KHÔNG có** hỗ trợ numbered list (`1.`, `a)`, `(1)`) | `format/pdf/document_il/utils/layout_helper.py:50-52` |
+| L7 | `is_bullet_point()` chỉ xét **ký tự đầu tiên** của dòng (`chars[0]`) | `layout_helper.py:55-65`; call site `paragraph_finder.py:899-901` |
+| L8 | babeldoc chỉ `.strip()` output LLM — newline **bên trong** chuỗi trả về KHÔNG bị loại bỏ | `format/pdf/document_il/midend/il_translator_llm_only.py:718, 987, 998` |
+
+### N3. Root cause chi tiết — 3 cơ chế độc lập
+
+#### RC-1 (chính) — `--split-short-lines` tách nhầm dòng ngắn giữa đoạn
+
+`paragraph_finder.py:891-895`: với mỗi cặp dòng liền kề trong 1 paragraph, nếu **dòng
+trước** (`prev_width`) hẹp hơn `median_width * 0.8` thì mọi dòng từ vị trí `j` trở đi bị
+cắt ra thành paragraph mới.
+
+Heuristic này giả định "dòng ngắn = dòng cuối đoạn". Giả định đó **sai** trong đúng loại
+tài liệu của project (sách dạy làm bánh):
+
+- Dòng ngay trước công thức/đơn vị đo, dòng kết câu trong cột căn đều.
+- **Nghiêm trọng nhất (L5)**: `median_width` gộp mọi dòng của cả trang. Một trang vừa có
+  body full-width vừa có bảng nguyên liệu / caption / cột hẹp → median bị kéo lệch → **mọi
+  dòng của khối hẹp** đều `< 0.8 * median` → mỗi dòng thành 1 paragraph riêng → LLM dịch
+  từng dòng rời rạc, mất ngữ cảnh câu → đúng triệu chứng "bóc tách xuống dòng chưa chính xác".
+
+Đây cũng chính là rủi ro mà chính babeldoc cảnh báo trong help text (L1) — flag này được
+bật hardcode mà không có nguồn xác thực nào trong Architecture.md chứng minh lợi ích của
+nó lớn hơn tác hại.
+
+#### RC-2 — bullet pattern không phủ `-` và numbered list
+
+Nhánh `or` ở `paragraph_finder.py:896-901` chạy **độc lập với `split_short_lines`** (nó
+nằm ngoài mệnh đề `and`). Nghĩa là: **babeldoc đã tự tách bullet item đúng cách mà KHÔNG
+cần `--split-short-lines`** — flag kia không đóng góp gì cho việc nhận diện list.
+
+Nhưng nhánh đó chỉ nhận diện được glyph bullet (L6) trên ký tự đầu dòng (L7). Hệ quả:
+
+- `• Trộn bột` → `chars[0] = "•"` → khớp → tách đúng.
+- `- Trộn bột` → `chars[0] = "-"` (U+002D) → **không khớp** → không tách.
+- `1. Nướng ở 180°C` → `chars[0] = "1"` (ASCII digit) → **không khớp** → không tách.
+  (Pattern có `¹²³` superscript, không có digit thường.)
+
+→ Dash-bullet và numbered list **hoàn toàn phụ thuộc vào RC-1** để được tách. Mà RC-1 tách
+theo hình học, không theo ngữ nghĩa → khi các item cùng dài (gần median) chúng bị **gộp**
+thành một đoạn; khi một item xuống dòng thứ 2 ngắn thì bị **tách sai chỗ**. Đúng triệu
+chứng thứ hai user báo: "Xuống dòng ở các chỗ bulleted/numbered".
+
+Tác dụng phụ khác của L6: pattern chứa `¹²³` và `·` → **marker footnote** và **dấu chấm
+giữa** bị hiểu nhầm là bullet → tách đoạn thừa.
+
+#### RC-3 (phụ) — prompt yêu cầu giữ list ở cấp fragment
+
+`src/core/prompt_builder.py:53-54, 111-112, 247-248` yêu cầu "Bullet list phải dịch thành
+bullet list, numbered list phải dịch thành numbered list".
+
+babeldoc gửi LLM **từng paragraph đã tách sẵn** (sản phẩm của RC-1/RC-2), không phải cả
+khối list. Khi 1 item bị cắt thành fragment không còn ký tự bullet, chỉ thị này khiến LLM
+có xu hướng **tự thêm lại** bullet/newline vào fragment. Vì babeldoc chỉ `.strip()` hai
+đầu (L8), newline nội bộ do LLM sinh ra **sống sót** vào output.
+
+⚠️ **CHƯA VERIFY**: chưa đo được tần suất LLM thực sự thêm newline, và chưa verify renderer
+của babeldoc xử lý `\n` nội bộ ra sao (xuống dòng thật hay thành ô vuông tofu). Dev/QA cần
+đo bằng live run trước khi coi RC-3 là nguyên nhân thật — hiện chỉ là giả thuyết có cơ sở
+source (L8), không phải kết luận.
+
+### N4. Vì sao lọt qua toàn bộ review/test
+
+`tests/test_babeldoc_runner.py:201` chỉ assert `"--split-short-lines" in args` — tức là
+test **xác nhận lại chính giả định đang sai**, không kiểm chứng flag đó có tạo layout đúng
+hay không. Không có test nào trong toàn repo dựng PDF có bullet/numbered list rồi kiểm tra
+cấu trúc đoạn của output (`grep -rn "bullet" tests/` chỉ hit `test_prompt_builder.py:62`,
+mà file đó chỉ assert chuỗi "bullet" có mặt trong prompt).
+
+Đây đúng dạng lỗ hổng Protocol 5 mô tả: mock/assert tự nhất quán với giả định, không nhất
+quán với thực tế. Bổ sung đề xuất cho Protocol 5: **flag CLI bật hardcode cũng là một
+"contract" cần nguồn xác thực** — hiện `--split-short-lines` được biện minh trong docstring
+`babeldoc_runner.py:242-243` là "fix lỗi gộp dòng danh sách của pdf2zh" nhưng không có
+nguồn xác thực nào, và theo L4 thì lý do đó **sai**: việc tách list do nhánh
+`is_bullet_point` đảm nhiệm, độc lập hoàn toàn với flag này.
+
+### N5. Phương án fix đề xuất
+
+**F1 (bắt buộc, gốc rễ) — Bỏ `--split-short-lines` khỏi list hardcode.**
+Sửa `src/services/babeldoc_runner.py:278`. Theo L4, nhánh `is_bullet_point` vẫn chạy khi
+không có flag → glyph bullet vẫn được tách đúng, chỉ mất đi heuristic hình học đang gây
+hại. Đây là fix triệt để cho RC-1, không phải patch tạm.
+
+**F2 — Đưa flag thành tham số có kiểm soát, không hardcode.**
+Thêm `split_short_lines: bool = False` vào signature `translate_pages()` và một field
+tương ứng trong `Settings` (`src/core/config.py`), mặc định `False`. Lý do: một số tài liệu
+scan qua cầu nối `searchable_pdf` có thể vẫn cần heuristic này; khoá cứng ở một trong hai
+đầu đều sai. Nếu bật, đồng thời cho phép chỉnh `--short-line-split-factor` (mặc định
+babeldoc `0.8` theo L2; hạ xuống ~`0.5` sẽ giảm mạnh false-positive vì chỉ còn dòng thật
+sự ngắn mới bị tách).
+
+**F3 — Bù cho RC-2 bằng tiền xử lý, KHÔNG fork babeldoc.**
+babeldoc không có hook nào cho `BULLET_POINT_PATTERN`, và monkey-patch một
+`frozenset`/`re.Pattern` module-level của tool bên thứ 3 chạy trong **subprocess riêng** là
+bất khả thi (ta gọi qua CLI, không import). Hai hướng khả thi, theo thứ tự ưu tiên:
+
+- **F3a**: chuẩn hoá ở bước tiền xử lý cho nhánh `pdf_scan` — trong
+  `src/preprocess/searchable_pdf.py`, khi ghi lại text span OCR (`page.insert_text`,
+  `:226`), map dash-bullet `-`/`–`/`*` đầu dòng sang `•` (U+2022, có trong L6) để nhánh
+  `is_bullet_point` của babeldoc nhận ra. **Chỉ áp dụng được cho nhánh scan** — nhánh
+  born-digital không đi qua file này.
+- **F3b** (cho born-digital): chấp nhận giới hạn, ghi nhận là known limitation của babeldoc
+  0.6.4, và mở issue upstream. **Không tự viết lại paragraph finder** — chi phí/rủi ro vượt
+  xa lợi ích, và sẽ tạo đúng loại nợ mà Protocol 5 sinh ra để tránh.
+
+⚠️ **ASSUMED — chưa verify**: F3a giả định việc đổi ký tự bullet trong lớp text vô hình
+không làm lệch bbox hay hỏng layout render. Dev phải verify bằng 1 live run trước khi
+implement đầy đủ (Protocol 5 R5-02 spike).
+
+**F4 — Sửa prompt cho đúng cấp độ (giảm RC-3).**
+`src/core/prompt_builder.py` (3 chỗ: `:53-54`, `:111-112`, `:247-248`). Riêng biến thể
+babeldoc (`:247-248`) cần nói rõ: input là **một đoạn đơn lẻ**, phải dịch thành **đúng một
+đoạn**, **không được thêm ký tự xuống dòng**, không tự thêm bullet nếu input không có. Giữ
+nguyên chỉ thị list cho biến thể `_FILE_*` (dùng cho EPUB/bilingual_book_maker — nơi LLM
+thực sự thấy cả khối list).
+
+### N6. Yêu cầu test kèm fix (Protocol 5 + 6)
+
+1. **Golden-file test, không mock tay** (R5-03 / Protocol 5 mục 3): tạo fixture PDF thật có
+   3 khối — bullet `•`, bullet `-`, numbered `1./2./3.` — cạnh một bảng hẹp (để ép
+   `median_width` lệch, tái hiện RC-1). Lưu tại `tests/fixtures/babeldoc/`.
+2. **Assert cấu trúc, không assert flag**: thay assert kiểu
+   `assert "--split-short-lines" in args` bằng test đọc output PDF bằng PyMuPDF và đếm số
+   block/đoạn, so với số item mong đợi. Assert flag chỉ chứng minh ta gọi đúng cái ta định
+   gọi, không chứng minh kết quả đúng.
+3. **Live E2E (R6-03)**: chạy xuyên suốt 1 file thật, **mở PDF output và đọc nội dung**
+   vùng list, xác nhận số item khớp bản gốc — không tin field `status`.
+4. **Data lineage (R6-02)**: nếu implement F2, test phải assert giá trị
+   `split_short_lines` từ `Settings` thực sự tới được `args` của subprocess, không chỉ
+   `assert_awaited()`.
+
+### N7. Việc KHÔNG phải nguyên nhân (đã loại trừ)
+
+- `src/core/chunking.py` — chunking thuần **theo trang** (`ChunkPlan.page_start/page_end`),
+  không hề đụng tới text. Không thể cắt giữa một list item. Loại trừ giả thuyết (d).
+- `src/postprocess/chunk_merge.py`, `bilingual_merge.py` — ghép **ở cấp trang** bằng
+  `fitz.insert_pdf()`, không đọc/ghi text. Không thể chèn xuống dòng. Loại trừ.
+- `src/postprocess/font_shrink.py` — không nằm trong nhánh babeldoc (babeldoc tự vẽ lại
+  text). Loại trừ giả thuyết (c).
+- `250709c` — không đụng bất kỳ file nào trong `src/core/`, `src/postprocess/`,
+  `src/preprocess/`. Chỉ `babeldoc_runner.py` (2 hàm mới), `config.py` (đổi default model),
+  routes API + web UI. Loại trừ giả thuyết "commit gần nhất refactor làm hỏng regex".
+
+### N8. Thứ tự implement đề xuất cho Dev
+
+1. **F1** trước, một mình (một dòng), rồi live-run lại đúng file user báo lỗi → đo xem RC-1
+   chiếm bao nhiêu phần triệu chứng. Đây là bước rẻ nhất và có khả năng giải quyết phần lớn.
+2. Chỉ khi F1 chưa đủ mới làm **F4**, rồi đo lại.
+3. **F2** làm cùng F1 (cùng file, cùng review).
+4. **F3a** để sau cùng, và chỉ sau spike verify theo R5-02.
+
+**Trạng thái**: Phân tích — chờ PM/user duyệt trước khi Dev implement.
+
+---
+
+## Đánh giá hướng Post-Processing cho lỗi gộp dòng Numbered List (2026-09-06)
+
+**Tác giả**: Tech Lead — research/đánh giá, KHÔNG implement.
+**Bối cảnh**: F1/F2/F4 đã ship, F3 (pre-processing injection ký tự bullet) đã THẤT BẠI qua
+spike thật (xem CHANGELOG "F3 — Spike verify"). PM yêu cầu đánh giá hướng can thiệp SAU khi
+babeldoc chạy, thay vì trước.
+
+Toàn bộ claim dưới đây đọc trực tiếp từ **source thật babeldoc 0.6.4 đã cài** tại
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`
+(`babeldoc/main.py:29` → `__version__ = "0.6.4"`), hoặc đo bằng script chạy thật trên
+fixture có sẵn. Không có claim nào từ trí nhớ (Protocol 5 R5-01).
+
+### P1. babeldoc trả về gì — nguồn xác thực
+
+| # | Claim | Nguồn (file:line) |
+|---|-------|-------------------|
+| P1 | `BabeldocRunner.translate_pages()` trả `BabeldocResult` chỉ mang `mono_path`/`dual_path` (2 đường dẫn PDF) + stdout/stderr/duration/rate_limit_hits. **Không có bất kỳ cấu trúc text/layout nào** | `src/services/babeldoc_runner.py:191-199` (dataclass), `:374-388` (chỗ dựng return) |
+| P2 | App gọi babeldoc qua **CLI trong subprocess riêng** (`asyncio.create_subprocess_exec`), không import in-process | `src/services/babeldoc_runner.py:325-331` |
+| P3 | Console script `babeldoc` trỏ tới `babeldoc.main:cli` | `babeldoc-0.6.4.dist-info/entry_points.txt` |
+| P4 | Nội bộ babeldoc CÓ 1 cấu trúc trung gian đầy đủ: IL (`il_version_1.Document` → `Page` → `PdfParagraph` → `PdfParagraphComposition` → `PdfLine` → `PdfCharacter`) | `format/pdf/document_il/il_version_1.py`; dùng xuyên suốt `high_level.py:836-1050` |
+| P5 | Pipeline nội bộ (hàm `_do_translate_single`) chạy tuần tự **trong cùng 1 process**, các stage là lời gọi hardcode: `LayoutParser` → `ParagraphFinder` → `StylesAndFormulas` → `ILTranslatorLLMOnly` → `Typesetting` → `PDFCreater` | `high_level.py:953-1046`; `_do_translate_single` được gọi trực tiếp tại `:548,558,564,659` (không qua process pool) |
+| P6 | `--debug` map thẳng vào `TranslationConfig.debug` | `main.py:53-56` (định nghĩa flag), `main.py:694` (`debug=args.debug`), `translation_config.py:171,233` |
+| P7 | Khi `debug=True`, babeldoc **dump IL ra JSON tại 8 mốc**: `create_il.debug.json`, `detect_scanned_file.json`, `layout_generator.json`, `table_parser.json`, `paragraph_finder.json`, `styles_and_formulas.json`, `il_translated.json`, `add_debug_information.json`, `typsetting.json` | `high_level.py:916-919, 946-951, 957-961, 966-970, 973-977, 980-984, 1009-1013, 1015-1021, 1040-1044` |
+| P8 | Các dump này ghi vào `working_dir` (mặc định `<CACHE_FOLDER>/working/<stem>`, đổi được bằng `--working-dir`) | `translation_config.py:428-429` (`get_working_file_path`), `:287-298`; `main.py:101` (flag), `:719` |
+| P9 | **Dump là MỘT CHIỀU**: `XMLConverter` có `read_xml()`/`from_xml()` (`xml_converter.py:33,40`) nhưng **không có call site nào trong pipeline đọc IL ngược trở lại**. Không có flag kiểu `--resume-from-il`. `grep -rn "read_xml\|from_xml"` toàn source chỉ hit chính định nghĩa | `format/pdf/document_il/xml_converter.py:29-62`; `high_level.py` chỉ gọi `write_json` |
+
+**Kết luận P1**: babeldoc CLI là hộp đen **PDF vào → PDF ra**. IL trung gian tồn tại và
+**quan sát được** (`--debug`), nhưng **không tiêm ngược vào được** — nó là dump chẩn đoán,
+không phải checkpoint có thể resume. Vì vậy câu hỏi 3 của PM ("hook vào cấu trúc trung gian
+qua CLI") **không có đường đi trực tiếp**; muốn hook phải chạy babeldoc in-process (xem
+Hướng B).
+
+### P2. Phát hiện mới quan trọng — số liệu biện minh cho F1 đã bị đo sai
+
+Trước khi bàn hướng đi mới, cần sửa lại một kết luận cũ. CHANGELOG F1 ghi:
+
+> "F1 giảm mạnh over-fragmentation của đoạn văn thường (36→11 block — đúng triệu chứng RC-1
+> 'xuống dòng chưa chính xác' mà user báo)"
+
+**Số liệu này diễn giải SAI.** Đo lại trực tiếp trên chính 2 fixture đã capture
+(`tests/fixtures/babeldoc/page14_split_short_lines_{true,false}_mono.pdf`, PyMuPDF
+`get_text("blocks")`, chia vùng theo toạ độ y — danh sách ở `y < 505`, phần văn xuôi
+"LỜI CẢM ƠN" ở `y >= 505`):
+
+| Vùng | `--split-short-lines` BẬT (cũ) | TẮT (F1, hiện tại) |
+|---|---|---|
+| Văn xuôi (`y>=505`) — số block | 4 | 4 |
+| Văn xuôi — text sau khi normalize whitespace | **giống hệt nhau, 1368 ký tự, `==` True** | như bên trái |
+| Danh sách (`y<505`) — số block | 32 | 7 |
+| Danh sách — số block bắt đầu bằng marker `N.` | 28 | 3 |
+| Danh sách — các marker nhận ra được | 1,2,3,...,35 (31 marker) | chỉ 1, 2, 17, 27 |
+
+Nghĩa là: **toàn bộ chênh lệch 36 vs 11 block nằm ở vùng danh sách, không phải ở văn xuôi.**
+Trên trang này, `--split-short-lines` gây **0 (không) tổn hại** cho đoạn văn thường — văn bản
+văn xuôi ra giống hệt từng ký tự ở cả 2 chế độ. 25 block "thêm" chính là 25 mục danh sách
+được tách ĐÚNG.
+
+Hệ quả với bản TẮT flag còn nặng hơn con số block gợi ý: các mục bị **dính liền không cả
+dấu cách** trong cùng một chuỗi LLM trả về — ví dụ đọc được trong output thật:
+`"...nhiều kích cỡ khác nhau3. Rây hoặc lưới lọc4. Máy trộn với tô 5 quart..."`. Đây là lỗi
+nội dung nhìn thấy được, không chỉ lỗi thẩm mỹ layout.
+
+⚠️ **Giới hạn của bằng chứng này**: chỉ đo trên **1 trang** (trang 14). RC-1 (heuristic
+`median_width` toàn trang, `paragraph_finder.py:822-839,891-895`) vẫn là cơ chế **có thật đã
+verify trong source** và vẫn có thể gây hại trên trang có bố cục khác (bảng hẹp cạnh body
+full-width). Kết luận đúng là: **tác hại của RC-1 chưa từng được quan sát bằng dữ liệu thật
+trên bất kỳ trang nào**, còn lợi ích của flag thì đã quan sát được rõ ràng. Trước đây ta đổi
+một tác hại ĐÃ ĐO (gộp danh sách) lấy một tác hại mới CHỈ SUY LUẬN TỪ SOURCE.
+
+### P3. Ba hướng khả thi
+
+#### Hướng A — Hậu xử lý PDF output (câu hỏi 2 của PM)
+
+Sửa `mono.pdf` sau khi babeldoc trả về: tìm block có nhiều marker `N.` dính liền, tách và vẽ
+lại.
+
+**Khả thi về mặt phát hiện**: marker vẫn còn trong text (`"...khác nhau3. Rây..."`), regex
+tìm được. Project cũng đã có sẵn năng lực vẽ lại text lên PDF đã render
+(`src/postprocess/font_shrink.py:311-345`, `_redraw_span()` dùng `page.insert_text()` với
+`fontfile`).
+
+**Nhưng không khả thi về mặt chất lượng**, vì việc cần làm không phải "merge dòng" như PM
+mô tả ban đầu — mà là **tách một đoạn đã dính liền rồi TÁI TYPESET**: xoá text cũ, chèn
+newline tại mỗi marker, tính lại ngắt dòng cho vừa bề rộng cột, tính lại chiều cao khối,
+dịch chuyển mọi thứ bên dưới xuống, rồi vẽ lại toàn bộ bằng đúng font subset babeldoc đã
+nhúng. Cụ thể:
+
+- Đây là **viết lại module Typesetting của babeldoc** (`high_level.py:1039`) ở phía ngoài,
+  không có thông tin layout (`Layout`, `layout_label`, bbox cột) mà babeldoc có sẵn trong IL
+  — ta chỉ còn bbox của block sau khi đã render.
+- `font_shrink.py:15-25` đã ghi rõ bài học: vẽ lại text bằng font SAI làm hỏng glyph tiếng
+  Việt (`"thơm" -> "th·m"`); phải dùng **đúng file font đã nằm trên trang**. Font đó do
+  babeldoc nhúng và subset, không phải file trong `fonts/` của project → phải extract font
+  ra từ chính PDF output trước khi vẽ, thêm một lớp rủi ro nữa.
+- Nội dung dài ra (thêm ngắt dòng) → khối cao lên → tràn sang phần dưới trang. Không có chỗ
+  nào để "đẩy xuống" an toàn trong một PDF đã render.
+
+**Đánh giá**: độ phức tạp **rất cao**; rủi ro hỏng nội dung/layout **cao** (đụng đúng 2 loại
+lỗi đã có tiền sử trong project: glyph corruption và mất nội dung âm thầm); không phải fork
+babeldoc nhưng **tệ hơn fork** ở chỗ phải tái hiện lại logic typeset mà không có dữ liệu
+layout; effort **lớn**. → **Không khuyến nghị.**
+
+#### Hướng B — Hook vào IL trước bước render, qua wrapper script (không fork)
+
+babeldoc không có plugin/hook API (`ParagraphFinder(translation_config).process(docs)` là
+lời gọi hardcode, `high_level.py:960`). Nhưng vì mọi stage chạy **trong cùng 1 process** (P5),
+một **wrapper script** import babeldoc, thay thế hành vi tại runtime, rồi gọi
+`babeldoc.main.cli()` là đủ — **không sửa 1 dòng source nào của babeldoc**, không phải fork,
+và vẫn giữ nguyên mô hình subprocess hiện tại (`BabeldocRunner` chỉ đổi từ gọi `babeldoc`
+sang gọi `<babeldoc-python> wrapper.py <args cũ>`).
+
+Hai biến thể, **đã verify sống 2026-09-06** bằng cách chạy interpreter của chính tool
+babeldoc (`/Users/hieutt/.local/share/uv/tools/babeldoc/bin/python`):
+
+- **B-1 (nhỏ, thô)** — nới `BULLET_POINT_PATTERN`.
+  Verify: `paragraph_finder.py:30` import `is_bullet_point` **theo tên** vào namespace riêng
+  → patch `layout_helper.is_bullet_point` sẽ KHÔNG có tác dụng lên `paragraph_finder`.
+  NHƯNG `is_bullet_point` đọc `BULLET_POINT_PATTERN` như **module global tại thời điểm gọi**
+  (`layout_helper.py:65`) → patch chính cái pattern thì CÓ tác dụng. Đo thật:
+  gán `lh.BULLET_POINT_PATTERN = re.compile(r"[■•⚫◆○●◦‣⁃▪▫0-9]")` rồi gọi
+  `paragraph_finder.is_bullet_point(char("1"))` → trả `True` (trước khi patch: `False`);
+  `char("a")` vẫn `False`.
+  **Hạn chế cố hữu**: call site chỉ truyền `chars[0]` — MỘT ký tự
+  (`paragraph_finder.py:899-902`). Không thể phân biệt `"1. Trộn bột"` với một dòng nối tiếp
+  vô tình bắt đầu bằng `"180°C..."`. Thêm `0-9` = **mọi dòng bắt đầu bằng chữ số đều thành
+  paragraph mới**. False-positive bị chặn ở mức "tách thừa 1 đoạn", cùng loại tác hại với
+  RC-1 nhưng hẹp hơn nhiều (chỉ dòng bắt đầu bằng digit, thay vì mọi dòng ngắn).
+  → Phức tạp: **thấp** (~20 dòng wrapper). Rủi ro: **thấp-trung bình**. Fork: **không**.
+  Effort: **nhỏ**.
+
+- **B-2 (đúng bài)** — bọc `ParagraphFinder.process`.
+  Chạy `process()` gốc trước, rồi duyệt IL đã có (`document.page[*]` → paragraph →
+  `pdf_paragraph_composition` → `pdf_line`) và tự tách paragraph tại các dòng mở đầu bằng
+  marker. Ở tầng này ta thấy **toàn bộ text của dòng**, không chỉ `chars[0]` — nên áp được
+  heuristic chống false-positive thật sự mà PM từng yêu cầu (marker tăng dần 1,2,3...; loại
+  `"2 cups flour"`; loại dòng mục lục). Code tách có sẵn để tái dùng nguyên xi
+  (`paragraph_finder.py:903-929`: dựng `PdfParagraph` mới, cắt composition, gọi
+  `self.update_paragraph_data()` cho cả 2, `insert` vào list) — ta gọi lại chính các method
+  đó qua `self`, không chép logic typeset.
+  Quan trọng: can thiệp diễn ra **TRƯỚC** `ILTranslatorLLMOnly` (`high_level.py:1003`) và
+  trước `Typesetting` (`:1039`) → babeldoc vẫn tự dịch và tự dàn trang bình thường, ta không
+  đụng gì tới render. Đây chính là điều Hướng A không làm được.
+  **Rủi ro thật sự**: phụ thuộc **internal API riêng của babeldoc 0.6.4** (tên method, shape
+  `PdfParagraph`). Nâng version babeldoc = phải verify lại toàn bộ (Protocol 5 mục 5). Cần
+  pin cứng version và có smoke test fail rõ ràng khi shape đổi.
+  → Phức tạp: **trung bình** (~80-120 dòng wrapper + heuristic + test). Rủi ro: **trung
+  bình** (không đụng render, không đụng nội dung; rủi ro chính là brittleness theo version).
+  Fork: **không** (không sửa source babeldoc, không vendor code). Effort: **vừa**.
+
+#### Hướng C — Chấp nhận known limitation, chỉnh lại default của F2
+
+Không viết thêm code. Chỉ dựa vào `Settings.babeldoc_split_short_lines` (đã ship ở F2) và
+chọn default cho đúng theo dữ liệu đo được.
+
+Theo P2, trên trang duy nhất đã đo thật, `True` **tốt hơn nghiêm ngặt** so với `False`
+(văn xuôi giống hệt nhau; danh sách đúng 28/32 block có marker thay vì 3/7 và không bị dính
+chữ). Default hiện tại là `False`.
+
+→ Phức tạp: **rất thấp** (1 dòng + đo thêm). Rủi ro: **thấp nhưng chưa đo đủ**. Effort:
+**rất nhỏ**.
+
+### P4. Khuyến nghị
+
+**Bước 1 (làm ngay, rẻ nhất, chặn quyết định sai) — đo lại F1 trên nhiều trang.**
+Chạy babeldoc thật ở cả 2 chế độ trên **3-5 trang có bố cục khác nhau** của chính cuốn "How
+baking works" (bắt buộc có: 1 trang toàn văn xuôi, 1 trang có bảng nguyên liệu cạnh body
+full-width — đúng kịch bản RC-1 dự đoán, 1 trang có công thức đánh số). Với mỗi trang, so
+sánh theo **vùng** như bảng P2 (văn xuôi vs danh sách riêng), **không** so tổng số block —
+tổng số block là proxy sai, chính nó đã dẫn tới kết luận nhầm ở F1. Đây là điều kiện tiên
+quyết: nếu RC-1 không gây hại thật trên trang nào, thì Bước 2 giải quyết xong vấn đề mà
+không cần viết code.
+
+**Bước 2 (nhiều khả năng là đủ) — nếu Bước 1 xác nhận, đổi default
+`Settings.babeldoc_split_short_lines` về `True`** (`src/core/config.py`), giữ nguyên
+`babeldoc_short_line_split_factor` ở `0.5` (thấp hơn default `0.8` của babeldoc — chỉ dòng
+thật sự ngắn mới bị tách, giảm mạnh false-positive của RC-1, xem L2/N5-F2). Nếu Bước 1 tìm
+ra trang bị RC-1 làm hỏng thật, **không** đổi default; đi tiếp Bước 3.
+
+**Bước 3 (chỉ khi Bước 2 không đủ) — làm Hướng B-2.** Khi đó bật lại
+`--split-short-lines` **không còn cần thiết**: B-2 tách numbered list theo ngữ nghĩa, nên có
+thể để `split_short_lines=False` (tránh hẳn RC-1) mà vẫn giữ danh sách đúng. Đây là phương
+án duy nhất giải quyết triệt để cả RC-1 lẫn RC-2 cùng lúc.
+
+**Không khuyến nghị Hướng A** trong mọi trường hợp: sửa PDF đã render đòi hỏi tái hiện lại
+Typesetting của babeldoc mà không có dữ liệu layout, và đụng đúng 2 lớp rủi ro đã có tiền sử
+gây sự cố trong project (glyph tiếng Việt hỏng khi vẽ lại bằng font sai; mất nội dung âm
+thầm). Chi phí/rủi ro vượt xa lợi ích so với B-2.
+
+### P5. Điều kiện kèm theo nếu chọn Hướng B (bắt buộc, Protocol 5/6)
+
+1. **Pin version**: wrapper phải assert `babeldoc.__version__ == "0.6.4"` và **raise ngay**
+   nếu lệch — không "chạy tiếp cho lành". Đổi version babeldoc = verify lại toàn bộ contract
+   internal (Protocol 5 mục 5).
+2. **Smoke test gọi thật** (R5-03): 1 test chạy wrapper thật trên fixture
+   `page14_numbered_list_source.pdf`, assert số block có marker trong output ≥ 25.
+3. **Assert nội dung, không assert flag** (bài học N4): không được viết test kiểu
+   `assert "--wrapper" in args`. Phải đọc PDF output bằng PyMuPDF và đếm marker.
+4. **Kiểm tra không dính chữ**: assert output KHÔNG chứa pattern `\S\d{1,2}\.\s` (chữ dính
+   liền marker, dấu hiệu của lỗi gộp hiện tại).
+5. Với B-2, cần assert cả **văn xuôi không bị đổi**: so text vùng văn xuôi trước/sau khi bật
+   wrapper phải bằng nhau (đúng phương pháp đã dùng ở P2).
+
+**Trạng thái**: Đánh giá — chờ PM/user quyết định. Không có code nào được viết trong task này.
+
+---
+
+## Đo lại F1 trên nhiều trang — kết quả live A/B/C (2026-09-06)
+
+**Tác giả**: Tech Lead — đo lường, KHÔNG implement, KHÔNG sửa default. PM quyết định cuối cùng.
+**Bối cảnh**: thực hiện đúng "Bước 1" của section trước (P4). Mục tiêu: xác định tác hại RC-1
+có THẬT trên dữ liệu thật hay không, trước khi giữ/đổi `Settings.babeldoc_split_short_lines`.
+
+### Q1. Phương pháp (live, không mock — Protocol 5 R5-03 / Protocol 6 R6-03)
+
+- **Engine**: `babeldoc` 0.6.4 CLI thật, gọi qua chính production code path của app
+  (`BabeldocRunner.translate_pages()` + `Pdf2zhServiceMapper().map("deepseek", settings)`),
+  không tự dựng lại lệnh CLI bằng tay.
+- **LLM**: DeepSeek API thật, model `deepseek-v4-flash` — lấy đúng giá trị đang chạy production
+  trong bảng `settings` của `data/bb_translation.db` (KHÔNG phải `deepseek-chat` mặc định trong
+  `.env`; `get_settings()` chỉ đọc `.env` nên harness override tường minh).
+- **Prompt**: prompt babeldoc thật do `build_babeldoc_prompt_text()` sinh (đã bao gồm bản sửa
+  F4), dùng chung 1 file cho toàn bộ 21 lần chạy để loại prompt khỏi biến số.
+- **File nguồn**: `data/uploads/898a567a-..._Figoni, Paula - How baking works...-1-25.pdf`.
+- **3 nhánh (arm)** cho MỖI trang:
+  - `false` — `split_short_lines=False` (F1, default đang ship).
+  - `true` — `split_short_lines=True`, `factor=0.5` (F2, giá trị
+    `Settings.babeldoc_short_line_split_factor` đang ship).
+  - `true08` — `split_short_lines=True`, `factor=0.8` (**default của chính babeldoc**,
+    `main.py:184-189` / `translation_config.py:179` — chính là hành vi TRƯỚC F1).
+- **Tổng**: 7 trang × 3 nhánh = **21 lần chạy babeldoc + DeepSeek thật**, 0 rate-limit hit,
+  0 lần fail.
+- **Artifact đã lưu lại** (golden file, không phải mock viết tay):
+  `tests/fixtures/babeldoc/ab_split_short_lines/page{N}_{arm}_mono.pdf` (21 PDF) +
+  `run_measure.py` (harness đã chạy) + `analyze.py` (script đo). Tái chạy được nguyên trạng.
+
+⚠️ Nhánh `true08` **không có trong đề bài PM giao** (PM chỉ yêu cầu A/B True-vs-False). Bổ sung
+vì phát hiện giữa chừng: fixture cũ của F1 dùng factor **0.8**, còn `Settings` sau F2 mặc định
+**0.5** — nên "bật lại flag" theo cấu hình hiện tại KHÔNG tái hiện hành vi trước F1. Nếu chỉ đo
+A/B như đề bài, kết luận sẽ sai lệch (xem Q3).
+
+### Q2. Chọn trang — 7 trang, 5 loại bố cục
+
+Chọn bằng cách quét thống kê toàn bộ 25 trang (số block, số marker `N.`, số bullet glyph,
+median width, số block hẹp < 0.6 × median) rồi lấy đại diện mỗi loại:
+
+| Trang | Loại bố cục | Lý do chọn |
+|---|---|---|
+| 13 | **Văn xuôi thuần**, 1 cột full-width, không list/bảng | Yêu cầu (a) của PM. Baseline sạch nhất |
+| 21 | Có **bảng** (TABLE 1.2) + văn xuôi | Yêu cầu (c) |
+| 20 | Văn xuôi + **bảng hẹp + caption** ở cột trái (8 block hẹp — cao nhất tài liệu, median_width bị lệch mạnh nhất) | Yêu cầu (c), đúng kịch bản RC-1 mô tả |
+| 22 | **Mix nhiều loại**: văn xuôi 2 cột + bảng + caption ảnh + heading giãn chữ | Yêu cầu (d) |
+| 8 | **Mục lục** (72 block nguồn, toàn dòng ngắn) | Yêu cầu (d) |
+| 17 | **Mix**: numbered list ngắn (5 mục "CHAPTER OBJECTIVES") + văn xuôi | Yêu cầu (b) + (d) |
+| 14 | **Numbered list dài** (35 mục) trong 2 cột hẹp | Yêu cầu (b), trang user báo lỗi |
+
+### Q3. Số liệu thô
+
+Chỉ số dùng (đo bằng PyMuPDF `get_text("blocks")` trên PDF output thật):
+
+- `blk` — số text block; `chars` — tổng ký tự (kiểm tra mất nội dung).
+- `glue:N+UP` — số lần **một chữ số dính liền ngay một chữ HOA** trong CÙNG 1 block
+  (vd `"CHƯƠNG 6CÁC LOẠI NGŨ CỐC"`). Lỗi nội dung nhìn thấy được.
+- `glue:x+N.` — số lần **một chữ cái dính liền ngay marker `N.`** (vd `"khác nhau3. Rây"`).
+  Đây chính là triệu chứng gộp danh sách user báo.
+- `mkBlk` — số block **bắt đầu bằng** marker `N.` (mục còn đứng đúng dòng riêng).
+
+Cả 2 chỉ số `glue` đếm **trong từng block**, không nối các block lại — nối block sẽ tự tạo ra
+đúng cái ranh giới mà chỉ số này dùng để kiểm tra sự VẮNG MẶT (lỗi của lần đo đầu tiên).
+
+| Trang | arm | blk | chars | glue:N+UP | glue:x+N. | mkBlk |
+|---|---|---:|---:|---:|---:|---:|
+| **13** (văn xuôi thuần) | false | 10 | 4243 | 0 | 0 | 0 |
+| | true (0.5) | 10 | 4243 | 0 | 0 | 0 |
+| | true08 | 10 | 4243 | 0 | 0 | 0 |
+| **21** (bảng) | false | 30 | 2402 | 0 | 0 | 0 |
+| | true (0.5) | 30 | 2402 | 0 | 0 | 0 |
+| | true08 | 30 | 2402 | 0 | 0 | 0 |
+| **20** (bảng hẹp + caption) | false | 19 | 3320 | 0 | 0 | 0 |
+| | true (0.5) | 22 | 3310 | 0 | 0 | 0 |
+| | true08 | 22 | 3310 | 0 | 0 | 0 |
+| **22** (mix) | false | 31 | 3264 | 0 | 0 | 0 |
+| | true (0.5) | 32 | 3280 | 0 | 0 | 0 |
+| | true08 | 35 | 3255 | 0 | 0 | 0 |
+| **8** (mục lục) | false | 15 | 1952 | **7** | 0 | 0 |
+| | true (0.5) | 17 | 1937 | **7** | 0 | 0 |
+| | true08 | 34 | 1930 | **0** | 0 | 0 |
+| **17** (list ngắn + văn xuôi) | false | 8 | 2044 | 0 | 0 | 1/5 |
+| | true (0.5) | 9 | 2096 | 0 | 0 | 2/5 |
+| | true08 | 11 | 2077 | 0 | 0 | **4/5** |
+| **14** (list 35 mục) | false | 11 | 2764 | 0 | **28** | 3/35 |
+| | true (0.5) | 20 | 2804 | 0 | **21** | 12/35 |
+| | true08 | 34 | 2801 | 0 | **3** | **26/35** |
+
+**Kiểm tra mất nội dung**: `chars` của mọi arm nằm trong ±1.5% so với nhau và so với trang
+nguồn. **Không arm nào làm mất nội dung** — khác hẳn lớp lỗi Bug #2/#5 trước đây.
+
+**Kiểm tra "output có giống hệt nhau không"** (so text toàn bộ block sau khi normalize
+whitespace):
+
+| Trang | `false` == `true(0.5)` | `false` == `true08` |
+|---|---|---|
+| 13 | **True** | **True** |
+| 21 | **True** | **True** |
+| 20 | False | False |
+| 22 | False | False |
+| 8 | False | False |
+| 17 | False | False |
+| 14 | False | False |
+
+### Q4. Phân tích từng trang (đọc nội dung thật, không chỉ đếm block)
+
+**Trang 13 — văn xuôi thuần: KHÔNG KHÁC BIỆT.**
+(a) văn xuôi: không arm nào tách vụn. (b) không có list/bảng. (c) **Kết luận: không khác biệt** —
+output giống hệt nhau từng ký tự ở cả 3 arm. **RC-1 không hề kích hoạt trên trang văn xuôi thuần.**
+
+**Trang 21 — có bảng: KHÔNG KHÁC BIỆT.**
+(a) văn xuôi nguyên vẹn ở cả 3 arm. (b) bảng không dính chữ ở arm nào. (c) **Kết luận: không
+khác biệt** — giống hệt nhau từng ký tự. Đáng chú ý vì đây là trang có bảng mà RC-1 lẽ ra phải
+gây hại.
+
+**Trang 20 — bảng hẹp + caption (kịch bản RC-1 nặng nhất): `false` tốt hơn chút ít.**
+(a) văn xuôi: **giống hệt nhau ở cả 3 arm** (5 đoạn body, từng chữ như nhau). (b) khác biệt DUY
+NHẤT: caption bảng. `false` giữ nguyên 1 khối
+`"BẢNG 1.1 ■ SỰ TƯƠNG ĐƯƠNG GIỮA ĐƠN VỊ THÔNG DỤNG CỦA MỸ (IMPERIAL) VÀ ĐƠN VỊ MÉT"`;
+`true`/`true08` cắt thành 4 fragment (`"BẢNG 1.1 ■"` / `"SỰ TƯƠNG ĐƯƠNG GIỮA"` /
+`"ĐƠN VỊ THÔNG DỤNG CỦA MỸ (IMPERIAL)"` / `"VÀ ĐƠN VỊ HỆ MÉT"`). Ghép lại vẫn đọc đúng nghĩa,
+không dính chữ, không mất nội dung. (c) **Kết luận: `false` tốt hơn, mức độ nhẹ** — đây là bằng
+chứng THẬT ĐẦU TIÊN của RC-1, nhưng tác hại giới hạn ở 1 caption và không làm sai nội dung.
+`0.5` và `0.8` cho kết quả y hệt nhau ở trang này.
+
+**Trang 22 — mix: KẾT QUẢ TRÁI CHIỀU (cả 2 arm đều có lỗi riêng).**
+(a) văn xuôi: không arm nào tách vụn. (b) **`true08` gây hại**: cắt vụn 2 caption, và một trong
+số đó mất mạch nghĩa thật sự — caption gốc `"TABLE 1.3 ■ VOLUME CONVERSIONS FOR COMMON U.S.
+UNITS"` ra thành 3 fragment dịch rời rạc, lặp ý:
+`"BẢNG 1.3 ■ QUY ĐỔI THỂ TÍCH"` / `"CHO CÁC ĐƠN VỊ"` / `"CÁC ĐƠN VỊ THÔNG DỤNG"`. Đây là **tác
+hại RC-1 rõ ràng nhất tìm được trong toàn bộ mẫu**. NHƯNG (b') **`false` cũng gây hại riêng**:
+heading giãn chữ ra thành `"MẸ O H A Y"` (hỏng, `true08` ra đúng `"MẸO HỮU ÍCH"`), và credit ảnh
+bị dính vào caption: `"...siro cây phong, nước và bột mì.Ảnh: Aaron Seyfarth"` (`true08` tách
+đúng thành 2). (c) **Kết luận: trái chiều, không arm nào thắng** — mỗi arm hỏng một chỗ khác nhau.
+
+**Trang 8 — mục lục: `true08` tốt hơn RÕ RỆT.**
+(a) không có văn xuôi. (b) `false` VÀ `true(0.5)` đều dính chữ **7 lần**, kiểu
+`"CHƯƠNG 6CÁC LOẠI NGŨ CỐC"`, `"CHƯƠNG 7GLUTEN 117"`, `"CHƯƠNG 10CHẤT BÉO"` — số chương dính
+liền tên chương, lỗi nội dung nhìn thấy ngay. Các mục con cũng bị gộp thành chuỗi dài
+(`"Giới thiệu 101 Ngũ cốc 102 Các loại ngũ cốc và bột không chứa gluten 106..."`). `true08`:
+**0 lần dính**, mỗi mục mục lục một block (`"Giới thiệu 101"`, `"Ngũ cốc có gluten 102"`), và
+`"CHƯƠNG 6"` xuống dòng đúng trước tên chương. (c) **Kết luận: `true08` tốt hơn rõ rệt**; `0.5`
+gần như không cải thiện gì so với `false`.
+
+**Trang 17 — numbered list ngắn + văn xuôi: `true08` tốt hơn.**
+(a) văn xuôi: cả 3 arm đều giữ nguyên 3 đoạn body, không tách vụn. (b) `false` gộp cả 5 mục
+"CHAPTER OBJECTIVES" vào 1 block dính chữ
+(`"...cách đạt được điều đó.2. Phân biệt giữa..."`), chỉ 1/5 mục đứng riêng. `true08` tách được
+**4/5**, các mục 3/4/5 mỗi mục 1 block sạch. `true(0.5)` chỉ được 2/5. (c) **Kết luận: `true08`
+tốt hơn**, không kèm tác hại nào quan sát được trên trang này.
+
+**Trang 14 — numbered list 35 mục: `true08` tốt hơn RẤT RÕ.**
+(a) văn xuôi ("LỜI CẢM ƠN", 3 đoạn): **giống hệt nhau ở cả 3 arm** — xác nhận lại kết luận P2 của
+section trước bằng một lần chạy độc lập, prompt mới. (b) dính chữ: `false` **28 lần**,
+`true(0.5)` **21 lần**, `true08` chỉ **3 lần**. Số mục đứng đúng dòng riêng: 3/35 → 12/35 →
+**26/35**. `false` dồn 33 mục vào đúng 2 khối khổng lồ. (c) **Kết luận: `true08` tốt hơn rất rõ.**
+
+### Q5. Tổng hợp
+
+| Trang | Loại | Kết luận |
+|---|---|---|
+| 13 | văn xuôi thuần | không khác biệt (identical) |
+| 21 | bảng | không khác biệt (identical) |
+| 20 | bảng hẹp + caption | `false` tốt hơn (nhẹ — 1 caption bị cắt 4) |
+| 22 | mix | trái chiều (mỗi arm hỏng 1 chỗ khác nhau) |
+| 8 | mục lục | **`true08` tốt hơn rõ rệt** (7 lỗi dính chữ → 0) |
+| 17 | list ngắn + văn xuôi | **`true08` tốt hơn** (1/5 → 4/5 mục đúng) |
+| 14 | list 35 mục | **`true08` tốt hơn rất rõ** (28 → 3 dính chữ; 3/35 → 26/35) |
+
+**Tổng kết: `true08` thắng rõ 3 trang, trái chiều 1 trang, thua nhẹ 1 trang, hoà 2 trang.**
+
+Ba kết luận quan trọng:
+
+1. **RC-1 CÓ THẬT nhưng hẹp hơn nhiều so với dự đoán từ source.** Phân tích N3/RC-1 dự đoán
+   `median_width` toàn trang sẽ làm "mọi dòng của khối hẹp" bị tách, gây hại cho **đoạn văn
+   thường**. Đo thật: **không có một đoạn văn xuôi nào trong toàn bộ 7 trang bị tách vụn ở bất kỳ
+   arm nào.** Tác hại thật của RC-1 chỉ xuất hiện ở **caption của bảng/ảnh** (trang 20, 22) —
+   một loại nội dung ngắn, ít quan trọng hơn nhiều so với body text và list.
+
+2. **`factor` quan trọng hơn cả bản thân flag.** Đây là phát hiện làm thay đổi kết luận:
+   `true(0.5)` — chính là cấu hình `Settings` đang ship sau F2 — là **tệ nhất trong ba**: nó giữ
+   gần như trọn vẹn lỗi gộp danh sách của `false` (trang 8: vẫn 7 lỗi dính chữ, y hệt `false`;
+   trang 14: 21/28 lỗi còn lại) mà **vẫn phải trả đủ giá RC-1** (trang 20 cắt caption y hệt
+   `true08`). Nghĩa là nếu PM bật `babeldoc_split_short_lines=True` với default `factor` hiện tại,
+   sẽ nhận về **gần như toàn bộ tác hại và rất ít lợi ích**. Hạ factor từ 0.8 xuống 0.5 ở F2 được
+   suy luận là "giảm false-positive" nhưng chưa từng đo — đo thật cho thấy nó chủ yếu giảm
+   TRUE-positive.
+
+3. **Kết quả KHÔNG mâu thuẫn theo loại trang** theo cách cần setting per-document. Trang văn xuôi
+   thuần và trang bảng **hoàn toàn không bị ảnh hưởng** (identical) — tức là bật flag không có
+   rủi ro gì với chúng. Chỉ trang có caption ngắn mới chịu thiệt. Vì vậy **không cần** heuristic
+   "phát hiện tài liệu nhiều list" hay setting per-file-type: một default duy nhất là đủ, vì chi
+   phí của việc bật flag bằng 0 trên đúng những trang mà nó không giúp gì.
+
+### Q6. Khuyến nghị
+
+**Khuyến nghị chính: đổi CẢ HAI default trong `src/core/config.py`:**
+
+- `babeldoc_split_short_lines: bool = False` → **`True`**
+- `babeldoc_short_line_split_factor: float = 0.5` → **`0.8`** (bằng đúng default của babeldoc)
+
+Tức là **hoàn nguyên hành vi runtime về trước F1**, nhưng **GIỮ NGUYÊN toàn bộ phần plumbing của
+F1/F2** (tham số hoá, `Settings`, data-lineage test) — đó mới là giá trị thật của F1/F2: biến một
+flag hardcode không nguồn xác thực thành một tham số đo được, đổi được. Không đề xuất revert code.
+
+Lý do, theo đúng thứ tự sức nặng bằng chứng:
+
+1. Lợi ích **đã đo được** trên 3/7 trang, gồm cả trang user trực tiếp báo lỗi (trang 14), và gồm
+   loại lỗi **nhìn thấy được trong bản dịch giao cho user** (dính chữ `"CHƯƠNG 6CÁC LOẠI"`,
+   `"khác nhau3. Rây"`).
+2. Tác hại **đã đo được** giới hạn ở caption bảng/ảnh trên 2/7 trang, và trên 1 trong 2 trang đó
+   (trang 22) arm `false` cũng có lỗi riêng tương đương — nên tác hại ròng thực tế chỉ là **1
+   caption trên 7 trang**.
+3. Trang văn xuôi thuần và trang bảng: **bật flag không gây bất kỳ thay đổi nào** — rủi ro bằng 0
+   trên phần lớn nội dung của một cuốn sách.
+4. Giữ `factor=0.5` là lựa chọn tệ nhất trong cả ba (điểm 2 mục Q5) — nếu PM chọn giữ
+   `split_short_lines=False`, cũng nên sửa `0.5` về `0.8`, vì giá trị 0.5 hiện tại chỉ có hại khi
+   ai đó bật flag lên qua `.env`.
+
+**Không khuyến nghị**: setting per-`file_type` hoặc heuristic tự phát hiện "tài liệu nhiều list".
+Dữ liệu không ủng hộ (điểm 3 mục Q5): chi phí bật flag trên trang không có list bằng 0, nên phân
+nhánh chỉ thêm phức tạp mà không mua được gì.
+
+**Việc kèm theo nếu PM duyệt** (Dev thực hiện, Protocol 5/6):
+
+1. Sửa 2 default nói trên trong `src/core/config.py`. Cập nhật docstring
+   `BabeldocRunner.translate_pages()` — hiện đang viết `--split-short-lines` là "tác hại hình học
+   lan rộng hơn toàn bộ trang", câu này **đã bị dữ liệu ở đây bác bỏ** và cần sửa lại theo phạm vi
+   thật (chỉ caption).
+2. Cập nhật 2 test đang khoá default cũ trong `tests/integration/test_job_orchestrator.py`
+   (`test_babeldoc_split_short_lines_defaults_to_disabled`) — đổi tên và đảo assert theo default
+   mới. Giữ nguyên test data-lineage (R6-02).
+3. Thêm golden-file test đọc **cấu trúc** từ fixture đã lưu
+   (`tests/fixtures/babeldoc/ab_split_short_lines/`), tối thiểu 3 assert:
+   `page8_true08` có `glue:N+UP == 0` (arm `false` là 7); `page14_true08` có ≥ 24 block bắt đầu
+   bằng marker (arm `false` là 3); `page13` giống hệt nhau ở cả 3 arm. **Không** assert sự có mặt
+   của flag trong `args` — đó đúng là lỗi N4 đã mắc một lần.
+4. Ghi **known limitation** vào CHANGELOG: caption bảng/ảnh có thể bị cắt thành nhiều fragment
+   (trang 20, 22). Đây là giá đã biết và đã chấp nhận có ý thức, không phải bug chưa phát hiện.
+
+**Hướng B-2 (section trước) vẫn là fix triệt để duy nhất** và bây giờ có thêm lý do: nó tách
+numbered list theo **ngữ nghĩa**, nên cho phép đặt `split_short_lines=False` mà vẫn giữ list
+đúng — tức là loại bỏ hoàn toàn cái giá "caption bị cắt" mà khuyến nghị trên đang phải trả. Nhưng
+khuyến nghị trên rẻ hơn nhiều (2 dòng config) và đã đủ để xử lý triệu chứng user báo, nên nên làm
+trước; B-2 chỉ cần khi caption bị cắt trở thành phàn nàn thật từ user.
+
+**Trạng thái**: Đo lường xong — chờ PM/user quyết định. Không sửa code, không đổi default.
+
+---
+
+## US-16 — Nén ảnh sau khi ghép (`compress_pdf_images`) — thiết kế (2026-09-06)
+
+Thiết kế cho US-16 / BR-IMGCOMP-01..04 (`docs/PRD.md` §3, §4.9). Trạng thái: **đã spike đo
+thật trên dữ liệu production, không có phần nào `[UNVERIFIED]`** — mọi contract PyMuPDF dưới
+đây đều đã chạy thật trong `.venv` của project và có output kèm theo.
+
+### S1. Nguồn xác thực (Protocol 5 R5-01 — áp dụng tự nguyện)
+
+PyMuPDF là thư viện Python import trực tiếp (không phải subprocess/HTTP service) nên **không
+thuộc phạm vi bắt buộc** của Protocol 5 (xem "Phạm vi áp dụng" trong `CLAUDE.md` project).
+Tuy nhiên toàn bộ contract dưới đây vẫn được verify bằng cách chạy thật, không viết từ trí nhớ.
+
+**Version đã cài** (lệnh: `.venv/bin/python -c "import fitz; print(fitz.VersionBind, fitz.version)"`):
+
+```
+PyMuPDF 1.28.2: Python bindings for the MuPDF 1.28.2 library.
+Python 3.14 running on darwin (64-bit).
+VersionBind 1.28.2
+version ('1.28.2', '1.28.2', None)
+```
+
+⚠️ **Deprecation warning đã quan sát thấy**: `import fitz` in ra
+`"The fitz API is deprecated and will be removed in future. Use import pymupdf instead."`
+`src/postprocess/chunk_merge.py:54` hiện đang dùng `import fitz`. **Không đổi trong scope
+US-16** (ngoài phạm vi, sẽ gây diff nhiễu); hàm mới bám theo import sẵn có của file.
+
+**Signature đã verify bằng `inspect.signature`** (không có cái nào là suy đoán):
+
+| API | Signature thật (1.28.2) | Ghi chú |
+|---|---|---|
+| `Document.get_page_images` | `(self, pno: int, full: bool = False) -> list` | `full=True` mới có trường filter |
+| `Document.xref_get_key` | `(self, xref, key)` | trả tuple `(type, value)`, ví dụ `('null','null')` / `('name','/DCTDecode')` |
+| `Document.xref_stream_raw` | `(self, xref)` | bytes stream **chưa** giải nén — dùng để đo size thật |
+| `Document.update_stream` | `(self, xref=0, stream=None, new=1, compress=1)` | **phải truyền `compress=0`** khi ghi JPEG |
+| `Document.xref_set_key` | `(self, xref, key, value)` | sửa `/Filter`, `/ColorSpace`... |
+| `Pixmap.tobytes` | `(self, output='png', jpg_quality=95)` | **`jpg_quality` là tên tham số đúng**, không phải `quality` |
+| `Page.replace_image` | `(page, xref, *, filename=None, pixmap=None, stream=None)` | tồn tại, nhưng **KHÔNG dùng** — xem S4 |
+| `Document.extract_image` | `(self, xref)` | tồn tại, **KHÔNG dùng** — xem S4 |
+
+**Tuple của `get_page_images(pno, full=True)`** — đã verify thứ tự thật trên dữ liệu production:
+
+```
+(12, 0, 859, 1582, 8, 'ICCBased', '', 'Im1', '', 0)
+ ^   ^   ^    ^     ^   ^          ^    ^     ^   ^
+ |   |   w    h    bpc  colorspace alt  name  |   referencer
+ |   smask xref (0 = khong co)                filter (chuoi rong = raw)
+ xref
+```
+
+⚠️ **Cạm bẫy đã thực sự mắc phải trong lúc spike**: index `1` là `smask`, index `8` là
+`filter` — dễ nhầm lẫn nhau. Lần đo đầu tiên của spike này dùng nhầm `info[8]` làm smask và
+báo "0 ảnh có smask" từ một trường hoàn toàn khác. Đã đo lại bằng index đúng (`info[1]`) và
+kết quả tình cờ vẫn là 0, nhưng **Dev không được tin vào sự trùng hợp đó** — dùng đúng index.
+
+**Đã verify `info[8]` và `xref_get_key(xref,"Filter")` cho kết quả nhất quán 100%** trên cả
+538 image xref của file thật (`agree: 538, disagree: 0`). Dev dùng cách nào cũng được;
+thiết kế dưới đây dùng `xref_get_key` cho khớp cách diễn đạt của BR-IMGCOMP-02 (`Filter: null`).
+
+### S2. Vấn đề đo được trên dữ liệu thật
+
+Đo trên chính file đã sinh ra US-16 — `data/outputs/3594a7a3-8b72-4390-9d9b-159769a2a215/translated_vi.pdf`
+(job thật 415 trang, engine `babeldoc`, `status=completed`):
+
+| Chỉ số | Giá trị đo |
+|---|---|
+| Kích thước file | **846.79 MB** |
+| Số trang | 415 |
+| Unique image xref | 538 |
+| `Filter: null` (raw) | **357 xref — 690.96 MB** stream bytes |
+| `DCTDecode` (JPEG sẵn) | 156 xref — 1.60 MB |
+| `CCITTFaxDecode` | 25 xref — 0.04 MB |
+| Phần còn lại (font, content stream, metadata) | ~155.82 MB |
+
+=> **81.6% dung lượng file** nằm ở 357 ảnh raw không nén. Đúng như PRD mô tả.
+
+Đặc điểm của 357 ảnh raw (đã đo, quan trọng cho S4): **tất cả** đều `ColorSpace: ICCBased`,
+`BitsPerComponent: 8`, **0 ảnh có `/SMask`**, **0 ảnh là `/ImageMask`**. Tức là trên dữ liệu
+thật hiện có, các edge case nguy hiểm nhất **không xuất hiện** — nhưng thiết kế vẫn phải guard
+chúng (S4/S6), vì file khác có thể có.
+
+### S3. Kết quả spike dedupe — **KHÔNG đạt ngưỡng, LOẠI khỏi scope** (BR-IMGCOMP-04)
+
+Phương pháp: SHA-256 trên nội dung stream thật của từng xref, gom nhóm theo hash, tính phần
+dung lượng thừa (`size × (số bản sao − 1)`). Đo trên chính file production 846.79 MB ở trên —
+**không phải fixture, không phải ước lượng**.
+
+**Đo 1 — dedupe trong nhóm ảnh raw (nhóm mà US-16 thực sự nén):**
+
+```
+raw-content dup groups: 0    redundant xrefs: 0    wasted bytes: 0.0 MB / 690.96 MB
+```
+
+**0 nhóm trùng.** Đáng chú ý: có những cặp xref *trông như* trùng (ví dụ xref 12 và 58: cùng
+`859×1582`, cùng đúng 5,435,752 bytes) nhưng hash khác nhau (`64fddbc4…` vs `80593ef4…`) —
+tức là babeldoc render lại ảnh cho từng trang, gần giống nhau về thị giác nhưng **không
+byte-identical**. Đây chính là lý do không được suy đoán: nhìn bảng size/dims sẽ kết luận
+ngược hoàn toàn với kết quả hash.
+
+**Đo 2 — dedupe trên TOÀN BỘ 538 ảnh (kể cả DCTDecode/CCITT, rộng hơn cách diễn đạt của BR):**
+
+```
+ALL images: 538   unique: 460   dup groups: 19   redundant xrefs: 78
+total img bytes 692.60 MB, exact-dup waste 0.349 MB (0.05%)
+```
+
+Có trùng lặp thật (78 xref thừa), nhưng **chỉ nằm ở nhóm ảnh vốn đã nhỏ** (icon/logo lặp lại
+qua các chương), tổng cộng 0.349 MB.
+
+**So với ngưỡng 20% của BR-IMGCOMP-04** — "giảm THÊM ≥20% so với chỉ nén JPEG", nên mẫu số
+phải là dung lượng ảnh **sau khi** đã nén JPEG (6.64 MB raw-đã-nén + 1.64 MB DCT/CCITT giữ
+nguyên = 8.28 MB):
+
+| Phép so | Kết quả |
+|---|---|
+| Dedupe / tổng ảnh gốc | 0.349 / 692.60 = **0.05%** |
+| Dedupe / ảnh sau nén JPEG (mẫu số đúng theo BR) | 0.349 / 8.28 = **4.2%** |
+| Ngưỡng yêu cầu | ≥ 20% |
+| Trên tổng file sau nén (19.34 MB) | 0.349 / 19.34 = **1.8%** |
+
+=> **4.2% < 20% → KHÔNG đạt ngưỡng.**
+
+**QUYẾT ĐỊNH: dedupe KHÔNG vào scope implement lần này.** Defer về backlog kèm số liệu trên.
+Dev **không** implement dedupe. Acceptance criterion điều kiện cuối cùng của US-16 ("Nếu spike
+dedupe đạt ngưỡng ≥ 20%…") **không kích hoạt**.
+
+Giới hạn của kết luận (nêu rõ, không giấu): đo trên **1 job thật duy nhất** (415 trang, sách
+`How Baking Works`). Đây là job lớn nhất và chính là case đã gây ra US-16, nên đại diện tốt
+cho vấn đề cần giải; nhưng nếu sau này gặp tài liệu dạng catalogue lặp ảnh nhiều, con số có
+thể khác — lúc đó **đo lại**, không kế thừa kết luận này. Các fixture nhỏ trong
+`tests/fixtures/babeldoc/` đã được khảo sát và **không đủ đại diện** (chunk0 chỉ có 5 ảnh,
+chunk1 và `page14_*` chỉ có 1 ảnh) — đó là lý do spike dùng thẳng file production.
+
+### S4. Vì sao KHÔNG dùng `extract_image()` / `replace_image()`
+
+Cả hai API đều tồn tại thật trong 1.28.2 (S1), nhưng thiết kế **cố ý không dùng**:
+
+- `Page.replace_image()` cần đối tượng `Page`, buộc phải theo dõi xref ↔ page và sẽ xử lý lặp
+  với ảnh dùng ở nhiều trang. Đi thẳng qua xref ở cấp `Document` đơn giản và ít trạng thái hơn.
+- `Document.extract_image()` trả về dict đã **giải mã sang một format ảnh** (`image` bytes +
+  `ext`). Muốn re-encode sang JPEG từ đó thì cần một thư viện ảnh (Pillow) để decode lại.
+  **Pillow KHÔNG có trong `.venv`** (đã kiểm tra: `ModuleNotFoundError: No module named 'PIL'`).
+
+=> **Dùng `pymupdf.Pixmap(doc, xref)` + `Pixmap.tobytes("jpeg", jpg_quality=85)`** — PyMuPDF
+tự encode JPEG, **không cần thêm dependency nào**. Đã verify chạy thật (S6).
+
+### S5. Vị trí gắn code, signature, data lineage (Protocol 6 — R6-01)
+
+**File**: `src/postprocess/image_compress.py` (module mới, cạnh `chunk_merge.py`).
+Không nhét vào `chunk_merge.py`: `merge_chunk_pdfs()` là code đã 2 lần dính bug trang
+(Bug #7, Bug #8) và đang có test golden bám sát; nén ảnh là mối quan tâm tách biệt, gộp vào sẽ
+làm bề mặt hồi quy của hàm ghép rộng ra vô cớ.
+
+**Signature** (async cho đồng nhất với `merge_chunk_pdfs`, dù thân hàm là CPU-bound thuần):
+
+```python
+async def compress_pdf_images(pdf_path: str | Path, *, jpeg_quality: int = 85) -> ImageCompressStats
+```
+
+`jpeg_quality` là **keyword-only, mặc định 85, KHÔNG đọc từ `Settings`/`.env`/UI**
+(BR-IMGCOMP-03). Tham số tồn tại chỉ để test tham số hoá được, không phải điểm cấu hình.
+
+`ImageCompressStats` — dataclass thuần để log/test, không ghi DB, không lên UI:
+`images_scanned: int`, `images_recompressed: int`, `images_skipped_already_compressed: int`,
+`images_skipped_larger: int`, `images_skipped_unsupported: int`,
+`size_before: int`, `size_after: int`.
+
+**Data lineage — tường minh (R6-01), đây là phần bắt buộc đọc kỹ:**
+
+| | |
+|---|---|
+| **Artifact vào** | `merged_path` — chính biến `merged_path` mà `run_job()` tạo ở Step 8 (`src/core/job_orchestrator.py:477`) và truyền cho `merge_chunk_pdfs(chunks, merged_path)` (`:479`). **KHÔNG** phải `job.file_path`, **KHÔNG** phải `chunk.output_path`. |
+| **Artifact ra** | **Ghi đè in-place chính `merged_path`** — không tạo file mới, không đổi tên. Lý do: `job.output_path = str(merged_path)` ở `:508`, và `create_bilingual_pdf(merged_path, …)` ở Step 9 đều đang trỏ vào đúng path này. Sinh file mới sẽ tạo ra đúng loại lỗ hổng Bug #5 (bước sau vẫn dùng file cũ chưa nén, "thành công" nhưng sai artifact). |
+| **Ai gọi** | `JobOrchestrator.run_job()`, **trong cùng khối `try` của Step 8**, **sau** `merge_chunk_pdfs(...)` và **sau** guard rỗng-chữ BR-OCR-03, **trước** `job.output_path = str(merged_path)` (`:508`). |
+| **Điều kiện gọi** | `if self._settings.pdf_translate_engine == "babeldoc":` (BR-IMGCOMP-01, `src/core/config.py:135`). Nhánh `pdf2zh` **không gọi**, không đổi một dòng hành vi nào. |
+
+**Thứ tự bắt buộc — đặt SAU guard BR-OCR-03, không phải trước.** Guard đó (`job_orchestrator.py:481-491`)
+đọc `page.get_text()` để bắt job dịch ra file rỗng chữ. Nếu nén chạy trước guard, một lỗi trong
+bước nén sẽ làm job `failed` với thông báo "bản dịch không chứa chữ nào" — chẩn đoán sai hoàn
+toàn nguyên nhân. Nén sau guard thì lỗi nén báo đúng là lỗi nén.
+
+**Ghi đè in-place: PyMuPDF KHÔNG cho save đè file đang mở.** Đã verify bằng cách chạy thật:
+
+```
+ValueError: save to original must be incremental
+```
+
+=> Dev **phải** ghi ra file tạm cùng thư mục rồi `os.replace()`:
+`doc.save(tmp, garbage=4, deflate=True)` → `doc.close()` → `os.replace(tmp, pdf_path)`.
+`os.replace` là atomic trong cùng filesystem — nếu tiến trình chết giữa chừng, `merged_path`
+vẫn là bản chưa nén hợp lệ, không bao giờ là file cụt.
+
+### S6. Thuật toán (spec cho Dev — KHÔNG phải code để copy)
+
+1. Mở `pdf_path`. Ghi lại `size_before`.
+2. Duyệt `for pno in range(doc.page_count)` → `doc.get_page_images(pno, full=True)`.
+   Gom **xref duy nhất** vào một `set` trước — ảnh dùng ở nhiều trang chỉ được xử lý **một lần**
+   (trong file thật có xref xuất hiện tới 10 lần; nén lại nhiều lần vừa lãng phí vừa gây
+   generation loss chồng nhau).
+3. Với mỗi xref, **bỏ qua** nếu `doc.xref_get_key(xref, "Filter")[0] != "null"` — tức mọi ảnh đã
+   có filter (`DCTDecode`, `CCITTFaxDecode`, `JPXDecode`, `FlateDecode`, `JBIG2Decode`…) đều giữ
+   nguyên. Đây chính là BR-IMGCOMP-02 "không nén chồng JPEG".
+4. **Guard các trường hợp không được đụng vào** (chưa xuất hiện trong dữ liệu hiện có, nhưng
+   bắt buộc phải có — đếm vào `images_skipped_unsupported`):
+   - `doc.xref_get_key(xref, "ImageMask")[1] == "true"` → **bỏ qua**. Stencil mask là ảnh 1-bit
+     dùng làm khuôn tô màu; biến thành JPEG 8-bit sẽ hỏng cách vẽ.
+   - `info[1] != 0` (có `/SMask`, tức có kênh alpha) → **bỏ qua**. JPEG không mang được alpha.
+     Có thể xử lý bằng cách tách alpha ra giữ riêng, nhưng đó là độ phức tạp không có dữ liệu
+     nào hiện tại biện minh (đo được: 0/357 ảnh có SMask).
+5. Tạo `pix = pymupdf.Pixmap(doc, xref)`. Nếu `pix.alpha` → `pix = pymupdf.Pixmap(pix, 0)`
+   (bỏ kênh alpha) — lưới an toàn thứ hai cho bước 4.
+6. `jb = pix.tobytes("jpeg", jpg_quality=jpeg_quality)`.
+7. **Guard nở file**: nếu `len(jb) >= len(doc.xref_stream_raw(xref))` → **bỏ qua**, đếm vào
+   `images_skipped_larger`. Ảnh rất nhỏ hoặc nhiễu cao có thể to ra sau khi encode JPEG.
+8. Ghi đè:
+   - `doc.update_stream(xref, jb, new=1, compress=0)` — **`compress=0` là bắt buộc**: JPEG đã nén
+     rồi, để `compress=1` (mặc định!) sẽ bọc thêm một lớp Flate vô ích lên trên.
+   - `doc.xref_set_key(xref, "Filter", "/DCTDecode")`
+   - `doc.xref_set_key(xref, "BitsPerComponent", "8")`
+   - `doc.xref_set_key(xref, "ColorSpace", …)` theo `pix.n`: `4 → /DeviceCMYK`,
+     `3 → /DeviceRGB`, còn lại `→ /DeviceGray`.
+   - `doc.xref_set_key(xref, "Width", str(pix.width))`, `"Height", str(pix.height)`.
+
+   ⚠️ Ghi `/ColorSpace` là **bắt buộc, không được bỏ**: 357/357 ảnh thật đang là `ICCBased`.
+   Stream mới là JPEG thường, ICC profile cũ không còn khớp — để nguyên key cũ thì màu sai.
+9. `doc.save(tmp, garbage=4, deflate=True)` → `close()` → `os.replace(tmp, pdf_path)` (S5).
+
+**Về `/DeviceCMYK` và hiện tượng đảo màu**: `Pixmap.tobytes("jpeg")` trên ảnh CMYK sinh JPEG có
+marker Adobe APP14 (đã quan sát: byte đầu `ff d8 ff ee`), thường đi kèm quy ước CMYK **đảo**.
+Đây là rủi ro thật và đã được **kiểm chứng bằng pixel**, không chỉ bằng "file mở được" — xem S7.
+
+**Xử lý lỗi**: bọc phần xử lý **từng xref** trong `try/except` — một ảnh dị dạng chỉ nên bị bỏ
+qua (log `warning`, tăng `images_skipped_unsupported`), **không được làm hỏng cả job** ở bước
+gần cuối pipeline khi tiền dịch đã tiêu. Ngược lại, lỗi ở bước `save`/`os.replace` **phải** raise
+lên — lúc đó file đích không còn tin được nữa.
+
+### S7. Kết quả verify chạy thật — end-to-end trên file production 846.79 MB
+
+Không phải mock, không phải ước lượng: chạy đúng thuật toán S6 trên bản copy của file thật.
+
+| Chỉ số | Trước | Sau |
+|---|---|---|
+| Kích thước | 846.79 MB | **19.34 MB (−97.7%)** |
+| Số trang | 415 | **415** |
+| Tổng ký tự text | 1,160,121 | **1,160,121 — giống hệt từng trang** |
+| Ảnh re-encode | — | 357/357 raw, 0 lỗi, 0 bị guard nở file |
+| Render toàn bộ trang | — | **all pages render OK** |
+| Thời gian chạy | — | **~30 giây** (415 trang) |
+
+**Kiểm chứng thị giác bằng pixel** (chống đúng cái bẫy "tin vào status" của Bug #5 / R6-03):
+render trước-sau ở 25 trang mẫu và so sánh từng pixel.
+
+```
+worst pages by mean abs pixel diff: [(0.08, 0), (0.02, 68), (0.02, 102), (0.02, 51), ...]
+mean over sampled pages: 0.009  / 255
+```
+
+Sai khác trung bình **0.009/255** — mất mát thị giác không đáng kể. Trang bìa (trang 0, chứa
+ảnh CMYK 5.4 MB) đã được render ra PNG và **xem tận mắt**: màu đúng, **không bị đảo màu CMYK**.
+
+Chạy thêm trên fixture nhỏ `tests/fixtures/babeldoc/job3594a7a3_chunk0_sample_mono.pdf`:
+7.42 MB → 0.61 MB (−91.8%), 5/5 trang, text giống hệt, 1 ảnh raw 5,435,752 → 52,245 bytes.
+
+### S8. Phát hiện phụ — `merge_chunk_pdfs()` đang save KHÔNG nén (cần PM quyết định)
+
+Đo tách riêng hai tác nhân, phát hiện ngoài dự kiến ban đầu:
+
+| Xử lý | Kích thước |
+|---|---|
+| Hiện tại | 846.79 MB |
+| **Chỉ** `save(garbage=4, deflate=True)`, không đụng gì tới ảnh | **44.93 MB (−94.7%)** |
+| Thêm re-encode JPEG q85 (thiết kế S6 đầy đủ) | **19.34 MB (−97.7%)** |
+
+Nguyên nhân: `chunk_merge.py:131` đang gọi `output_doc.save(output_path)` **trần** — mặc định
+của PyMuPDF là `deflate=False`, `garbage=0`, nên mọi stream (kể cả bitmap thô 691 MB) được ghi
+ra **hoàn toàn không nén**. Phần lớn con số 846 MB đến từ đây chứ không riêng từ việc ảnh chưa
+phải JPEG.
+
+Nghĩa là: **phần lớn thắng lợi (−94.7%) đến từ một sửa đổi một dòng**, và JPEG re-encode đóng
+góp thêm 57% trên phần còn lại (44.93 → 19.34 MB). Cả hai đều đáng làm; thiết kế S6 đã bao gồm
+`garbage=4, deflate=True` trong bước save của nó, nên **job `babeldoc` hưởng cả hai mà không
+cần đụng vào `chunk_merge.py`**.
+
+**Điểm cần PM/user quyết định** — job dùng engine `pdf2zh` hiện cũng đang chịu đúng vấn đề save
+không nén này, nhưng BR-IMGCOMP-01 nói rõ "job dùng `pdf2zh` không đổi hành vi". Hai lựa chọn:
+
+- **(A) Giữ nguyên scope PRD** (khuyến nghị mặc định): chỉ nhánh `babeldoc` được nén; không đụng
+  `chunk_merge.py`. Rủi ro hồi quy bằng 0 với đường `pdf2zh` và với các test golden Bug #7/#8.
+- **(B) Mở rộng nhẹ**: đổi `chunk_merge.py:131` thành `save(output_path, garbage=4, deflate=True)`
+  cho **cả hai** engine. Job `pdf2zh` cũng nhỏ đi rõ rệt, nhưng đây là thay đổi hành vi nằm
+  ngoài US-16, chạm vào file đã 2 lần dính bug — cần user duyệt như một thay đổi có chủ đích,
+  và cần chạy lại toàn bộ test golden của `chunk_merge`.
+
+Tech Lead **không tự quyết** cái này vì nó mâu thuẫn trực tiếp với một business rule đã chốt.
+Mặc định giao Dev là **(A)**, trừ khi PM/user chọn (B).
+
+### S9. Yêu cầu test kèm implementation (Protocol 6 R6-02 + R6-03)
+
+1. **Test data lineage (R6-02) — không chấp nhận `assert_awaited()` trần.** Phải khẳng định
+   được giá trị cụ thể đi giữa hai bước:
+
+   ```
+   compress_pdf_images.assert_called_with(merged_path, ...)   # đúng cái merge vừa ghi ra
+   ```
+
+   với `merged_path` là chính path đã truyền cho `merge_chunk_pdfs` trong cùng test — đây đúng
+   là dạng ràng buộc mà Bug #5 đã thiếu. Test riêng cho nhánh `pdf2zh`: khẳng định
+   `compress_pdf_images` **không** được gọi (BR-IMGCOMP-01).
+2. **Test thứ tự**: khẳng định nén chạy **sau** guard BR-OCR-03 — một job có output rỗng chữ
+   phải `failed` với thông báo của guard, không phải thông báo lỗi nén.
+3. **Test nội dung, không chỉ status (R6-03)**: chạy `compress_pdf_images` thật trên fixture
+   `tests/fixtures/babeldoc/job3594a7a3_chunk0_sample_mono.pdf` (đã có sẵn, 5 trang, 1 ảnh raw
+   5.4 MB) và khẳng định: `page_count` không đổi (5), **text từng trang giống hệt trước/sau**,
+   file sau nhỏ hơn, và **mọi image xref đều có `Filter != null`** sau khi chạy. Đây là test
+   bắt được đúng lớp lỗi mà "job status = completed" không bao giờ bắt được.
+4. **Test guard**: ảnh `DCTDecode` sẵn có phải giữ **nguyên byte** stream sau khi chạy (chống
+   nén chồng — dùng luôn 3 ảnh DCTDecode có sẵn trong chính fixture đó).
+5. **Không cần golden file mới**: các fixture cần thiết đã tồn tại và đã có xuất xứ ghi trong
+   `tests/fixtures/babeldoc/README.md`.
+
+### S10. Trạng thái verify
+
+| Hạng mục | Trạng thái |
+|---|---|
+| Version + signature PyMuPDF | ✅ Verified — chạy thật, output ở S1 |
+| Thứ tự tuple `get_page_images(full=True)` | ✅ Verified trên 538 xref thật |
+| Đọc `Filter`, phát hiện ảnh raw | ✅ Verified — khớp 538/538 qua 2 cách độc lập |
+| Encode JPEG q85 không cần Pillow | ✅ Verified |
+| Ghi đè stream + đổi `/Filter`,`/ColorSpace` | ✅ Verified end-to-end, 357 ảnh |
+| Bảo toàn text/số trang | ✅ Verified — 1,160,121 ký tự giống hệt, 415/415 trang |
+| Bảo toàn màu (CMYK không đảo) | ✅ Verified bằng pixel-diff + xem ảnh render thật |
+| Không save đè được file đang mở | ✅ Verified — `ValueError` thật ở S5 |
+| Số liệu dedupe | ✅ Verified trên job production, **không đạt 20% → loại khỏi scope** |
+| Hành vi với ảnh có `/SMask` hoặc `/ImageMask` | ⚠️ **`[UNVERIFIED]`** — không có mẫu nào trong dữ liệu hiện có (0/357). Thiết kế **bỏ qua** các ảnh này (S6 bước 4), tức nhánh code an toàn theo mặc định; nhưng chính đường `skip` đó chưa từng chạy trên dữ liệu thật. Không chặn Dev implement (hành vi mong đợi là "không làm gì"). |
+| Lựa chọn (A)/(B) ở S8 | ⏸ **Chờ PM/user quyết định** — không chặn phần còn lại của US-16 |
+

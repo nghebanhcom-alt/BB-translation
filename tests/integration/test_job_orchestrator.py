@@ -13,6 +13,7 @@ from src.core.config import Settings
 from src.core.job_orchestrator import JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
+from src.postprocess.image_compress import ImageCompressStats
 from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
 from src.services.mineru_runner import (
     MinerUResult,
@@ -548,6 +549,95 @@ async def test_babeldoc_engine_writes_babeldoc_prompt_contract_not_pdf2zh(
 
 
 @pytest.mark.asyncio
+async def test_babeldoc_split_short_lines_defaults_to_enabled_with_babeldoc_factor(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Architecture.md "Root Cause Analysis: Line-break/List Regression" +
+    "Đo lại F1 trên nhiều trang — kết quả live A/B/C" (2026-09-06): `Settings`
+    default flipped TWICE based on 2 real measurements — first to
+    `False`/`0.5` (1-page spike suggested RC-1 harm was broad), then to
+    `True`/`0.8` (a 21-run/7-page live A/B/C study found the OPPOSITE:
+    `factor=0.5` was the WORST of the 3 configurations measured — it kept
+    almost all of `False`'s list-merging harm while still paying nearly the
+    full RC-1 cost; `factor=0.8`, babeldoc's OWN built-in default, fixed
+    numbered lists/TOC far more (e.g. the 35-item list page: 28 glued spots
+    -> 3) while RC-1's real damage turned out to be narrow — limited to a
+    handful of table/image captions, never ordinary body text, across all 7
+    pages tested). This asserts the CURRENT correct production default is
+    ENABLED with `factor=0.8` — asserting the actual kwargs `JobOrchestrator`
+    passes to the real call (Protocol 6 R6-02), not just that the runner was
+    awaited."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    settings = Settings(pdf_translate_engine="babeldoc")
+    # Default, sanity check — these are the values Architecture.md's live
+    # A/B/C study recommends, NOT the safer-looking `False`/`0.5` shipped
+    # in the first round (measured to be the worst of 3 configurations).
+    assert settings.babeldoc_split_short_lines is True
+    assert settings.babeldoc_short_line_split_factor == 0.8
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert babeldoc_runner.translate_pages.await_args_list
+    for call in babeldoc_runner.translate_pages.await_args_list:
+        assert call.kwargs["split_short_lines"] is True
+        assert call.kwargs["short_line_split_factor"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_babeldoc_split_short_lines_can_be_opted_out_via_settings(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Same lineage guard as above, opposite direction: an operator who
+    explicitly sets `Settings.babeldoc_split_short_lines=False` (e.g. for a
+    document type where the narrow RC-1 caption-cutting cost matters more
+    than the list-merging benefit) must have that override actually reach
+    `BabeldocRunner.translate_pages()` — asserting the concrete kwargs
+    value, not merely that the setting field exists on `Settings`. When
+    disabled, `short_line_split_factor` must be `None` (has no effect on its
+    own per babeldoc's own `and` condition, `paragraph_finder.py:891`) even
+    if a non-default factor happens to be configured alongside it."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    settings = Settings(
+        pdf_translate_engine="babeldoc",
+        babeldoc_split_short_lines=False,
+        babeldoc_short_line_split_factor=0.5,
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert babeldoc_runner.translate_pages.await_args_list
+    for call in babeldoc_runner.translate_pages.await_args_list:
+        assert call.kwargs["split_short_lines"] is False
+        assert call.kwargs["short_line_split_factor"] is None
+
+
+@pytest.mark.asyncio
 async def test_pdf_scan_babeldoc_engine_translates_bridge_not_original(
     session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -759,3 +849,124 @@ def test_pdf2zh_service_mapper_rejects_deepl_directly() -> None:
     mapper = Pdf2zhServiceMapper()
     with pytest.raises(UnsupportedForPdfPipelineError):
         mapper.map("deepl", Settings())
+
+
+@pytest.mark.asyncio
+async def test_babeldoc_engine_compresses_merged_output_with_correct_lineage(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """US-16/BR-IMGCOMP-01 + Protocol 6 R6-02: a bare `assert_awaited()` would
+    have missed Bug #5's exact failure class (right call, wrong/no data
+    lineage). This asserts `compress_pdf_images` is called with the SAME path
+    `merge_chunk_pdfs()` just wrote — `merged_path`, which becomes
+    `result.output_path` — never `job.file_path` (the pre-merge source) or
+    any other stand-in (Architecture.md US-16 S5 lineage table)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    settings = Settings(pdf_translate_engine="babeldoc")
+
+    compress_spy = mocker.patch(
+        "src.core.job_orchestrator.compress_pdf_images",
+        new=AsyncMock(return_value=ImageCompressStats()),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    compress_spy.assert_awaited_once()
+    called_path = compress_spy.await_args.args[0]
+    assert Path(called_path) == Path(result.output_path)
+    assert Path(called_path) != Path(job.file_path)
+
+
+@pytest.mark.asyncio
+async def test_pdf2zh_engine_does_not_compress_images(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """BR-IMGCOMP-01: `pdf2zh` jobs must not change behavior at all — image
+    compression is gated strictly to `pdf_translate_engine == "babeldoc"`."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    compress_spy = mocker.patch(
+        "src.core.job_orchestrator.compress_pdf_images",
+        new=AsyncMock(return_value=ImageCompressStats()),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    compress_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_translation_fails_before_compress_runs(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """Architecture.md US-16 S5: compression must run AFTER the BR-OCR-03
+    empty-text guard, so a compression bug never gets misdiagnosed as "no
+    text found" and vice versa. A job whose merged output has zero readable
+    characters must fail with the BR-OCR-03 message, and `compress_pdf_images`
+    must never be reached for it — even with `pdf_translate_engine=babeldoc`."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 5)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    compress_spy = mocker.patch(
+        "src.core.job_orchestrator.compress_pdf_images",
+        new=AsyncMock(return_value=ImageCompressStats()),
+    )
+
+    babeldoc_runner = AsyncMock(spec=BabeldocRunner)
+
+    async def _translate_pages_empty(
+        input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
+    ):
+        with fitz.open(input_path) as source_doc:
+            total_pages = source_doc.page_count
+        mono_path = output_dir / f"{input_path.stem}.no_watermark.{lang_out}.mono.pdf"
+        mono_path.parent.mkdir(parents=True, exist_ok=True)
+        doc = fitz.open()
+        for _ in range(total_pages):
+            doc.new_page()  # no text inserted -> BR-OCR-03 guard trips
+        doc.save(mono_path)
+        doc.close()
+        return BabeldocResult(
+            success=True, mono_path=mono_path, dual_path=None, stderr="", duration_seconds=0.01
+        )
+
+    babeldoc_runner.translate_pages.side_effect = _translate_pages_empty
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "failed"
+    assert "khong chua chu nao" in result.error_message
+    compress_spy.assert_not_awaited()

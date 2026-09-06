@@ -12,6 +12,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -39,6 +40,7 @@ class UploadResponse(BaseModel):
     file_type: str
     size_bytes: int
     page_count: int | None = None
+    uploaded_at: str | None = None
 
 
 @dataclass
@@ -50,6 +52,12 @@ class UploadMetadata:
     size_bytes: int
     file_hash: str
     page_count: int | None
+    # US moi (2026-09-06): sap xep "file da upload" moi nhat len dau + hien
+    # thi gio upload o UI. ISO 8601 string (khong phai datetime) de tuong
+    # thich JSON sidecar hien co. Default "" (khong phai None/thieu field)
+    # de doc duoc sidecar CU tao TRUOC khi truong nay ton tai — UploadMetadata(**data)
+    # se loi TypeError neu field bat buoc khong co default va sidecar cu thieu key nay.
+    uploaded_at: str = ""
 
 
 class UploadNotFoundError(ValueError):
@@ -131,6 +139,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
                 detail="File PDF bi hong hoac khong doc duoc, vui long kiem tra lai file",
             ) from exc
 
+    uploaded_at = datetime.now(UTC).isoformat()
     metadata = UploadMetadata(
         file_id=file_id,
         filename=file.filename,
@@ -139,6 +148,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
         size_bytes=size_bytes,
         file_hash=hasher.hexdigest(),
         page_count=page_count,
+        uploaded_at=uploaded_at,
     )
     _metadata_path(file_id).write_text(
         json.dumps(metadata.__dict__, ensure_ascii=False), encoding="utf-8"
@@ -150,6 +160,7 @@ async def upload_file(file: UploadFile) -> UploadResponse:
         file_type=file_type.value,
         size_bytes=size_bytes,
         page_count=page_count,
+        uploaded_at=uploaded_at,
     )
 
 

@@ -134,6 +134,43 @@ class Settings(BaseSettings):
     # lam tu UI, va rollback phai la 1 thao tac co chu dich (sua .env + restart).
     pdf_translate_engine: Literal["pdf2zh", "babeldoc"] = "babeldoc"
     babeldoc_executable: str = "babeldoc"
+    # Architecture.md "Root Cause Analysis: Line-break/List Regression" (F1/F2,
+    # 2026-09-06) + "Đo lại F1 trên nhiều trang — kết quả live A/B/C"
+    # (2026-09-06, Tech Lech, 21 lan chay babeldoc+DeepSeek that qua dung
+    # production code path, 7 trang x 3 cau hinh). `--split-short-lines`
+    # KHONG con hardcode trong `BabeldocRunner.translate_pages()` — gio la 1
+    # cap setting co the bat/tat + chinh factor.
+    #
+    # LICH SU QUYET DINH (2 lan doi, DUNG ca 2 lan deu dua tren do luong that,
+    # khong doan — doc de hieu TAI SAO, dung xoa):
+    # 1. F1/F2 lan dau (1 trang, 1 lan chay): tuong RC-1 (heuristic hinh hoc
+    #    cua flag nay) gay hai LAN RONG cho doan van thuong tren ca trang ->
+    #    chon mac dinh TAT (`False`/`0.5`) de an toan.
+    # 2. Do lai tren 7 trang x 3 cau hinh (21 lan chay that, xem Architecture.md
+    #    section "Đo lại F1 trên nhiều trang"): ket luan (1) SAI — KHONG mot
+    #    doan van xuoi nao trong toan bo 7 trang bi tach vun o bat ky cau hinh
+    #    nao; tac hai RC-1 that chi gioi han o caption bang/anh (2/7 trang, muc
+    #    do nhe). Nguoc lai, BAT flag voi factor DUNG BANG default goc cua
+    #    babeldoc (`0.8`) xu ly list/muc luc tot hon RO RET (vd trang list 35
+    #    muc: 28 cho dinh chu -> con 3; trang muc luc: 7 loi dinh chu -> 0).
+    #    factor `0.5` (cau hinh da ship o lan 1) la CAU HINH TE NHAT trong 3 —
+    #    no giu gan het tac hai cua `False` (van dinh chu) MA van phai tra gan
+    #    du gia RC-1 (van cat caption y het `0.8`) — ha factor de "giam
+    #    false-positive" ho ra chu yeu giam TRUE-positive, chua tung do truoc
+    #    khi chon o lan 1.
+    #
+    # -> Doi mac dinh production sang BAT + factor bang chinh default cua
+    # babeldoc. `.env`-only nhu `pdf_translate_engine` o tren: day van la
+    # gia tri co the rollback/tuy chinh co chu dich cho tung loai tai lieu,
+    # khong phai thao tac UI thuong ngay.
+    babeldoc_split_short_lines: bool = True
+    # Chi co tac dung khi `babeldoc_split_short_lines=True`
+    # (`paragraph_finder.py:891` dung ca 2 gia tri trong cung 1 dieu kien
+    # `and`). Mac dinh BANG DUNG default goc cua babeldoc (VERIFIED
+    # `babeldoc/main.py:184-189`) — do that (xem comment tren) cho thay day la
+    # cau hinh TOT NHAT trong 3 da do, khong phai `0.5` (da ship truoc, do
+    # SAI vi chua do truoc khi chon).
+    babeldoc_short_line_split_factor: float = 0.8
 
 
 @lru_cache

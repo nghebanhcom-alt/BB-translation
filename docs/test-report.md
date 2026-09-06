@@ -1338,3 +1338,199 @@ thay đổi trải nghiệm người dùng rất lớn, nên là quyết định
 không phải quyết định kỹ thuật thuần tuý của QA. Đề xuất Tech Lead + người dùng cân nhắc thêm ít
 nhất 1-2 lần chạy trên file dài hơn (65+ trang, có sẵn `qa_aimd_65pages.pdf`) trước khi quyết
 định đổi default.
+
+---
+---
+
+# QA — US-16 (Nén ảnh sau khi ghép, `compress_pdf_images`) — 2026-09-06
+
+**QA**: QA (Sonnet). **Phạm vi**: `src/postprocess/image_compress.py`, wiring
+`src/core/job_orchestrator.py` Step 8, `tests/test_image_compress.py`,
+`tests/integration/test_job_orchestrator.py`. Dev đã implement, Reviewer đã APPROVE (xem
+`docs/review-report.md`, section "US-16 — Nén ảnh sau khi ghép ... Review (2026-09-06, vòng
+1)"). QA không tin suông báo cáo Dev/Reviewer — tự chạy lại toàn bộ test suite độc lập và tự
+làm live verification thật (R5-03/R6-03) trên file production thật, không mock.
+
+## 1. Chạy lại toàn bộ test suite (độc lập, không tin số cũ)
+
+```
+.venv/bin/python -m pytest tests/ -q
+→ 307 passed, 408 warnings in 14.35s
+```
+
+Khớp đúng con số Dev/Reviewer đã báo (307). Các warning là `RuntimeError: Event loop is closed`
+từ teardown thread `aiosqlite` sau khi test xong (benign, không liên quan US-16, không phải lỗi
+mới — không chặn).
+
+```
+.venv/bin/python -m pytest tests/integration/test_job_orchestrator.py -k "compress or babeldoc or pdf2zh_engine" -v
+→ 7 passed (test_babeldoc_engine_compresses_merged_output_with_correct_lineage,
+  test_pdf2zh_engine_does_not_compress_images, test_empty_translation_fails_before_compress_runs,
+  + 4 test babeldoc khác không liên quan trực tiếp US-16 nhưng cùng khu vực code)
+```
+
+## 2. R5-03 / R6-03 — Live verification thật trên file production (KHÔNG mock)
+
+File thật vẫn còn: `data/outputs/3594a7a3-8b72-4390-9d9b-159769a2a215/translated_vi.pdf`
+(846,787,223 bytes = 846.79 MB decimal, 415 trang, MD5 `0ee5ab738f7715fc2665f71ffc2fdd11`).
+
+**Quy trình**: copy file gốc ra scratchpad (KHÔNG đụng file gốc), xác nhận MD5 khớp 100% sau
+copy, rồi gọi trực tiếp `compress_pdf_images()` thật (import thẳng từ
+`src/postprocess/image_compress.py`, không qua mock nào) lên bản copy. Sau khi test xong, đã
+`md5` lại file gốc tại `data/outputs/...` — **khớp y hệt MD5 ban đầu**, xác nhận file production
+không hề bị đụng vào trong lúc QA test.
+
+### 2.1. Dung lượng, số trang
+
+| Chỉ số | Trước | Sau |
+|---|---|---|
+| Kích thước | 846,787,223 bytes (846.79 MB decimal / 807.56 MiB) | 19,335,585 bytes (**19.34 MB decimal / 18.44 MiB, −97.7%**) |
+| Số trang | 415 | **415** (khớp) |
+| Ảnh xref quét | 538 | 538 |
+| Ảnh re-encode JPEG | — | 357 (khớp đúng số `Filter: null` đo trước) |
+| Ảnh skip (đã compressed) | — | 181 (156 DCTDecode + 25 CCITTFaxDecode) |
+| Ảnh skip (lớn hơn/unsupported) | — | 0 / 0 |
+| Filter còn lại sau khi chạy | `null`: 357, `/DCTDecode`: 156, `/CCITTFaxDecode`: 25 | `null`: 0, `/DCTDecode`: 454, `/CCITTFaxDecode`: 6 (xref count giảm 538→460 do `garbage=4` gộp object trùng lặp — hành vi chuẩn của PyMuPDF save, không phải dedupe tự viết, khớp đúng thiết kế S6 bước 9) |
+
+Số liệu **khớp gần như tuyệt đối** với Architecture.md S7 (846.79MB → 19.34MB decimal) — chênh
+lệch duy nhất là đơn vị hiển thị (Architecture.md dùng MB=10^6 byte, script QA có lúc in thêm
+MiB=2^20 byte cho cùng 1 số byte — không phải sai lệch số liệu, cùng 19,335,585 bytes).
+
+**PASS** — đúng AC US-16 dòng 1 ("dung lượng giảm rõ rệt"), đúng BR-IMGCOMP-02 (DCTDecode giữ
+nguyên, không nén chồng). Xref count sau khi chạy giảm 538 → 460 (454 DCTDecode + 6
+CCITTFaxDecode) — chênh lệch 78 xref không phải do code US-16 tự dedupe (đã grep xác nhận không
+có), mà do `doc.save(..., garbage=4, ...)` (bước bắt buộc theo thiết kế S6/S9) tự gộp các object
+PDF trùng lặp khi ghi file — con số 78 khớp đúng "78 redundant xrefs" mà Architecture.md S3 đã
+đo được khi khảo sát dedupe trên toàn bộ 538 ảnh (bao gồm cả DCTDecode/CCITT), nên đây là hệ quả
+đã biết trước của `garbage=4`, không phải sai lệch hay tính năng dedupe ẩn.
+
+### 2.2. Text content — so sánh từng trang (chống Bug #5 kiểu silent failure)
+
+Extract text bằng PyMuPDF (`page.get_text()`) cho cả 415 trang, TRƯỚC và SAU khi nén, so sánh
+từng trang một (không chỉ tổng ký tự):
+
+```
+total_chars_before = 1,160,121
+total_chars_after  = 1,160,121
+pages_with_text_diff = 0  (0/415 trang có sai khác dù chỉ 1 ký tự)
+```
+
+**PASS** — không chỉ tin "status completed"/tổng số ký tự bằng nhau (có thể trùng hợp), mà đã
+so khớp **string y hệt từng trang một** (415 phép so sánh `str == str`), đúng tinh thần R6-03.
+
+### 2.3. Kiểm tra ảnh còn hiển thị được, không corrupt (không chỉ tin "file mở được")
+
+Render bằng PyMuPDF (`page.get_pixmap(dpi=100)`) ở 11 trang mẫu rải đều toàn tài liệu (0, 1, 50,
+100, 150, 200, 250, 300, 350, 400, 414 — bao gồm trang bìa có ảnh CMYK theo cảnh báo Architecture.md
+S6 về nguy cơ đảo màu), so sánh pixel sample trước/sau:
+
+```
+page 0:   mean_abs_diff = 0.0398 / 255   (trang bìa, ảnh CMYK)
+page 1:   mean_abs_diff = 0.0            (trang text thuần, không ảnh)
+page 50:  mean_abs_diff = 0.0100 / 255
+page 100–414 (còn lại): 0.0 – 0.0052 / 255
+```
+
+Đã tự mắt xem 2 file PNG render trang bìa (before/after) — **giống hệt nhau bằng mắt thường**,
+không có dấu hiệu đảo màu CMYK, không có vùng ảnh vỡ/nhiễu/thiếu. Đã xem thêm trang 50 (có
+khối ảnh minh hoạ + text tiếng Việt dấu đầy đủ) — ảnh hiển thị bình thường, không corrupt, dấu
+tiếng Việt (ứ, ạ, ố, ộ...) hiển thị đúng không lệch dòng.
+
+**PASS** — mức sai khác pixel (tối đa 0.04/255 trên mẫu) khớp đúng số liệu Tech Lead đã báo
+(mean 0.009/255 trên 25 trang), là mất mát nén JPEG q85 bình thường, không phải corrupt.
+
+## 3. Kiểm tra gate `pdf_translate_engine` (đọc code thật, không tin lại lời Reviewer)
+
+Đọc trực tiếp `src/core/job_orchestrator.py`:
+
+```
+:498  if self._settings.pdf_translate_engine == "babeldoc":
+:499      await compress_pdf_images(merged_path)
+```
+
+Đây là **lời gọi `compress_pdf_images` duy nhất** trong toàn bộ file (`grep -n
+"compress_pdf_images" src/core/job_orchestrator.py` → chỉ 2 dòng: import ở `:52` và lời gọi
+`:499`, cùng nằm trong khối `if` `:498`). Không có nhánh `pdf2zh` nào gọi tới hàm này —
+**xác nhận PASS BR-IMGCOMP-01**, không chỉ tin lại lời Reviewer.
+
+Chạy test riêng `test_pdf2zh_engine_does_not_compress_images` → PASS, xác nhận bằng spy/mock
+`compress_pdf_images` không được await khi engine = pdf2zh.
+
+## 4. Đánh giá lại 2 issue non-blocking Reviewer đã nêu
+
+### 4.1. Rò file tạm `.tmp.pdf` khi `doc.save()` lỗi giữa chừng
+
+Đọc `src/postprocess/image_compress.py:132-146`: nếu `doc.save(tmp_path, ...)` raise, khối
+`finally` chỉ `doc.close()`, không `tmp_path.unlink()`. Khối `except Exception` ngoài cùng
+(`:143-146`) chỉ đóng `doc` (guard `is_closed`) rồi `raise` lại, cũng không xoá `tmp_path`.
+
+**Đánh giá độc lập của QA**: xác nhận đây đúng là **non-blocking**, không phải bị đánh giá thấp
+mức độ nghiêm trọng — lý do:
+- `os.replace(tmp_path, pdf_path)` chỉ chạy ở dòng cuối cùng, SAU khi `doc.save()` thành công.
+  Nếu `save()` raise, `os.replace` không bao giờ chạy → `merged_path` (file gốc job đang dùng)
+  **không hề bị đụng vào, không mất dữ liệu, không hỏng file** — job vẫn `failed` đúng với file
+  output cũ (chưa nén nhưng nguyên vẹn) còn nguyên trên đĩa.
+- Hậu quả duy nhất là rác đĩa tích luỹ (1 file `.tmp.pdf` cỡ gần bằng file gốc mỗi lần retry gặp
+  lỗi giữa chừng — ví dụ hết dung lượng đĩa) — ảnh hưởng vận hành lâu dài (đầy đĩa), không ảnh
+  hưởng correctness của bất kỳ job nào.
+
+**Kết luận**: đồng ý với Reviewer — non-blocking, nên fix ở lần sửa `image_compress.py` tiếp
+theo (thêm `try/except`/`tmp_path.unlink(missing_ok=True)` quanh nhánh lỗi `save`), nhưng không
+chặn release US-16.
+
+### 4.2. Filter dạng array (`[/ASCII85Decode /DCTDecode]`) chưa được cân nhắc tường minh
+
+Đọc `image_compress.py:81-84`: điều kiện skip là `filter_type != "null"` — bất kỳ giá trị nào
+khác chuỗi `"null"` (kể cả 1 mảng nhiều filter, PyMuPDF sẽ trả `type` khác `"null"` cho case
+này) đều bị skip an toàn trước khi chạm tới bước Pixmap/encode.
+
+**Đánh giá độc lập của QA**: xác nhận **non-blocking** — hành vi mặc định (skip) là an toàn
+đúng hướng dù chưa được thiết kế có chủ đích cho case cụ thể này; không có dữ liệu thật nào
+(0/538 xref trong file production) rơi vào case filter-array để kiểm chứng thêm, giống tinh
+thần `[UNVERIFIED]` đã tự khai ở Architecture.md S10 cho case SMask/ImageMask. Không chặn
+release.
+
+## 5. Đối chiếu Acceptance Criteria US-16 (PRD.md §3, §4.9) — từng dòng
+
+| # | Acceptance Criteria (PRD) | Kết quả |
+|---|---|---|
+| 1 | Job `babeldoc` + file merge có ảnh raw (`Filter: null`) → re-encode JPEG q85 trước khi ghi output cuối, dung lượng giảm rõ rệt | **PASS** — đo thật: 846.79MB → 19.34MB (−97.7%), xem mục 2.1 |
+| 2 | Job `pdf2zh` → KHÔNG áp dụng bước nén, hành vi merge giữ nguyên | **PASS** — xem mục 3 (gate đọc code thật) + test `test_pdf2zh_engine_does_not_compress_images` |
+| 3 | Ảnh đã `DCTDecode`/JPEG → giữ nguyên, không re-encode chồng | **PASS** — 156 xref DCTDecode trước khi chạy đều nằm trong 181 "images_skipped_already_compressed" sau khi chạy (156 DCTDecode + 25 CCITTFaxDecode), khớp; test riêng `test_compress_pdf_images_does_not_recompress_already_compressed_images` so byte stream, đã tự chạy lại PASS |
+| 4 | Nén xong → file vẫn mở được, số trang không đổi, nội dung/text không mất | **PASS** — 415/415 trang, 1,160,121/1,160,121 ký tự khớp từng trang, xem mục 2.2; ảnh render được, không corrupt, xem mục 2.3 |
+| 5 (điều kiện) | Nếu spike dedupe đạt ≥20% → gộp xref ảnh trùng lặp | **N/A — dedupe bị loại khỏi scope sau spike đo thật (Architecture.md S3), đúng theo BR-IMGCOMP-04.** Spike đo trên chính file production này cho kết quả 4.2% (so mẫu số đúng theo BR: dedupe/ảnh-đã-nén-JPEG) < ngưỡng 20% → không kích hoạt, Dev không implement — QA xác nhận `grep -rn "hashlib\|sha256\|dedupe" src/postprocess/image_compress.py` không có kết quả, khớp đúng quyết định đã ghi |
+
+**BR-IMGCOMP-03** (quality cố định 85, không lộ config/UI): đọc `image_compress.py:47-49`,
+`jpeg_quality: int = 85` là keyword-only, không đọc từ `Settings`/`.env`. Grep
+`jpeg_quality\|jpg_quality` trong `src/api/`, `src/models/settings.py`, `web/` → không có kết
+quả nào expose ra config/UI. **PASS**.
+
+## 6. Bug list
+
+Không có bug chặn release. 2 issue non-blocking đã xác nhận lại đúng mức độ (mục 4) — khuyến
+nghị Dev dọn ở lần sửa `image_compress.py` tiếp theo, không phải bug hiện tại.
+
+## 7. R5-03 gate — trạng thái verify
+
+External dependency của US-16 là **PyMuPDF** (thư viện Python import trực tiếp, không phải
+subprocess/HTTP service — theo CLAUDE.md project, PyMuPDF **không thuộc phạm vi bắt buộc** của
+Protocol 5, nhưng Architecture.md S1 và review-report.md đã tự nguyện verify signature thật).
+QA đã tự chạy `compress_pdf_images()` thật (không mock) trên file production thật — thoả điều
+kiện R5-03 (ít nhất 1 lần gọi thật) dù về mặt kỹ thuật US-16 không bắt buộc theo phạm vi áp
+dụng của Protocol 5. Không có phần nào của US-16 cần đánh dấu "release blocked pending live
+verification".
+
+## 8. KẾT LUẬN
+
+**ready_for_release: YES** cho US-16.
+
+Tất cả 4/4 acceptance criteria bắt buộc PASS (criterion thứ 5 là N/A theo đúng thiết kế điều
+kiện). Live verification thật (không mock) trên file production 415 trang khớp gần như tuyệt
+đối với số liệu Tech Lead đã đo (846.79MB → 19.34MB), text content khớp 100% từng trang (chống
+đúng lớp lỗi Bug #5), ảnh render được và không đảo màu CMYK. Gate `pdf_translate_engine ==
+"babeldoc"` xác nhận đúng vị trí, đúng chiều qua đọc code thật. 2 issue non-blocking của
+Reviewer đã được QA tự đánh giá lại độc lập và xác nhận đúng là non-blocking (không ảnh hưởng
+correctness, chỉ là rác đĩa tích luỹ trong 1 kịch bản lỗi hiếm + 1 edge case chưa có dữ liệu
+thật để kiểm chứng). File production gốc không bị đụng vào trong suốt quá trình QA test (MD5
+xác nhận khớp trước/sau).
+

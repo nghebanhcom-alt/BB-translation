@@ -243,10 +243,28 @@ _BABELDOC_CONCISENESS_RULE = (
     "muc nao chi de dat muc tieu do dai."
 )
 
+#: F4 (Architecture.md "Root Cause Analysis: Line-break/List Regression",
+#: RC-3, 2026-09-06): KHAC voi `_TYPOGRAPHY_RULES`/`_FILE_TYPOGRAPHY_RULES`
+#: o tren (noi LLM thay CA mot khoi list), babeldoc goi LLM dich TUNG
+#: PARAGRAPH DA TACH SAN boi `paragraph_finder.py` (VERIFIED nguon babeldoc
+#: 0.6.4 da cai, `il_translator_llm_only.py`) — 1 fragment co the chi la 1
+#: cau hoac 1 phan cua 1 muc list, khong phai ca khoi. Chi thi "bullet list
+#: phai dich thanh bullet list" o cac bien the khac, ap dung vao 1 fragment
+#: da bi cat roi, khien LLM co xu huong TU THEM lai bullet/newline vao
+#: fragment khong con ky tu bullet nao — va vi babeldoc chi `.strip()` 2 dau
+#: (KHONG loai newline noi bo, `il_translator_llm_only.py:718,987,998`),
+#: newline do LLM tu them song sot vao output. Bien the nay noi ro nguoc
+#: lai: dich DUNG MOT doan, KHONG tu chen newline, KHONG tu them
+#: bullet/so thu tu neu ban goc khong co san.
 _BABELDOC_TYPOGRAPHY_RULES = (
-    "Giu nguyen typography va cau truc tai lieu: font size/cap heading, bullet/numbered "
-    "list, bold/italic/underline, va indentation level cua nested list phai giu dung vi tri "
-    "va cap bac tuong ung ban goc."
+    "Giu nguyen typography (font size/cap heading, bold/italic/underline). LUU Y RIENG: "
+    "doan van ban nhan duoc la MOT fragment DON LE ma he thong da tu tach san — co the la "
+    "ca 1 cau, 1 muc trong danh sach, hoac chi MOT PHAN cua 1 muc (khong phai ca khoi danh "
+    "sach). Dich thanh DUNG MOT doan van lien tuc; TUYET DOI KHONG tu chen ky tu xuong dong "
+    "vao giua ban dich. Neu dau fragment goc DA CO SAN ky tu bullet/so thu tu (vd '•', '-', "
+    "'1.'), giu nguyen dung ky tu do o dau ban dich; neu KHONG co, TUYET DOI KHONG tu them "
+    "bullet/so thu tu moi — cau truc danh sach do he thong tu quan ly o buoc khac, khong "
+    "phai o day."
 )
 
 
