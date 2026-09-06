@@ -3370,3 +3370,25 @@ Architecture.md (`merge_chunk_pdfs()` cũng đang save không nén, ảnh hưở
 là (A) = không đụng `chunk_merge.py`/nhánh `pdf2zh`, nên Dev giữ nguyên, không tự chọn (B).
 Đây là code implement chưa qua Reviewer thật (Protocol 7 R7-01) — PM sẽ tự giao Reviewer
 riêng trước khi coi US-16 là "xong".
+
+**Reviewer** (`docs/review-report.md`, mục cuối): **APPROVE**. R6-04 trace tay xác nhận
+`compress_pdf_images(merged_path)` nhận đúng biến bắt nguồn từ `merge_chunk_pdfs()`, không
+phải `job.file_path`. R5-04: "External contract verified against real source: YES" (đối
+chiếu `jpg_quality`, `compress=0`, thứ tự tuple `get_page_images` với Architecture.md S1-S4).
+2 issue non-blocking: rò file tạm `.tmp.pdf` nếu `doc.save()` lỗi giữa chừng; filter dạng
+array chưa có dữ liệu thật để kiểm chứng.
+
+**QA** (`docs/test-report.md`, mục cuối): verify độc lập trên **bản copy** file production
+thật `data/outputs/3594a7a3-.../translated_vi.pdf` (846.79MB, 415 trang) — không đụng file
+gốc (MD5 khớp trước/sau). Kết quả: 846.79MB → 19.34MB (−97.7%), 415/415 trang,
+1.160.121/1.160.121 ký tự khớp từng trang, ảnh CMYK không đảo màu (pixel-diff trung bình
+0.009/255). Tất cả acceptance criteria US-16 PASS, mục dedupe ghi N/A (loại khỏi scope theo
+BR-IMGCOMP-04). **ready_for_release: YES**.
+
+## Release v1.2.6 (2026-09-06)
+
+`pyproject.toml` bump `1.2.5` → `1.2.6`. Nội dung: US-16 (nén ảnh sau ghép, chỉ engine
+babeldoc) — xem chi tiết ở trên. 307/307 test pass, `ruff check`/`ruff format --check` sạch.
+Không có blocker mới phát sinh từ US-16; các blocker non-blocking tồn đọng từ trước (AIMD
+Claude/Gemini spike, thứ tự duplicate-check/cost-gate, v.v. — xem `project_state.json`
+`blockers`) không liên quan tới US-16, giữ nguyên trạng thái không chặn release.
