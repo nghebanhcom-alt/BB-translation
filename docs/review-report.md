@@ -3842,3 +3842,195 @@ test-report.md, không trộn vào kết luận pass/fail của chính bước 7
 câu hỏi độc lập. KHÔNG làm 7.3 (đo lại mục lục, Ca C) — đúng phạm vi đã chốt.
 
 ---
+
+## Review — HOTFIX bước 7.2: thêm `update_unicode=True` (bug phát hiện bởi Domain Expert, 2026-09-07)
+
+Phạm vi: `src/babeldoc_shim/sitecustomize.py` (hàm `_split_numbered_list_paragraphs_on_page`, 2 dòng
+sửa + comment), `tests/test_babeldoc_shim_unicode_regression.py` (MỚI, 2 test), entry mới cuối
+`docs/CHANGELOG.md`. Commit gốc bị vá: `e324b29`. Không đụng `docs/Architecture.md` trong hotfix
+này (bug phát hiện tình cờ trong lúc phản biện Ca C, xem `docs/Architecture.md` mục "Bug #7 Ca C —
+Phản biện của Domain Expert (2026-09-07)", section Z6 — đã tự đọc, xác nhận đúng là nơi phát hiện).
+
+### External contract verified against real source: YES
+
+Tự mở trực tiếp source babeldoc 0.6.4 đã cài trên máy này (KHÔNG suy đoán/nhớ lại, KHÔNG chỉ tin
+lại số dòng trong brief hay trong Architecture.md):
+
+- `update_paragraph_data(self, paragraph: PdfParagraph, update_unicode=False)` —
+  `paragraph_finder.py:124` (khớp CHÍNH XÁC dòng bắt đầu, không lệch, tốt hơn độ chính xác trích dẫn
+  ở review 7.2 trước). Đọc thân hàm (`:124-165`): `if update_unicode and chars: paragraph.unicode =
+  get_char_unicode_string(chars)` — xác nhận 100% mặc định `False` thì **không đụng gì tới
+  `.unicode` cả** (không reset, không giữ nguyên có điều kiện — đơn giản là không chạm), khớp đúng
+  claim của brief và của comment mới trong code.
+- `process_page` gọi đúng 1 lần `self.update_paragraph_data(paragraph, update_unicode=True)` cho
+  MỌI paragraph ở **dòng 124+170=... thực tế dòng 294** (tự `grep -n`, khớp CHÍNH XÁC con số brief
+  nêu, không lệch).
+- `ParagraphFinder.process()` (`:196-215`): tự đọc toàn bộ thân hàm, xác nhận đúng cấu trúc bọc của
+  `_build_patched_process` — `original_process(self, document)` chạy time-order TRƯỚC (loop hết mọi
+  `page.pdf_paragraph` gọi `process_page`, rồi mới check `total_paragraph_count`/`check_cid_paragraph`
+  trên SỐ PARAGRAPH GỐC, chưa có paragraph mới của 7.2) — patch 7.2 chỉ chạy SAU KHI hàm gốc `return`
+  hoàn toàn. Xác nhận độc lập lập luận "process_page's update_unicode=True loop luôn chạy xong trước
+  khi 7.2 có cơ hội tạo/cắt paragraph" là đúng, không phải suy luận chưa kiểm.
+- `il_translator_llm_only.py:566`: `if len(paragraph.unicode) < self.translation_config.min_text_length:
+  continue` — khớp đúng claim "563-566" (gate nằm ở dòng 566, trong đúng khoảng trích).
+- `PdfParagraph.unicode` mặc định không có `default=""` tường minh ở chỗ tôi soát nhanh, nhưng code
+  shim tự truyền `unicode=""` khi construct — không phụ thuộc default của dataclass, không phải vấn đề.
+
+**Diff thực tế so với `e324b29`** (tự chạy `git diff e324b29 -- src/babeldoc_shim/sitecustomize.py`,
+không tin lại mô tả trong CHANGELOG): đúng **2 dòng code thay đổi** (`update_paragraph_data(paragraph)`
+→ `update_paragraph_data(paragraph, update_unicode=True)`, và tương tự cho `new_paragraph`), phần còn
+lại thuần comment giải thích. Diff tối giản, không lẫn thay đổi ngoài phạm vi.
+
+### Đào sâu câu hỏi (5) của brief — có cần fix paragraph GỐC bị cắt không?
+
+Brief hỏi: liệu "stale nhưng không gây bug thấy được" (cho paragraph gốc bị cắt, nhóm đầu) có thực
+sự đúng không, hay có kịch bản nào khiến `.unicode` stale dài gây dịch nhầm nội dung. Đây là câu hỏi
+quan trọng nhất của lần review này — đã tự đọc sâu thêm source `il_translator.py` (KHÔNG có trong
+brief, tự tìm) để trả lời dứt điểm thay vì chỉ xác nhận lại 2 dòng sửa:
+
+1. `il_translator.py:954-989` (`pre_translate_paragraph`) → gọi `get_translate_input(paragraph, ...)`
+   (`il_translator.py:575+`). Đọc kỹ nhánh **`len(paragraph.pdf_paragraph_composition) == 1`**
+   (`:607-623`): trả về `TranslateInput(paragraph.unicode, [], paragraph.pdf_style)` — dùng **THẲNG**
+   `paragraph.unicode` làm text gửi LLM, **KHÔNG dựng lại từ ký tự/composition thật**. Chỉ khi
+   `len(pdf_paragraph_composition) > 1` (`:644+`) code mới tự duyệt `chars` từ `pdf_paragraph_composition`
+   thật (không phụ thuộc `.unicode`).
+2. Suy ra: **paragraph gốc bị cắt (nhóm đầu) — nếu sau khi cắt chỉ còn ĐÚNG 1 composition (1 dòng)**
+   (rất phổ biến trong thực tế — chính 3/4 cặp CHANGELOG dẫn chứng, `[11,12]`/`[31,32]`/`[33,34]`, đều
+   là các mục 1 dòng/mục theo cách đặt tên nhóm), thì trước fix, text gửi LLM cho paragraph này sẽ là
+   `.unicode` STALE = **toàn bộ văn bản gộp CŨ** (cả mục hiện tại LẪN mục đã bị tách ra) — **không chỉ
+   là "dữ liệu sai nằm im không ai đọc"**, mà là **input dịch sai thật sự** được gửi đi. Tôi tự verify
+   bằng dump thật `paragraph_finder_numbered_list_post71_dump.json.gz` (trước 7.2 chạy): paragraph
+   chứa cặp 11+12 có đúng `unicode = "11. Ovens (conventional, reel, deck, etc.) 12. Stovetop burners"`
+   (63 ký tự, 2 composition) — và trong `wd72c/page14_numbered_list_source/paragraph_finder.json` (dump
+   SAU khi 7.2 tách, cùng artifact Reviewer trước đã dùng), paragraph nhóm đầu (item 11) có đúng
+   `num_comp=1` **và unicode VẪN LÀ chuỗi 63 ký tự gộp đó** — xác nhận trực tiếp bằng dữ liệu thật,
+   không chỉ suy luận từ source.
+3. **Nhưng**: đối chiếu `translate_tracking.json` trong CHÍNH thư mục `wd72c` đó, record cho item 11
+   lại ghi `pdf_unicode` **sạch** (`"11. Ovens (conventional, reel, deck, etc.)"`, không lẫn nội dung
+   item 12) — mâu thuẫn trực tiếp với `paragraph_finder.json` cùng thư mục (không có stage nào giữa
+   `ParagraphFinder` và `ILTranslatorLLMOnly` chạm `.unicode` — đã tự đọc `StylesAndFormulas`,
+   `AddDebugInformation`, `xml_converter.write_json` để loại trừ, không suy đoán). Không tự dàn xếp
+   được nghịch lý này bằng đọc source thuần — nghi vấn hợp lý nhất: các thư mục `wd72/wd72b/wd72c`
+   là **artifact dò tìm lặp lại nhiều lần trong ~25 phút** (21:51→22:15, theo mtime) khi Domain Expert
+   còn đang thử các bản vá tạm thời khác nhau, nên `paragraph_finder.json` và `translate_tracking.json`
+   trong cùng 1 thư mục scratch **có thể đến từ 2 lần chạy babeldoc khác nhau** ghi đè lẫn nhau vào
+   cùng `--working-dir`, không phải bằng chứng "sạch" của đúng 1 lần chạy nhất quán — nên KHÔNG dùng
+   được để bác bỏ kết luận (1)/(2) ở trên, vốn dựa thẳng trên đọc source (bằng chứng mạnh hơn).
+
+**Kết luận của tôi (khác — mạnh hơn — kết luận ở Architecture.md Z6)**: Architecture.md Z6 viết
+*"Paragraph gốc không bị ảnh hưởng vì text gửi LLM dựng từ composition... `unicode` stale chỉ dùng
+cho đếm token"* — câu này **chỉ đúng cho trường hợp paragraph còn ≥ 2 composition sau khi cắt**, và
+**SAI/thiếu sót cho trường hợp còn đúng 1 composition** (xác nhận bằng đọc trực tiếp
+`il_translator.py:607-623`, không suy đoán) — dữ liệu chính CHANGELOG dẫn chứng (`[11,12]`,
+`[31,32]`, `[33,34]`) cho thấy trường hợp 1-composition này **phổ biến, không phải hiếm**. Vì vậy:
+- Việc Dev chọn sửa **CẢ HAI** lời gọi (không chỉ paragraph mới) là quyết định ĐÚNG, và lý do đúng
+  **mạnh hơn** những gì CHANGENLOG/comment trong code hiện ghi ("chỉ để đúng dữ liệu, không gây bug
+  thấy được") — thực chất fix này **đóng luôn một đường dịch sai nội dung thật** (gửi văn bản gộp cũ
+  dài hơn cho LLM dịch thay vì đúng 1 dòng còn lại), không chỉ là dọn dẹp dữ liệu stale vô hại.
+- Vì fix hiện tại ĐÃ áp `update_unicode=True` cho CẢ HAI chỗ, rủi ro này **đã được đóng hoàn toàn**
+  bất kể kịch bản nào ở trên có thật sự xảy ra trên dữ liệu `wd72c` hay không — **không cần sửa thêm
+  code nào nữa cho hotfix này**, đây là ghi nhận bổ sung lý do, không phải blocking issue.
+
+### Kiểm tra `tests/test_babeldoc_shim_unicode_regression.py`
+
+Tự chạy lại logic trích xuất bằng script riêng (không tin lại việc test tự pass) — xác nhận:
+`_extract_function_body` cắt ĐÚNG khối thân hàm `_split_numbered_list_paragraphs_on_page` (4073 ký
+tự, dòng đầu/cuối đúng ranh giới hàm), `re.findall` bắt đúng **2** lời gọi
+`self.update_paragraph_data(...)`, cả 2 đều chứa `update_unicode=True`. Test có `assert` rõ ràng khi
+không tìm thấy hàm (không silent-pass nếu ai đó đổi tên hàm). Test thứ 2
+(`test_numbered_list_split_touches_only_the_documented_two_call_sites`, đếm `PdfParagraph(` == 1)
+là 1 lớp bảo vệ hợp lý cho giả định "chỉ có đúng 2 lời gọi" của test đầu — đúng tinh thần thiết kế
+test bảo vệ giả định của test khác.
+
+Đây là **source-pinning test** (đọc chuỗi source bằng regex), không phải test hành vi thật qua
+babeldoc — chấp nhận được vì lý do kiến trúc đã nêu rõ trong docstring (không `import babeldoc`
+được trong venv app, Architecture.md X4-1) — nhất quán với cách tiếp cận toàn bộ file
+`sitecustomize.py` từ đầu, không phải điểm yếu mới của riêng hotfix này.
+
+**Rủi ro nhỏ của cách viết regex** (non-blocking, xem issue #1): `re.findall(r"self\.update_paragraph_data\(([^)]*)\)", ...)`
+dùng `[^)]*` — sẽ bắt sai nếu sau này 1 trong 2 lời gọi có tham số chứa dấu `)` lồng bên trong (vd 1
+lời gọi hàm khác làm argument). Rủi ro thấp với code hiện tại (không có), nhưng đáng ghi lại.
+
+### Kiểm tra `docs/CHANGELOG.md` — lịch sử có bị mất không (Protocol 7 R7-03)
+
+`git diff e324b29 --stat -- docs/CHANGELOG.md` → **166 insertions(+), 0 deletions** (tự chạy, không
+tin lại lời khai). Đoạn cũ "Quan sát thêm (KHÔNG phải bug của 7.2...)" của bước 7.2 (dòng 3941) và
+đoạn "Đính chính" mới (dòng 4086, trỏ ngược lại đúng đoạn cũ bằng cách trích đúng cụm từ "Quan sát
+thêm") đều **còn nguyên trong file**, không cái nào bị xoá — đúng yêu cầu "APPEND, không overwrite"
+(R7-03). Entry mới thuật đúng cơ chế bug, đúng số liệu (4/35, 10/40 → 0/35, 0/40 — khớp với dữ liệu
+`wd72c`/`wd74c` tôi tự mở), chỉ có 1 điểm nên bổ sung: xem issue non-blocking #2 dưới đây (CHANGENLOG
+hiện mô tả rủi ro của paragraph gốc bị cắt nhẹ hơn thực tế theo phát hiện ở mục trên).
+
+### Chạy thật (Reviewer tự chạy, không tin lại số Dev báo)
+
+```
+uv run pytest -q                                                    → 401 passed, 419 warnings (81s)
+uv run ruff check src/babeldoc_shim/sitecustomize.py \
+  tests/test_babeldoc_shim_unicode_regression.py                    → All checks passed!
+uv run ruff format --check (2 file trên)                            → 2 files already formatted
+```
+Khớp đúng số Dev báo trong CHANGELOG (401 = 399 + 2 test mới).
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+
+1. **Regex trích xuất trong test mới dùng `[^)]*`, không chịu được tham số có dấu `)` lồng bên
+   trong** (`tests/test_babeldoc_shim_unicode_regression.py`, dòng ~62). Rủi ro thấp với code hiện
+   tại (2 lời gọi hiện có đều đơn giản, không có `)` lồng), nhưng nếu sau này ai sửa hàm thêm 1 tham
+   số dạng gọi hàm khác (vd `update_paragraph_data(paragraph, foo(x), update_unicode=True)`), regex
+   sẽ cắt nhầm ở dấu `)` đầu tiên của `foo(x)` và có thể false-negative (không thấy `update_unicode=True`
+   dù code đúng) hoặc false-positive tinh vi hơn. Không cấp bách, ghi lại để không ai ngạc nhiên nếu
+   test này fail kỳ lạ trong tương lai vì lý do không liên quan tới bug thật.
+2. **CHANGELOG.md và comment trong code hiện mô tả nhẹ hơn thực tế mức độ rủi ro của việc BỎ SÓT fix
+   cho paragraph gốc bị cắt (nhóm đầu).** Cả 2 chỗ đều viết kiểu "không gây bug bỏ dịch (đủ dài để
+   qua gate min_text_length) nhưng vẫn là dữ liệu SAI/lỗi thời" — ngụ ý rủi ro chỉ là "dữ liệu bẩn nằm
+   im, không ai đọc". Theo phát hiện ở mục "Đào sâu câu hỏi (5)" phía trên (tự đọc thêm
+   `il_translator.py:607-623`, không có trong brief gốc): khi paragraph nhóm đầu sau khi cắt còn ĐÚNG
+   1 composition (phổ biến, không hiếm — khớp 3/4 cặp CHANGENLOG tự dẫn chứng), `.unicode` chính là
+   text được gửi THẲNG cho LLM dịch (không dựng lại từ ký tự thật) — nếu thiếu `update_unicode=True`,
+   đây sẽ là **input dịch sai nội dung thật** (gộp cả mục đã tách sang paragraph khác), không chỉ
+   "dữ liệu chết". Không blocking vì fix hiện tại ĐÃ đóng đúng cả 2 chỗ nên rủi ro này đã bị chặn hoàn
+   toàn bất kể mô tả đúng hay chưa — nhưng đề xuất PM/Dev thêm 1 câu vào CHANGELOG (append, không sửa
+   đoạn cũ) làm rõ lại mức độ rủi ro thật, để người đọc sau này không đánh giá thấp tầm quan trọng của
+   việc sửa "cả 2 chỗ" nếu có tình huống tương tự phát sinh sau này (vd khi làm 7.4).
+3. **`docs/Architecture.md` mục Z6 có 1 câu khẳng định quá rộng, không đúng cho mọi trường hợp**:
+   *"Paragraph gốc không bị ảnh hưởng vì text gửi LLM dựng từ composition... unicode stale chỉ dùng
+   cho đếm token"* — câu này chỉ đúng khi paragraph còn ≥ 2 composition sau khi cắt; SAI/thiếu sót
+   cho trường hợp còn đúng 1 composition (xem phân tích trên, tự đọc `il_translator.py:607-623` xác
+   nhận). Không thuộc phạm vi code sửa của hotfix này (Z6 là văn bản debate cũ, không phải phần được
+   giao sửa), nhưng đáng note theo kỷ luật gắn nhãn verify (CLAUDE.md global) vì đây là 1 claim cụ thể
+   về hành vi hệ thống ngoài đã ghi vào tài liệu chính thức mà chưa đúng hoàn toàn. Đề xuất: PM/Tech
+   Lead thêm 1 dòng đính chính ngắn tại Z6 (không sửa/xoá câu cũ, theo đúng tinh thần append).
+4. **Không tận dụng được artifact `/private/tmp/bdprobe/wd72c` để xác nhận dứt điểm** hành vi
+   single-composition ở trên bằng dữ liệu "sạch" 1 lần chạy — phát hiện `paragraph_finder.json` và
+   `translate_tracking.json` trong CÙNG thư mục đó tự mâu thuẫn nhau (xem phân tích), nghi do thư mục
+   scratch bị tái sử dụng qua nhiều lần chạy babeldoc khác nhau trong lúc debug. Không phải lỗi của
+   Dev/Domain Expert (đây là quy trình dò tìm tạm thời, không phải golden fixture chính thức), nhưng
+   ghi lại để nếu QA/Dev cần verify sâu thêm về sau, nên tạo **thư mục `--working-dir` MỚI, sạch**
+   cho mỗi lần chạy thay vì tái sử dụng, tránh đúng loại mâu thuẫn dữ liệu này.
+
+## Next step
+
+**APPROVE.** Circuit breaker Dev↔Reviewer: đây là hotfix riêng (Protocol 3 không tính hotfix qua
+đúng quy trình Reviewer là 1 vòng sửa lỗi thông thường — không có round trước cho riêng thay đổi
+này), vòng 1 cho hotfix này. Diff tối giản, đúng cơ chế bug, verify chéo với source thật khớp 100%,
+401 test xanh, ruff sạch, CHANGELOG lẫn review-report đều append đúng cách (không mất lịch sử).
+
+Chuyển QA — lưu ý riêng cho hotfix này, ngoài Protocol 6 R6-03 chuẩn (chạy live thật, đọc nội dung
+PDF output, không chỉ tin status):
+- QA nên ưu tiên test lại đúng 2 fixture đã có bug trước đó (`page14_numbered_list_source.pdf`,
+  trang "QUESTIONS FOR REVIEW") để xác nhận 0 mục còn tiếng Anh — đây là bằng chứng trực tiếp nhất
+  cho chính bug đã sửa.
+- Theo phát hiện non-blocking #2 ở trên: nếu có điều kiện, QA nên thêm 1 lần kiểm tra riêng nội
+  dung dịch của các mục nhóm ĐẦU (nhóm giữ lại, vd item #11/#23/#31/#33 trong fixture cũ) — không chỉ
+  xác nhận chúng ĐƯỢC dịch (đã biết đúng từ trước), mà xác nhận bản dịch KHÔNG lẫn nội dung của mục
+  đã bị tách sang paragraph khác (vd #11 không được lẫn nghĩa "Stovetop burners" của #12) — đây là
+  hệ quả cụ thể, kiểm được, của phát hiện single-composition ở trên; dù tôi tin fix hiện tại đã đóng
+  đúng, thêm 1 lần verify sống trực tiếp cho đúng kịch bản này sẽ dứt điểm hoàn toàn nghi vấn.
+- KHÔNG cần chặn release chỉ vì issue non-blocking #2/#3 (mô tả rủi ro trong docs) — đây là vấn đề
+  tài liệu, không phải code sai.
+
+---

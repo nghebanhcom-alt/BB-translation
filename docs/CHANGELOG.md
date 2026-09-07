@@ -4054,3 +4054,92 @@ từ `data/uploads/937b1d1c-…Figoni….pdf`).
 **Trạng thái**: Đo xong theo đúng gate D7-3 cho 7.3. **Không có code nào được viết/sửa trong task
 này** — chỉ 1 entry docs này. Ca C (mục lục) cần PM/user quyết định có làm tiếp không (thiết kế
 mới, không phải mở rộng B-2b) — chưa tự ý code thêm.
+
+## Hotfix bước 7.2 — `unicode=""` khiến mục numbered-list bị BỎ DỊCH, không phải "LLM fallback"
+## như đã ghi nhầm (phát hiện bởi Domain Expert, 2026-09-07)
+
+### Bối cảnh phát hiện
+
+Trong lúc phản biện thiết kế Ca C (xem section "Bug #7 Ca C — Phản biện của Domain Expert" trong
+`docs/Architecture.md`), Domain Expert phát hiện **bug thật trong code 7.2 đã ship** (commit
+`e324b29`) — không liên quan trực tiếp tới Ca C nhưng nghiêm trọng hơn cả việc đang bàn, nên xử lý
+ngay thay vì để dồn qua bước sau.
+
+**Root cause** (đã tự verify độc lập, đọc source thật, không chỉ tin lại Domain Expert):
+
+1. `ParagraphFinder.update_paragraph_data(paragraph, update_unicode=False)` — mặc định **không**
+   đụng tới `paragraph.unicode` (`paragraph_finder.py:124-158`, tham số `update_unicode` mặc định
+   `False`).
+2. `process_page` của babeldoc gốc gọi ĐÚNG 1 LẦN `update_paragraph_data(paragraph,
+   update_unicode=True)` cho MỌI paragraph, nhưng dòng gọi đó (`paragraph_finder.py:294`) nằm
+   **BÊN TRONG** `process_page` — chạy xong TRƯỚC KHI patch 7.2 (`_split_numbered_list_paragraphs_on_page`,
+   bọc `ParagraphFinder.process` và chỉ chạy SAU KHI `process()` đã trả về hoàn toàn cho MỌI trang)
+   có cơ hội tạo paragraph mới.
+3. Paragraph mới do 7.2 tạo (`PdfParagraph(..., unicode="", ...)`) gọi
+   `self.update_paragraph_data(new_paragraph)` — **thiếu** `update_unicode=True` — nên `.unicode`
+   giữ nguyên `""` vĩnh viễn.
+4. `il_translator_llm_only.py:563-566`: `if len(paragraph.unicode) < self.translation_config.min_text_length: continue`
+   — paragraph có `unicode=""` (độ dài 0) bị **bỏ qua hoàn toàn**, không bao giờ được gửi đi dịch.
+
+**Hệ quả**: mọi mục numbered-list bị 7.2 tách ra ở vị trí "nhóm thứ 2 trở đi" (tức paragraph MỚI
+tạo, không phải paragraph gốc bị cắt) đều bị giữ nguyên tiếng Anh trong PDF output — **không phải**
+do LLM tự "fallback" như CHANGELOG bước 7.2 (2026-09-07, mục "Quan sát thêm") đã ghi. Đính chính:
+mục đó ghi "một số mục... bị babeldoc fallback về giữ nguyên tiếng Anh... CHƯA điều tra sâu" — kết
+luận đó **sai một phần quan trọng** (không phải hành vi ngẫu nhiên của babeldoc/LLM, mà là bug xác
+định 100% trong code app) — giữ nguyên đoạn cũ (không sửa/xoá lịch sử), đính chính tại đây.
+
+**Verify chéo bằng chính dữ liệu live-run đã lưu trước đó** (không cần chạy lại mới đã đủ bằng
+chứng): 4 mục còn tiếng Anh trong lần chạy `page14_numbered_list_source.pdf` ở bước 7.2
+(`#12`, `#24`, `#32`, `#34`) khớp **chính xác 100%** với "nhóm thứ 2" của **đúng 4 cặp** mà
+`numbered_list_split.split_paragraph_lines` đã tách (11+12, 23+24+"1½ quart", 31+32, 33+34) —
+không lệch 1 mục nào. Tương tự 10 mục còn tiếng Anh ở trang "QUESTIONS FOR REVIEW" (#3, #5, #7,
+#9-15) khớp chính xác các nhóm mới tạo trong chuỗi cascade 8→15 và các cặp (2,3)/(4,5)/(6,7).
+
+### Fix
+
+`src/babeldoc_shim/sitecustomize.py`, hàm `_split_numbered_list_paragraphs_on_page`: thêm
+`update_unicode=True` vào **CẢ HAI** lời gọi `update_paragraph_data`:
+- Paragraph gốc bị cắt (nhóm đầu, `group_idx == 0`) — trước đó `.unicode` giữ nguyên **văn bản
+  gộp CŨ** (dài hơn nội dung thực còn lại sau khi cắt).
+- Paragraph mới tạo (nhóm thứ 2 trở đi) — đây là chỗ gây bug thấy được (bỏ dịch hoàn toàn).
+
+**Đính chính sau review** (Reviewer đào sâu hơn phạm vi được giao, đọc thêm
+`il_translator.py:607-623` — `get_translate_input`): trường hợp paragraph gốc bị cắt chỉ còn ĐÚNG
+1 composition (khớp 3/4 cặp ví dụ chính ở trên: 11+12, 31+32, 33+34), text gửi cho LLM dịch lấy
+**THẲNG** từ `paragraph.unicode`, không dựng lại từ ký tự thật. Vậy fix cho nhóm đầu KHÔNG chỉ là
+"dọn dữ liệu lỗi thời vô hại" như nhận định ban đầu ở trên — mà là chặn đúng 1 rủi ro thật: **dịch
+sai nội dung** (gửi văn bản gộp CŨ, dài hơn, cho LLM dịch thay vì đúng nội dung ngắn còn lại sau
+khi cắt). May mắn là bản fix đã áp dụng từ đầu (thêm `update_unicode=True` cho CẢ HAI) đã chặn kín
+rủi ro này dù lý do ban đầu ghi ở trên chưa đủ mạnh — không cần sửa thêm code, chỉ đính chính lại
+lý do tại đây.
+
+### Verify sống lại sau fix (R6-03, đọc nội dung PDF output thật)
+
+| Fixture | Trước hotfix | Sau hotfix |
+|---|---|---|
+| `page14_numbered_list_source.pdf` (35 mục) | **4/35** mục còn tiếng Anh (#12,#24,#32,#34) | **0/35** — dịch đủ hết, cấu trúc vẫn giữ nguyên 35/35 xuống dòng đúng, 0 dính chữ |
+| p74-77, "QUESTIONS FOR REVIEW" + 3 trang khác | **10** mục còn tiếng Anh (đếm trên page0) | **0** mục còn tiếng Anh trên cả 4 trang; cấu trúc vẫn 17/17, 3/3, 3/3, 1/1 đúng như trước |
+
+**Test mới** (`tests/test_babeldoc_shim_unicode_regression.py`, 2 test): pin cứng bằng cách đọc
+SOURCE THẬT của `sitecustomize.py` (không import `babeldoc` — package này cố ý KHÔNG phải
+dependency của app, `import babeldoc` sẽ luôn thất bại trong venv của app ở bất kỳ máy nào, đây là
+kiến trúc cố ý theo Architecture.md X4-1, không phải giới hạn CI) — assert cả 2 lời gọi
+`update_paragraph_data` trong hàm này đều có `update_unicode=True`. Chặn hồi quy nếu ai đó sau này
+lỡ sửa hàm và bỏ mất flag.
+
+**Kết quả cuối**:
+```
+uv run pytest -q            → 401 passed (399 + 2 test moi), 419 warnings
+uv run ruff check           → All checks passed!
+uv run ruff format --check  → 2 file da sua deu dung format
+```
+
+**File đã sửa**: `src/babeldoc_shim/sitecustomize.py`.
+**File đã tạo mới**: `tests/test_babeldoc_shim_unicode_regression.py`.
+
+**Trạng thái**: Đây là fix hành vi runtime cho code ĐÃ SHIP (7.2). **Đã qua Reviewer thật (Protocol
+7 R7-01) — APPROVE, không blocking issue**, xem `docs/review-report.md`. **Ghi nhận công phát
+hiện: Domain Expert** (đang trong lúc phản biện thiết kế Ca C, không phải nhiệm vụ được giao) —
+đây là lý do giữ nguyên quy trình 2 vai trò (Tech Lead đề xuất, Domain Expert phản biện độc lập
+bằng cách tự đọc source/tự đo) cho các thay đổi runtime quan trọng, kể cả khi việc đang bàn là một
+task khác.

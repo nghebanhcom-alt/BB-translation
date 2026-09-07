@@ -213,7 +213,13 @@ def _split_numbered_list_paragraphs_on_page(self, page, paragraph_finder_module)
             offset += len(group)
             if group_idx == 0:
                 paragraph.pdf_paragraph_composition = comp_slice
-                self.update_paragraph_data(paragraph)
+                # update_unicode=True bat buoc: paragraph nay da di qua vong lap
+                # `update_paragraph_data(paragraph, update_unicode=True)` cua
+                # process_page (paragraph_finder.py:294) TRUOC KHI bi truncate o
+                # day, nen .unicode dang giu NGUYEN VAN BAN GOP (dai hon noi dung
+                # thuc te con lai). Khong cap nhat lai se de .unicode "an" chua
+                # noi dung da bi tach di cho paragraph khac.
+                self.update_paragraph_data(paragraph, update_unicode=True)
                 new_paragraphs.append(paragraph)
                 continue
             new_paragraph = PdfParagraph(
@@ -224,7 +230,20 @@ def _split_numbered_list_paragraphs_on_page(self, page, paragraph_finder_module)
                 layout_label=paragraph.layout_label,
                 layout_id=paragraph.layout_id,
             )
-            self.update_paragraph_data(new_paragraph)
+            # update_unicode=True bat buoc (Bug tim thay boi Domain Expert,
+            # 2026-09-07): paragraph MOI nay khong bao gio di qua vong lap
+            # `update_paragraph_data(..., update_unicode=True)` cua process_page
+            # (paragraph_finder.py:294) vi no duoc tao SAU KHI process() da
+            # chay xong hoan toan. Neu khong tu goi voi update_unicode=True,
+            # `.unicode` giu nguyen "" (default) -> il_translator_llm_only.py
+            # bo qua hoan toan paragraph nay (`len(paragraph.unicode) <
+            # min_text_length`) -> muc numbered-list bi giu nguyen tieng Anh,
+            # KHONG duoc dich. Verify song: 4/4 muc bi anh huong o 1 lan chay
+            # thuc te (item #12/#24/#32/#34 tren page14_numbered_list_source.pdf)
+            # deu la nhom thu 2 tro di cua 1 cap da tach — khop chinh xac gia
+            # thuyet nay, khong phai "LLM tu fallback" nhu CHANGELOG buoc 7.2
+            # ghi nham luc dau.
+            self.update_paragraph_data(new_paragraph, update_unicode=True)
             new_paragraphs.append(new_paragraph)
 
     page.pdf_paragraph = new_paragraphs
