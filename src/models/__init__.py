@@ -4,6 +4,7 @@ from src.models.chunk import Chunk
 from src.models.concurrency_state import ConcurrencyState
 from src.models.glossary import Glossary, GlossaryEntry
 from src.models.job import Job
+from src.models.layout_qa import LayoutQaFinding
 from src.models.overflow import OverflowReport
 from src.models.settings import Setting
 
@@ -14,6 +15,7 @@ __all__ = [
     "Glossary",
     "GlossaryEntry",
     "Job",
+    "LayoutQaFinding",
     "OverflowReport",
     "Setting",
     "TranslationCache",

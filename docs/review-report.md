@@ -2763,3 +2763,256 @@ chỉ trạng thái/`assert_called()`. Tự chạy lại pytest (307/307) và ru
 Dev. 2 issue non-blocking ở mục 6 (rò file tạm khi save lỗi, filter-array chưa ghi chú) không cản
 trở approve — khuyến nghị Dev dọn ở lần sửa tiếp theo liên quan tới file này. CHANGELOG.md được
 Dev append đúng cách (Protocol 7 R7-03), không mất lịch sử.
+
+---
+---
+
+# P0 — Babeldoc Layout Bug Fix Roadmap (Gate P0.1 + Pin P0.3) — Iteration 1
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-07
+- **Phạm vi**: `src/services/layout_qa.py` (mới), `src/models/layout_qa.py` (mới),
+  `src/models/__init__.py`, `src/models/database.py` (đăng ký model mới),
+  `tests/test_layout_qa.py` (mới, 19 test), `docs/Architecture.md` + `docs/CHANGELOG.md`
+  (cập nhật P0.1/P0.3 + kết quả A/B P0.2). Không bao gồm `BabeldocRunner`/orchestrator (không
+  nằm trong diff này).
+
+## Verdict: **APPROVE**
+
+Module gate đo lường chất lượng layout, chất lượng tốt: type hints đầy đủ, docstring rõ ràng
+gắn với từng dòng spec Architecture.md U4/P0.1, test dùng fixture PDF thật (không mock hình
+học), tự chạy lại toàn bộ đều khớp báo cáo Dev. Không có blocking issue. Có một số rủi ro
+heuristic đáng lưu ý ở mục 4 nhưng đã được Dev tự ghi nhận rõ trong code/CHANGELOG, không che
+giấu — chấp nhận được cho gate ở giai đoạn P0 (đo trước khi fix), xếp non-blocking.
+
+---
+
+## 1. R5-04 checklist (bắt buộc) — External contract verified against real source
+
+**Kết luận: N/A** (không phải YES/NO theo nghĩa "gọi external tool sai/đúng").
+
+Lý do: `src/services/layout_qa.py` **không** gọi babeldoc/pdf2zh qua subprocess/HTTP — nó chỉ
+đọc file PDF *output* bằng PyMuPDF (thư viện Python import trực tiếp, dùng API core:
+`get_text("blocks")`, `get_text("dict")`, `get_drawings()`, `get_image_rects()`). Theo đúng
+"Phạm vi áp dụng" của Protocol 5 trong CLAUDE.md project: *"Không áp dụng cho thư viện nội bộ
+Python thuần code logic (... `pymupdf` dùng đúng API core, không phải external network/
+subprocess service)"* — nên R5-04 dạng YES/NO không áp dụng trực tiếp cho module này.
+
+Tuy vậy module **có** 2 chỗ mang giả định về hành vi PyMuPDF cần verify vì dùng để suy luận
+logic quan trọng (không phải chỉ gọi API cho có) — tôi đã tự verify thật (không tin theo
+docstring của Dev):
+
+- `page.get_drawings()[i]["type"]` chứa `"s"` khi có nét stroke (dùng để lọc "đường viền vẽ"
+  ở check (b)). Tự chạy `fitz` 1.28.2 thật (`draw_rect(..., fill=None, width=2)` →
+  `{'type': 's', ...}`; `draw_rect(..., fill=(1,0,0), width=0)` → `{'type': 'f', ...}`) — khớp
+  đúng logic `"s" in (drawing.get("type") or "")` trong code. **Verified — chạy thật, không
+  đọc tài liệu suông.**
+- Ngưỡng góc xoay `ROTATION_TOLERANCE_DEG = 0.1` và điều kiện vứt ký tự của babeldoc
+  (`il_creater.py:968-974`) — đây LÀ claim về babeldoc thật, nhưng đã được Tech Lead verify
+  trực tiếp source code và ghi rõ trong Architecture.md U1 (bảng V-1/E-2, kèm số dòng file
+  cụ thể) trước khi Dev viết module này — Dev chỉ *tái sử dụng* con số đã verify, có trích dẫn
+  nguồn (docstring dòng 12: `"dung nguong il_creater.py:968-974"`). Không phải claim mới chưa
+  verify.
+
+## 2. R6-04 — Trace tay data lineage nội bộ module
+
+Không có `*_orchestrator.py` nào trong diff này (chưa nối vào `JobOrchestrator`), nên checklist
+R6-04 đúng nghĩa (orchestrator gọi nhiều service) chưa áp dụng. Nhưng `run_layout_qa_gate()` tự
+nó đóng vai trò điều phối nhiều bước nội bộ (mở file → chạy 5 check → gom queue), nên tôi trace
+tay như thể nó là 1 orchestrator nhỏ:
+
+- `translated_page_count` được gán từ `len(translated_doc)` **trước khi đóng** `translated_doc`
+  lần mở đầu tiên (dòng 382), rồi dùng để giới hạn vòng lặp thứ hai (`if index <
+  translated_page_count`, dòng 395) khi mở lại `translated_doc` lần 2 để chạy check (e) theo
+  cặp trang với `source_doc`. Đã đọc kỹ: biến này đúng là lấy từ file dịch thật (không phải
+  copy số trang gốc), và guard này ngăn `IndexError`/sai lệch khi 2 file lệch số trang — đúng.
+- Check (e) `_check_entity_preservation(source_page, translated_doc[index], ...)`: `source_page`
+  lấy từ `source_doc[index]` (vòng lặp ngoài đang chạy theo `source_doc`), `translated_doc[index]`
+  dùng CÙNG `index` — tức giả định 1-đối-1 theo thứ tự trang giữa gốc và dịch. Giả định này được
+  ghi rõ trong docstring `run_layout_qa_gate` ("gia dinh so trang giu nguyen giua goc va dich —
+  dung voi babeldoc/pdf2zh vi ca hai deu dich 1-doi-1 trang, khong chen/xoa trang") — đúng là
+  invariant thật của 2 tool này (không chèn/xoá trang), không phải giả định tuỳ tiện.
+- `persist_findings()` ghi thẳng `finding.detail` (đã serialize JSON) từ list `findings` được
+  trả về nguyên vẹn từ `run_layout_qa_gate` — không có bước biến đổi/mất dữ liệu giữa lúc tính
+  toán và lúc ghi DB.
+
+**Kết luận R6-04**: lineage nội bộ đúng, không phát hiện lỗi kiểu Bug #5 (mất kết nối giữa 2
+bước).
+
+---
+
+## 3. Bốn "giả định tự chọn" của Dev (CHANGELOG)
+
+1. **`page_number` 1-indexed**: hợp lý, khớp cách con người/Architecture.md gọi trang ("trang
+   67"), khác `fitz.Page.number` (0-indexed) một cách có chủ ý và đã ghi rõ. Test
+   (`test_rotated_text_prescan_matches_t3d_measurement_on_p67`) gọi `page_number=67` khi đọc
+   `doc[0]` (0-indexed) của fixture 1 trang — đúng convention, không lẫn lộn.
+2. **Severity map cố định** (`overlap`/`text_over_drawing`/`text_over_image` = critical,
+   `rotated_text_prescan`/`entity_loss` = blocker): đã tự đối chiếu `docs/ux-review-report.md`
+   dòng 78-79 — UX-A và UX-B **đúng là "Critical"** trong báo cáo UX gốc, khớp claim của Dev.
+   UX-C **đúng là "Blocker"** (dòng 77) — khớp `rotated_text_prescan`. Riêng `entity_loss`
+   (DoD-UX-02, "Không mất nội dung") không có nhãn UX-letter/severity riêng tường minh trong
+   `ux-review-report.md` (DoD-UX-02 là tiêu chí release riêng, không map 1-1 với UX-C) — Dev ghi
+   "khớp UX-C" hơi rộng tay, nhưng chọn mức **blocker** (mức cao nhất) cho 1 check đo trực tiếp
+   mất nội dung định lượng là hướng an toàn, hợp lý về bản chất rủi ro (số/đơn vị công thức nấu
+   ăn sai là nghiêm trọng) dù lập luận trích dẫn hơi lỏng. Non-blocking, xem mục 5.
+3. **`job_id` nullable + `run_label`/`source_file`**: hợp lý — P0.2 chạy babeldoc/pdf2zh ngoài
+   `JobOrchestrator`, không có `Job` row thật; thiết kế cho phép cả 2 chế độ (spike A/B và pipeline
+   thật tương lai) dùng chung bảng mà không cần bảng riêng. Đã đối chiếu convention model khác
+   (`OverflowReport` cũng có FK nullable tương tự cho trường hợp không chắc luôn có job) — nhất
+   quán.
+4. **Ngưỡng IoU 0.05 cho check (e)**: đây là điểm cần lưu ý nhất, xem mục 4.
+
+---
+
+## 4. Rủi ro heuristic bảo toàn thực thể số/đơn vị (mục quan trọng nhất theo yêu cầu review)
+
+Đã tự đọc kỹ `_check_entity_preservation`/`_find_entities`/`_best_matching_block` và tự nghĩ
+thêm case ngoài test có sẵn:
+
+**False positive (flag oan, không blocking vì đây vốn là "cảnh báo cho QA soi", không phải kết
+luận cuối — nhưng đáng ghi rõ hơn nữa trong docstring)**:
+- Regex chỉ khớp định dạng **y hệt ký hiệu gốc** (`"°C"`, `"g"`, `"phút"`...). Nếu bản dịch hợp
+  lệ dùng cách viết khác — ví dụ `"180 độ C"` thay vì `"180°C"`, số thập phân đổi dấu phẩy↔chấm
+  (`"10,5g"` → `"10.5g"`), hoặc thêm khoảng trắng/full-width — check sẽ báo `entity_loss` dù nội
+  dung không hề mất. Dev đã tự nêu đúng case này trong docstring (dòng 322-324: `"10 phút" ->
+  "10 min"`) nên đây không phải thiếu sót che giấu, chỉ là rủi ro cố hữu của cách tiếp cận
+  regex — chấp nhận được cho 1 GATE cảnh báo (không phải hard-block tự động), miễn QA hiểu đây
+  là gợi ý cần soi tay, không phải sự thật tuyệt đối.
+
+**False negative (nguy hiểm hơn, vì đây là gate quan trọng nhất — im lặng bỏ sót mất nội dung
+thật)**:
+- `missing = [entity for entity in entities if entity not in translated_text]` chỉ kiểm tra
+  chuỗi con xuất hiện **ở đâu đó** trong toàn bộ text của block dịch đã match, không kiểm tra
+  đúng vị trí/đúng câu. Nếu 1 block dịch dài (gộp nhiều đoạn gốc, hoặc babeldoc gộp paragraph
+  sai như RC-T1/T-07 đã ghi trong Architecture.md) tình cờ chứa cùng con số ở chỗ khác (ví dụ
+  cùng công thức lặp lại "180°C" ở bước 2 nhưng bị mất ở bước 5), check sẽ **PASS oan** vì tìm
+  thấy "180°C" đâu đó trong block, dù đúng vị trí cần nó đã mất. Đây là hạn chế thật của cách
+  match theo block-level substring thay vì theo dòng/câu — rủi ro tăng thêm khi kết hợp với
+  ngưỡng IoU rất lỏng (`0.05`): 1 block dịch lớn có thể "hấp thụ" nhiều block gốc nhỏ nếu bbox
+  hơi chồng lấn, khiến check (e) hoạt động ở mức "trang" chứ không phải "block" trong các
+  trường hợp gộp nặng — đúng kịch bản UX-A (paragraph bị gộp/lệch) mà chính roadmap này đang cố
+  gate.
+- `_best_matching_block` chọn block có IoU **lớn nhất trong số các block vượt ngưỡng 0.05**,
+  không có cơ chế "unique assignment" (1 block dịch có thể được chọn làm match cho nhiều block
+  gốc khác nhau cùng lúc) — nếu 2 block gốc kề nhau bị gộp thành 1 block dịch, cả 2 sẽ match
+  cùng 1 block dịch đó; không sai về mặt logic hiện tại (mỗi block gốc xét độc lập) nhưng có thể
+  khiến kết quả entity check và overlap check (a) trên CÙNG 1 trang kể 2 câu chuyện khác nhau về
+  cùng 1 hiện tượng gộp block — không phải bug, nhưng nên ghi chú liên hệ này trong docstring để
+  QA đọc report dễ liên hệ 2 loại finding với nhau khi debug 1 trang.
+
+**Đánh giá tổng thể**: không có lỗi logic (code khớp đúng ý định đã ghi trong docstring, test
+`test_check_entity_preservation_flags_missing_temperature`/`..._passes_when_all_entities_kept`
+verify đúng hành vi cơ bản), nhưng **rủi ro false-negative do block-level substring match + IoU
+lỏng nên được ghi thành 1 dòng cảnh báo rõ ràng hơn trong docstring** (hiện chỉ nêu ví dụ
+false-positive định dạng, chưa nêu rõ trường hợp false-negative do gộp block) — xếp
+**non-blocking nhưng nên làm sớm**, vì đây đúng là gate quan trọng nhất theo đánh giá của
+Domain Expert/UX report, và người đọc report (QA) cần biết giới hạn này để không quá tin tưởng
+khi gate PASS.
+
+---
+
+## 5. Migration DB (`layout_qa_findings`)
+
+Đối chiếu với các model khác (`job.py`, `database.py`): project **không dùng Alembic**, mà dùng
+`SQLModel.metadata.create_all()` cho bảng mới + `_NEW_NULLABLE_COLUMNS`/hàm migrate riêng
+(`_migrate_concurrency_state_engine_key`) chỉ cho các thay đổi trên bảng **đã tồn tại** (thêm
+cột, đổi PK). `layout_qa_findings` là bảng **hoàn toàn mới**, nên chỉ cần đăng ký model trong
+`src/models/__init__.py` (đã làm) và import trong `src/models/database.py` để
+`SQLModel.metadata.create_all()` tạo bảng khi khởi động (đã làm, dòng import + comment
+`# noqa: F401` đúng pattern các model khác) — **không cần** thêm entry vào
+`_NEW_NULLABLE_COLUMNS` (đúng, vì đó chỉ dành cho ALTER TABLE trên bảng cũ). Đã tự đọc
+`src/models/job.py` để xác nhận field `id: str = Field(default_factory=_uuid, primary_key=True)`
+là kiểu `str` UUID — khớp với `foreign_key="jobs.id"` kiểu `str | None` trong
+`LayoutQaFinding.job_id`, không lệch kiểu FK. **Đúng convention, không có vấn đề.**
+
+---
+
+## 6. Trung thực của "Kết quả thí nghiệm A/B — P0.2"
+
+Đọc kỹ toàn bộ section trong Architecture.md. Đánh giá: **trình bày trung thực, phân biệt rõ
+VERIFIED/UNVERIFIED, không phóng đại**:
+
+- Câu hỏi 1 (UX-D): kết quả "không tái hiện được" được giữ nguyên là **`[UNVERIFIED]`**, không
+  bị diễn giải quá tay thành "đã loại trừ T-07" — Dev viết rõ "không loại trừ T-07 (chỉ là không
+  tái hiện được lần này), nhưng cũng không xác nhận được". Đúng tinh thần Protocol 5.
+- Phát hiện phụ (gate P0.1-a bị "ngợp" bởi hàng trăm nghìn cặp overlap từ block cực nhỏ/trùng
+  lặp `fallback_line`/`plain text`): đây là 1 hạn chế thật của chính gate P0.1 vừa build, và Dev
+  **tự báo cáo hạn chế của sản phẩm mình vừa làm** thay vì giấu đi — đáng ghi nhận. Đã note
+  đúng "KHÔNG sửa trong task này, ngoài scope" — hợp lý không mở rộng scope P0 giữa chừng.
+- Câu hỏi 2 (`--max-pages-per-part`): kết luận "KHÔNG implement P1.3" dựa trên số liệu cụ thể
+  (149 vs 149, 4243 vs 4243 — bằng tuyệt đối ở 2/3 trang đo) — kết luận khớp với điều kiện đã
+  chốt trước ở U4 ("P1.3 chỉ implement nếu P0.2 chứng minh"), không tự ý nới lỏng điều kiện.
+- Câu hỏi 4 (pdf2zh fallback): đây là chỗ dễ bị phóng đại nhất (pdf2zh thắng rõ ràng ở overlap
+  và không mất nội dung) nhưng Dev **chủ động nêu 3 điểm phản bác** ((a) mất góc nghiêng, (b)
+  dịch dở dang 1 phần khối — gắn nhãn `[UNVERIFIED]` đúng vì "chưa đo thêm mẫu lớn hơn", (c)
+  trang 15 pdf2zh thua babeldoc) trước khi giữ nguyên quyết định G1e đã chốt — đây là cách trình
+  bày cân bằng, không thiên vị kết luận đã có sẵn dù số liệu bề mặt có vẻ ủng hộ hướng khác.
+- Ghi chú rõ giới hạn LLM non-deterministic (cache không khoá được 100% khi ngữ cảnh batch xung
+  quanh thay đổi) áp dụng NGAY TỪ ĐẦU cho mọi so sánh phía sau, không phải biện minh sau khi có
+  kết quả bất lợi — đọc thứ tự trình bày trong file xác nhận ghi chú này xuất hiện *trước* các
+  bảng số liệu.
+
+**Kết luận**: không phát hiện chỗ nào phóng đại/diễn giải quá tay. Cách viết mẫu để các
+increment sau tham khảo.
+
+---
+
+## 7. Tự chạy lại (không tin lời Dev báo cáo)
+
+```
+uv run pytest -q
+  → 326 passed, 405 warnings in 13.26s   (khớp đúng "326/326" Dev báo cáo trong CHANGELOG)
+
+uv run ruff check src/services/layout_qa.py src/models/layout_qa.py tests/test_layout_qa.py \
+  src/models/__init__.py src/models/database.py
+  → All checks passed!
+
+uv run ruff format --check src/services/layout_qa.py src/models/layout_qa.py tests/test_layout_qa.py
+  → 3 files already formatted
+```
+
+Đã đối chiếu `tests/fixtures/babeldoc/` — 3 file PDF fixture mới (`rotated_text_p67_source.pdf`,
+`rotated_chart_p15_source.pdf`, `toc_2col_p7_source.pdf`) đã được **commit từ trước** (không nằm
+trong working-tree diff hiện tại, `git log` cho thấy commit `5d1cf26`), có `README.md` ghi rõ
+nguồn trích (job id, trang gốc, cách trích bằng `pymupdf.insert_pdf` không chỉnh sửa) — đúng yêu
+cầu golden-file của Protocol 5 mục 3, không phải mock viết tay.
+
+---
+
+## Blocking issues
+
+**Không có.**
+
+## Non-blocking suggestions
+
+1. **Bổ sung docstring `_check_entity_preservation`** ghi rõ thêm rủi ro false-negative do (a)
+   match theo substring-trong-toàn-block thay vì theo dòng/câu, và (b) ngưỡng IoU lỏng (0.05) có
+   thể khiến nhiều block gốc cùng match 1 block dịch đã gộp — hiện docstring chỉ nêu ví dụ
+   false-positive định dạng (mục 4 ở trên). Nên làm sớm vì đây là gate quan trọng nhất theo UX
+   report/Domain Expert.
+2. **Sửa câu trích dẫn severity của `entity_loss`** trong CHANGENLOG (mục "Giả định tự chọn" #2):
+   ghi "khớp DoD-UX-02 (không có nhãn UX-letter riêng trong ux-review-report.md, chọn mức blocker
+   vì bản chất rủi ro nội dung định lượng)" thay vì "khớp UX-C" — tránh Tech Lead/PM đọc lướt
+   tưởng nhầm đây là cùng 1 hạng mục đã có sẵn trong UX report.
+3. Cân nhắc thêm 1 test cho trường hợp "2 block gốc nhỏ bị gộp thành 1 block dịch lớn" (mô phỏng
+   đúng rủi ro false-negative nêu ở mục 4) để tài liệu hoá giới hạn này bằng test thay vì chỉ bằng
+   docstring — không blocking vì đây là hạn chế đã biết trước, không phải bug ẩn.
+4. Gate P0.1-a bị "ngợp" bởi block cực nhỏ/trùng lặp `fallback_line` (đã tự Dev ghi nhận trong
+   kết quả A/B) — nhắc lại để không quên xử lý ở vòng tinh chỉnh sau, vì ảnh hưởng tới khả năng
+   dùng `severity_score` để so sánh giữa các lần chạy một cách công bằng trên trang dày đặc.
+5. Phát hiện phụ về `BabeldocRunner` truyền API key qua CLI argument (`ps aux` đọc được) mà Dev
+   đã ghi trong CHANGELOG và tách task riêng — xác nhận đây **đúng là** vấn đề bảo mật thật (rò
+   rỉ secret qua process list là lỗ hổng kinh điển), việc tách task riêng thay vì sửa lẫn trong
+   PR này là hợp lý (đúng nguyên tắc 1 commit 1 mục đích), nhưng đây là **security issue có mức
+   độ nghiêm trọng**, đề nghị PM ưu tiên task đó sớm, không để trôi.
+
+## Next step
+
+P0 (`layout_qa.py` gate P0.1 + pin version P0.3) **APPROVED**. Circuit breaker Dev↔Reviewer:
+0/3 vòng cho phần này (không cần vòng sửa). P0.2 (thí nghiệm A/B) là spike đo lường, không phải
+code sản phẩm nên không thuộc phạm vi APPROVE/REJECT của Reviewer — đã review riêng ở mục 6 chỉ
+về tính trung thực của cách trình bày kết quả. Nhắc PM: task riêng về API key leak trong
+`BabeldocRunner` (mục Non-blocking #5) nên được ưu tiên xử lý sớm dù không thuộc scope P0 này.
+
+---

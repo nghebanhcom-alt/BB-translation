@@ -18,6 +18,7 @@ from src.models import (  # noqa: F401
     Glossary,
     GlossaryEntry,
     Job,
+    LayoutQaFinding,
     OverflowReport,
     Setting,
     TranslationCache,

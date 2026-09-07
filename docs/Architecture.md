@@ -3624,9 +3624,21 @@ key that trong `.env`), qua **`JobOrchestrator` cua app**, khong phai goi CLI ba
 nen duoc Dev capture lai vao day o increment dau tien.
 
 **Khoi tao moi truong** (R5-03): `babeldoc` phai cai bang venv **rieng** Python 3.12
-(`uv tool install --python 3.12 babeldoc`) — Python 3.14 crash vi dung API private
+(`uv tool install --python 3.12 "babeldoc==0.6.4"`) — Python 3.14 crash vi dung API private
 `concurrent.futures.thread._WorkItem` (CHANGELOG). Neu tren may QA khong cai duoc, QA ghi dung
 cau: `"release blocked pending live verification: babeldoc"`.
+
+**Pin version (P0.1/P0.3, Final Decision U1/U4/V-4)**: lenh cai dat o tren PHAI ghim dung
+`babeldoc==0.6.4`, khong duoc de trong (`uv tool install --python 3.12 babeldoc` se tu keo
+version moi nhat tren PyPI trong tuong lai). Ly do: toan bo so do o T3/U1/U2 va toan bo thiet
+ke G1e (overlay `insert_text(morph=…)`, U3) deu gan chat voi hanh vi cua dung ban 0.6.4 nay
+(nguong goc xoay `il_creater.py:968-974`, thu tu "gian truoc bop sau" cua `typesetting.py`) —
+doi version ma khong biet la doi silent, co the lam sai lech moi ket luan da verify. Repo nay
+chua co script/CI tu dong hoa viec cai `babeldoc` (khong tim thay trong README, script setup,
+hay Dockerfile — xem `docker/Dockerfile` va `docs/Architecture.md` section 7 cho danh sach day
+du cac buoc cai dat thu cong); day la lenh huong dan THU CONG duy nhat, nen viec pin o day la
+đủ cho toan bo project (khong can them file cai dat rieng). Neu sau nay them script tu dong
+hoa (CI, Dockerfile), phai pin cung dung `==0.6.4` o do, khong duoc de mac dinh "latest".
 
 ---
 
@@ -5575,3 +5587,142 @@ ngân sách thời gian cho việc này.
 | Nguyên nhân UX-D | ⚠️ `[UNVERIFIED]` — thí nghiệm P0.2 phải phân biệt mode-scale (T-07) vs gom nhầm paragraph (`--split-short-lines`) |
 | pdf2zh có tốt hơn babeldoc trên 19 trang xoay không | ⚠️ `[UNVERIFIED]` — đo ở P0.2-(v) |
 | `--translate-table-text` ảnh hưởng trang bảng | ⚠️ `[UNVERIFIED]` — đo ở P0.2-(iv); đã hạ ưu tiên sau U2 |
+
+---
+
+### Kết quả thí nghiệm A/B — P0.2 (2026-09-07, Dev)
+
+**Cách chạy** (đúng spec U4/P0.2, không mock — Protocol 5 R5-03): gọi thẳng
+`babeldoc`/`pdf2zh` CLI thật qua `asyncio.create_subprocess_exec`, dùng chung file gốc
+`data/uploads/f88282bb-…_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf` (418 trang,
+xác nhận lại bằng PyMuPDF), cùng flag production (`--split-short-lines --short-line-split-factor
+0.8`, `--openai-thinking disabled` cho DeepSeek, model `deepseek-v4-flash` — đúng giá trị đang
+override trong bảng `settings` của DB, không phải default `deepseek-chat` trong code). Script
+spike lưu tại
+`/private/tmp/.../scratchpad/p02_experiment/run_experiment.py` (không phải code sản phẩm).
+
+**Khoá cache**: chạy (i) 1-trang riêng lẻ cho cả 5 trang TRƯỚC để làm ấm cache, các lần sau
+không truyền `--ignore-cache`. Ghi chú quan trọng phát hiện thêm: dù đã làm ấm cache, một vài
+đoạn dịch vẫn đổi nhẹ giữa các lần gọi khác batch-context (ví dụ tiêu đề trang 7 dịch ra
+"Mục lục" ở chế độ 1 trang nhưng "Nội dung" ở chế độ chunk, "Hai Chữ T: Nhiệt Độ" viết hoa khác
+"Hai chữ T: Nhiệt độ") — tức cache của babeldoc không khoá được 100% biến LLM non-deterministic
+khi ngữ cảnh batch xung quanh đoạn đó thay đổi (batch cùng 1 request gồm nhiều đoạn). Các so
+sánh dưới đây vì vậy ưu tiên tín hiệu HÌNH HỌC (bbox, số block, overlap) hơn là tín hiệu câu chữ
+chính xác.
+
+**Cách bật debug JSON**: `--debug` CLI flag chỉ set `TranslationConfig.debug=True` (help text
+"Use debug logging level" gây hiểu lầm — đã đọc source `main.py:694`/`high_level.py:916-1030`
+để verify). Khi `debug=True`, JSON được ghi vào `working_dir` (không phải `--output`!),
+`working_dir` mặc định là `~/.cache/babeldoc/working/<stem file input>/` nếu không truyền
+`--working-dir` — **và bị GHI ĐÈ giữa các lần chạy cùng 1 file input** nếu không tách riêng.
+Đã tự truyền `--working-dir <thư mục riêng theo config>` cho mỗi lần gọi để tránh mất dữ liệu.
+Với `--max-pages-per-part`, `working_dir` của từng part bị `cleanup_part_working_dir()` xoá
+NGAY sau khi part đó xong (`high_level.py:671`) — nên KHÔNG lấy được JSON debug per-part cho
+cấu hình (iii); phải đối chiếu bằng cách đọc trực tiếp PDF output cuối (mono) thay vì JSON.
+
+**Câu hỏi 1 — UX-D do mode-scale-theo-chunk (T-07) hay gom nhầm paragraph do
+`--split-short-lines`?**
+
+Đối chiếu đúng cặp đoạn PM từng thấy lỗi trong production ("4. Kỹ Thuật và Kỹ Năng Làm Bánh
+Ngọt 172" / "Hai chữ T: Nhiệt độ", trang 7) qua `typsetting.json` (IL, toạ độ PDF-native
+y-up) VÀ qua PDF output cuối (PyMuPDF, toạ độ top-left) ở cả 3 cấu hình — (i) 1 trang, (ii)
+chunk 1-40 y hệt production, (iii) chunk 1-40 + `--max-pages-per-part 4`:
+
+| Cấu hình | bbox heading | bbox sub-entry | Thứ tự |
+|---|---|---|---|
+| (i) 1 trang | (330.0,330.3)-(546.6,344.6) | (361.2,361.5)-(467.5,377.0) | heading TRÊN, sub-entry DƯỚI — ĐÚNG |
+| (ii) chunk 1-40 | (330.0,330.3)-(546.6,344.6) | (361.2,361.4)-(469.6,377.8) | heading TRÊN, sub-entry DƯỚI — ĐÚNG |
+| (iii) chunk + mpp4 | (330.0,330.3)-(546.6,344.6) | (361.2,361.4)-(469.6,377.8) | heading TRÊN, sub-entry DƯỚI — ĐÚNG |
+
+**Kết quả bất ngờ**: KHÔNG tái hiện được hiện tượng UX-D cho đúng cặp đoạn này ở BẤT KỲ cấu
+hình nào trong lần chạy này — bbox gần như giống hệt nhau giữa cả 3 cấu hình (heading giống
+tuyệt đối, sub-entry lệch < 2pt do word-wrap khác 1 chữ). Điều này **không xác nhận** T-07 hay
+`--split-short-lines` là biến quyết định cho CHÍNH cặp đoạn này ở lần chạy hiện tại — nhiều khả
+năng lỗi PM thấy trong production (T3-f, "391 384" và cặp "Hai chữ T" nói trên) là sản phẩm của
+1 lần gọi LLM cụ thể khác (tổ hợp câu chữ/độ dài dịch khác đủ để đẩy paragraph qua ngưỡng
+overflow) — **không loại trừ T-07** (chỉ là không tái hiện được lần này), nhưng cũng không xác
+nhận được. Giữ nguyên trạng thái `[UNVERIFIED]` cho câu hỏi "nguyên nhân UX-D", không nâng
+thành kết luận.
+
+Tuy vậy, khi quét TOÀN BỘ trang 7 bằng gate P0.1 (không chỉ 1 cặp), chồng lấn là RẤT LỚN và
+đồng nhất giữa (ii)/(iii): **149 cặp overlap ở cả (ii) và (iii)** (so với **157** ở (i) — chênh
+lệch do khác câu chữ dịch, không phải do vị trí). Trên TOÀN BỘ 40 trang của chunk 1-40, tổng số
+cặp overlap là **410.898 (ii)** so với **411.832 (iii)** — cùng bậc độ lớn, 25/40 trang có
+chênh lệch nhưng không theo chiều hướng nhất quán (một số trang giảm: trang 30 giảm 1074→723,
+trang 18 giảm 1240→881; một số trang tăng: trang 27 tăng 184→345, trang 6 tăng 175→208). Số
+liệu áp đảo này (hàng trăm nghìn cặp overlap/40 trang) đến từ rất nhiều block cực nhỏ/trùng lặp
+gần như tuyệt đối (`fallback_line` trùng khít `plain text` ở tỉ lệ giao 1.0) — đây là hạn chế
+đã biết của gate P0.1-a khi áp lên trang dày đặc block nhỏ (bảng/mục lục nhiều dòng ngắn): số
+đếm thô bị "ngợp" bởi nhiễu hình học chứ không phản ánh đúng mức độ nghiêm trọng thực tế — ghi
+nhận đây là điểm cần tinh chỉnh gate (lọc block quá nhỏ hoặc dedupe trùng khít) ở vòng sau,
+KHÔNG sửa trong task này (ngoài scope P0.1 đã chốt).
+
+**Câu hỏi 2 — `--max-pages-per-part 4` có cải thiện đáng kể không?**
+
+**KHÔNG.** Trên cả 3 trang đo trực tiếp (7, 63, 67):
+
+| Trang | Overlap (ii, mặc định) | Overlap (iii, mpp4) | Char count (ii) | Char count (iii) |
+|---|---|---|---|---|
+| 7 | 149 | 149 | — | — |
+| 63 | 55 | 57 | 3.286 | 3.318 |
+| 67 | 4.243 | 4.243 | 5.978 | 5.962 |
+
+Trang 7 và 67: SỐ OVERLAP GIỐNG HỆT NHAU giữa (ii) và (iii) — `--max-pages-per-part 4` không
+đổi gì đo được ở 2 trang này trong lần chạy này. Trang 63 chỉ lệch ±2 (nhiễu). Tổng thể 40
+trang của chunk 1-40 cũng cùng bậc độ lớn (410.898 vs 411.832, xem Câu hỏi 1). **Kết luận**:
+không có bằng chứng `--max-pages-per-part 4` cải thiện đáng kể trên bộ trang này — **P1.3
+(G2b) KHÔNG nên implement** dựa trên số đo P0.2 này (đúng điều kiện đã chốt ở U4: "P1.3 chỉ
+implement nếu P0.2 chứng minh" — P0.2 KHÔNG chứng minh).
+
+**Câu hỏi 3 — `--translate-table-text` đổi gì trên trang bảng (63)?**
+
+Gần như KHÔNG đổi gì: 117 block text (mặc định) so với 118 block (`--translate-table-text`),
+3.286 ký tự so với 3.319 ký tự, 55 overlap so với 57 overlap — sample nội dung dịch giống hệt
+nhau theo thứ tự block. Khớp với kết luận U2 (V-3 "bảng chưa từng được dịch" đã bị BÁC BỎ —
+bảng ĐÃ được dịch qua cơ chế `fallback_line` mặc định, xem `layout_helper.py:725-728, 844`) —
+`--translate-table-text` không mang lại giá trị đo được thêm trên đúng trang bảng này.
+**Kết luận**: giữ nguyên quyết định U2/T6 — **không nâng ưu tiên P2.3**.
+
+**Câu hỏi 4 — pdf2zh có đáng làm fallback cho 19 trang chữ xoay không?**
+
+So sánh trực tiếp bằng chính gate P0.1 vừa xây, chạy trên CẢ HAI output (babeldoc chunk 39-80
+và pdf2zh 5-trang) cho 3 trang xoay (15, 63, 67):
+
+| Trang | Char count pdf2zh | Char count babeldoc | Overlap pdf2zh | Overlap babeldoc | Nội dung nghiêng còn không? |
+|---|---|---|---|---|---|
+| 15 (bảng quy đổi, xoay 20°) | 1.651 | 860 | 74 | 47 | pdf2zh: nhiều chữ hơn hẳn (babeldoc mất phần lớn, khớp T3-c "39/58 block mất"); chưa xác nhận có đúng nội dung "CONVERSION CHART" bằng regex đơn giản |
+| 63 (Fiche de Technique, không xoay) | 1.374 | 3.286 | **0** | 55 | N/A (không xoay) — pdf2zh **0 overlap** trên trang bảng này, tốt hơn hẳn babeldoc |
+| 67 (chú giải xoay -11°, "Disaccharide") | 3.631 | 5.978 | 65 | 4.243 | **pdf2zh GIỮ ĐƯỢC nội dung** (`"...một loại disaccharide..."`, `"Disaccharide"`, `"The word disaccharide is composed..."`) — babeldoc **MẤT TRẮNG** hoàn toàn (khớp T3-d) |
+
+Kiểm tra trực tiếp góc xoay (`line["dir"]`) trên output pdf2zh trang 67: **`dir=(1.0, 0.0)`**
+— tức pdf2zh **duỗi thẳng** khối chữ nghiêng (khớp đúng V-2 đã verify trước đó qua source
+`converter.py:244,384`: "pdf2zh không vứt chữ nghiêng nhẹ nhưng cũng duỗi thẳng"). Đồng thời
+phát hiện MỚI: nội dung bên trong khối đó ở pdf2zh bị **dịch DỞ DANG** — dòng đầu đã dịch sang
+tiếng Việt, 3 dòng còn lại (bao gồm chính tiêu đề "Disaccharide") **vẫn nguyên văn tiếng Anh**
+— tức pdf2zh không mất chữ hoàn toàn nhưng chất lượng dịch không đồng nhất trên khối này.
+
+**Kết luận, có điều kiện**: pdf2zh **đáng cân nhắc làm fallback cho vấn đề MẤT NỘI DUNG** (UX-C)
+trên trang chữ xoay — nó KHÔNG BAO GIỜ tạo ra "ô trắng" như babeldoc quan sát được trên cả 3
+trang test (15/63/67), và trên trang 63 (bảng, không xoay) overlap = 0 tuyệt đối tốt hơn hẳn.
+NHƯNG: (a) nó đánh đổi mất góc nghiêng thẩm mỹ (duỗi thẳng, đã biết trước ở V-2 — đây chính là
+lý do project chọn babeldoc lúc đầu), (b) chất lượng dịch không đồng nhất trong 1 khối (phát
+hiện mới, `[UNVERIFIED]` cần đo thêm mẫu lớn hơn trước khi kết luận đây là hiện tượng hệ thống
+hay ngẫu nhiên 1 lần), và (c) trên trang 15, pdf2zh có overlap CAO HƠN babeldoc (74 so với 47)
+— tức không phải lúc nào pdf2zh cũng thắng tuyệt đối. **Giữ nguyên roadmap U4/P1.1**: hướng
+chính cho UX-C vẫn là G1e (overlay giữ góc nghiêng, đã spike khả thi ở U3); pdf2zh cho 19 trang
+xoay **chỉ nên là phương án dự phòng cuối** nếu spike fit-text G1e ở P1.1 thất bại — đúng thứ tự
+đã chốt ở P1.1, số đo P0.2-(v) này KHÔNG đủ mạnh để đảo ngược quyết định đó (mới đo 3/19 trang,
+1 lần chạy, chưa loại trừ non-determinism của LLM).
+
+**Thời gian chạy thật** (tham khảo cho ước tính chi phí, KHÔNG phải benchmark hiệu năng
+nghiêm ngặt — máy Dev, không kiểm soát tải hệ thống): 1 trang babeldoc ~42-51s; chunk 40 trang
+babeldoc ~176-255s (~4-6s/trang); pdf2zh 5 trang riêng lẻ (không liền mạch, `--pages
+"7,13,15,63,67"`) ~427s tổng — dùng cùng `--thread 8`/`--pool-max-workers 8` cho công bằng.
+
+**File/artifact của thí nghiệm** (không commit vào repo, chỉ tham chiếu): script + toàn bộ
+output/debug JSON của 11 lần chạy lưu tại
+`/private/tmp/claude-501/.../scratchpad/p02_experiment/` (`run_experiment.py`,
+`results_summary.json`, `config_i/` .. `config_v/`) — PM/QA cần xem lại số đo thô có thể yêu
+cầu Dev export lại vào `tests/fixtures/babeldoc/` theo đúng Protocol 5 mục 3 (golden file) nếu
+muốn dùng làm fixture test lâu dài; hiện tại đây là dữ liệu spike một lần, không phải fixture
+đã chốt.

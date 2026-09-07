@@ -3392,3 +3392,92 @@ babeldoc) — xem chi tiết ở trên. 307/307 test pass, `ruff check`/`ruff fo
 Không có blocker mới phát sinh từ US-16; các blocker non-blocking tồn đọng từ trước (AIMD
 Claude/Gemini spike, thứ tự duplicate-check/cost-gate, v.v. — xem `project_state.json`
 `blockers`) không liên quan tới US-16, giữ nguyên trạng thái không chặn release.
+
+## P0 — Babeldoc Layout Bug Fix Roadmap: gate đo lường + pin version (2026-09-07)
+
+Implement **P0.1** và **P0.3** của roadmap đã chốt tại `docs/Architecture.md`
+"Final Decision: Babeldoc Layout Bug Fix Roadmap" (U4). **P0.2** (thí nghiệm A/B) đang chạy
+live song song — kết quả (4 câu hỏi) được append riêng vào `docs/Architecture.md` khi xong,
+không ghi ở đây để tránh trùng lặp 2 nguồn.
+
+**P0.1 — Gate chất lượng hậu kiểm (`src/services/layout_qa.py`, module mới)**: hàm
+`run_layout_qa_gate(translated_pdf_path, source_pdf_path=None)` chạy 5 kiểm tra bằng
+PyMuPDF, đúng bảng đặc tả U4/P0.1:
+- (a) cặp block text giao nhau > 5% diện tích block nhỏ hơn (`get_text("blocks")`) — tái sử
+  dụng đúng ngưỡng/logic script T3-a đã chạy thật.
+- (b) text vượt qua đường viền vẽ (`page.get_drawings()`, chỉ xét drawing có nét stroke).
+- (c) text đè lên ảnh (`page.get_image_rects()`).
+- (d) pre-scan chữ xoay trên file GỐC (`line["dir"]` ngoài 0/90° ± 0.1°, đúng ngưỡng babeldoc
+  `il_creater.py:968-974`) — chính là G1d, xuất phụ lục text cho QA, không phải sản phẩm giao
+  người đọc cuối.
+- (e) bảo toàn thực thể số+đơn vị (nhiệt độ/khối lượng-thể tích/thời gian/phân số) — match
+  block gốc↔dịch theo IoU bbox (không so toàn trang), heuristic có ghi rõ giới hạn trong
+  docstring (không phải NLP entity-matching chính xác 100%).
+
+Output là **hàng đợi review theo trang, xếp hạng mức nghiêm trọng** (`LayoutQaReport.page_queue`,
+sắp giảm dần theo `severity_score`) — không phải 1 kết quả pass/fail toàn tài liệu, đúng yêu
+cầu tường minh của Tech Lead. Kết quả ghi vào bảng mới `layout_qa_findings`
+(`src/models/layout_qa.py`, đăng ký trong `src/models/__init__.py`/`database.py`) qua
+`persist_findings()` — điều kiện bắt buộc để P0.2 so sánh được giữa các lần chạy A/B.
+
+**Test** (`tests/test_layout_qa.py`, 19 test): theo Protocol 5 R5-03 + Protocol 6 R6-02 — dùng
+PDF thật đã trích ở `tests/fixtures/babeldoc/` (`rotated_text_p67_source.pdf`,
+`rotated_chart_p15_source.pdf`, `toc_2col_p7_source.pdf`), assert GIÁ TRỊ CỤ THỂ đo được (góc
+xoay `-11°`/`20°`, `dir=(0.9816…, -0.1908…)` khớp đúng số đã ghi ở Architecture.md T3(d), số
+cặp overlap thật đo trên fixture) — không phải chỉ "gate chạy không lỗi". 2 test cho check (e)
+dùng PDF do chính `fitz` vẽ ra (không phải mock hành vi babeldoc/pdf2zh — chỉ kiểm logic
+regex+bbox-matching của module này) để kiểm soát được trường hợp mất 1 thực thể cụ thể.
+`persist_findings()` test bằng 1 fake session tối thiểu, assert đúng field ghi vào row (không
+dùng `AsyncMock` + `assert_called()` trần).
+
+**P0.3 — Pin `babeldoc==0.6.4`**: repo chưa có script/CI tự động hoá việc cài `babeldoc`
+(chỉ có hướng dẫn thủ công tại `docs/Architecture.md` 6.14.6) — sửa dòng lệnh đó thành
+`uv tool install --python 3.12 "babeldoc==0.6.4"`, kèm ghi chú lý do (U1/U4/V-4: mọi số đo
+T3/U1/U2 và toàn bộ thiết kế G1e đều gắn với đúng hành vi bản 0.6.4).
+
+**Giả định tự chọn (không tự đoán, ghi rõ ở đây theo yêu cầu PM)**:
+1. `page_number` trong `LayoutQaFinding`/`LayoutQaFindingData` là **1-indexed** (khác
+   `fitz.Page.number` 0-indexed) để khớp cách Architecture.md/UX report gọi trang ("trang 67").
+2. Severity map cố định: `overlap`/`text_over_drawing`/`text_over_image` = `critical` (khớp
+   UX-A/UX-B trong `ux-review-report.md`), `rotated_text_prescan`/`entity_loss` = `blocker`
+   (khớp UX-C, Blocker theo UX report) — Architecture.md không tự chỉ định nhãn severity cụ
+   thể cho từng check, chỉ nói "xếp hạng mức nghiêm trọng".
+3. `job_id` trên bảng `layout_qa_findings` là **nullable** + thêm `run_label`/`source_file` —
+   vì P0.2 chạy babeldoc/pdf2zh ngoài `JobOrchestrator` (không tạo `Job` row thật), cần cách
+   phân biệt các lần chạy A/B mà Architecture.md chưa đặc tả tên cột.
+4. Ngưỡng match IoU tối thiểu cho check (e) chọn `0.05` (lỏng, vì block dịch có thể lệch toạ
+   độ khỏi bản gốc — chính RC-T1) — chưa có con số nào trong Architecture.md, sẽ cần tinh
+   chỉnh khi có dữ liệu QA thật soi qua gate.
+
+**Trạng thái**: `uv run pytest -q` → 326/326 pass (19 test mới, không có test nào bị vỡ).
+`ruff check`/`ruff format --check` sạch trên mọi file đã sửa/tạo. Đây là code thay đổi hành vi
+runtime (P0.1) — **CHƯA qua Reviewer thật** (Protocol 7 R7-01) — PM sẽ tự spawn Reviewer riêng
+trước khi coi P0 là "xong".
+
+**Phát hiện phụ (ngoài scope, đã tách task riêng)**: trong lúc chạy P0.2, soi `ps aux` phát
+hiện `BabeldocRunner.translate_pages()` truyền API key thật qua CLI argument
+`--openai-api-key` (không chỉ qua `env=`) — vi phạm chính nguyên tắc bảo mật ghi trong
+docstring đầu file `src/services/pdf2zh_service_map.py` ("API keys always go through envs...
+never through argv, which any local user could read via ps"). `Pdf2zhRunner` không mắc lỗi
+này. Chưa sửa trong task này (ngoài phạm vi P0.1/P0.2/P0.3) — đã tách thành task riêng cho
+PM/Dev sau.
+
+**P0.2 — Thí nghiệm A/B (spike, không phải code sản phẩm)**: chạy babeldoc/pdf2zh THẬT (không
+mock) trên trang 7/13/15/63/67 của file production `f88282bb-…-Foundations (1).pdf`, 5 cấu
+hình đúng spec U4/P0.2 (1 trang / chunk 1-40 & 39-80 giống production / chunk + `--max-pages-
+per-part 4` / chunk + `--translate-table-text` / pdf2zh cùng bộ trang), khoá cache đúng thứ tự
+(chạy 1-trang trước để làm ấm, không truyền `--ignore-cache` sau đó). Kết quả đầy đủ (bảng số
+liệu, 4 câu trả lời) đã append vào `docs/Architecture.md` mục "Kết quả thí nghiệm A/B — P0.2
+(2026-09-07, Dev)" ở cuối file — không lặp lại ở đây để tránh 2 nguồn lệch nhau. Tóm tắt cực
+ngắn: (1) không tái hiện được đúng cặp đoạn UX-D đã biết ở bất kỳ cấu hình nào lần này — giữ
+`[UNVERIFIED]`; (2) `--max-pages-per-part 4` không cải thiện đo được → **không implement P1.3**;
+(3) `--translate-table-text` gần như không đổi gì trên trang 63 → giữ nguyên P2.3; (4) pdf2zh
+không mất nội dung trên trang chữ xoay (khác babeldoc mất trắng) nhưng duỗi thẳng góc nghiêng +
+dịch dở dang 1 phần khối — chỉ nên là phương án dự phòng cuối cho P1.1, không đảo ngược thứ tự
+ưu tiên G1e đã chốt. Phát hiện phụ: gate P0.1-a (overlap) bị "ngợp" bởi hàng trăm nghìn cặp
+block cực nhỏ/trùng lặp trên trang dày đặc (mục lục/bảng) — cần lọc/dedupe ở vòng tinh chỉnh
+sau, ghi nhận nhưng không sửa trong task này.
+
+Artifact thô của thí nghiệm (script + JSON debug + PDF output của 11 lần chạy) lưu ngoài repo
+tại thư mục scratchpad của session Dev — chưa export vào `tests/fixtures/babeldoc/` (Protocol
+5 mục 3), vì đây là dữ liệu spike 1 lần chưa chốt làm golden fixture lâu dài.
