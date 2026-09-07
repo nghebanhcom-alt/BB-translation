@@ -3361,3 +3361,171 @@ OCR→dịch→overlay với dữ liệu thật, kiểm tra nội dung `translat
 `status`) trước khi release.
 
 ---
+
+# Review — Bug #6 Phase 1 + task P0 (logging) — 2026-09-07
+
+Spec: `docs/Architecture.md` mục "Bug #6 — Final Decision sau phản biện Domain Expert
+(2026-09-07)", đặc biệt **V6 (QUYẾT ĐỊNH CUỐI — 2 pha)** dòng ~6023-6096. Phạm vi review: file
+mới `src/services/mineru_det_probe.py`, `tests/test_mineru_det_probe.py`,
+`tests/fixtures/mineru/det_probe_p67.json`; file sửa `src/api/main.py`, `src/core/config.py`,
+`src/core/job_orchestrator.py`, `src/services/layout_qa.py`,
+`tests/integration/test_job_orchestrator.py`, `docs/PRD.md`.
+
+## Kết luận: APPROVE
+
+Không có blocking issue. 2 non-blocking suggestion (chi tiết bên dưới).
+
+## Checklist bắt buộc (1-8)
+
+**1. R6-04 — trace tay `_run_rotated_text_probe()` / `_build_ocr_bridge()`
+(`src/core/job_orchestrator.py`)**
+
+- (a) Ảnh scan dùng để probe: `run_job()` gán `file_path = Path(job.file_path)` (dòng 259), rồi
+  gọi `self._build_ocr_bridge(job, file_path, db_session)` (dòng 272) — cùng `file_path` này
+  được truyền tiếp làm tham số `file_path` của `_build_ocr_bridge`. Cả 2 nhánh (fresh: dòng
+  ~683; resumable: dòng ~651) đều gọi `self._run_rotated_text_probe(job, file_path, ...)` với
+  đúng biến `file_path` đó — KHÔNG phải `bridge_path`/`bridge.path` (đã bị whiteout, xác nhận qua
+  docstring `mineru_det_probe.py` dòng 29-32 và code: `bridge = build_searchable_pdf(...)` chạy
+  **sau** lời gọi probe ở nhánh fresh, dòng 683 gọi trước dòng 685 tạo bridge). Đúng job đang xử
+  lý — không có job khác/fixture nào lẫn vào vì `file_path` bắt nguồn trực tiếp từ
+  `job.file_path` của đối tượng `job` đang được xử lý trong cùng scope hàm. **Đạt.**
+- (b) `middle.json` dùng để ghép: nhánh fresh dùng `ocr_result.middle_json_path` — chính là
+  return value của `self._mineru_runner.parse_document(file_path, ocr_dir)` gọi ngay phía trên
+  (dòng 660), tức middle.json CỦA CHÍNH job này, không phải fixture. Nhánh resumable dùng
+  `ocr_dir / "middle.json"` với `ocr_dir = self._processing_dir / job.id / "ocr_output"` — đã
+  verify bằng cách đọc `src/services/mineru_runner.py:291-310`
+  (`_write_middle_json`): `middle_json_path = output_dir / "middle.json"`, và `output_dir` truyền
+  vào đó chính là `ocr_dir` được gọi ở dòng 660 (`parse_document(file_path, ocr_dir)`) — cùng 1
+  path string, cùng `job.id`. Suy luận "đường dẫn cố định" của Dev trong comment là đúng, có
+  nguồn xác thực (đọc code, không suy đoán). **Đạt.** Test tích hợp
+  `test_pdf_scan_runs_rotated_text_det_probe_with_correct_lineage` cũng tự verify lại bằng
+  assertion `Path(called_middle_json_path) == expected_middle_json` — đúng tinh thần R6-02 (assert
+  giá trị cụ thể, không chỉ `assert_awaited()`).
+- (c) `page_number`: `DetProbeLine.page_number` gán ở `run_det_probe()` bằng `page_index + 1`
+  (0-indexed PyMuPDF → 1-indexed), có comment "matches src/services/layout_qa.py convention".
+  Đối chiếu CHANGELOG P0.1 (dòng 3439-3440): "`page_number` trong `LayoutQaFinding`/
+  `LayoutQaFindingData` là 1-indexed... để khớp cách Architecture.md/UX report gọi trang" —
+  nhất quán. Golden fixture test cũng gọi `parse_det_probe_output(raw, page_number=67)` khớp
+  trang 67 thật của tài liệu spike. **Đạt.**
+
+**2. R5-04 — External contract verified against real source: YES.**
+Nguồn: (i) Architecture.md mục V6/V-1/V-3/V8 — Tech Lead tự chạy spike thật ngày 2026-09-07 và
+ghi bảng trạng thái verify tường minh (`Detector MinerU trả poly còn góc... verified — spike Tech
+Lead tự chạy`); (ii) golden fixture `tests/fixtures/mineru/det_probe_p67.json` — đã tự kiểm tra
+bằng script Python độc lập trong review này: 88 item thô, lọc `score>=0.8` và `|angle|>=3.0` ra
+đúng 18 dòng, median = -10.8565° (nằm trong dung sai ±1.5° so với `_EXPECTED_MEDIAN_ANGLE_DEG =
+-11.0` mà test dùng) — số liệu trong fixture tự nhất quán với assertion trong test, không phải
+số bịa. (iii) Docstring module `mineru_det_probe.py` dòng 6-23 trích dẫn cụ thể
+`ocr_utils.py:399-410` (MinerU đã cài, bản 3.4.5) cho hành vi "flattening" — đây là source code
+thật, không phải trí nhớ. Riêng chữ ký `PytorchPaddleOCR(lang=..).ocr(img, det=True, rec=True)`
+tự nó chưa được review này verify độc lập (không cài lại MinerU để đối chiếu), nhưng đã có khoá
+Protocol 5 mục 3 đúng cách: golden fixture backing + smoke test thật (mục 5 dưới) + version pin
+ghi rõ trong docstring — chấp nhận được cho Phase 1.
+
+**3. Best-effort/an toàn — đọc thật code try/except.**
+`_run_rotated_text_probe()` (`job_orchestrator.py`) có **2 khối try/except riêng biệt**, đúng
+pattern P1.1 đã áp dụng:
+- Khối 1 bọc `probe_and_flag_rotated_text(...)` — bắt `Exception`, log
+  `"mineru_det_probe that bai..."`, `return` ngay — không tiếp tục.
+- Khối 2 bọc `persist_findings(...)` — bắt `Exception` riêng, log
+  `"persist_findings that bai..."` kèm số finding bị mất, tách biệt khỏi khối 1.
+Xác nhận lỗi thiếu venv MinerU đi qua đường: `run_det_probe()` raise
+`MineruDetProbeUnavailableError` (subclass `MineruDetProbeError(RuntimeError)`, subclass
+`Exception`) → bị khối try 1 bắt bằng `except Exception` → job tiếp tục bình thường. Test
+`test_pdf_scan_det_probe_failure_does_not_fail_job` verify đúng kịch bản này bằng
+`side_effect=MineruDetProbeUnavailableError(...)` và assert `result.status == "completed"`.
+Trước khi thử probe còn có early-return `if not self._settings.mineru_det_probe_enabled: return`
+và `if not middle_json_path.exists(): return` — 2 guard này nằm NGOÀI try/except (không cần, vì
+không có gì có thể raise ở đó). **Đạt, không có finding.**
+
+**4. Test dấu góc `test_angle_sign_matches_pymupdf_dir`.**
+Test này KHÔNG dùng `abs()` hay tolerance lỏng để né lỗi dấu — cụ thể:
+`assert detector_median * pymupdf_median > 0` (bắt buộc CÙNG DẤU, một phép nhân âm sẽ tự động
+fail nếu ai đó đảo dấu `angle = atan2(y1-y0, x1-x0)` thành `atan2(y0-y1, ...)` hay tương tự) VÀ
+tiếp theo `assert detector_median == pytest.approx(pymupdf_median, abs=1.5)` (khớp cả độ lớn, tự
+build lại tolerance đối chiếu 2 giá trị thật chứ không phải hằng số cứng cả 2 vế). Ground truth
+(`_real_pymupdf_dir_angle_deg()`) đọc trực tiếp từ PDF nguồn qua `page.get_text("dict")["blocks"]
+[...]["lines"]["dir"]`, độc lập với golden fixture của detector — nếu ai đó tự ý sửa cả file
+fixture cho khớp code sai, test này (đọc PDF gốc) vẫn bắt được lỗi vì so sánh với nguồn thứ 3 độc
+lập. Đủ chặt để khoá lỗi dấu. **Đạt, không có finding.**
+
+**5. Smoke test R5-03 `test_run_det_probe_real_subprocess`.**
+Test gọi `run_det_probe(P67_SOURCE)` — hàm PRODUCTION thật, không mock `subprocess` hay
+`_run_ocr_subprocess`/detector nào (khác các test khác trong cùng file đều `mocker.patch(...
+run_det_probe...)` để cô lập, riêng test này để nguyên). `@pytest.mark.skipif(not
+is_mineru_interpreter_available(), ...)` — điều kiện skip đọc `Path(...).expanduser().exists()`
+trên `default_mineru_python_path()` (`~/.local/share/uv/tools/mineru/bin/python`), đúng logic:
+skip (không fail) khi máy thiếu venv MinerU, đúng tinh thần Protocol 5 mục 4 ("được phép skip
+trong CI nếu tool không cài được"). Trên máy Reviewer này, `uv run pytest -q` cho thấy test suite
+chạy 350 passed — verify riêng: máy này CÓ venv MinerU nên test không bị skip (xem log run dưới).
+
+**6. Logging fix `_configure_logging()` (`src/api/main.py`).**
+- Handler mới gắn vào `logging.getLogger("src")`, KHÔNG gắn vào root logger — đọc code xác nhận
+  không có lệnh `logging.getLogger()` (root, không tham số) hay `logging.basicConfig()` nào khác
+  trong toàn bộ `src/` (`grep -rn "basicConfig\|addHandler\|getLogger()" src/` chỉ ra đúng
+  `main.py`). `app_logger.propagate = False` được set NGAY SAU `addHandler` trong cùng hàm —
+  đúng chỗ, chặn log lan lên root.
+- Double-logging với uvicorn: vì `propagate=False` chặn hẳn việc lan lên root, và uvicorn tự cấu
+  hình handler riêng cho các logger `uvicorn`/`uvicorn.error`/`uvicorn.access` (không phải
+  `"src"` hay root) — 2 hệ thống logging không giao nhau, không có đường nào double-log.
+- Rủi ro "chặn mất log nơi khác cần propagation": đã tự grep toàn `src/` để tìm bất kỳ
+  `logging.basicConfig`/handler khác gắn vào root dự định bắt log từ `"src.*"` — không tìm thấy
+  cái nào tồn tại ở thời điểm này, nên `propagate=False` không cắt đứt cơ chế nào đang hoạt động.
+  Rủi ro duy nhất là *tương lai*: nếu sau này có ai thêm 1 handler ở root để bắt log toàn app
+  (vd Sentry SDK, log-aggregator), log `"src.*"` sẽ không tới đó nữa — đã có comment cảnh báo rõ
+  trong code (dòng 55-58) nên chấp nhận được, ghi thành non-blocking suggestion bên dưới.
+
+**7. Kết quả chạy thật (Reviewer tự chạy, không copy CHANGELOG):**
+```
+uv run pytest -q          → 350 passed, 428 warnings in 85.89s (0:01:25)
+uv run ruff check         → All checks passed!
+uv run ruff format --check → 19 files would be reformatted (toàn bộ NẰM NGOÀI diff đang review —
+                              đã tự kiểm tra riêng: `ruff format --check --diff` trên đúng 7 file
+                              thuộc diff này (mineru_det_probe.py, test_mineru_det_probe.py,
+                              job_orchestrator.py, config.py, main.py, layout_qa.py,
+                              test_job_orchestrator.py) → "7 files already formatted", không có
+                              file nào trong 19 file kia trùng với diff này)
+```
+Cảnh báo runtime (`PytestUnhandledThreadExceptionWarning`, `RuntimeWarning: coroutine
+'_FakeProcess.wait' was never awaited`) đều ở các test file KHÔNG thuộc diff này
+(`test_babeldoc_runner.py`, `test_chunk_merge.py`, `test_progress_tracker.py`,
+`test_translation_providers.py`) — không phải regression của increment này.
+
+**8. Ranh giới phạm vi Phase 2.**
+`git diff --stat` / `git status --porcelain` xác nhận `src/preprocess/searchable_pdf.py`
+**KHÔNG xuất hiện** trong danh sách file thay đổi (đã tự chạy `git diff --stat --
+src/preprocess/searchable_pdf.py` → không có output, file không đổi). Không có thay đổi nào
+thêm góc vào `insert_text`/vẽ whiteout xoay — đúng như Architecture.md V6 chốt "PHASE 2... KHÔNG
+implement bây giờ". **Đạt.**
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+1. `_configure_logging()` (`src/api/main.py` dòng ~55-58): `propagate=False` là quyết định đúng
+   cho hiện tại (không có handler root nào khác), nhưng nếu tương lai có tool giám sát tập trung
+   gắn vào root logger, log `"src.*"` sẽ không tới đó nữa mà không có cảnh báo runtime nào — đã
+   có comment code cảnh báo, nhưng nên thêm 1 dòng vào Architecture.md/CHANGELOG khi việc đó xảy
+   ra để không ai phải re-discover qua code archaeology.
+2. Docstring `match_lines_to_middle_json()` (`src/services/mineru_det_probe.py` dòng ~394-396)
+   nhắc tới "spike had a noisy outlier poly at -23.43°" làm lý do chọn median thay vì mean —
+   nhưng golden fixture đã copy vào repo (`det_probe_p67.json`, 18 dòng sau lọc) KHÔNG chứa giá
+   trị nào gần -23.43° (dải thật đo được: -11.399° đến -10.293°, xem log verify mục 2 ở trên).
+   Không phải bug (median vẫn là lựa chọn đúng, và ý định — chống outlier — hợp lý độc lập với
+   fixture này), nhưng câu chuyện outlier trong comment không tự chứng minh được bằng chính
+   fixture đi kèm trong repo → nên sửa comment cho khớp fixture thật, hoặc ghi rõ outlier đó đến
+   từ 1 lần chạy khác không có trong golden fixture, để người đọc sau không mất công đi tìm -23.43°
+   trong file JSON và không thấy.
+
+## Next step
+
+**APPROVE.** Circuit breaker Dev↔Reviewer: vòng 1/3 cho increment này. Chuyển QA: theo Protocol 5
+R5-03 QA phải re-run smoke test thật trước khi duyệt release, và theo Protocol 6 R6-03 lưu ý
+increment này CHƯA cần live E2E toàn chuỗi mới (Phase 1 chỉ FLAG, không đổi output hình học) —
+nhưng vẫn cần QA tự mở `docs/test-report.md` xác nhận ít nhất 1 lần chạy thật
+`test_run_det_probe_real_subprocess` không bị skip trên máy QA (R5-03), và xác nhận
+`layout_qa_findings` thật sự có row `rotated_text_scan_unsupported` khi chạy job `pdf_scan` có
+trang chữ xoay thật — không chỉ tin lại kết quả review này.
+
+---

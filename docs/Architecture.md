@@ -5269,6 +5269,14 @@ hưởng mọi người dùng dịch sang ngôn ngữ dài hơn ngôn ngữ ngu�
 file tái hiện tối thiểu đã có sẵn (`p67.pdf`, `p15.pdf`). Effort 0,5 ngày, risk 0, nhưng
 **không tính là fix** — không được chờ upstream để đóng task.
 
+**✅ Đã thực hiện (2026-09-07)**: đã mở issue tại
+[funstory-ai/BabelDOC#615](https://github.com/funstory-ai/BabelDOC/issues/615) — tổng hợp
+3 lỗi kèm nguồn xác thực (file:line): Bug A = RC-T2 (T-01, vứt glyph xoay), Bug B = RC-T1
+(T-04 vẽ tràn + T-08 chống chồng lấn sai hướng), Bug C = root cause `max_tokens=2048` hardcode
+mất nội dung với reasoning model (CHANGELOG 2026-09-06). Repro file (`p67.pdf`, `p15.pdf`)
+chưa đính kèm trực tiếp trong issue, sẽ gửi khi maintainer yêu cầu. **Không chờ phản hồi
+upstream để đóng bất kỳ task nào** — giữ nguyên tinh thần G4/P2.2.
+
 #### G5 — Known limitation trong PRD
 
 Dù chọn hướng nào, ghi vào PRD: bản dịch giữ layout PDF **không** đảm bảo 100% không chồng
@@ -5516,7 +5524,10 @@ lineage R6-02: giá trị từ `Settings` phải đi thật tới `args` của s
     dù đã có đủ chỗ. Đây là **bug logic**, không chỉ "thứ tự chưa tối ưu" → khả năng merge cao.
   - PR (b): biến ngưỡng góc `il_creater.py:973` thành tham số CLI + **thêm log khi vứt char**
     (hiện `return` im lặng, E-2). Không đổi default → rủi ro merge thấp.
-  - Issue: kèm `p67.pdf` / `p15.pdf` (đã có sẵn từ T3).
+  - Issue: kèm `p67.pdf` / `p15.pdf` (đã có sẵn từ T3). **✅ Đã mở
+    [funstory-ai/BabelDOC#615](https://github.com/funstory-ai/BabelDOC/issues/615)
+    (2026-09-07)** — xem chi tiết ở G4. PR (a)/(b) ở trên **chưa** mở, mới dừng ở đề xuất trong
+    thân issue #615 (đợi phản hồi maintainer trước khi bỏ công viết PR thật).
   Ghi rõ: **không được chờ upstream để đóng task** (giữ nguyên tinh thần G4).
 - **P2.3 — `--translate-table-text`**: chỉ xét lại nếu P0.2-(iv) cho số đo tốt hơn rõ rệt.
   Không còn là ưu tiên sản phẩm sau khi V-3 bị bác bỏ (U2).
@@ -5726,3 +5737,690 @@ output/debug JSON của 11 lần chạy lưu tại
 cầu Dev export lại vào `tests/fixtures/babeldoc/` theo đúng Protocol 5 mục 3 (golden file) nếu
 muốn dùng làm fixture test lâu dài; hiện tại đây là dữ liệu spike một lần, không phải fixture
 đã chốt.
+
+---
+
+### Bug #6 — Root Cause & Phương án fix: chữ xoay bị mất góc trong OCR bridge (2026-09-07)
+
+**Người viết**: Tech Lead (Opus). **Trạng thái**: Đánh giá/đề xuất SƠ BỘ — chờ Domain Expert
+phản biện + PM/user quyết định. **Không có code nào được viết trong task này.**
+
+**Đầu vào**: `docs/test-report.md` mục "QA Vòng 6" — Bug #6: overlay chữ xoay (P1.1/G1e) không
+bao giờ kích hoạt cho job `pdf_scan` + `babeldoc`; `layout_qa_findings` = 0 hàng (im lặng hoàn
+toàn). QA đã đánh dấu `[CHƯA VERIFY]`: "MinerU 3.4.5 có API/field nào khác chứa góc không?".
+Task này trả lời DỨT ĐIỂM câu hỏi đó theo Protocol 5 R5-01/R5-02.
+
+#### 6.13.1 — Nguồn xác thực (Protocol 5 R5-01)
+
+Bản đã cài: `mineru --version` → **3.4.5**, đường dẫn
+`/Users/hieutt/.local/share/uv/tools/mineru/lib/python3.12/site-packages/mineru/`.
+Toàn bộ trích dẫn dưới đây là **đọc trực tiếp source code của bản đã cài này** (không phải trí
+nhớ, không phải suy đoán), cộng thêm 1 nguồn doc chính thức đã fetch thật để đối chiếu chéo.
+
+| # | Nguồn | Nội dung xác thực |
+|---|---|---|
+| S-M1 | `mineru/model/ocr/pytorch_paddle.py:203-225, 242-291` | Detector (DBNet, `self.text_detector`) trả `dt_boxes` dạng **poly 4 điểm** — có mang thông tin góc. `ocr(det=True, rec=False)` trả thẳng poly (`tmp_res = [box.tolist() for box in dt_boxes]`). |
+| S-M2 | `mineru/utils/ocr_utils.py:276-297` (`merge_det_boxes`), `211-236` (`update_det_boxes`) | Poly nghiêng (`calculate_is_angle()` = True) được **cố ý tách riêng** vào `angle_boxes_list` và bỏ qua bước gộp/làm phẳng — góc **vẫn sống** ở tầng này. Comment gốc của tác giả (pytorch_paddle.py:218): "merge_det_boxes 和 update_det_boxes 都会把poly转成bbox再转回poly，因此需要过滤所有倾斜程度较大的文本框". |
+| S-M3 | **`mineru/utils/ocr_utils.py:399-410`** | **Điểm mất góc — chốt.** `if calculate_is_angle(poly):` → poly nghiêng bị **thay bằng 1 hình chữ nhật thẳng trục** dựng quanh **trọng tâm** poly: `x_center/y_center` = trung bình 4 đỉnh, `new_height` = trung bình 2 cạnh dọc, `new_width = p3[0] - p1[0]`. Góc bị **vứt bỏ có chủ đích**, không lưu ở đâu. |
+| S-M4 | `mineru/utils/ocr_utils.py:391-392` | Dòng comment chết `# average_angle_degrees = calculate_angle_degrees(box_ocr_res[0])` — hàm `calculate_angle_degrees` **không còn tồn tại** trong bản 3.4.5 (`grep -rn "calculate_angle_degrees"` chỉ khớp đúng dòng comment này). Tức là tác giả từng tính góc rồi **bỏ hẳn**. |
+| S-M5 | `mineru/utils/ocr_utils.py:418-432` | `ocr_item` cuối cùng chỉ có `{"label","bbox","score","text"}` — `bbox` qua `normalize_to_int_bbox` (`mineru/utils/bbox_utils.py:7-32`: lấy min/max, luôn ra 4 số thẳng trục). **Không có field góc nào.** |
+| S-M6 | `mineru/backend/pipeline/batch_analyze.py:788, 832` và `mineru/backend/hybrid/hybrid_analyze.py:212, 285` | **MỌI** nhánh OCR (batch và single, pipeline và hybrid) đều đi qua đúng `get_ocr_result_list()` ở S-M3. Không có đường vòng nào giữ được poly. |
+| S-M7 | `mineru/backend/vlm/vlm_magic_model.py:54, 225`; `mineru/backend/hybrid/hybrid_analyze.py:357-366` (`_normalize_medium_vlm_angle`), `437` | Backend **VLM/hybrid** CÓ field `angle` trong block — nhưng bị chuẩn hoá cứng: `if normalized_angle in {0, 90, 180, 270}: return normalized_angle; return 0`. Nguồn của nó là **table orientation classifier** (`AtomicModel.TableOrientationCls`, dòng 437) — tức "bảng bị xoay ngang/ngược", KHÔNG phải góc nghiêng tuỳ ý. |
+| S-M8 | Doc chính thức, fetch thật 2026-09-07: https://opendatalab.github.io/MinerU/reference/output_files/ | Xác nhận chéo S-M7: chỉ backend VLM sinh field `angle`, giá trị giới hạn trong `{0, 90, 180, 270}`; `middle.json`/`model.json` của backend **pipeline** (backend app đang dùng, `MinerURunner(backend="pipeline")`) **không có** field angle. |
+| S-M9 | `mineru/utils/ocr_utils.py:453-513` (`get_rotate_crop_image` → `get_rotate_crop_image_for_text_rec`), gọi tại `pytorch_paddle.py:276` | Crop để nhận dạng chữ được **warp phối cảnh về ngang** (rectify) trước khi đưa vào `text_recognizer`. Đây là lý do MinerU **đọc đúng nội dung** chữ nghiêng nhưng trả toạ độ ngang. |
+
+#### 6.13.2 — Trả lời dứt điểm câu `[CHƯA VERIFY]` của QA
+
+**VERIFIED — MinerU 3.4.5 KHÔNG cung cấp góc xoay tuỳ ý qua bất kỳ API/config/output nào.**
+Cụ thể, 3 mệnh đề con, mỗi cái có nguồn:
+
+1. **Không phải "MinerU không tính được góc"** — detector DBNet của nó trả poly 4 điểm có góc
+   thật, và MinerU còn có hàm `calculate_is_angle()` nhận biết poly nghiêng (S-M1, S-M2).
+2. **Giả thuyết "góc bị tiêu thụ ở bước rectify" của PM là ĐÚNG MỘT PHẦN, nhưng không phải cơ
+   chế chính** (đây là khả năng PM yêu cầu loại trừ): góc quả thật bị tiêu thụ ở
+   `get_rotate_crop_image` để nhận dạng chữ (S-M9) — nhưng ngay cả nếu bỏ qua bước rectify,
+   góc vẫn sẽ mất, vì có **một bước làm phẳng riêng, tường minh, có chủ đích** ở
+   `get_ocr_result_list` (S-M3) áp lên chính poly gốc (không phải lên bản đã rectify). Ma trận
+   rectify KHÔNG được lưu lại ở đâu (S-M9 tạo `img_crop` rồi bỏ ma trận). ⇒ **Không có "ma trận
+   rectify nội bộ để đọc lại"** — hướng fix "moi lại rectify matrix" bị **LOẠI**.
+3. **Không có cờ/env/backend nào bật lại góc**: đã liệt kê toàn bộ `MINERU_*` env của bản 3.4.5
+   (`grep -rhoE "MINERU_[A-Z_]+"`, 40 biến) — không biến nào liên quan góc/skew/deskew.
+   Backend `vlm`/`hybrid` có `angle` nhưng lượng tử hoá về `{0,90,180,270}` và nguồn là bộ phân
+   loại hướng BẢNG (S-M7, S-M8) ⇒ **không dùng được cho góc -11°**. Chuyển sang backend VLM
+   **KHÔNG** giải quyết Bug #6.
+
+**Hệ quả kiến trúc**: `middle.json` là **API công khai duy nhất** app đang tiêu thụ, và nó
+**vĩnh viễn** không mang góc cho backend pipeline. Muốn có góc, app **bắt buộc phải tự tính**
+(hoặc gọi tầng dưới `middle.json`). Đây không phải thiếu sót cấu hình — là thiết kế của MinerU.
+
+**Điểm phụ nhưng quan trọng cho mọi phương án fix** (VERIFIED, S-M3): với dòng chữ nghiêng,
+bbox MinerU trả về **KHÔNG phải bounding box của poly**, mà là 1 **dải ngang mỏng đi qua trọng
+tâm** dòng chữ (cao = chiều cao chữ thật, rộng = bề rộng ngang của poly). Nghĩa là:
+- (a) `_insert_invisible_text` hiện tại chèn chữ vô hình vào đúng dải mỏng đó — lệch khỏi vệt
+  mực thật, nhưng vẫn nằm ở giữa nó (chấp nhận được cho mục đích "cầu nối để dịch").
+- (b) **Chỉ cần biết thêm 1 số vô hướng θ** là tái dựng được hình bình hành thật:
+  tâm = tâm bbox, chiều cao = `y1-y0`, chiều dài = `(x1-x0)/cos θ`, xoay quanh tâm góc θ.
+  Đây là điều làm phương án (A) rẻ hơn nhiều so với cảm giác ban đầu.
+
+#### 6.13.3 — Các phương án
+
+| Mã | Phương án | Cách làm | Effort | Rủi ro | Tự tin |
+|---|---|---|---|---|---|
+| **A** | App tự đo góc trên ảnh raster, bổ sung vào bridge | Module mới `src/preprocess/skew_probe.py`: render trang bằng PyMuPDF `get_pixmap()`, với MỖI span bbox của `middle.json` cắt vùng (nới rộng theo 6.13.2-a), nhị phân hoá, đo θ bằng **projection-profile** (quét θ ∈ [-20°, +20°], chọn θ tối đa hoá phương sai tổng theo hàng). Truyền θ vào `_insert_invisible_text` → `insert_text(..., morph=(pivot, Matrix(-θ)))` + tái dựng hình học theo 6.13.2-b. Overlay P1.1 sau đó chạy **không cần sửa dòng nào**. | **Cao** (~2-3 ngày: 1 spike đo độ chính xác + 1 increment Dev + QA live E2E) | **Trung bình-cao** | Cơ chế đo: `assumed` (chưa spike). Hình học tái dựng: `verified` (S-M3). |
+| **A′** | Như A nhưng **chỉ để FLAG**, không đổi hình học | Cùng module `skew_probe.py`, cùng θ — nhưng θ **không** đi vào `insert_text`; chỉ dùng để ghi `layout_qa_findings` ("trang N có K dòng nghiêng ~θ°, overlay không khả dụng cho `pdf_scan`, cần soát tay"). | **Thấp-trung bình** (~0.5-1 ngày) | **Thấp** (không đụng hình học output, chỉ thêm hàng DB) | Như A cho phần đo; phần ghi flag `verified` (đã có sẵn `LayoutQaFindingData`) |
+| **B** | Chấp nhận known-limitation, FLAG mức job | Ghi known-limitation vào PRD; `JobOrchestrator` ghi **1 finding cho mỗi job** `pdf_scan` + `babeldoc`: "nhánh scan không phát hiện được chữ xoay — soát tay 100% trang". Không đo góc. | **Rất thấp** (~2 giờ) | **Thấp**, nhưng **nhiễu cao** (mọi job scan đều bị flag, kể cả job không có chữ xoay → nguy cơ "flag fatigue" làm mất tác dụng chính U7-E3) | `verified` |
+| **C** | Tự xoay ảnh trước khi gửi MinerU | Bị **LOẠI**. Bài toán con gà-quả trứng (phải biết θ trước mới xoay được → nếu đã biết θ thì đã là phương án A), và MinerU vẫn rectify từng dòng ở tầng crop (S-M9) nên xoay cả trang không giữ được gì. | — | — | `verified` (S-M9, S-M3) |
+| **D** | Đổi engine `pdf_scan` sang pdf2zh | Bị **LOẠI cho mục tiêu giữ góc**: đã đo ở P0.2 câu 4 — pdf2zh cũng **duỗi thẳng** (`dir=(1.0,0.0)`), chỉ hơn ở chỗ không mất nội dung. Nhưng nhánh `pdf_scan` **đã không mất nội dung** (QA Vòng 6 mục 4: 3.310 ký tự tiếng Việt đúng nghĩa) ⇒ đổi engine không mua được gì, lại mất các ưu điểm khác của babeldoc. | — | — | `verified` (P0.2 câu 4, đo thật) |
+| **E** | Gọi thẳng detector của MinerU ngoài luồng | Chạy subprocess bằng chính interpreter của MinerU (`~/.local/share/uv/tools/mineru/bin/python`) gọi `PytorchPaddleOCR.ocr(img, det=True, rec=False)` → nhận poly 4 điểm **còn nguyên góc** (S-M1), match với bbox `middle.json` theo trọng tâm, suy ra θ. Chính xác hơn A (dùng đúng model đã tải sẵn, không cần dep mới nặng). | **Cao** (~3-4 ngày) | **Cao** — phụ thuộc **API nội bộ** của MinerU (không phải API công khai), Protocol 5 mục 5 bắt verify lại toàn bộ mỗi lần nâng version; chạy model lần 2 → tăng thời gian job đáng kể; ghép venv lạ vào runtime app | Poly có góc: `verified` (S-M1). Chi phí/độ ổn định: `assumed` |
+
+**Ghi chú dependency cho A/A′**: app **chưa có** `numpy` lẫn `cv2` (`pyproject.toml` dòng 7-23;
+`uv run python -c "import numpy"` → `ModuleNotFoundError`). Projection-profile trên vùng crop đã
+hạ mẫu (≤200px bề rộng, ~13-27 góc thử) chạy được bằng **Python thuần + PyMuPDF `Pixmap`**, không
+cần dep mới — `assumed`, phải đo trong spike; nếu quá chậm thì thêm `numpy` (nhẹ), **không** thêm
+`opencv`.
+
+#### 6.13.4 — Một rủi ro ẩn của phương án A mà Domain Expert cần soi kỹ
+
+Nếu A thành công (bridge mang chữ vô hình ĐÃ xoay), hành vi babeldoc trên nhánh `pdf_scan` sẽ
+**đổi**: hiện tại babeldoc dàn khối chữ đó thành hộp ngang (QA Vòng 6 mục 4); khi input đã
+nghiêng, nhiều khả năng babeldoc sẽ **vứt bỏ** khối đó như nó vẫn làm với `pdf_digital` (T3-d,
+P0.2) → chừa chỗ trống cho overlay P1.1 điền vào — tức nhánh `pdf_scan` **hội tụ về đúng nhánh
+`pdf_digital` đã PASS**. Đây là kịch bản mong muốn, nhưng là **`[UNVERIFIED]` — assumed**, phải
+là câu hỏi ĐẦU TIÊN của spike A. Nếu babeldoc **vẫn** vẽ hộp ngang, A sẽ tạo ra **chữ đè chữ**
+(overlay nghiêng chồng lên hộp ngang của babeldoc) — tệ hơn hiện trạng — và khi đó A cần thêm
+1 bước xoá/che vùng babeldoc đã vẽ (`page.add_redact_annot`), làm effort/rủi ro tăng thêm một
+bậc. `overlay_rotated_text()` hiện **chỉ vẽ, không xoá** (`_draw_block`,
+`rotated_text_overlay.py:367-389`) — `verified`.
+
+#### 6.13.5 — Đề xuất SƠ BỘ của Tech Lead
+
+**Trả lời câu hỏi cốt lõi của PM ("đào sâu sửa tiếp hay chấp nhận known-limitation"):
+CHẤP NHẬN known-limitation cho hình học, NHƯNG BẮT BUỘC sửa phần FLAG — cụ thể là phương án
+A′, không phải B.**
+
+Lý do (theo thứ tự sức nặng):
+
+1. **Ưu tiên sai đối tượng nếu làm A ngay**: ví dụ động lực của toàn bộ roadmap P1.1 (trang 67,
+   khối "Disaccharide" nghiêng -11°) nằm trên nhánh **`pdf_digital`** — nhánh này **đã PASS,
+   verify sống, góc khớp < 0.01°** (QA Vòng 6 mục 3). Nhánh `pdf_scan` có chữ xoay hiện là
+   trường hợp **giả định**, chưa có tài liệu thật nào trong corpus chứng minh nó xảy ra. Đầu tư
+   2-4 ngày + rủi ro trung bình-cao cho 1 nhánh chưa có bằng chứng nhu cầu là sai thứ tự — đúng
+   tinh thần kỷ luật đã áp dụng khi **bác bỏ P1.3** ở P0.2 ("chỉ implement nếu số đo chứng minh").
+2. **Thiệt hại thực tế là thẩm mỹ, không phải nội dung**: QA Vòng 6 xác nhận nội dung dịch
+   **không mất** trên nhánh scan (3.310 ký tự tiếng Việt đúng nghĩa). Đây là mức nghiêm trọng
+   khác hẳn Bug #5 (mất trắng nội dung).
+3. **Nhưng phần "im lặng" thì KHÔNG được chấp nhận** — đây là chỗ tôi **không** đồng ý với việc
+   chỉ ghi known-limitation rồi thôi. Hệ thống đang **báo sai** rằng không có trang nào cần soi,
+   trong khi chính sách U7-E3 tự đặt ra là "soát tay bắt buộc 100% cho mọi trang có chữ xoay".
+   Im lặng có hệ thống nguy hiểm hơn lỗi thẩm mỹ.
+4. **Chọn A′ chứ không B**, vì B (flag mức job) sẽ flag **mọi** job scan kể cả job không có chữ
+   xoay → flag fatigue làm hỏng chính cơ chế U7-E1/U7-E3 mà nó định cứu. A′ flag **đúng trang
+   có chữ nghiêng thật**.
+5. **A′ là bước 1 của A, không phải ngõ cụt**: cùng module `skew_probe.py`, cùng θ. Nếu sau này
+   corpus thật xuất hiện tài liệu scan có chữ xoay (bằng chứng nhu cầu), nâng A′ → A chỉ còn là
+   nối θ vào `insert_text(morph=...)` + trả lời câu hỏi `[UNVERIFIED]` ở 6.13.4 — phần đo góc,
+   phần khó và rủi ro nhất, đã xong và đã chạy thật trong production suốt thời gian đó (tức là
+   **đã tự tích luỹ dữ liệu độ chính xác thật** thay vì phải spike mù).
+
+**Giải pháp cụ thể đề xuất (A′)** — để Dev không phải đoán:
+
+- **Module mới** `src/preprocess/skew_probe.py`, hàm
+  `estimate_span_skew_deg(page: fitz.Page, bbox, *, max_abs_deg=20.0, step_deg=1.0) -> float | None`.
+  Render **một lần mỗi trang** (`page.get_pixmap(dpi=150, colorspace=fitz.csGRAY)`), cắt vùng
+  bbox **nới rộng dọc theo `(x1-x0) * sin(max_abs_deg)`** (bắt buộc, vì bbox MinerU là dải mỏng
+  qua trọng tâm — 6.13.2-a), nhị phân hoá theo ngưỡng Otsu đơn giản, quét θ và chọn θ tối đa hoá
+  phương sai của projection profile. Trả `None` khi tín hiệu yếu (tránh dương tính giả).
+- **Ngưỡng**: coi là "nghiêng" khi `|θ| >= 3.0°` (dưới ngưỡng này là skew scan bình thường, không
+  phải chữ xoay có chủ đích) — con số này **`[UNVERIFIED]`, phải hiệu chỉnh bằng fixture thật**
+  (`tests/fixtures/babeldoc/rotated_text_p67_source.pdf` raster hoá 200 DPI, ground truth
+  -10.9999°, đã có sẵn từ QA Vòng 6) trước khi chốt.
+- **Điểm nối (R6-01, khai báo lineage tường minh)**: gọi trong `searchable_pdf.py` ngay tại vòng
+  lặp đã có sẵn qua các span của `middle.json` (nơi `_collect_text_spans()` trả về), **cùng lúc**
+  với việc dựng bridge — không thêm lần render trang thứ 2. Kết quả θ **không** đi vào
+  `_insert_invisible_text` ở giai đoạn A′; nó đi vào `MinerUResult`/kết quả bridge dưới dạng
+  danh sách `(page_number, bbox, angle_deg)`, rồi `JobOrchestrator` chuyển thành
+  `LayoutQaFindingData` với lý do `"rotated_text_scan_unsupported"`.
+- **Test bắt buộc (R6-02)**: assert **giá trị θ cụ thể** đo được từ fixture raster hoá (sai số
+  cho phép ±1.5°) và assert **số hàng `layout_qa_findings` > 0** cho đúng job `pdf_scan` fixture
+  đó — không chấp nhận `assert_called()`.
+- **Không đụng** `rotated_text_overlay.py` (module đó ĐÚNG, QA đã verify sống ở nhánh digital).
+- **PRD**: ghi known-limitation tường minh — "overlay giữ góc chữ xoay chỉ hỗ trợ `pdf_digital`;
+  với `pdf_scan`, hệ thống **phát hiện và FLAG** trang có chữ xoay để soát tay, nhưng **không**
+  tái tạo góc — nguyên nhân gốc nằm ở MinerU (6.13.1 S-M3), không sửa được từ phía app mà không
+  tự đo góc lại."
+
+**Việc cần làm ngay, độc lập với mọi phương án** (đã được QA nêu ở test-report mục 8, tôi tán
+thành và nâng lên thành hạng mục kiến trúc): `src/api/main.py` **chưa cấu hình logging handler**
+nào cho logger `src.*` ⇒ mọi `logger.warning(..., exc_info=True)` trong các nhánh best-effort
+(bao gồm nhánh nuốt exception của `overlay_rotated_text()` tại `job_orchestrator.py:533-539`)
+**im lặng hoàn toàn** trong production. Đây là **điều kiện khiến Bug #6 khó phát hiện** và sẽ
+khiến bug tiếp theo cũng khó phát hiện y hệt. Đề xuất tách 1 task riêng, ưu tiên cao hơn cả A′.
+
+**Trạng thái**: Đề xuất sơ bộ — chờ Domain Expert (Fable) phản biện độc lập, sau đó PM/user
+quyết định. Không tự chuyển sang implement.
+
+---
+
+### Bug #6 — Final Decision sau phản biện Domain Expert (2026-09-07)
+
+**Người viết**: Tech Lead (Opus). **Trạng thái**: QUYẾT ĐỊNH CUỐI của Tech Lead — thay thế mục
+6.13.5 (đề xuất sơ bộ) ở phần trên. Vẫn **không có code nào được viết trong task này**. Có 2 câu
+hỏi escalate lên PM/user ở V7.
+
+**Đầu vào**: phản biện độc lập của Domain Expert (Fable), kèm spike thật Expert tự chạy. Toàn bộ
+mục này chỉ ghi những gì **tôi (Tech Lead) tự chạy lại / tự đọc lại source được**, không nhận
+kết quả của Expert như dữ kiện.
+
+#### V1. Kết quả TỰ VERIFY lại các claim của Expert (Protocol 5 R5-01)
+
+Phiên bản đã cài dùng cho mọi phép đo dưới đây: MinerU **3.4.5**
+(`/Users/hieutt/.local/share/uv/tools/mineru/`), babeldoc **0.6.4**
+(`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`,
+`babeldoc.__version__` in ra `0.6.4`), PyMuPDF của venv app.
+
+| # | Claim của Expert | Kết quả tự verify | Nguồn |
+|---|---|---|---|
+| V-1 | `PytorchPaddleOCR.ocr(img, det=True, rec=False)` trả poly **còn góc** | **XÁC NHẬN — tự chạy lại, tái hiện được.** Render `tests/fixtures/babeldoc/rotated_text_p67_source.pdf` ở 200 DPI (1800×2175 px) rồi gọi detector bằng chính interpreter MinerU: **88 poly**, trong đó **19 poly có \|θ\| ≥ 3°**. Loại 1 poly nhiễu (`score=0.51`, text `"0"`) bằng ngưỡng `score ≥ 0.8` → còn **18 dòng, θ ∈ [-11.40°, -10.29°]**. | Spike tự chạy, script `det_spike.py`, output `det_probe_p67.json` |
+| V-2 | Độ chính xác góc | **XÁC NHẬN, thậm chí tốt hơn Expert báo.** Ground truth đo bằng PyMuPDF trên chính fixture: 17 dòng có `dir` = **-11.0°** (và 75 dòng 0°). Sai số **median ≈ 0.1°**, **max 0.40°** trên 18 dòng (Expert báo ≤0.7°). | So sánh trực tiếp GT PyMuPDF vs poly detector |
+| V-3 | `ocr(det=True, rec=True)` **vẫn** giữ poly còn góc (kèm text) ⇒ điểm làm phẳng nằm ở tầng backend, không nằm trong class detector | **XÁC NHẬN bằng cả 2 cách.** (a) Chạy thật: 88 item, 19 item nghiêng, text đọc đúng (`"Disaccharide"`, `"The word disaccharide is composed of the prefix di"`, ...), score 0.99-1.00. (b) Đọc source: `pytorch_paddle.py:196-201` (`tmp_res = [[box.tolist(), res] ...]`) trả thẳng `dt_boxes` chưa qua `get_ocr_result_list`. | Spike + `pytorch_paddle.py:190-291` |
+| V-4 | Chi phí thời gian của (E) | **XÁC NHẬN và RẺ HƠN cả số Expert đo.** Trên máy này: init model **0.73s**; `det` only **0.36s/trang**; `det+rec` **2.00s/trang**. ⇒ 400 trang scan ≈ **2,4 phút** (det-only) hoặc **~13 phút** (det+rec). *Lưu ý*: đây là 1 lần chạy, không kiểm soát tải máy — dùng để so sánh bậc độ lớn, không phải benchmark. | Spike tự chạy |
+| V-5 | babeldoc `il_creater` vứt glyph **deterministic theo ma trận ký tự**, không phân biệt `render_mode` | **XÁC NHẬN.** `il_creater.py:968-974` (`on_lt_char`, bản 0.6.4): `rotation_angle = get_rotation_angle(char.matrix)`; `if not (-0.1 <= rotation_angle <= 0.1 or 89.9 <= rotation_angle <= 90.1): return`. `get_rotation_angle` = `atan2(b, a)` của ma trận (`il_creater.py:390-398`). `grep -n "render_mode"` trên toàn file → **0 kết quả** ⇒ chữ vô hình (`render_mode=3`) bị xử lý y hệt chữ thường. | Đọc source bản đã cài |
+| V-6 | "Không có paragraph thì không có ô nền trắng" | **XÁC NHẬN, và mạnh hơn Expert nói.** `paragraph_finder.py:89-121` (`add_text_fill_background`) lặp `for paragraph in page.pdf_paragraph` → không paragraph thì không sinh `PdfRectangle` nào. Thêm nữa: `grep -rn "fill_background=True"` trên **toàn bộ package babeldoc** chỉ khớp **đúng 1 dòng** (`paragraph_finder.py:117`) ⇒ đây là **nơi DUY NHẤT** ô nền trắng được sinh ra, không có đường vòng nào khác. | Đọc source + grep toàn package |
+
+#### V2. Rủi ro 6.13.4 ("2 lớp chữ đè nhau") — GỠ `[UNVERIFIED]`, nhưng KHÔNG gỡ hết
+
+**Đồng ý với Expert**: với dải góc của bài toán thật (\|θ\| khoảng 3°-30°), rủi ro "2 lớp chữ đè
+nhau" **KHÔNG xảy ra** — `verified` bằng V-5 + V-6. Chuỗi nhân quả: glyph xoay bị `on_lt_char`
+`return` sớm → không vào IL → không có `pdf_paragraph` → `add_text_fill_background` không sinh
+`PdfRectangle` nào → **không có hộp ngang nào để đè lên**. Đây đúng là cơ chế đã làm nhánh
+`pdf_digital` "chừa chỗ trống" mà overlay P1.1 đang tận dụng (đã PASS QA Vòng 6).
+
+**Bổ sung một điểm cả tôi lẫn Expert đều chưa nêu** (`verified`, V-5): điều kiện vứt glyph có
+**hai** khoảng an toàn, không phải một — `-0.1..0.1` **và `89.9..90.1`**. Nghĩa là với chữ xoay
+**≈ ±90°** (nhãn trục dọc trong biểu đồ, chữ chạy dọc mép bảng — rất phổ biến trong sách kỹ
+thuật), babeldoc **GIỮ** glyph, **dựng** paragraph, và **vẽ** ô nền trắng ⇒ trong dải góc đó
+rủi ro "2 lớp chữ đè nhau" là **CÓ THẬT**. Ghi lại đây để bất kỳ ai làm Phase 2 sau này không
+đọc kết luận "KHÔNG xảy ra" ở trên một cách quá rộng.
+
+⇒ **Sửa 6.13.4**: `[UNVERIFIED]` → **`verified: KHÔNG xảy ra với \|θ\| nằm ngoài lân cận 0° và
+90°; CÓ xảy ra với θ ≈ ±90°`** (nguồn: `il_creater.py:968-974`, `paragraph_finder.py:89-121`,
+grep `fill_background=True` toàn package babeldoc 0.6.4).
+
+#### V3. Rủi ro MỚI Expert nêu ("raster tiếng Anh còn nguyên dưới overlay") — ĐÚNG HƯỚNG, SAI MỨC ĐỘ
+
+Expert cảnh báo: nếu Phase 2 chỉ nối θ vào `insert_text` mà không thêm bước che nền, chữ tiếng
+Việt sẽ **in đè trực tiếp lên pixel tiếng Anh gốc → "không đọc được gì cả, tệ hơn hiện trạng"**,
+và đề xuất thêm một bước vẽ tứ giác xoay che nền (~0.5 ngày), lấy mẫu màu nền từ pixmap.
+
+**Tôi BÁC BỎ MỘT PHẦN — đo được, không phải suy đoán:**
+
+1. **Bước che nền KHÔNG phải là bước còn thiếu — nó ĐÃ TỒN TẠI trong code.**
+   `src/preprocess/searchable_pdf.py:113-125` đã có sẵn vòng lặp whiteout 2 pha: với **mọi**
+   span, vẽ `page.draw_rect(..., fill=(1,1,1), overlay=True)` với `whiteout_padding=1.5pt`
+   **trước** khi chèn chữ vô hình (comment trong code nói rõ vì sao phải tách 2 pha). Nhánh này
+   vốn **chỉ chạy cho `pdf_scan`** (`build_searchable_pdf` chỉ được gọi ở cầu nối OCR), nên điều
+   kiện "chỉ bật cho `pdf_scan`" Expert đề xuất cũng đã tự thoả mãn.
+2. **Mức độ hở thực tế: 5,5%, không phải 100%.** Tôi mô phỏng đúng công thức làm phẳng của MinerU
+   (`ocr_utils.py:399-410`) lên chính 18 poly nghiêng detector trả về ở V-1, dựng lại dải whiteout
+   ngang + padding 1.5pt, rồi đo tỷ lệ diện tích vệt mực nghiêng **không** được che (lấy mẫu lưới
+   1px): **5,5% tổng diện tích**. Phân bố **rất lệch**: 15/18 dòng ở giữa khối hở **≤ 2,2%** (các
+   dải ngang của những dòng kề nhau chồng lấn và che hộ nhau), toàn bộ phần hở dồn vào **các dòng
+   rìa khối**: 17,8% (dòng tiêu đề `"What's in a word?"`), 11,2% và **28,5%** (dòng cuối
+   `"blocks of the sucrose molecule."`).
+   ⇒ Kết quả thật sẽ là **vệt chữ tiếng Anh sót lại ở mép trên/mép dưới khối**, không phải "không
+   đọc được gì cả". Nói cách khác **rủi ro là THẬT và phải fix, nhưng nó không đảo ngược so sánh
+   với hiện trạng** — luận điểm "tệ hơn hiện trạng" của Expert là **quá mạnh so với số đo**.
+3. **Hệ quả về thiết kế Phase 2** (rẻ hơn Expert ước tính): việc cần làm **không phải** thêm một
+   module che nền mới, mà là **đổi hình dạng whiteout đã có**: trong đúng vòng lặp pha 1 của
+   `searchable_pdf.py:113-125`, khi span có θ, thay `draw_rect` bằng tứ giác xoay
+   (`Shape.draw_polygon` + `finish(fill=(1,1,1))`) dựng từ poly gốc + padding. **Không cần lấy
+   mẫu màu nền** như Expert đề xuất: production hiện đã tô **trắng thuần** cho 100% span của mọi
+   trang scan và QA Vòng 6 đã PASS ⇒ đổi màu tô là thay đổi hành vi ngoài phạm vi Bug #6, nếu
+   muốn thì tách task riêng.
+4. **`[CHƯA VERIFY]` mới, phải là câu hỏi ĐẦU TIÊN của Phase 2**: các hình chữ nhật whiteout do
+   cầu nối vẽ có **sống sót** qua bước babeldoc dựng lại trang hay không (babeldoc chỉ vứt glyph,
+   nhưng tôi **chưa** đo trực tiếp việc nó giữ nguyên vector rect của trang gốc). Bằng chứng gián
+   tiếp ủng hộ: QA Vòng 6 không báo hiện tượng chữ tiếng Anh lộ ra trên toàn trang scan — nếu
+   whiteout bị mất thì **mọi** span (kể cả 75 dòng ngang) đều sẽ lộ chữ gốc, khó bỏ sót. Nhưng
+   suy luận gián tiếp không thay thế phép đo.
+
+#### V4. Đánh giá lại phương án (E) — TÔI RÚT LẠI đánh giá cũ ở 6.13.3
+
+Ở 6.13.3 tôi chấm (E) là "effort cao (~3-4 ngày), rủi ro cao, chạy model lần 2 → tăng thời gian
+job đáng kể". **Đánh giá đó dựa trên phỏng đoán chưa đo, và số đo của tôi ở V1 bác bỏ nó**:
+
+| Tiêu chí | (A) projection-profile tự viết (đánh giá cũ) | (E) gọi detector MinerU (số đo thật hôm nay) |
+|---|---|---|
+| Độ chính xác | `assumed`, chưa spike, yếu với dòng ngắn | **max 0.40°, median 0.1°** trên 18 dòng thật (V-2) |
+| Ghép span với `middle.json` | theo trọng tâm bbox đã bị làm phẳng — mơ hồ | theo **TEXT** (`det+rec` trả text, score 0.99-1.00) — gần như không nhầm (V-3) |
+| Dependency mới | có thể cần `numpy` | **không** — dùng lại venv MinerU đã cài |
+| Chi phí | chưa đo | **0.36s/trang** (det) / **2.0s/trang** (det+rec) + 0.73s init (V-4) |
+
+**Kết luận**: (E) **thắng (A) trên mọi tiêu chí đã đo**. Lý do duy nhất còn lại để dè chừng (E) là
+**bề mặt API nội bộ** — và điều đó được xử lý bằng golden fixture (Protocol 5 mục 3), không phải
+bằng cách né phương án. ⇒ **Phương án nền tảng chuyển từ (A) sang (E).** Đánh giá cũ ở bảng 6.13.3
+dòng (A)/(E) coi như **bị thay thế bởi mục V4 này**.
+
+#### V5. Điểm KHÔNG đồng ý với Expert: bỏ "bộ lọc bậc thang" khỏi Phase 1
+
+Expert đề xuất dùng heuristic "bậc thang" (đo độ trôi trọng tâm bbox giữa các dòng trong 1 khối,
+suy ra góc gần đúng, sai số ~1°) làm **pre-filter rẻ tiền** để chỉ chạy detector trên trang nghi
+ngờ. **Tôi loại hạng mục này khỏi Phase 1**, lý do dựa trên chính số đo của tôi:
+
+- Chi phí mà pre-filter định tiết kiệm là **2,4 phút cho 1 sách 400 trang** (det-only, V-4) — so
+  với 1 job scan vốn mất **hàng giờ** (OCR toàn bộ + dịch LLM từng chunk). Tiết kiệm **dưới 1%**
+  thời gian job.
+- Đổi lại, nó thêm **một code path thứ hai, kém chính xác hơn**, với chế độ hỏng riêng mà chính
+  Expert đã thừa nhận: **bỏ sót caption 1 dòng** — tức bỏ sót đúng loại khối mà cơ chế FLAG sinh
+  ra để bắt (nhãn xoay, pull-quote ngắn). Một bộ lọc âm tính giả nằm **trước** cơ chế chống im
+  lặng thì phá hỏng chính mục tiêu của cơ chế đó (đúng bài học Bug #6).
+- Nguyên tắc đã áp dụng khi bác bỏ P1.3 ở P0.2: **chỉ tối ưu khi số đo chứng minh cần tối ưu**.
+  Ở đây số đo chứng minh điều ngược lại.
+
+Nếu sau này đo được thời gian probe thật sự đáng kể trên corpus lớn (ví dụ > 5% thời gian job),
+mở lại hạng mục này — ghi vào backlog, không làm bây giờ.
+
+#### V6. QUYẾT ĐỊNH CUỐI — 2 pha, xây trên (E)
+
+**Tôi chấp nhận cấu trúc 2 pha của Expert thay cho A′ thuần tuý của tôi.** Lý do tôi đổi ý (chứ
+không phải chỉ nhượng bộ): trong đề xuất cũ, lập luận số 5 của tôi ("A′ là bước 1 của A, không
+phải ngõ cụt") là **suy đoán** — với (A) tự viết, phần đo góc là phần khó nhất và chưa ai biết nó
+có đủ chính xác để dùng cho hình học hay không. Sau spike hôm nay, với (E), lập luận đó trở thành
+**sự thật đo được**: góc đã có sẵn với sai số 0.4°, nên khoảng cách từ "chỉ flag" tới "dựng đúng
+hình học" thu lại còn **2 chỉnh sửa cục bộ trong đúng 1 file** (`searchable_pdf.py`: nối θ vào
+`insert_text(morph=...)`, và xoay tứ giác whiteout ở V3-3). Khi delta nhỏ và đã biết rõ như vậy,
+việc **viết sẵn Phase 2 thành thiết kế có điều kiện kích hoạt** rẻ hơn hẳn việc để nó là "known
+limitation vĩnh viễn" rồi phải research lại từ đầu. Đây là ưu điểm thật của đề xuất Expert so với
+A′ của tôi.
+
+**PHASE 1 — làm ngay, ~1 ngày** (mục tiêu: **hết im lặng**, không đụng hình học output)
+
+1. **Task P0 (làm TRƯỚC mọi thứ, ~1-2 giờ)**: cấu hình logging handler cho logger `src.*` trong
+   `src/api/main.py`. Cả tôi và Expert đều xếp đây trên cùng: mọi `logger.warning(exc_info=True)`
+   ở các nhánh best-effort (gồm nhánh nuốt exception của `overlay_rotated_text()`,
+   `job_orchestrator.py:533-539`) hiện **im lặng hoàn toàn** trong production. Bug #6 chỉ lộ ra vì
+   QA mở file thủ công.
+2. **Module mới `src/services/mineru_det_probe.py`** (đặt ở `services/` chứ không `preprocess/`
+   vì đây là wrapper gọi tool ngoài qua subprocess — cùng loại với `*_runner.py`, chịu Protocol 5).
+   - Chạy subprocess bằng interpreter MinerU (`~/.local/share/uv/tools/mineru/bin/python`), input
+     là PNG từng trang render **200 DPI** bằng PyMuPDF, gọi
+     `PytorchPaddleOCR(lang="en").ocr(img, det=True, rec=True)`.
+   - Output JSON `[{page, poly_px, text, score}]`; lọc `score >= 0.8` và `|θ| >= 3.0°`.
+   - Quy đổi toạ độ: poly ở px@200DPI → point nhân `72/200`. Góc trong hệ ảnh (y hướng xuống) có
+     **dấu ngược** với `dir` của PyMuPDF — spike đo θ_ảnh ≈ -11° trùng dấu với `dir` = -11.0° ở
+     fixture này, nhưng đây là chi tiết dễ sai dấu, **bắt buộc assert bằng fixture trong test**.
+3. **Ghép với `middle.json`**: khớp theo **TEXT** (fuzzy, chuẩn hoá khoảng trắng/hoa thường) +
+   ràng buộc khoảng cách trọng tâm < 0.5 chiều cao dòng. Góc của cả khối = **median** góc các dòng
+   thành phần (median chứ không mean — spike cho thấy có poly nhiễu `-23.43°`, median miễn nhiễm).
+4. **Ghi flag**: kết quả `(page_number, bbox, angle_deg)` → `LayoutQaFindingData` với lý do
+   `"rotated_text_scan_unsupported"`, đúng trang/khối/góc. **θ KHÔNG đi vào `insert_text`** ở
+   Phase 1.
+5. **Golden fixture (Protocol 5 mục 3)**: lưu output spike hôm nay tại
+   `tests/fixtures/mineru/det_probe_p67.json` — file này đã được sinh ra trong task này, Dev
+   **copy vào repo, không viết tay lại**.
+6. **Test bắt buộc (R6-02)**: assert **giá trị θ cụ thể** (median ≈ -11.0°, dung sai ±1.5°) và
+   assert `layout_qa_findings` có **≥ 1 hàng** cho job `pdf_scan` fixture — không chấp nhận
+   `assert_called()`. Thêm 1 smoke test gọi detector thật, được phép `skip` khi thiếu venv MinerU
+   (R5-03).
+7. **PRD**: ghi known-limitation — `pdf_scan` **phát hiện và FLAG** trang có chữ xoay để soát tay,
+   nhưng **chưa** tái tạo góc; nguyên nhân gốc ở MinerU (6.13.1 S-M3).
+
+**PHASE 2 — thiết kế đã chốt, KHÔNG implement bây giờ**
+
+*Điều kiện kích hoạt*: job `pdf_scan` **thật trong production** đầu tiên sinh ra ≥ 1 finding
+`"rotated_text_scan_unsupported"`. Khi điều kiện xảy ra, Tech Lead **re-scope rồi mới giao Dev**
+(không tự động chuyển sang implement) — vì còn phải phân loại finding đó là khối nội dung thật
+hay chỉ nhãn trang trí.
+
+*Nội dung (ước ~1-1.5 ngày, đã tính cả 2 câu hỏi verify)*:
+- **B2.1 (verify trước tiên)**: đo xem hình chữ nhật whiteout của cầu nối có sống sót qua babeldoc
+  không (`[CHƯA VERIFY]` ở V3-4). Nếu **không** sống sót thì toàn bộ Phase 2 phải thiết kế lại —
+  đây là gate, không phải chi tiết.
+- **B2.2**: `searchable_pdf.py:113-125` — khi span có θ, thay `draw_rect` ngang bằng **tứ giác
+  xoay** (`Shape.draw_polygon` + `finish(fill=(1,1,1))`) dựng từ poly gốc + padding 1.5pt. Vá
+  đúng phần 5,5% hở đã đo ở V3-2.
+- **B2.3**: `_insert_invisible_text()` nhận thêm `angle_deg`/`poly`; đặt baseline theo cạnh poly
+  gốc; `insert_text(..., morph=(pivot, Matrix(-θ)))`; hình học tái dựng theo 6.13.2-b.
+- **B2.4**: **KHÔNG** đụng `rotated_text_overlay.py` (module đó đã verify sống ở nhánh digital;
+  chỉ cần input đúng) — điểm này tôi và Expert đồng ý hoàn toàn.
+- **B2.5 (live E2E, R6-03)**: dựng lại fixture scan từ `tests/fixtures/babeldoc/rotated_text_p67_source.pdf`
+  (raster hoá 200 DPI — cách QA đã mô tả trong `docs/test-report.md`; fixture scratchpad cũ của QA
+  có thể đã bị dọn, tái tạo chứ đừng phụ thuộc vào nó), chạy **xuyên suốt** OCR → dịch → overlay,
+  rồi **mở file output đọc nội dung thật**: assert ≥ 15 dòng có `dir` ≈ -11° và **không còn** dòng
+  ngang nào chứa `"disaccharide"`.
+- **B2.6**: nếu gặp khối chữ xoay ≈ ±90° thì áp dụng cảnh báo ở V2 (babeldoc **giữ** glyph và
+  **vẽ** ô nền trắng ở dải góc đó) — cần bước xoá/che vùng babeldoc đã vẽ, effort tăng thêm.
+
+**Vẫn giữ LOẠI**: phương án (B) flag mức job (flag fatigue), (C) tự xoay ảnh, (D) đổi engine sang
+pdf2zh — lý do không đổi so với 6.13.3, Expert cũng đồng ý loại.
+
+#### V7. Escalate lên PM/user (ngoài thẩm quyền Tech Lead)
+
+1. **Câu hỏi sản phẩm (Expert nêu, tôi tán thành là đúng chỗ)**: **PM/user có kế hoạch nhận tài
+   liệu PDF scan trong thời gian tới không?** Điều này quyết định Phase 2 là "thiết kế treo chờ
+   điều kiện" (nếu chưa có kế hoạch — mặc định tôi chọn) hay nên đẩy lên làm ngay sau Phase 1
+   (nếu sắp có sách scan thật). Dữ kiện để PM cân nhắc: cả **6 file đã upload đều là
+   `pdf_digital`**, chưa có sách scan nào đi qua app; nhưng trong corpus digital cùng thể loại,
+   ~4-5% số trang có khối chữ xoay có chủ đích (Expert quét: Le Cordon Bleu 19/418 trang, Figoni
+   4 trang) ⇒ nếu một ấn bản **scan** cùng thể loại xuất hiện, kỳ vọng hợp lý là hiện tượng lặp
+   lại. *Tôi đã sửa lại cách nói của mình ở 6.13.5-1*: gọi đây là "trường hợp giả định" là **quá
+   nhẹ**; chính xác hơn là "chưa có bằng chứng trên nhánh scan, nhưng có bằng chứng gián tiếp
+   mạnh từ bản digital song sinh".
+2. **Ưu tiên task P0 logging**: xác nhận cho phép chen task này lên **trước** Phase 1 (~1-2 giờ,
+   chạm `src/api/main.py`). Nó không sửa Bug #6 nhưng là điều kiện để bug kế tiếp không im lặng
+   y hệt.
+
+#### V8. Trạng thái verify (tổng hợp mục này)
+
+| Nội dung | Trạng thái |
+|---|---|
+| Detector MinerU trả poly còn góc, sai số ≤ 0.40° trên 18 dòng | `verified` — spike Tech Lead tự chạy 2026-09-07 |
+| Chi phí probe 0.36s/trang (det) — 2.0s/trang (det+rec), init 0.73s | `verified` (1 lần chạy, máy Dev, không kiểm soát tải) |
+| babeldoc vứt glyph xoay deterministic, không phân biệt `render_mode` | `verified` — `il_creater.py:968-974, 390-398` (0.6.4) |
+| Ô nền trắng chỉ sinh từ paragraph, đúng 1 nơi trong toàn package | `verified` — `paragraph_finder.py:117` + grep toàn package |
+| Rủi ro "2 lớp chữ" với \|θ\| ngoài lân cận 0°/90° | `verified: KHÔNG xảy ra` (thay thế `[UNVERIFIED]` ở 6.13.4) |
+| Rủi ro "2 lớp chữ" với θ ≈ ±90° | `verified: CÓ xảy ra` — phát hiện mới, chưa ai nêu trước đó |
+| Cầu nối đã có sẵn whiteout ngang cho mọi span | `verified` — `searchable_pdf.py:113-125` |
+| Vệt raster tiếng Anh hở 5,5% diện tích (dồn vào dòng rìa khối, tối đa 28,5%) | `verified` — mô phỏng công thức `ocr_utils.py:399-410` trên poly thật |
+| Whiteout của cầu nối có sống sót qua babeldoc hay không | `[CHƯA VERIFY]` — **gate đầu tiên của Phase 2 (B2.1)** |
+| Chữ ký `PytorchPaddleOCR` ở branch `dev`/version tương lai của MinerU | `[CHƯA VERIFY]` — khoá bằng golden fixture, verify lại khi nâng version (Protocol 5 mục 5) |
+
+**Artifact của spike** (không commit vào repo trong task này): `render.py`, `det_spike.py`,
+`coverage.py`, `p67_200dpi.png`, `det_probe_p67.json` tại scratchpad của session này. File
+`det_probe_p67.json` là **golden fixture bắt buộc** của Phase 1 — Dev copy vào
+`tests/fixtures/mineru/`, không viết tay lại (Protocol 5 mục 3).
+
+---
+
+### Bug #7 — List line-break regression tái phát + Bug #8 — Font quá nhỏ trong bảng (2026-09-07)
+
+**Tác giả**: Tech Lead — phân tích/research, KHÔNG implement code.
+**Triệu chứng user báo (v1.2.6, đã verify bằng mắt trên 4 ảnh so sánh song song)**:
+- **Bug #7**: mục lục, danh sách "Questions for Review" đánh số 1–17, và bullet list lồng nhau
+  trong box "Products Prepared"/"Materials and Equipment" bị dồn thành đoạn văn liền mạch; số thứ
+  tự (`2.`, `3.`) và bullet (`■`/`▪`) nằm giữa dòng thay vì đầu dòng.
+- **Bug #8**: cỡ chữ trong bảng "TABLE 4.2 — Texture Terms" không đồng đều và nhỏ bất thường so
+  với bản gốc, ngay trong cùng 1 cột của cùng 1 bảng.
+
+#### W0. Tóm tắt điều hướng
+
+| | Bug #7 | Bug #8 |
+|---|---|---|
+| Có phải regression của fix cũ không? | **Không** — F1/F2/Q6 (`split_short_lines=True`, `factor=0.8`) vẫn đang chạy đúng; nó chỉ **không phủ được** 2 cơ chế mới tìm ra ở đây | Không — là biểu hiện cụ thể đầu tiên **đo được bằng số** của "tam nan" U5/U7-E1 |
+| Nguyên nhân nằm ở đâu | 100% trong babeldoc 0.6.4 (`paragraph_finder.py`) | 100% trong babeldoc 0.6.4 (`typesetting.py`) |
+| Code của team có sai gì không | Không | Không |
+| Có flag CLI nào chữa được không | Không (đã hết tác dụng, xem W3) | **Không có flag nào tồn tại** (W5-3) |
+
+#### W1. Nguồn xác thực (Protocol 5 / R5-01)
+
+Toàn bộ claim dưới đây có nguồn trực tiếp. **Không có claim nào từ trí nhớ.**
+
+**(a) Source thật babeldoc 0.6.4 đã cài** tại
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`
+(`main.py:29` → `__version__ = "0.6.4"`).
+
+**(b) Bằng chứng sống (Protocol 6 / R6-03) — chạy thật, $0 chi phí LLM**: chạy `babeldoc` 0.6.4
+CLI thật với `--debug` trên 4 trang thật (`src` page 74–77) trích từ chính file production
+`data/uploads/937b1d1c-…_Figoni, Paula - How baking works….pdf`, cùng flag production
+(`--split-short-lines --short-line-split-factor 0.8`). Cố ý trỏ `--openai-base-url` tới
+`http://127.0.0.1:1/v1` (không có server) → **0 token, 0 USD**, nhưng dump IL
+`paragraph_finder.json` **vẫn được ghi vì nó nằm TRƯỚC bước dịch** (`high_level.py:973-977`).
+Đây là cách quan sát trực tiếp cấu trúc đoạn mà babeldoc tạo ra, tách bạch hoàn toàn khỏi biến số
+LLM. Artifact: `/tmp/bdprobe/wd/p74_77/paragraph_finder.json`.
+
+**(c) Đo output production thật**: so `data/uploads/937b1d1c-…Figoni….pdf` (nguồn) với
+`data/outputs/40cb4746-16ba-4c24-ab75-5b2cd9f83d0d/translated_vi.pdf` (job `40cb4746`, chạy
+2026-09-06 14:00, **đúng bản v1.2.6 user đang báo lỗi**), bằng PyMuPDF 1.28.2.
+
+| # | Claim | Nguồn |
+|---|-------|-------|
+| W-1 | `min_scale = 0.1` là **hằng số cứng trong thân hàm**, không phải tham số | `format/pdf/document_il/midend/typesetting.py:969` |
+| W-2 | Vòng tìm scale: `while scale >= min_scale`, giảm `-0.05` khi `scale > 0.6`, `-0.1` khi thấp hơn | `typesetting.py:973, 1012-1015` |
+| W-3 | **Không có CLI flag nào** và **không có field nào trong `TranslationConfig`** liên quan tới scale/min font size | `grep -n "scale" main.py` → 0 kết quả; `grep -n "scale" translation_config.py` → 0 kết quả |
+| W-4 | Mỗi `PdfParagraph` (⇒ mỗi Ô BẢNG) có `optimal_scale` **riêng**, tìm độc lập từ 1.0 | `typesetting.py:895-914` (`preprocess_document`), `:1078-1094` (`_get_optimal_scale`) |
+| W-5 | Chuẩn hoá theo mode **chỉ kéo XUỐNG**: `if paragraph.optimal_scale > mode_scale: = mode_scale`. **Không có nhánh nào nâng scale nhỏ lên** | `typesetting.py:919-936` |
+| W-6 | `render_paragraph` dùng `optimal_scale` đã tính làm `initial_scale`, rồi lại chạy tiếp vòng giảm scale tới `min_scale` | `typesetting.py:1271-1281`, `:1096-1116` |
+| W-7 | Gap giữa các dòng chỉ được ghi nhận khi collision count **`< 1`** (tức đúng bằng 0), **mâu thuẫn với chính docstring của hàm** ("less than 2") | `paragraph_finder.py:725` vs docstring `:657-661` |
+| W-8 | Nếu `gaps` rỗng → **toàn bộ paragraph gộp thành MỘT `PdfLine` duy nhất** | `paragraph_finder.py:735-743` |
+| W-9 | `process_independent_paragraphs` **bỏ qua hoàn toàn** paragraph có `len(pdf_paragraph_composition) <= 1` | `paragraph_finder.py:848-851` |
+| W-10 | `is_bullet_point` chỉ xét `chars[0]` — ký tự ĐẦU TIÊN của dòng | `layout_helper.py:55-65`; call site `paragraph_finder.py:896-901` |
+| W-11 | `BULLET_POINT_PATTERN` **CÓ** `■` (U+25A0) và `▪` (U+25AA); **KHÔNG CÓ** chữ số ASCII `0-9`, `-`, `–`, `*` | `layout_helper.py:48-50`; verify chạy thật bằng interpreter của chính babeldoc: `▪`→True, `■`→True, `1`→False, `2`→False, `-`→False |
+| W-12 | Nhánh nhận diện mục lục chỉ kích hoạt khi có **≥ 20 dấu chấm liên tiếp** (dot leader) | `paragraph_finder.py:864-866` (`re.search(r"\.{20,}", prev_text)`) |
+| W-13 | Cả 2 default hiện hành đúng như Q6 đã chốt: `babeldoc_split_short_lines = True`, `babeldoc_short_line_split_factor = 0.8` | `src/core/config.py:181, 188` |
+
+#### W2. Bug #7 — bằng chứng sống: chuyện gì thực sự xảy ra
+
+Đọc trực tiếp `paragraph_finder.json` (IL **trước khi dịch**, W1-b). Đây là bằng chứng mạnh nhất:
+nó chứng minh cấu trúc đã sai **trước** khi LLM chạm vào, nên **loại trừ hoàn toàn** giả thuyết
+"LLM gộp dòng" / "prompt sai" (RC-3 cũ) cho 2 ca này.
+
+**Ca A — `QUESTIONS FOR REVIEW` (src page 74), numbered list 17 mục.**
+IL page 0 sau `ParagraphFinder`, các paragraph `plain text`:
+
+```
+"1. Why is it that humans often "eat with their eyes"?"                      <- ĐÚNG (1 mục)
+"2. What three things can happen…?  3. What makes limes green in color?"     <- GỘP 2 mục
+"4. List the three main factors…  5. Explain why the appearance…"            <- GỘP 2 mục
+"6. Explain and provide an example…  7. …"                                    <- GỘP
+"8. Why is saliva necessary…  9. …  10. …  11. …  12. …  13. …  14. …  15. …" <- GỘP 8 mục (9 dòng)
+"16. How does the perception of saltiness change…"                            <- ĐÚNG
+"17. What is meant by mouthfeel?"                                             <- ĐÚNG
+```
+
+Paragraph "8.…15." có **9 `pdf_line` riêng biệt, tách dòng ĐÚNG** (đo được: `w=273.8 / 361.1 /
+277.3 / 311.8 / 225.3 / 325.0 / 208.4 / 356.2 / 26.5`). Nghĩa là bước tách dòng chạy tốt; bước
+**tách ĐOẠN** mới là chỗ hỏng. Với mỗi cặp dòng liền kề, điều kiện tách (`paragraph_finder.py:891-901`):
+- nhánh bullet: `chars[0]` là `'8'`, `'9'`, `'1'` — chữ số ASCII → `is_bullet_point` **luôn False**
+  (W-11). Nhánh này chết hoàn toàn với numbered list.
+- nhánh hình học: `prev_width < median_width × 0.8`. Các dòng câu hỏi rộng **208–361pt**, tức là
+  **chính chúng tạo ra median của trang** → điều kiện gần như không bao giờ đúng. Nó chỉ kích hoạt
+  ở đúng chỗ dòng trước bị ngắn thật (dòng cuối bị wrap, `w=26.5` của `"usual?"`) — và đó chính
+  là lý do mục 16 và 17 tách ra đúng còn 8–15 thì không.
+
+Đo trên output production (W1-c), page 74:
+
+| | Nguồn EN | Bản dịch VI (v1.2.6) |
+|---|---:|---:|
+| Số dòng **bắt đầu** bằng `N.` | **17** | **3** |
+| Số lần `N.` nằm **giữa dòng** | 0 | **10** |
+
+→ Khớp chính xác triệu chứng user mô tả.
+
+**Ca B — box `PRODUCTS PREPARED` / `MATERIALS AND EQUIPMENT` (src page 77), bullet `■` (U+25A0).**
+Đây là ca **QUAN TRỌNG NHẤT và HOÀN TOÀN MỚI**, vì `■` **NẰM TRONG** `BULLET_POINT_PATTERN`
+(W-11) — tức là RC-2 cũ ("pattern thiếu marker") **KHÔNG giải thích được** ca này. Cơ chế thật:
+
+IL cho thấy paragraph `"■ Sugar and acid  ■ Other (…)  ■ Your choice of additions"` có
+**đúng 1 composition** — tức babeldoc coi cả 3 mục là **MỘT dòng duy nhất**. Đo toạ độ các ký tự
+`■` trong "dòng" đó: `x=410.8 y=205.7`, `x=410.8 y=193.7`, `x=410.8 y=157.7` — **cùng x, khác y**,
+tức là 3 mục **xếp chồng theo chiều dọc thật sự**, không phải nhiều cột.
+
+Vì sao 3 dòng vật lý bị gộp thành 1 `PdfLine`? `_split_paragraph_into_lines`
+(`paragraph_finder.py:652-776`) dùng phương pháp "line-threading": quét ngang theo y, chỗ nào có
+ít ký tự cắt qua thì coi là khe giữa 2 dòng. **Docstring viết ngưỡng là "less than 2"
+(`:657-661`) nhưng code implement là `count < 1` (`:725`) — tức đòi khe phải HOÀN TOÀN TRỐNG.**
+
+Tự tính lại histogram từ chính dữ liệu IL đó (pure Python, cùng `step=0.25`, cùng `visual_bbox`
+mà `_get_effective_y_bounds` dùng — `:600-609`):
+
+```
+y=204.24  count=21   [' ', ' ', ' ', ' ', 'S', 'u', …]   <- dòng "■ Sugar and acid"
+y=203.99  count=1    ['g']        <- KHE giữa 2 dòng, nhưng bị 1 ký tự bắc cầu
+…
+y=202.24  count=1    ['g']
+y=201.99  count=11   ['g', ' ', ' ', …]                  <- dòng kế tiếp
+```
+
+Khe giữa 2 dòng **có tồn tại**, nhưng bị bắc cầu bởi **đúng MỘT ký tự**: đuôi descender của chữ
+`g` trong `"Sugar"`. Vì `1 < 1` là False → không ghi nhận gap nào → `gaps` rỗng → W-8 kích hoạt →
+**cả box bullet gộp thành 1 `PdfLine`**. Hệ quả dây chuyền:
+
+1. Paragraph còn đúng 1 composition → W-9: `process_independent_paragraphs` **bỏ qua không xét**.
+2. Kể cả có xét, `is_bullet_point` chỉ nhìn `chars[0]` (W-10) → chỉ thấy `■` đầu tiên; `■` thứ 2,
+   thứ 3 nằm giữa dòng, vô hình với thuật toán.
+3. Cả 3 mục đi vào LLM như **một chuỗi**, quay về như một chuỗi, được typeset thành một đoạn chảy.
+
+Đo trên output production, page 77: dòng bắt đầu bằng bullet **16 → 7**; bullet nằm giữa dòng
+**1 → 10**. Ví dụ thật trong file giao cho user:
+`"■ Không bổ sung (sản phẩm đối chứng) ■ Đường ■ Axit"` — **khớp chính xác** ảnh user gửi.
+
+**Đây là một bug thật của babeldoc** (code lệch docstring của chính nó), không phải giới hạn thiết
+kế. Một ký tự có đuôi (`g`, `y`, `p`, `q`, `j`) hoặc dấu tiếng Việt lấn vào dải giữa 2 dòng là đủ
+phá vỡ việc tách dòng của **cả khối**. Điều này giải thích tính **thất thường** của lỗi: cùng một
+kiểu box, chỗ hỏng chỗ không, phụ thuộc thuần vào việc dòng đó có chữ nào thò đuôi hay không.
+
+**Ca C — trang mục lục (Contents).** Hai lớp bảo vệ đều không hoạt động:
+- Nhánh mục lục chuyên dụng đòi **≥ 20 dấu chấm liên tiếp** (W-12). Mục lục của Figoni
+  **không dùng dot leader** (chỉ `"Stage II: Baking 32"`) → nhánh này không bao giờ chạy.
+- Nhánh hình học: mọi dòng mục lục đều ngắn như nhau ⇒ **chính chúng là median** ⇒
+  `prev_width < 0.8 × median` hiếm khi đúng. Đây đúng là cơ chế "median bị kéo lệch" mà RC-1 đã
+  cảnh báo, nhưng theo chiều **ngược lại** với dự đoán ban đầu: trang toàn dòng ngắn thì heuristic
+  **mất tác dụng**, chứ không phải tách quá tay.
+- Đo: page 7 (Contents), block **72 → 49**, dòng **88 → 81**.
+
+#### W3. Vì sao fix F1/F2/Q6 đã ship KHÔNG chặn được (và không phải do đo sai)
+
+Kết luận Q6 (đổi default sang `True`/`0.8`) **vẫn đúng với dữ liệu Q1–Q6** và **không nên revert**.
+Vấn đề là **phạm vi**:
+
+| | Trang 14 (đo ở Q1–Q6) | Trang 74 (bug này) |
+|---|---|---|
+| Bố cục list | 2 cột **hẹp**, mỗi mục 1 dòng ngắn | 1 cột **rộng**, mỗi mục 1–3 dòng gần full-width |
+| Quan hệ với `median_width` | Dòng list **hẹp hơn** median toàn trang → heuristic kích hoạt | Dòng list **CHÍNH LÀ** median → heuristic im lặng |
+| Kết quả `true08` | 26/35 mục đúng (tốt rõ rệt) | 3/17 mục đúng (gần như không tác dụng) |
+
+`--split-short-lines` là **proxy hình học**, chỉ đúng khi list item tình cờ ngắn hơn văn xuôi xung
+quanh. Nó **không phải** cơ chế nhận diện list. Q1–Q6 đo trên đúng chế độ mà proxy này hoạt động;
+sách mới rơi vào chế độ ngược lại. **Không có giá trị `factor` nào chữa được ca này** — hạ factor
+làm heuristic im lặng hơn; nâng factor > 1.0 sẽ tách vụn cả văn xuôi. Đây là **giới hạn cấu trúc**
+của F2, không phải tham số chưa tune.
+
+Tương tự, **Ca B nằm ngoài phạm vi của MỌI phân tích trước đó**: RC-1 (hình học) và RC-2 (pattern
+thiếu marker) đều không đúng cho nó — bug nằm ở **tầng tách DÒNG**, một tầng thấp hơn cả hai.
+
+#### W4. Bug #7 — quan hệ với F3 (spike đã thất bại) — KHÔNG lặp lại cách cũ
+
+F3 (CHANGELOG "F3 — Spike verify … KHÔNG thành công", 2026-09-06) đã thử **chèn ký tự `•` vô hình
+vào PDF NGUỒN** trước khi đưa cho babeldoc. Thất bại vì 2 lý do độc lập đã verify:
+(1) thứ tự ký tự trong dòng **không sort theo x** (3 dòng `sort` bị comment out trong source thật)
+→ ký tự chèn thêm không rơi vào vị trí `chars[0]`; (2) babeldoc **re-render toàn bộ**, không tôn
+trọng `render_mode=3` → ký tự "vô hình" hiện ra thành rác trong output.
+
+**Mọi đề xuất ở W6 dưới đây KHÔNG dùng lại cơ chế injection đó.** Chúng can thiệp **bên trong
+process của babeldoc** (Hướng B, Architecture.md P3), nơi cả 2 lý do thất bại trên đều không tồn
+tại: không chèn gì vào PDF nguồn, không phụ thuộc thứ tự extraction, không đụng bước render.
+
+#### W5. Bug #8 — root cause (verified)
+
+**Đo trên dữ liệu thật** (W1-c), trang `TABLE 4.2 — Texture Terms` (src page 75), phân bố cỡ chữ
+(số span mỗi cỡ, đọc bằng PyMuPDF `get_text("dict")`):
+
+| | Nguồn EN | Bản dịch VI (v1.2.6) |
+|---|---|---|
+| Phân bố cỡ chữ | `9.0pt × 101` span, `10.0 × 8`, `8.0 × 7` — **gần như đồng nhất** | `8.1 × 24`, `5.85 × 15`, `6.3 × 14`, `9.0 × 10`, `6.75 × 7`, `7.65 × 7`, `6.0 × 6`, `4.5 × 6`, `7.2 × 3`, `6.5 × 2`, `4.05 × 2`, `5.4 × 2` — **12 cỡ khác nhau** |
+| Tỷ lệ so với 9.0pt gốc | 1.00 | **0.45 → 1.00** (`4.05/9.0 = 0.45`) |
+
+Chuỗi nguyên nhân, mọi mắt xích đều có source:
+
+1. **Mỗi ô bảng là một `PdfParagraph` riêng** → có `optimal_scale` riêng, tìm **độc lập** bằng
+   `_find_optimal_scale_and_layout` khởi tạo từ `1.0` (W-4).
+2. Vòng lặp giảm scale cho tới `min_scale = **0.1**` — **hằng số cứng trong thân hàm**, không phải
+   tham số, không có flag CLI, không có field config (W-1, W-2, W-3).
+3. Bước chuẩn hoá theo mode (`preprocess_document`) **chỉ kéo XUỐNG những paragraph cao hơn mode,
+   không bao giờ nâng những paragraph thấp hơn mode lên** (W-5). Nghĩa là nó **áp một trần chung**
+   nhưng **bảo toàn nguyên vẹn mọi sự chênh lệch phía dưới trần**. Đây chính là lý do bảng trông
+   "vỡ": mode ở đây là `0.9` (⇒ `8.1pt`), các ô ngắn ("Mềm", "Dai") nằm ở trần; các ô dài
+   ("Có thịt quả, ẩm…") tụt tự do xuống tới `0.45`.
+4. Tiếng Việt dài hơn tiếng Anh ~20–40% ⇒ ô nào text dài hơn thì tụt sâu hơn. Chênh lệch độ dài
+   giữa các ô trong cùng một cột **được khuếch đại thành chênh lệch cỡ chữ nhìn thấy được**.
+
+**Đây chính là "tam nan" U5 đã mô tả** (bóp font / giãn khung / cắt text), lần đầu **đo được bằng
+số** thay vì mô tả định tính. Với ô bảng, babeldoc gần như luôn chọn "bóp font": nhánh giãn khung
+(`typesetting.py:1017-1062`) chỉ chạy khi `scale < 0.7`, và trong bảng thì
+`get_max_bottom_space`/`get_max_right_space` gần như không có chỗ trống để giãn (ô bảng bị bao
+quanh bởi ô khác) → rơi thẳng về nhánh bóp font tới đáy `0.1`.
+
+**Chính sách U7-E1 ("bóp tối đa 70% rồi FLAG") CHƯA từng được implement ở đâu** — xác nhận bằng
+`grep -rn "min_scale\|0\.7" src/` → không có chỗ nào áp sàn scale. U7-E1 tới nay vẫn ở trạng thái
+"escalate cho PM/user, chưa chốt". **Bug #8 là bằng chứng thực nghiệm đầu tiên cho thấy nó cần
+được chốt.**
+
+#### W6. Đề xuất SƠ BỘ (Tech Lead — chưa chốt, chờ Domain Expert phản biện + PM duyệt)
+
+##### Bug #7
+
+**Đường đi khả thi duy nhất còn lại là Hướng B-2 (wrapper in-process)** đã đánh giá ở P3 và đã
+verify sống cơ chế patch (P3/B-1: patch `BULLET_POINT_PATTERN` ở module global CÓ tác dụng lên
+`paragraph_finder`). Hai patch, theo thứ tự lợi ích/rủi ro:
+
+- **B-2a (ưu tiên cao nhất — rẻ, rủi ro thấp, sửa đúng một bug thật của babeldoc)**: nới ngưỡng
+  gap của line-threading từ `count < 1` về `count < 2` — **đúng bằng con số docstring của chính
+  babeldoc tuyên bố** (W-7). Đây không phải "chế thêm heuristic", mà là làm cho code khớp với đặc
+  tả của chính nó. Sửa được **Ca B** (bullet `■` bị gộp) ở tận gốc, và có khả năng cải thiện cả
+  **Ca C** (mục lục). Rủi ro cần đo: ngưỡng 2 có thể tách nhầm ở khối chữ dày đặc/nhiều dấu — phải
+  A/B trên nhiều trang trước khi chốt.
+  ⚠️ **`[UNVERIFIED]`**: chưa đo tác động của `count < 2` trên toàn tài liệu. Bắt buộc spike theo
+  R5-02 trước khi implement đầy đủ.
+- **B-2b — bọc `ParagraphFinder.process`**: chạy `process()` gốc trước, rồi duyệt IL và tách
+  paragraph tại các **dòng** mở đầu bằng marker numbered (`1.`, `2.`, `a)`). Ở tầng này ta thấy
+  **toàn bộ text của dòng**, không chỉ `chars[0]` (W-10) — nên áp được heuristic chống
+  false-positive thật (marker phải tăng dần; loại `"2 cups flour"`; loại dòng mục lục). Sửa được
+  **Ca A**. Code tách có sẵn để tái dùng nguyên xi (`paragraph_finder.py:868-925`), không phải
+  chép lại logic typeset.
+- **KHÔNG đề xuất**: (a) tiếp tục tune `short_line_split_factor` — đã chứng minh là ngõ cụt cấu
+  trúc (W3); (b) nới `BULLET_POINT_PATTERN` thêm `0-9` (B-1 cũ) — vô dụng cho Ca A vì `chars[0]`
+  chỉ 1 ký tự, không phân biệt được `"1. Trộn bột"` với `"180°C…"`, mà B-2b làm được đúng việc đó
+  với cùng chi phí wrapper; (c) mọi biến thể của F3 (injection vào PDF nguồn) — đã thất bại, xem W4.
+
+**Điều kiện bắt buộc kèm theo** (giữ nguyên P5): pin cứng `babeldoc.__version__ == "0.6.4"`, raise
+ngay nếu lệch; smoke test gọi thật; assert **cấu trúc output** (đếm dòng bắt đầu bằng marker), tuyệt
+đối không assert sự có mặt của flag trong `args` (bài học N4).
+
+##### Bug #8
+
+**Đề xuất: ĐÃ ĐỦ CƠ SỞ để chốt U7-E1, nhưng KHÔNG nên implement như "sàn 0.7 cứng".** Lý do: `0.7`
+trong U7-E1 là con số **đề xuất chưa từng đo**. Số đo thật ở W5 cho thấy mode của trang bảng này là
+`0.9` và đuôi kéo tới `0.45`. Một sàn cứng `0.7` sẽ biến mọi ô hiện ở `0.45–0.65` thành **tràn chữ**
+(babeldoc cố ý vẽ tràn khi hết cách — T-04) — tức là **đổi một lỗi thẩm mỹ lấy một lỗi chồng chữ**,
+đúng nhánh (2)/(3) của tam nan U5. Đề xuất 3 bước, theo thứ tự:
+
+1. **Đo trước, chốt số sau** (P0, rẻ nhất): dùng chính phương pháp W1-c chạy trên ≥ 5 trang bảng
+   thật, dựng **histogram scale thực tế**. Sàn phải chọn từ dữ liệu, không từ con số tròn.
+2. **Ưu tiên "thu hẹp khoảng cách" hơn "áp sàn tuyệt đối"**: cái user thực sự phàn nàn là
+   **KHÔNG ĐỒNG ĐỀU trong cùng 1 bảng**, không phải "chữ nhỏ" nói chung. Vì vậy đề xuất **đảo ngược
+   chiều chuẩn hoá của W-5**: thay vì chỉ kéo xuống mode, **kéo mọi paragraph trong cùng một vùng
+   layout `table` về CÙNG một scale** (= min scale của vùng đó). Bảng sẽ nhỏ đều thay vì vỡ — đây
+   là thay đổi rẻ hơn, rủi ro thấp hơn nhiều so với áp sàn, vì **không tạo thêm tràn chữ nào**
+   (mọi ô chỉ nhỏ đi hoặc giữ nguyên, không ô nào to lên). Cùng cơ chế wrapper B-2 (patch
+   `preprocess_document`), không phát sinh hạ tầng mới.
+3. **Sàn + FLAG (U7-E1 đúng nghĩa)** chỉ làm sau, và phải đi kèm cơ chế **flag vào
+   `layout_qa_findings`** — sàn mà không flag thì chỉ là đổi lỗi im lặng này lấy lỗi im lặng khác
+   (đúng bài học Bug #6: `scan_rotated_lines()` trả 0 block và **không flag gì cả**).
+
+⚠️ **`[UNVERIFIED]`**: cả bước 2 lẫn bước 3 đều chưa spike. Phải verify theo R5-02 trước khi
+implement.
+
+#### W7. Trạng thái verify (tổng hợp mục này)
+
+| Claim | Trạng thái |
+|-------|-----------|
+| Bug #7 Ca A — numbered list gộp do `chars[0]` là chữ số + median không lệch | ✅ **Verified** — IL dump thật (W1-b) + `paragraph_finder.py:891-901` + đo output production 17→3 |
+| Bug #7 Ca B — `■` bị gộp do `count < 1` bắc cầu bởi descender `g` | ✅ **Verified** — IL dump thật, tự tính lại histogram, `paragraph_finder.py:725, 735-743, 848-851` |
+| Bug #7 Ca C — mục lục không có dot leader nên nhánh TOC không chạy | ✅ **Verified** — `paragraph_finder.py:864-866` + đo page 7 (72→49 block) |
+| Bug #7 KHÔNG do LLM/prompt gộp dòng | ✅ **Verified** — cấu trúc đã sai trong IL **trước** bước dịch, 0 token LLM |
+| Bug #7 KHÔNG do code của team | ✅ **Verified** — default `True`/`0.8` đúng như Q6 chốt (`config.py:181,188`), flag truyền đúng (`babeldoc_runner.py:308-318`) |
+| Bug #8 — `min_scale = 0.1` hardcode, không có flag/config nào | ✅ **Verified** — `typesetting.py:969` + grep 0 kết quả trên `main.py`/`translation_config.py` |
+| Bug #8 — chuẩn hoá mode chỉ kéo xuống, không nâng lên | ✅ **Verified** — `typesetting.py:919-936` |
+| Bug #8 — biểu hiện thật: 12 cỡ chữ, scale 0.45–1.0 trong 1 bảng | ✅ **Verified** — đo output production page 75 |
+| U7-E1 (sàn 0.7) chưa từng được implement | ✅ **Verified** — `grep -rn "min_scale" src/` → 0 kết quả |
+| B-2a (`count < 2`) không gây tách nhầm trên tài liệu thật | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
+| B-2b heuristic marker tăng dần không false-positive | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
+| Đồng bộ scale theo vùng `table` không gây tràn chữ | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
+| Con số sàn tối ưu (0.7 hay khác) | ⚠️ **`[UNVERIFIED]`** — phải đo histogram trước khi chốt |
+
+**Artifact spike** (không commit trong task này, tái tạo được bằng lệnh ghi ở W1-b):
+`/tmp/bdprobe/wd/p74_77/paragraph_finder.json` — dump IL thật, **golden file bắt buộc** nếu PM
+duyệt đi tiếp: Dev copy vào `tests/fixtures/babeldoc/`, KHÔNG viết tay lại (Protocol 5 mục 3).
+
+**Trạng thái**: Phân tích/research xong — **không có code nào được viết**. Chờ Domain Expert phản
+biện rồi PM/user quyết định.

@@ -1,3 +1,5 @@
+import logging
+import sys
 import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,11 +11,54 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import download, glossary, jobs, settings, upload
 from src.api.websocket import router as websocket_router
+from src.core.config import get_settings
 from src.models.database import init_db
 
 _WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PYPROJECT_PATH = _PROJECT_ROOT / "pyproject.toml"
+
+
+def _configure_logging() -> None:
+    """Bug #6 P0 (Architecture.md "Final Decision" V6, task P0): every
+    `logger.warning(exc_info=True)` in best-effort branches across `src/`
+    (e.g. `overlay_rotated_text()`'s swallowed exception,
+    `job_orchestrator.py:533-539`) was silently discarded in production —
+    `logging.getLogger("src.*")` had NO handler configured anywhere, and only
+    uvicorn's own access log ever reached stdout (QA Vong 6 muc 8, verified
+    by experiment: a real job failure logged nothing beyond the HTTP access
+    line). `Settings.log_level` existed in config.py already but nothing
+    ever read it.
+
+    Attaches a handler to the `"src"` logger specifically (the common parent
+    of every `logging.getLogger(__name__)` call under `src/`, since Python
+    module names there all start with `src.`) rather than the root logger —
+    this leaves uvicorn's own logging config (`uvicorn`/`uvicorn.access`
+    loggers) untouched and avoids double-configuring third-party library
+    loggers that also attach to root.
+    """
+    settings = get_settings()
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+
+    app_logger = logging.getLogger("src")
+    app_logger.setLevel(level)
+
+    if any(isinstance(h, logging.StreamHandler) for h in app_logger.handlers):
+        # Uvicorn's `--reload` re-imports this module per worker restart —
+        # avoid stacking duplicate handlers (duplicate log lines) each time.
+        return
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    app_logger.addHandler(handler)
+    # Explicit `False` (not just relying on `logging`'s own default of True):
+    # if this module is ever re-imported with the root logger ALSO holding a
+    # handler (e.g. a future `logging.basicConfig()` call elsewhere), this
+    # stops every `src.*` log line from being emitted twice.
+    app_logger.propagate = False
+
+
+_configure_logging()
 
 
 def _read_app_version() -> str:

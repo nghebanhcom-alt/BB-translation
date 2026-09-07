@@ -3621,3 +3621,104 @@ uv run ruff format --check  → 4 files already formatted
 
 **Trạng thái**: Vòng 1/3 (Dev↔Reviewer) đã dùng. Gửi lại Reviewer vòng 2 — KHÔNG tự báo cáo "xong",
 PM sẽ tự spawn Reviewer.
+
+## Bug #6 Phase 1 + task P0 (logging) — 2026-09-07
+
+Theo `docs/Architecture.md` mục "Bug #6 — Final Decision sau phản biện Domain Expert" (V6, QUYẾT
+ĐỊNH CUỐI). Chỉ làm task P0 + Phase 1 (FLAG, không sửa hình học) — **Phase 2 (tái tạo góc xoay
+thật trong bản dịch) KHÔNG được implement**, chỉ là thiết kế đã chốt, chờ điều kiện kích hoạt
+(job `pdf_scan` thật trong production sinh ra ≥ 1 finding).
+
+### Task P0 — logging handler
+
+`Settings.log_level` đã tồn tại từ trước trong `src/core/config.py` nhưng KHÔNG có handler nào
+đọc nó — `logger.warning(exc_info=True)` ở mọi nhánh best-effort (`overlay_rotated_text()`,
+`job_orchestrator.py`) im lặng hoàn toàn trong production (QA Vòng 6 mục 8 đã xác nhận bằng thực
+nghiệm). Thêm `_configure_logging()` trong `src/api/main.py`, gọi ngay ở module-level (trước khi
+`FastAPI(...)` khởi tạo): gắn 1 `StreamHandler` (stdout) vào logger `"src"` (cha chung của mọi
+`logging.getLogger(__name__)` trong `src/`, vì mọi module ở đây đều bắt đầu bằng `src.`) ở mức
+`Settings.log_level`, `propagate=False` để tránh log kép nếu sau này root logger cũng có handler.
+Cố ý KHÔNG đụng root logger / logger `uvicorn`/`uvicorn.access` — giữ nguyên logging riêng của
+uvicorn.
+
+### Phase 1 — phát hiện chữ xoay trong ảnh scan (chỉ FLAG)
+
+**Module mới `src/services/mineru_det_probe.py`** (đặt ở `services/`, chịu Protocol 5, cùng loại
+với `babeldoc_runner.py`/`pdf2zh_runner.py` — wrapper gọi tool ngoài qua subprocess):
+
+1. Render mỗi trang PDF scan thành PNG 200 DPI bằng PyMuPDF, gọi subprocess bằng interpreter
+   MinerU (`Settings.mineru_python_path`, mặc định `~/.local/share/uv/tools/mineru/bin/python`)
+   chạy `PytorchPaddleOCR(lang="en").ocr(img, det=True, rec=True)` — **verify trực tiếp trên máy
+   Dev** (không phải chạy lại theo trí nhớ): script subprocess tái tạo **CHÍNH XÁC** golden
+   fixture của Tech Lead (18/18 dòng nghiêng, cùng góc chính xác tới 3 chữ số thập phân, median
+   -10.8565°) khi chạy thật trên `tests/fixtures/babeldoc/rotated_text_p67_source.pdf`.
+2. Lọc `score >= 0.8` và `|angle| >= 3.0°` (`parse_det_probe_output()`).
+3. Quy đổi toạ độ poly px@200DPI → point (`72/200`).
+4. Ghép với `middle.json` của CHÍNH job đó (`match_lines_to_middle_json()`): fuzzy text match
+   (`difflib.SequenceMatcher`, chuẩn hoá khoảng trắng + casefold, ngưỡng 0.6) + ràng buộc khoảng
+   cách trọng tâm < 0.5 × chiều cao dòng. Góc của khối = **median** (không phải mean — khoá bởi
+   test, tránh outlier kiểu -23.43° trong golden fixture làm lệch kết quả).
+5. Ghi finding qua `persist_findings()`/`LayoutQaFindingData` đã có sẵn từ P0/P1 — **không tạo
+   bảng mới**. `angle_deg`/bbox nằm trong `detail` (cột JSON tự do đã có sẵn, cùng cách
+   `_check_rotated_text_prescan()` đã lưu `angle_deg` cho 1 check_type khác) — **không cần** mở
+   rộng schema `LayoutQaFindingData`/`LayoutQaFinding` vì cột `detail` vốn đã là JSON tự do.
+   check_type mới `rotated_text_scan_unsupported` (severity `blocker`) được thêm vào
+   `src/services/layout_qa.py` cùng chỗ với `ROTATED_OVERLAY_FLAG_CHECK`.
+6. Nối vào `JobOrchestrator._build_ocr_bridge()` (method mới `_run_rotated_text_probe()`) — chạy
+   CHỈ khi `file_type == PDF_SCAN` (độc lập engine dịch), SAU khi có `middle.json` của job, dùng
+   ĐÚNG `file_path` (ảnh scan gốc CHƯA whiteout — không phải bridge đã whiteout, detector sẽ
+   không tìm thấy gì trên bridge) + `middle_json_path` CỦA CHÍNH job đó (Protocol 6 R6-01 lineage).
+   Best-effort giống hệt `overlay_rotated_text()`: 2 khối try/except riêng (lỗi detect vs lỗi
+   persist), không bao giờ làm fail job. Cũng chạy cho nhánh resumable (`job.ocr_bridge_path` đã
+   tồn tại) bằng cách suy ra `middle.json` từ đường dẫn `ocr_output/` cố định.
+7. Feature flag `Settings.mineru_det_probe_enabled` (mặc định `True`) — cùng kiểu rollback tức
+   thời với `babeldoc_rotated_text_overlay`.
+8. Golden fixture `tests/fixtures/mineru/det_probe_p67.json` (đã có sẵn trong repo từ Tech Lead)
+   dùng làm dữ liệu test, không viết tay.
+
+**Test mới**: `tests/test_mineru_det_probe.py` (10 test) + 3 test tích hợp trong
+`tests/integration/test_job_orchestrator.py`. Điểm đáng chú ý (Protocol 6 R6-02 — assert giá trị
+cụ thể, không chỉ `assert_called()`):
+- `test_angle_sign_matches_pymupdf_dir`: khoá dấu góc bằng cách đọc `dir` THẬT từ
+  `rotated_text_p67_source.pdf` qua PyMuPDF (median -11.0°) và so với median góc detector
+  (-10.8565°) — cùng dấu, sai lệch < 1.5°. Không suy luận suông theo cảnh báo của Architecture.md.
+- `test_match_lines_to_middle_json_groups_into_one_block_with_median_angle`: assert đúng 1 khối,
+  đúng 18 dòng, `angle_deg` khớp median mong đợi trong dung sai ±1.5°.
+- `test_probe_persists_findings_for_pdf_scan_job`: assert **có hàng thật** trong bảng
+  `layout_qa_findings` (AsyncSession sqlite in-memory thật, không mock session).
+- `test_run_det_probe_real_subprocess` (Protocol 5 R5-03): gọi detector MinerU THẬT, skip (không
+  fail) nếu máy không có venv MinerU (`is_mineru_interpreter_available()`). **Đã chạy PASS thật
+  trên máy Dev** (venv MinerU có sẵn từ trước).
+- 3 test tích hợp trong `test_job_orchestrator.py`: lineage (probe nhận đúng `file_path` gốc +
+  đúng `middle.json` của job), best-effort không fail job khi probe lỗi
+  (`MineruDetProbeUnavailableError`), và tắt hoàn toàn qua flag.
+
+**Giả định tự chọn** (không có spec chính thức, ghi rõ theo yêu cầu — không dừng lại hỏi):
+1. Nhóm "nhiều dòng liền kề" thành 1 khối dựa theo RANH GIỚI BLOCK của `middle.json`
+   (`preproc_blocks[i]`) thay vì tự viết heuristic khoảng cách mới — tái sử dụng cấu trúc
+   MinerU đã tự nhóm (paragraph/title), đúng với trường hợp "16 dòng nghiêng -11° ở trang 67"
+   (MinerU đã gộp cả 16 dòng vào 1 block).
+2. Probe chạy trên nhánh resumable (`_build_ocr_bridge()` early-return) bằng cách suy ra đường
+   dẫn `middle.json` cố định (`ocr_output/middle.json`) thay vì bỏ qua hoàn toàn — giữ tính chất
+   "độc lập với trạng thái resumable" của tính năng best-effort này.
+3. `angle_deg` lưu trong `detail` JSON thay vì thêm cột mới trên `LayoutQaFinding` — vì cột
+   `detail` vốn đã tự do, thêm cột mới sẽ là thay đổi schema không cần thiết.
+
+**Kết quả cuối**:
+```
+uv run pytest -q            → 350 passed (337 + 13 test mới), 437 warnings
+uv run ruff check           → All checks passed!
+uv run ruff format --check  → 7 files already formatted
+```
+
+**File đã thay đổi/tạo mới**:
+- Mới: `src/services/mineru_det_probe.py`, `tests/test_mineru_det_probe.py`
+- Sửa: `src/api/main.py` (P0 logging), `src/core/config.py` (`mineru_python_path`,
+  `mineru_det_probe_enabled`), `src/core/job_orchestrator.py` (wiring + `_run_rotated_text_probe()`),
+  `src/services/layout_qa.py` (check_type mới), `tests/integration/test_job_orchestrator.py`,
+  `docs/PRD.md` (known limitation mới)
+
+**Trạng thái**: Đây là code thay đổi hành vi runtime (P0 logging + Phase 1 nối vào
+`JobOrchestrator`) — theo Protocol 7 (R7-01/R7-02), **CHƯA qua Reviewer thật**. PM sẽ tự spawn
+Reviewer riêng trước khi coi task này là "xong" — Dev KHÔNG tự báo cáo "xong"/"đã review"/"sẵn
+sàng".

@@ -65,6 +65,14 @@ _ENTITY_MATCH_MIN_IOU = 0.05
 #: (khong tao bang moi) de QA soi tay, dung nhu (d)/(e) o tren.
 ROTATED_OVERLAY_FLAG_CHECK = "rotated_text_overlay_flag"
 
+#: check_type dung boi `src/services/mineru_det_probe.py` (Architecture.md
+#: "Final Decision" Bug #6, V6 Phase 1) khi 1 khoi chu xoay tren TRANG SCAN
+#: (khac ROTATED_OVERLAY_FLAG_CHECK o tren, danh cho babeldoc lam mat chu xoay
+#: tren PDF DIGITAL) duoc MinerU detector phat hien nhung KHONG the tai tao
+#: lai goc trong ban dich (Phase 1 chi FLAG, khong sua hinh hoc — xem
+#: `angle_deg` trong `detail`).
+ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK = "rotated_text_scan_unsupported"
+
 _SEVERITY_BY_CHECK: dict[str, str] = {
     "overlap": "critical",
     "text_over_drawing": "critical",
@@ -72,6 +80,7 @@ _SEVERITY_BY_CHECK: dict[str, str] = {
     "rotated_text_prescan": "blocker",
     "entity_loss": "blocker",
     ROTATED_OVERLAY_FLAG_CHECK: "blocker",
+    ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK: "blocker",
 }
 
 _SEVERITY_WEIGHT: dict[str, int] = {"blocker": 3, "critical": 2, "major": 1, "minor": 0}

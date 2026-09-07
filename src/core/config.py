@@ -63,6 +63,21 @@ class Settings(BaseSettings):
     # so it must stay tunable until calibrated against real scans.
     ocr_confidence_threshold: float = 0.80
 
+    # Bug #6 Phase 1 (Architecture.md "Final Decision" V6): rotated-text detection for
+    # `pdf_scan` jobs runs MinerU's OWN detector (`PytorchPaddleOCR`) via a SEPARATE
+    # subprocess using MinerU's dedicated venv interpreter — NOT the `mineru_endpoint`
+    # HTTP service above, which never exposes raw poly angles through its API (V-1).
+    # Default path matches the Tech Lead spike's verified installation
+    # (`~/.local/share/uv/tools/mineru/bin/python`, `uv tool install mineru`); expanded
+    # with `Path(...).expanduser()` at call time, not here (pydantic-settings does not
+    # expand `~` for plain `str` fields).
+    mineru_python_path: str = "~/.local/share/uv/tools/mineru/bin/python"
+    # Feature flag matching `babeldoc_rotated_text_overlay`'s rollback pattern — this
+    # probe is best-effort (Architecture.md V6 step 6: never fails the job), but a flag
+    # lets it be disabled instantly if the subprocess proves too slow/flaky in production
+    # without needing a code change.
+    mineru_det_probe_enabled: bool = True
+
     database_url: str = "sqlite+aiosqlite:///data/bb_translation.db"
 
     max_concurrent_files: int = 3

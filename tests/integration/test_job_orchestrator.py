@@ -13,9 +13,12 @@ from src.core.config import Settings
 from src.core.job_orchestrator import JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
+from src.models.layout_qa import LayoutQaFinding
 from src.postprocess.image_compress import ImageCompressStats
 from src.postprocess.rotated_text_overlay import OverlayResult
 from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
+from src.services.layout_qa import ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK, LayoutQaFindingData
+from src.services.mineru_det_probe import MineruDetProbeUnavailableError
 from src.services.mineru_runner import (
     MinerUResult,
     MinerURunner,
@@ -1019,3 +1022,135 @@ async def test_empty_translation_fails_before_compress_runs(
     assert result.status == "failed"
     assert "khong chua chu nao" in result.error_message
     compress_spy.assert_not_awaited()
+
+
+# --- Bug #6 Phase 1 (Architecture.md "Final Decision" V6): rotated-text ---
+# --- detector probe for pdf_scan jobs — best-effort, correct lineage -----
+
+
+@pytest.mark.asyncio
+async def test_pdf_scan_runs_rotated_text_det_probe_with_correct_lineage(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """R6-01/R6-02: the probe must read the RAW scan (`job.file_path`, same
+    variable Step 2 passes to `_build_ocr_bridge()` — NOT the searchable-PDF
+    bridge, which has already had its OCR'd spans whited out, so a detector
+    run against it would find nothing) and THIS job's own `middle.json`
+    (written by `_fake_mineru_runner()` under `ocr_output/middle.json`, same
+    path `build_searchable_pdf()` itself consumes). Also asserts a real
+    finding row lands in `layout_qa_findings`, not just that the mock was
+    called (R6-02)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_scan")
+
+    fake_finding = LayoutQaFindingData(
+        page_number=1,
+        check_type=ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK,
+        severity="blocker",
+        detail={"angle_deg": -11.0, "bbox": [0.0, 0.0, 10.0, 10.0], "matched_texts": ["x"]},
+    )
+    probe_spy = mocker.patch(
+        "src.core.job_orchestrator.probe_and_flag_rotated_text",
+        new=AsyncMock(return_value=[fake_finding]),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh", mineru_det_probe_enabled=True),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        mineru_runner=_fake_mineru_runner(tmp_path),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    probe_spy.assert_awaited_once()
+    called_file_path = probe_spy.await_args.args[0]
+    called_middle_json_path = probe_spy.await_args.args[1]
+    assert Path(called_file_path) == Path(job.file_path)
+    expected_middle_json = tmp_path / "processing" / job.id / "ocr_output" / "middle.json"
+    assert Path(called_middle_json_path) == expected_middle_json
+
+    rows = (
+        await session.exec(
+            select(LayoutQaFinding).where(
+                LayoutQaFinding.job_id == job.id,
+                LayoutQaFinding.check_type == ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK,
+            )
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].page_number == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_scan_det_probe_failure_does_not_fail_job(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """Bug #6 V6 step 6 explicit instruction: a det-probe bug (e.g. the
+    MinerU interpreter isn't installed) must be logged (task P0) and
+    swallowed — never fail an otherwise-successful OCR/translation job."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_scan")
+
+    mocker.patch(
+        "src.core.job_orchestrator.probe_and_flag_rotated_text",
+        new=AsyncMock(side_effect=MineruDetProbeUnavailableError("interpreter khong ton tai")),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh", mineru_det_probe_enabled=True),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        mineru_runner=_fake_mineru_runner(tmp_path),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    rows = (
+        await session.exec(
+            select(LayoutQaFinding).where(
+                LayoutQaFinding.check_type == ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK
+            )
+        )
+    ).all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_pdf_scan_det_probe_disabled_by_flag(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """`mineru_det_probe_enabled=False` is the instant-rollback switch
+    (matching `babeldoc_rotated_text_overlay`'s pattern) — must skip the
+    probe call entirely, not just discard its result."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_scan")
+
+    probe_spy = mocker.patch(
+        "src.core.job_orchestrator.probe_and_flag_rotated_text",
+        new=AsyncMock(return_value=[]),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh", mineru_det_probe_enabled=False),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        mineru_runner=_fake_mineru_runner(tmp_path),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    probe_spy.assert_not_awaited()

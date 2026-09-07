@@ -1,0 +1,2033 @@
+{
+ "timings": {
+  "init": 0.7294251918792725,
+  "det": 0.3644540309906006,
+  "det_rec": 2.000778913497925
+ },
+ "items": [
+  {
+   "angle": 0.0,
+   "text": "Basic Elements/Elements de Base",
+   "score": 1.0,
+   "poly": [
+    [
+     1350.0,
+     54.0
+    ],
+    [
+     1703.0,
+     54.0
+    ],
+    [
+     1703.0,
+     84.0
+    ],
+    [
+     1350.0,
+     84.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "cane). The sugar is then extracted through diffusion in hot water (beets)",
+   "score": 0.988,
+   "poly": [
+    [
+     248.0,
+     177.0
+    ],
+    [
+     1181.0,
+     177.0
+    ],
+    [
+     1181.0,
+     208.0
+    ],
+    [
+     248.0,
+     208.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "whereas cane juice is pressed out of the sugar-cane fiber using roller mills.",
+   "score": 0.995,
+   "poly": [
+    [
+     248.0,
+     218.0
+    ],
+    [
+     1181.0,
+     218.0
+    ],
+    [
+     1181.0,
+     247.0
+    ],
+    [
+     248.0,
+     247.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "In both instances the result is a solution or juice containing a percentage of",
+   "score": 0.996,
+   "poly": [
+    [
+     248.0,
+     256.0
+    ],
+    [
+     1186.0,
+     256.0
+    ],
+    [
+     1186.0,
+     288.0
+    ],
+    [
+     248.0,
+     288.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "sucrose, water, and impurities. The juice is then treated chemically with car-",
+   "score": 0.989,
+   "poly": [
+    [
+     245.0,
+     295.0
+    ],
+    [
+     1184.0,
+     295.0
+    ],
+    [
+     1184.0,
+     326.0
+    ],
+    [
+     245.0,
+     326.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "bon and/or lime and filtered or decanted to remove most of the impurities.",
+   "score": 0.992,
+   "poly": [
+    [
+     248.0,
+     333.0
+    ],
+    [
+     1181.0,
+     333.0
+    ],
+    [
+     1181.0,
+     365.0
+    ],
+    [
+     248.0,
+     365.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "The resulting juice is evaporated and the sugar is crystallized; the result of",
+   "score": 0.997,
+   "poly": [
+    [
+     241.0,
+     365.0
+    ],
+    [
+     1188.0,
+     365.0
+    ],
+    [
+     1188.0,
+     406.0
+    ],
+    [
+     241.0,
+     406.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "this first crystallization is brown \"raw\" crystallized sugar that is covered in",
+   "score": 0.986,
+   "poly": [
+    [
+     245.0,
+     408.0
+    ],
+    [
+     1181.0,
+     408.0
+    ],
+    [
+     1181.0,
+     440.0
+    ],
+    [
+     245.0,
+     440.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "and saturated with its own molasses.",
+   "score": 1.0,
+   "poly": [
+    [
+     245.0,
+     449.0
+    ],
+    [
+     702.0,
+     449.0
+    ],
+    [
+     702.0,
+     480.0
+    ],
+    [
+     245.0,
+     480.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Separating the pure sucrose from the molasses involves a number of",
+   "score": 1.0,
+   "poly": [
+    [
+     288.0,
+     496.0
+    ],
+    [
+     1186.0,
+     496.0
+    ],
+    [
+     1186.0,
+     528.0
+    ],
+    [
+     288.0,
+     528.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "steps. The molasses is removed from the raw sugar by (1) spinning it at high",
+   "score": 0.994,
+   "poly": [
+    [
+     248.0,
+     537.0
+    ],
+    [
+     1184.0,
+     537.0
+    ],
+    [
+     1184.0,
+     569.0
+    ],
+    [
+     248.0,
+     569.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "velocity—a process called centrifuging; (2) redissolving it to separate more",
+   "score": 0.993,
+   "poly": [
+    [
+     245.0,
+     575.0
+    ],
+    [
+     1186.0,
+     575.0
+    ],
+    [
+     1186.0,
+     607.0
+    ],
+    [
+     245.0,
+     607.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "molasses; (3) recrystallizing; and (4) centrifuging again and rinsing. These",
+   "score": 0.995,
+   "poly": [
+    [
+     245.0,
+     614.0
+    ],
+    [
+     1186.0,
+     614.0
+    ],
+    [
+     1186.0,
+     646.0
+    ],
+    [
+     245.0,
+     646.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Granulated sugar",
+   "score": 1.0,
+   "poly": [
+    [
+     1366.0,
+     614.0
+    ],
+    [
+     1627.0,
+     614.0
+    ],
+    [
+     1627.0,
+     653.0
+    ],
+    [
+     1366.0,
+     653.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "steps are repeated until all the molasses is removed and more or less pure",
+   "score": 0.987,
+   "poly": [
+    [
+     245.0,
+     653.0
+    ],
+    [
+     1186.0,
+     653.0
+    ],
+    [
+     1186.0,
+     684.0
+    ],
+    [
+     245.0,
+     684.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "sucrose is attained.",
+   "score": 1.0,
+   "poly": [
+    [
+     245.0,
+     689.0
+    ],
+    [
+     482.0,
+     689.0
+    ],
+    [
+     482.0,
+     720.0
+    ],
+    [
+     245.0,
+     720.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "CH2OH",
+   "score": 0.975,
+   "poly": [
+    [
+     1310.0,
+     716.0
+    ],
+    [
+     1393.0,
+     716.0
+    ],
+    [
+     1393.0,
+     750.0
+    ],
+    [
+     1310.0,
+     750.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "CH2OH",
+   "score": 0.959,
+   "poly": [
+    [
+     1521.0,
+     716.0
+    ],
+    [
+     1604.0,
+     716.0
+    ],
+    [
+     1604.0,
+     750.0
+    ],
+    [
+     1521.0,
+     750.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 1.0,
+   "poly": [
+    [
+     1258.0,
+     770.0
+    ],
+    [
+     1280.0,
+     770.0
+    ],
+    [
+     1280.0,
+     795.0
+    ],
+    [
+     1258.0,
+     795.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "O",
+   "score": 0.829,
+   "poly": [
+    [
+     1388.0,
+     768.0
+    ],
+    [
+     1406.0,
+     768.0
+    ],
+    [
+     1406.0,
+     788.0
+    ],
+    [
+     1388.0,
+     788.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "O",
+   "score": 0.925,
+   "poly": [
+    [
+     1597.0,
+     766.0
+    ],
+    [
+     1618.0,
+     766.0
+    ],
+    [
+     1618.0,
+     788.0
+    ],
+    [
+     1597.0,
+     788.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 1.0,
+   "poly": [
+    [
+     1667.0,
+     770.0
+    ],
+    [
+     1690.0,
+     770.0
+    ],
+    [
+     1690.0,
+     795.0
+    ],
+    [
+     1667.0,
+     795.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Sugar Varieties",
+   "score": 1.0,
+   "poly": [
+    [
+     250.0,
+     791.0
+    ],
+    [
+     567.0,
+     791.0
+    ],
+    [
+     567.0,
+     838.0
+    ],
+    [
+     250.0,
+     838.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "2",
+   "score": 1.0,
+   "poly": [
+    [
+     1514.0,
+     804.0
+    ],
+    [
+     1535.0,
+     804.0
+    ],
+    [
+     1535.0,
+     827.0
+    ],
+    [
+     1514.0,
+     827.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "OH",
+   "score": 1.0,
+   "poly": [
+    [
+     1298.0,
+     818.0
+    ],
+    [
+     1346.0,
+     818.0
+    ],
+    [
+     1346.0,
+     845.0
+    ],
+    [
+     1298.0,
+     845.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 0.947,
+   "poly": [
+    [
+     1368.0,
+     816.0
+    ],
+    [
+     1397.0,
+     816.0
+    ],
+    [
+     1397.0,
+     845.0
+    ],
+    [
+     1368.0,
+     845.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 0.947,
+   "poly": [
+    [
+     1555.0,
+     829.0
+    ],
+    [
+     1586.0,
+     829.0
+    ],
+    [
+     1586.0,
+     859.0
+    ],
+    [
+     1555.0,
+     859.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "OH/",
+   "score": 0.947,
+   "poly": [
+    [
+     1618.0,
+     825.0
+    ],
+    [
+     1667.0,
+     825.0
+    ],
+    [
+     1667.0,
+     861.0
+    ],
+    [
+     1618.0,
+     861.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Granulated Sugar (Sucrose or Saccharose) –",
+   "score": 0.974,
+   "poly": [
+    [
+     248.0,
+     865.0
+    ],
+    [
+     954.0,
+     865.0
+    ],
+    [
+     954.0,
+     904.0
+    ],
+    [
+     248.0,
+     904.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "OH",
+   "score": 0.985,
+   "poly": [
+    [
+     1255.0,
+     870.0
+    ],
+    [
+     1303.0,
+     870.0
+    ],
+    [
+     1303.0,
+     902.0
+    ],
+    [
+     1255.0,
+     902.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "CH2OH",
+   "score": 0.963,
+   "poly": [
+    [
+     1663.0,
+     870.0
+    ],
+    [
+     1748.0,
+     870.0
+    ],
+    [
+     1748.0,
+     904.0
+    ],
+    [
+     1663.0,
+     904.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "alpha 1-2",
+   "score": 0.953,
+   "poly": [
+    [
+     1440.0,
+     886.0
+    ],
+    [
+     1544.0,
+     886.0
+    ],
+    [
+     1544.0,
+     918.0
+    ],
+    [
+     1440.0,
+     918.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Sucre Cristalisé",
+   "score": 1.0,
+   "poly": [
+    [
+     243.0,
+     911.0
+    ],
+    [
+     499.0,
+     911.0
+    ],
+    [
+     499.0,
+     945.0
+    ],
+    [
+     243.0,
+     945.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 1.0,
+   "poly": [
+    [
+     1305.0,
+     918.0
+    ],
+    [
+     1334.0,
+     918.0
+    ],
+    [
+     1334.0,
+     947.0
+    ],
+    [
+     1305.0,
+     947.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "OH",
+   "score": 1.0,
+   "poly": [
+    [
+     1366.0,
+     915.0
+    ],
+    [
+     1420.0,
+     915.0
+    ],
+    [
+     1420.0,
+     949.0
+    ],
+    [
+     1366.0,
+     949.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "glycosidic",
+   "score": 1.0,
+   "poly": [
+    [
+     1433.0,
+     915.0
+    ],
+    [
+     1543.0,
+     915.0
+    ],
+    [
+     1543.0,
+     947.0
+    ],
+    [
+     1433.0,
+     947.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "OH",
+   "score": 1.0,
+   "poly": [
+    [
+     1555.0,
+     927.0
+    ],
+    [
+     1602.0,
+     927.0
+    ],
+    [
+     1602.0,
+     958.0
+    ],
+    [
+     1555.0,
+     958.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "H",
+   "score": 1.0,
+   "poly": [
+    [
+     1622.0,
+     924.0
+    ],
+    [
+     1654.0,
+     924.0
+    ],
+    [
+     1654.0,
+     952.0
+    ],
+    [
+     1622.0,
+     952.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "bond",
+   "score": 1.0,
+   "poly": [
+    [
+     1458.0,
+     943.0
+    ],
+    [
+     1526.0,
+     943.0
+    ],
+    [
+     1526.0,
+     974.0
+    ],
+    [
+     1458.0,
+     974.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Whether derived from cane or beets, granulated sugar is more or less pure",
+   "score": 0.994,
+   "poly": [
+    [
+     243.0,
+     961.0
+    ],
+    [
+     1186.0,
+     961.0
+    ],
+    [
+     1186.0,
+     1001.0
+    ],
+    [
+     243.0,
+     1001.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "a-Glucose",
+   "score": 0.987,
+   "poly": [
+    [
+     1301.0,
+     965.0
+    ],
+    [
+     1415.0,
+     965.0
+    ],
+    [
+     1415.0,
+     997.0
+    ],
+    [
+     1301.0,
+     997.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "β-Fructose",
+   "score": 0.978,
+   "poly": [
+    [
+     1548.0,
+     963.0
+    ],
+    [
+     1674.0,
+     963.0
+    ],
+    [
+     1674.0,
+     1001.0
+    ],
+    [
+     1548.0,
+     1001.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "(99.8 percent) sucrose, which is a disaccharide, made of one glucose molecule and",
+   "score": 0.992,
+   "poly": [
+    [
+     248.0,
+     1006.0
+    ],
+    [
+     1184.0,
+     1006.0
+    ],
+    [
+     1184.0,
+     1038.0
+    ],
+    [
+     248.0,
+     1038.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "Sucrose molecular formula",
+   "score": 0.999,
+   "poly": [
+    [
+     1301.0,
+     1020.0
+    ],
+    [
+     1688.0,
+     1020.0
+    ],
+    [
+     1688.0,
+     1058.0
+    ],
+    [
+     1301.0,
+     1058.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "one fructose molecule. Granulated sugar, also known as “white,\" \"table,\" \"regular,",
+   "score": 0.983,
+   "poly": [
+    [
+     245.0,
+     1044.0
+    ],
+    [
+     1181.0,
+     1044.0
+    ],
+    [
+     1181.0,
+     1076.0
+    ],
+    [
+     245.0,
+     1076.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "or simply “sugar,\" is chosen for its crystal size which is large enough to crunch in",
+   "score": 0.986,
+   "poly": [
+    [
+     245.0,
+     1083.0
+    ],
+    [
+     1181.0,
+     1083.0
+    ],
+    [
+     1181.0,
+     1115.0
+    ],
+    [
+     245.0,
+     1115.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "the mouth but small enough that it dissolves readily in a solution (such as water",
+   "score": 0.999,
+   "poly": [
+    [
+     245.0,
+     1121.0
+    ],
+    [
+     1184.0,
+     1121.0
+    ],
+    [
+     1184.0,
+     1153.0
+    ],
+    [
+     245.0,
+     1153.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "if making a syrup or simply to sweeten a cup of coffee). Again due to its crystal",
+   "score": 0.997,
+   "poly": [
+    [
+     245.0,
+     1160.0
+    ],
+    [
+     1168.0,
+     1160.0
+    ],
+    [
+     1168.0,
+     1192.0
+    ],
+    [
+     245.0,
+     1192.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "size, when granulated sugar is used in pastry it delivers more",
+   "score": 1.0,
+   "poly": [
+    [
+     245.0,
+     1201.0
+    ],
+    [
+     968.0,
+     1201.0
+    ],
+    [
+     968.0,
+     1232.0
+    ],
+    [
+     245.0,
+     1232.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "friability (crunchiness) and flavor than pow-",
+   "score": 0.997,
+   "poly": [
+    [
+     241.0,
+     1232.0
+    ],
+    [
+     803.0,
+     1232.0
+    ],
+    [
+     803.0,
+     1273.0
+    ],
+    [
+     241.0,
+     1273.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "dered or superfine sugar; however, for the same",
+   "score": 0.996,
+   "poly": [
+    [
+     245.0,
+     1278.0
+    ],
+    [
+     803.0,
+     1278.0
+    ],
+    [
+     803.0,
+     1310.0
+    ],
+    [
+     245.0,
+     1310.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "reason, it produces dough that is a little harder",
+   "score": 0.997,
+   "poly": [
+    [
+     245.0,
+     1316.0
+    ],
+    [
+     808.0,
+     1316.0
+    ],
+    [
+     808.0,
+     1348.0
+    ],
+    [
+     245.0,
+     1348.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "to work with. Used in cakes, pastry, and confec-",
+   "score": 0.987,
+   "poly": [
+    [
+     248.0,
+     1353.0
+    ],
+    [
+     812.0,
+     1353.0
+    ],
+    [
+     812.0,
+     1384.0
+    ],
+    [
+     248.0,
+     1384.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "tionary, as well as in savory glazes, the range of",
+   "score": 0.999,
+   "poly": [
+    [
+     248.0,
+     1393.0
+    ],
+    [
+     826.0,
+     1393.0
+    ],
+    [
+     826.0,
+     1425.0
+    ],
+    [
+     248.0,
+     1425.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "its uses gives it the stature of an all-purpose sugar.",
+   "score": 0.99,
+   "poly": [
+    [
+     248.0,
+     1432.0
+    ],
+    [
+     828.0,
+     1432.0
+    ],
+    [
+     828.0,
+     1464.0
+    ],
+    [
+     248.0,
+     1464.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "In pâtisserie, confectionary, and boulangerie",
+   "score": 0.986,
+   "poly": [
+    [
+     284.0,
+     1475.0
+    ],
+    [
+     842.0,
+     1475.0
+    ],
+    [
+     842.0,
+     1516.0
+    ],
+    [
+     284.0,
+     1516.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "alike, sugars of all types play an important role:",
+   "score": 0.992,
+   "poly": [
+    [
+     248.0,
+     1520.0
+    ],
+    [
+     821.0,
+     1520.0
+    ],
+    [
+     821.0,
+     1552.0
+    ],
+    [
+     248.0,
+     1552.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "• In dough and batter, sugars weaken structure",
+   "score": 0.987,
+   "poly": [
+    [
+     252.0,
+     1577.0
+    ],
+    [
+     864.0,
+     1577.0
+    ],
+    [
+     864.0,
+     1618.0
+    ],
+    [
+     252.0,
+     1618.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "and improve tenderness by drawing moisture",
+   "score": 0.996,
+   "poly": [
+    [
+     279.0,
+     1622.0
+    ],
+    [
+     873.0,
+     1622.0
+    ],
+    [
+     873.0,
+     1654.0
+    ],
+    [
+     279.0,
+     1654.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "away from gluten and inhibiting its development;",
+   "score": 1.0,
+   "poly": [
+    [
+     279.0,
+     1661.0
+    ],
+    [
+     878.0,
+     1661.0
+    ],
+    [
+     878.0,
+     1692.0
+    ],
+    [
+     279.0,
+     1692.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "this ability to attract and retain water is known as",
+   "score": 1.0,
+   "poly": [
+    [
+     279.0,
+     1699.0
+    ],
+    [
+     882.0,
+     1699.0
+    ],
+    [
+     882.0,
+     1731.0
+    ],
+    [
+     279.0,
+     1731.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "sugar's hygroscopic function.",
+   "score": 0.999,
+   "poly": [
+    [
+     279.0,
+     1740.0
+    ],
+    [
+     632.0,
+     1740.0
+    ],
+    [
+     632.0,
+     1772.0
+    ],
+    [
+     279.0,
+     1772.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "In addition to affecting texture—the friability or",
+   "score": 0.996,
+   "poly": [
+    [
+     265.0,
+     1794.0
+    ],
+    [
+     902.0,
+     1794.0
+    ],
+    [
+     902.0,
+     1826.0
+    ],
+    [
+     265.0,
+     1826.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "\"crunchiness\" of cookies, for instance—the hydro-",
+   "score": 0.995,
+   "poly": [
+    [
+     281.0,
+     1833.0
+    ],
+    [
+     907.0,
+     1833.0
+    ],
+    [
+     907.0,
+     1865.0
+    ],
+    [
+     281.0,
+     1865.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "scopic function of sugar also acts as a preservative by",
+   "score": 1.0,
+   "poly": [
+    [
+     279.0,
+     1874.0
+    ],
+    [
+     916.0,
+     1874.0
+    ],
+    [
+     916.0,
+     1905.0
+    ],
+    [
+     279.0,
+     1905.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "denying bacteria the moisture it needs to grow within",
+   "score": 0.984,
+   "poly": [
+    [
+     279.0,
+     1912.0
+    ],
+    [
+     922.0,
+     1912.0
+    ],
+    [
+     922.0,
+     1944.0
+    ],
+    [
+     279.0,
+     1944.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "a given preparation.",
+   "score": 0.999,
+   "poly": [
+    [
+     279.0,
+     1951.0
+    ],
+    [
+     522.0,
+     1951.0
+    ],
+    [
+     522.0,
+     1982.0
+    ],
+    [
+     279.0,
+     1982.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "© Le Cordon Bleu International",
+   "score": 0.992,
+   "poly": [
+    [
+     196.0,
+     2105.0
+    ],
+    [
+     392.0,
+     2105.0
+    ],
+    [
+     392.0,
+     2127.0
+    ],
+    [
+     196.0,
+     2127.0
+    ]
+   ]
+  },
+  {
+   "angle": 0.0,
+   "text": "51",
+   "score": 1.0,
+   "poly": [
+    [
+     878.0,
+     2091.0
+    ],
+    [
+     922.0,
+     2091.0
+    ],
+    [
+     922.0,
+     2127.0
+    ],
+    [
+     878.0,
+     2127.0
+    ]
+   ]
+  },
+  {
+   "angle": -23.429,
+   "text": "0",
+   "score": 0.507,
+   "poly": [
+    [
+     1469.0,
+     869.0
+    ],
+    [
+     1499.0,
+     856.0
+    ],
+    [
+     1511.0,
+     885.0
+    ],
+    [
+     1481.0,
+     898.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.293,
+   "text": "What's in a word?",
+   "score": 0.997,
+   "poly": [
+    [
+     965.0,
+     1273.0
+    ],
+    [
+     1400.0,
+     1194.0
+    ],
+    [
+     1415.0,
+     1280.0
+    ],
+    [
+     981.0,
+     1359.0
+    ]
+   ]
+  },
+  {
+   "angle": -11.254,
+   "text": "Disaccharide",
+   "score": 1.0,
+   "poly": [
+    [
+     1125.0,
+     1337.0
+    ],
+    [
+     1321.0,
+     1298.0
+    ],
+    [
+     1330.0,
+     1345.0
+    ],
+    [
+     1134.0,
+     1385.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.776,
+   "text": "The word disaccharide is composed of the prefix di,",
+   "score": 0.993,
+   "poly": [
+    [
+     922.0,
+     1423.0
+    ],
+    [
+     1542.0,
+     1305.0
+    ],
+    [
+     1550.0,
+     1352.0
+    ],
+    [
+     931.0,
+     1471.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.971,
+   "text": "which means two, and the root saccharide, which",
+   "score": 0.993,
+   "poly": [
+    [
+     931.0,
+     1468.0
+    ],
+    [
+     1550.0,
+     1348.0
+    ],
+    [
+     1557.0,
+     1387.0
+    ],
+    [
+     939.0,
+     1507.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.92,
+   "text": "means sugar. This is clear enough considering",
+   "score": 1.0,
+   "poly": [
+    [
+     936.0,
+     1504.0
+    ],
+    [
+     1558.0,
+     1384.0
+    ],
+    [
+     1567.0,
+     1430.0
+    ],
+    [
+     944.0,
+     1550.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.827,
+   "text": "disaccharides such as sucrose (table sugar), lac-",
+   "score": 0.992,
+   "poly": [
+    [
+     946.0,
+     1545.0
+    ],
+    [
+     1563.0,
+     1427.0
+    ],
+    [
+     1570.0,
+     1466.0
+    ],
+    [
+     953.0,
+     1584.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.581,
+   "text": "tose (found in milk), and maltose (found in ger-",
+   "score": 0.998,
+   "poly": [
+    [
+     950.0,
+     1582.0
+    ],
+    [
+     1571.0,
+     1466.0
+    ],
+    [
+     1579.0,
+     1506.0
+    ],
+    [
+     958.0,
+     1622.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.937,
+   "text": "minating grain) are each made up of two mono-",
+   "score": 0.992,
+   "poly": [
+    [
+     959.0,
+     1622.0
+    ],
+    [
+     1580.0,
+     1502.0
+    ],
+    [
+     1588.0,
+     1541.0
+    ],
+    [
+     966.0,
+     1661.0
+    ]
+   ]
+  },
+  {
+   "angle": -11.399,
+   "text": "saccharides. In the case of sucrose, the bonded",
+   "score": 0.999,
+   "poly": [
+    [
+     965.0,
+     1661.0
+    ],
+    [
+     1585.0,
+     1536.0
+    ],
+    [
+     1593.0,
+     1577.0
+    ],
+    [
+     973.0,
+     1702.0
+    ]
+   ]
+  },
+  {
+   "angle": -11.239,
+   "text": "monosaccharides are fructose and glucose which",
+   "score": 1.0,
+   "poly": [
+    [
+     975.0,
+     1700.0
+    ],
+    [
+     1594.0,
+     1577.0
+    ],
+    [
+     1601.0,
+     1615.0
+    ],
+    [
+     982.0,
+     1738.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.954,
+   "text": "themselves can be separated to make two different",
+   "score": 0.988,
+   "poly": [
+    [
+     983.0,
+     1735.0
+    ],
+    [
+     1603.0,
+     1615.0
+    ],
+    [
+     1611.0,
+     1656.0
+    ],
+    [
+     991.0,
+     1776.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.886,
+   "text": "sugar products (see sucrose on p. 51 and glucose on",
+   "score": 0.999,
+   "poly": [
+    [
+     988.0,
+     1774.0
+    ],
+    [
+     1612.0,
+     1654.0
+    ],
+    [
+     1620.0,
+     1694.0
+    ],
+    [
+     996.0,
+     1815.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.937,
+   "text": "p. 62). The accompanying diagram shows the fruc-",
+   "score": 0.995,
+   "poly": [
+    [
+     995.0,
+     1812.0
+    ],
+    [
+     1616.0,
+     1692.0
+    ],
+    [
+     1624.0,
+     1731.0
+    ],
+    [
+     1002.0,
+     1851.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.62,
+   "text": "tose molecule, the glucose molecule, and the bond",
+   "score": 1.0,
+   "poly": [
+    [
+     1003.0,
+     1848.0
+    ],
+    [
+     1627.0,
+     1731.0
+    ],
+    [
+     1635.0,
+     1773.0
+    ],
+    [
+     1011.0,
+     1890.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.776,
+   "text": "that makes the two form a sucrose molecule. Also",
+   "score": 1.0,
+   "poly": [
+    [
+     1012.0,
+     1887.0
+    ],
+    [
+     1632.0,
+     1769.0
+    ],
+    [
+     1640.0,
+     1809.0
+    ],
+    [
+     1019.0,
+     1926.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.725,
+   "text": "included are the name and position of the atoms",
+   "score": 0.998,
+   "poly": [
+    [
+     1018.0,
+     1926.0
+    ],
+    [
+     1641.0,
+     1808.0
+    ],
+    [
+     1648.0,
+     1846.0
+    ],
+    [
+     1025.0,
+     1964.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.514,
+   "text": "carbon, hydrogen, and oxygen that are the building",
+   "score": 0.999,
+   "poly": [
+    [
+     1024.0,
+     1960.0
+    ],
+    [
+     1649.0,
+     1844.0
+    ],
+    [
+     1657.0,
+     1889.0
+    ],
+    [
+     1032.0,
+     2005.0
+    ]
+   ]
+  },
+  {
+   "angle": -10.305,
+   "text": "blocks of the sucrose molecule.",
+   "score": 0.999,
+   "poly": [
+    [
+     1034.0,
+     2003.0
+    ],
+    [
+     1419.0,
+     1933.0
+    ],
+    [
+     1425.0,
+     1971.0
+    ],
+    [
+     1041.0,
+     2041.0
+    ]
+   ]
+  }
+ ]
+}

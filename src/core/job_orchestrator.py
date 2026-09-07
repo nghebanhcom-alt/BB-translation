@@ -58,6 +58,7 @@ from src.postprocess.rotated_text_overlay import overlay_rotated_text
 from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
 from src.services.layout_qa import persist_findings
+from src.services.mineru_det_probe import probe_and_flag_rotated_text
 from src.services.mineru_runner import MinerUError, MinerURunner, MinerUUnavailableError
 from src.services.pdf2zh_runner import Pdf2zhError, Pdf2zhRunner, Pdf2zhTimeoutError
 from src.services.pdf2zh_service_map import (
@@ -639,12 +640,18 @@ class JobOrchestrator:
             )
 
         bridge_path = self._processing_dir / job.id / "ocr_bridge" / "searchable.pdf"
+        ocr_dir = self._processing_dir / job.id / "ocr_output"
 
         if job.ocr_bridge_path and Path(job.ocr_bridge_path).exists():
             # BR-CHUNK-05 resumable: da OCR + dung cau noi o lan chay truoc.
+            # Bug #6 Phase 1: middle.json cua lan chay truoc van con tren dia
+            # (cung thu muc `ocr_dir` ma `_write_middle_json` da ghi vao,
+            # xem src/services/mineru_runner.py) — chay probe o day thay vi
+            # bo qua no tren job resumable, giu dung tinh chat "best-effort,
+            # doc lap voi trang thai resumable" cua tinh nang nay.
+            await self._run_rotated_text_probe(job, file_path, ocr_dir / "middle.json", db_session)
             return Path(job.ocr_bridge_path)
 
-        ocr_dir = self._processing_dir / job.id / "ocr_output"
         ocr_result = await self._mineru_runner.parse_document(file_path, ocr_dir)
         # `quality.confidence` is `None` when no span went through OCR at all
         # (e.g. an image-only page) — a valid state, not an error
@@ -659,11 +666,67 @@ class JobOrchestrator:
                 "MinerU khong tra middle.json — khong dung duoc text layer cho file scan"
             )
 
+        # Bug #6 Phase 1 (Architecture.md "Final Decision" V6, step 6): CHI
+        # danh cho pdf_scan (ham nay chi duoc goi cho pdf_scan — xem
+        # run_job() Step 2), doc lap voi engine dich (chay TRUOC diem re
+        # nhanh pdf2zh/babeldoc o run_job()). Data lineage (R6-01): dung
+        # DUNG `file_path` (anh scan GOC cua CHINH job nay, chua bi whiteout)
+        # + `ocr_result.middle_json_path` (middle.json CUA CHINH job nay) —
+        # KHONG dung `bridge.path` (da bi whiteout, detector se khong thay
+        # gi de phat hien).
+        await self._run_rotated_text_probe(job, file_path, ocr_result.middle_json_path, db_session)
+
         bridge = build_searchable_pdf(file_path, ocr_result.middle_json_path, bridge_path)
         job.ocr_bridge_path = str(bridge.path)
         db_session.add(job)
         await db_session.commit()
         return bridge.path
+
+    async def _run_rotated_text_probe(
+        self, job: Job, file_path: Path, middle_json_path: Path, db_session: AsyncSession
+    ) -> None:
+        """Bug #6 Phase 1 (Architecture.md "Final Decision" V6): best-effort,
+        SAME failure-handling shape as `overlay_rotated_text()`'s call site
+        below (2 separate try/except blocks — detection failure and persist
+        failure are logged distinctly, so a persist bug never silently
+        swallows an already-successful detection the way the pre-R6-04
+        single-except version did for the overlay feature). Never raises —
+        a bug here must never fail an otherwise-successful OCR/translation
+        job (Architecture.md V6 step 6 explicit instruction).
+        """
+        if not self._settings.mineru_det_probe_enabled:
+            return
+        if not middle_json_path.exists():
+            return
+
+        findings = None
+        try:
+            findings = await probe_and_flag_rotated_text(
+                file_path, middle_json_path, python_path=self._settings.mineru_python_path
+            )
+        except Exception:  # best-effort — see docstring, must never fail the job
+            logger.warning(
+                "mineru_det_probe that bai cho job %s — bo qua flag chu xoay tren "
+                "trang scan (best-effort, khong lam fail job)",
+                job.id,
+                exc_info=True,
+            )
+            return
+
+        if not findings:
+            return
+
+        try:
+            await persist_findings(db_session, findings, job_id=job.id, source_file=file_path.name)
+        except Exception:
+            logger.warning(
+                "persist_findings that bai cho job %s sau khi mineru_det_probe tra ve "
+                "%d finding rotated_text_scan_unsupported — cac finding nay se KHONG "
+                "duoc QA thay (best-effort, khong lam fail job)",
+                job.id,
+                len(findings),
+                exc_info=True,
+            )
 
     async def _emit_ocr_warning_if_low(self, job: Job) -> None:
         """US-11 / AC-11.2 (Architecture.md 6.10.6): the only defense line

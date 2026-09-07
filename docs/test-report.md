@@ -1534,3 +1534,253 @@ correctness, chỉ là rác đĩa tích luỹ trong 1 kịch bản lỗi hiếm 
 thật để kiểm chứng). File production gốc không bị đụng vào trong suốt quá trình QA test (MD5
 xác nhận khớp trước/sau).
 
+---
+
+## QA Vòng 6 — Live E2E cho P1.1 Overlay chữ xoay (G1e), nhánh `pdf_scan` + `babeldoc` (R5-03/R6-03 gate)
+
+- **QA**: QA Agent (Sonnet). **Ngày**: 2026-09-07.
+- **Bối cảnh**: commit `b9c8952` implement P1.1 (overlay chữ xoay G1e, `src/postprocess/rotated_text_overlay.py`)
+  + P1.2 (prompt bất biến nội dung). Reviewer REJECT vòng 1 (lỗi lineage: overlay dùng
+  `file_path` gốc thay vì `translation_source_path` cầu nối OCR cho nhánh `pdf_scan`), APPROVE
+  vòng 2 sau khi Dev sửa + thêm test regression. Reviewer yêu cầu tường minh: trước khi coi P1
+  sẵn sàng release, PHẢI có ít nhất 1 lần **live E2E thật** xuyên suốt OCR → dịch → overlay cho
+  đúng tổ hợp `pdf_scan` + `babeldoc` (tổ hợp Reviewer vừa phát hiện bug lineage), mở file output
+  thật kiểm tra nội dung — không chỉ tin `status`. Đây là nhiệm vụ Vòng 6 này.
+
+### 1. Chuẩn bị external dependency (Protocol 5 R5-03)
+
+- `which mineru` → `/Users/hieutt/.local/bin/mineru`; `mineru --version` → `3.4.5`. MinerU
+  **thật đã cài** trên máy (khác các vòng trước — không cần dựng fake `ThreadingHTTPServer`
+  nữa). `curl http://127.0.0.1:8010/health` → `{"status":"healthy","version":"3.4.5",...}` —
+  server MinerU thật đã chạy sẵn, dùng trực tiếp, đúng ưu tiên "live thật tốt hơn fake server"
+  PM yêu cầu.
+- `pdf2zh --version` → `1.9.11`, `babeldoc --version` → `0.6.4` (khớp pin ở P0.3).
+- **Không cần đánh dấu "release blocked pending live verification"** — MinerU thật đã gọi được
+  trực tiếp, không có phần nào của gate R5-03 phải bỏ qua lần này.
+
+### 2. Phát hiện quan trọng TRƯỚC khi tin bất kỳ kết quả nào: server production đang chạy CODE CŨ
+
+Trước khi upload file test, phát hiện có sẵn 1 process `uvicorn` (PID 70114, cổng 8000) đã chạy
+từ trước (khởi động lúc 20:57, theo `ps aux`). Chạy thử job `pdf_digital` + `babeldoc` qua cổng
+này với chính `tests/fixtures/babeldoc/rotated_text_p67_source.pdf` (fixture ĐÃ CÓ chữ xoay
+-11° thật, dùng làm control) → **overlay không vẽ gì, `layout_qa_findings` rỗng, không log lỗi
+nào** — kết quả trông giống "P1.1 hoàn toàn không hoạt động".
+
+**Trước khi báo đây là bug, tự verify bằng cách loại trừ biến nhiễu "code cũ"** (đúng kỷ luật
+Protocol 5 — không kết luận vội theo dấu hiệu bề mặt): dựng 1 instance `uvicorn` MỚI của chính
+QA (`--port 8001`, foreground trong tiến trình riêng để đọc được toàn bộ stdout/stderr, không
+qua log file chung `/private/tmp/bb-app.log` — log file đó hoá ra KHÔNG capture bất kỳ log nào
+từ logger nội bộ app (`logging.getLogger(__name__)` trong `src/`), chỉ có access log của
+uvicorn — 1 gap quan sát-được riêng, ghi nhận ở mục 6 bên dưới). Chạy lại ĐÚNG y hệt file test
+control qua cổng 8001 (code hiện tại trên disk, đảm bảo mới) → **overlay vẽ đúng, 20 dòng chữ
+xoay -11°, bản dịch tiếng Việt đúng nghĩa** (xem mục 3). Kết luận: **process cổng 8000 đang chạy
+code cũ hơn commit `b9c8952`** (không dùng `--reload`, không tự nạp lại code khi git commit mới)
+— **mọi kết quả test thủ công chạy qua cổng 8000 từ nay đến khi ai đó restart nó đều KHÔNG đáng
+tin** cho bất kỳ tính năng nào đổi sau thời điểm nó khởi động. **Khuyến nghị PM**: restart
+process này (hoặc dùng `--reload` cho môi trường Dev/QA) trước khi làm bất kỳ QA/manual-test nào
+khác — đây không phải bug code, là vệ sinh quy trình vận hành, nhưng đủ nguy hiểm để tự nó có thể
+khiến 1 lần QA tương lai "PASS giả" nếu không ai để ý. Toàn bộ kết quả CHÍNH THỨC của Vòng 6 này
+dùng cổng 8001 (code mới, tự dựng, tự kiểm) — cổng 8000 (không phải server QA dựng, không tắt)
+giữ nguyên không đụng vào.
+
+### 3. Control test — P1.1 hoạt động ĐÚNG cho `pdf_digital` + `babeldoc` (xác nhận cơ chế G1e sống được)
+
+Upload thẳng `tests/fixtures/babeldoc/rotated_text_p67_source.pdf` (1 trang, có chữ xoay -11°
+thật từ trước — không phải scan) → `file_type: pdf_digital` (đúng, do đã có text layer thật).
+`POST /api/jobs` (`provider=deepseek`, engine mặc định `babeldoc`) → `completed` sau ~24s qua
+cổng 8001. Mở `translated_vi.pdf` bằng PyMuPDF:
+
+- `page.get_text("dict")`: **20 dòng có `dir` góc ≈ -11.0°** (khớp gần như tuyệt đối góc nguồn
+  `-10.9999°` đo trực tiếp trên fixture, sai số < 0.01°) — nội dung dịch tiếng Việt đúng nghĩa
+  ("Từ disaccharide được cấu tạo bởi tiền tố di, nghĩa là hai, và gốc từ saccharide..."), không
+  rỗng, không vỡ chữ.
+- `layout_qa_findings` cho job này: **0 hàng** — đúng vì bản dịch vừa bbox gốc ở scale đủ tốt,
+  không cần FLAG (đúng thiết kế U5/U7-E1: chỉ FLAG khi không vừa dù đã bóp tới 70%).
+- `actual_cost = 0.005854` USD (khác 0 rõ rệt) — xác nhận có gọi DeepSeek thật để dịch riêng
+  khối chữ xoay này qua `TranslationProvider` của app (không qua babeldoc CLI, đúng lineage
+  R6-01: `translate_rotated_blocks()` gọi `provider.translate()` trực tiếp).
+
+**Kết luận mục này**: cơ chế G1e (spike U3, PyMuPDF `insert_text(morph=...)`) hoạt động đúng
+trong SẢN PHẨM THẬT (không chỉ trong spike độc lập của Tech Lead) khi input là PDF có text layer
+gốc còn giữ góc xoay. Đây là bằng chứng sống đầu tiên xác nhận toàn bộ chuỗi
+`scan_rotated_lines → group_rotated_lines → translate_rotated_blocks (DeepSeek thật) →
+fit_translated_block → _draw_block` chạy đúng qua đúng code path production
+(`JobOrchestrator.run_job()`, không gọi hàm rời rạc).
+
+### 4. Test chính — nhánh `pdf_scan` + `babeldoc` (đúng tổ hợp Reviewer vừa fix lineage)
+
+**Chuẩn bị fixture**: không dùng thẳng `rotated_text_p67_source.pdf` vì file đó có text layer
+thật → sẽ bị `file_router.py` phân loại `pdf_digital`, không kích hoạt nhánh OCR cần test. Tạo
+fixture scan MỚI bằng cách raster hoá đúng trang đó: `page.get_pixmap()` ở 200 DPI (script tại
+`/private/tmp/.../scratchpad/qa_e2e_rotated_overlay/`), nhúng ảnh PNG kết quả vào 1 PDF mới chỉ
+chứa ảnh (không text layer) — giữ nguyên 100% vị trí/góc/nội dung hình ảnh của khối chữ xoay
+-11° gốc (đoạn "Disaccharide..."). Verify trước khi upload: `text_len=0`, có 1 image → đúng
+input scan-like. Upload qua API → `file_type: "pdf_scan"` (đúng, `file_router.py` phân loại
+đúng: 1 trang không chữ + có ảnh → `countable_pages=0` → `ratio=0.0` → `PDF_SCAN`).
+
+`POST /api/jobs` (`provider=deepseek`) qua cổng 8001 (code mới) → `queued` → `translating` →
+`merging` → **`completed`** sau ~36s. Response cuối:
+```
+status=completed, file_type=pdf_scan, ocr_confidence=0.9862, ocr_dropped_spans=0,
+ocr_warning=null, actual_cost=0.0063965, cost_source=estimated, error_message=null
+```
+
+**Verify NỘI DUNG THẬT (R6-03)** — mở `translated_vi.pdf` bằng PyMuPDF, không tin `status`:
+
+- `page.get_text()`: **3.310 ký tự tiếng Việt thật, đọc được, đúng nghĩa** (đối chiếu với nội
+  dung gốc tiếng Anh trang 67 — "Trong pâtisserie, confectionary và boulangerie...", "Đường cát
+  (Sucrose hoặc Saccharose)..." — đúng bản dịch nội dung đoạn văn xuôi chính của trang, khớp bài
+  học Bug #5: không rỗng, không phải giữ nguyên tiếng Anh). Số trang đúng tham chiếu được giữ
+  ("trang 51", "trang 62" — khớp gốc "p. 51"/"p. 62", đúng bất biến nội dung P1.2 yêu cầu).
+- OCR thật hoạt động đúng: `ocr_confidence=0.9862` (không NULL, hợp lý cho ảnh scan rõ nét),
+  `ocr_bridge_path` trỏ đúng `data/processing/<job_id>/ocr_bridge/searchable.pdf`.
+
+**NHƯNG — tiêu chí thành công CHÍNH của Vòng 6 này (overlay chữ xoay) THẤT BẠI**:
+
+- `page.get_text("dict")` quét toàn trang output: **0 dòng có `dir` khác 0°/90°** — khối chữ
+  xoay -11° gốc (chính là "Disaccharide...") **hoàn toàn không được overlay lại đúng góc**, dù
+  cơ chế đã verify hoạt động đúng 100% ở mục 3 (cùng khối văn bản, cùng ngày, cùng code).
+  - Bản dịch nội dung của khối này **KHÔNG bị mất** (nội dung "Disaccharide", "Từ disaccharide
+    được cấu tạo bởi tiền tố di..." vẫn xuất hiện trong `page.get_text()`) — nhưng bị babeldoc tự
+    dàn lại thành **văn bản NGANG bình thường trong 1 khung/box riêng**, không giữ góc nghiêng.
+  - Render trực quan (`get_pixmap` 2x, xem ảnh đã lưu tại
+    `/private/tmp/.../scratchpad/qa_e2e_rotated_overlay/final_output_render.png`): trang có 1
+    hình "thẻ giấy note" trang trí BỊ NGHIÊNG (đây là 1 phần ảnh nền gốc, babeldoc không đụng
+    vào ảnh) — NHƯNG các khung chữ tiếng Việt babeldoc tự vẽ đè lên trên đó (kiểu box nền trắng
+    quen thuộc từ các lỗi layout đã biết ở phần P0/T3) lại **NẰM NGANG, không nghiêng theo hình
+    nền** → hình ảnh cuối cùng trông SAI/lệch rõ rệt hơn cả 2 trường hợp đã biết trước đây
+    ("babeldoc vứt chữ, để trống" của `pdf_digital`, hoặc "pdf2zh duỗi thẳng nhưng ít nhất khung
+    cũng nằm đúng chỗ nó luôn nằm ngang").
+  - `layout_qa_findings` cho job này: **0 hàng** — nghĩa là ngay cả cơ chế FLAG dự phòng
+    (U5/U7-E1: "không vừa thì bóp tới 70% rồi FLAG, không bao giờ overlay đè chữ vỡ") **cũng
+    không kích hoạt** — đây không phải trường hợp "overlay cố gắng nhưng không vừa nên flag",
+    mà là "overlay chưa bao giờ coi đây là ứng viên cần xử lý".
+
+### 5. Root cause (đã tự verify bằng cách đọc trực tiếp file trung gian, không suy đoán)
+
+Đọc trực tiếp `data/processing/<job_id>/ocr_bridge/searchable.pdf` (chính là
+`translation_source_path` mà `overlay_rotated_text()` được lineage-fix ở Reviewer vòng 2 chỉ
+định phải quét để tìm chữ xoay — `rotated_text_overlay.py:525`,
+`source_pdf_path=translation_source_path`) bằng PyMuPDF: **TOÀN BỘ dòng chữ trong file cầu nối
+này có `dir=(1.0, 0.0)`** — kể cả chính dòng chứa "Disaccharide"/"The word disaccharide is
+composed..." mà ảnh nền bên dưới vẫn hiển thị nghiêng -11° rõ ràng. Tức là **bản thân file mà
+lineage fix (Reviewer vòng 2 APPROVE) chỉ định làm nguồn phát hiện chữ xoay, chưa bao giờ chứa
+thông tin góc xoay nào cho nhánh `pdf_scan`** — không phải do lineage sai (lineage ĐÚNG, trỏ đúng
+file `translation_source_path`), mà do chính NỘI DUNG file đó bị làm phẳng góc trước khi tới
+tay `overlay_rotated_text()`.
+
+Truy tiếp 2 tầng nguồn của sự phẳng hoá này:
+
+1. **`src/services/mineru_runner.py` / `middle.json`**: đọc trực tiếp
+   `data/processing/<job_id>/ocr_output/middle.json` — mỗi `span`/`line` chỉ có field `bbox`
+   (hình chữ nhật thẳng trục) và `content`, **không có field góc/rotation nào** cho span chứa
+   "The word disaccharide is composed of the prefix di,". MinerU (bản 3.4.5 đang dùng) tự nhận
+   dạng chữ đúng nội dung dù nó nghiêng trên ảnh, nhưng trả toạ độ kết quả theo khung thẳng trục
+   — mất thông tin góc ngay từ tầng OCR, trước khi chạm tới code của app.
+2. **`src/preprocess/searchable_pdf.py:_insert_invisible_text()` (dòng 211-236)**: hàm này gọi
+   `page.insert_text((x0, y1-h*0.15), content, fontname=font_name, fontsize=font_size,
+   render_mode=3)` — **không truyền `morph`/ma trận xoay nào**, luôn chèn text vô hình theo trục
+   ngang tại bbox thẳng trục lấy từ `middle.json`. Ngay cả khi (1) sau này được sửa để MinerU trả
+   thêm góc, hàm này vẫn sẽ cần sửa thêm để truyền góc đó vào `insert_text(morph=...)` — hiện tại
+   nó chưa hề có tham số hay logic nào cho việc này.
+
+`scan_rotated_lines()` (`rotated_text_overlay.py:211-237`) đọc đúng `line["dir"]` của
+`translation_source_path` như thiết kế — nhưng vì nguồn đó luôn là `(1.0, 0.0)` cho MỌI job
+`pdf_scan`, hàm này **không bao giờ** có thể trả về bất kỳ `RotatedLine` nào cho nhánh này, bất
+kể ảnh scan gốc có chữ nghiêng rõ tới đâu. Đây là lý do cả overlay VÀ flag đều im lặng — không
+phải lỗi logic trong `rotated_text_overlay.py` hay trong chính bước nối lineage (2 phần đó đã
+verify đúng ở mục 3), mà là **dữ liệu đầu vào của bước phát hiện đã bị làm phẳng góc trước đó 2
+tầng, không có tầng nào ở giữa flag lại việc mất thông tin này**.
+
+### 6. Đánh giá mức độ & phân loại bug
+
+**Bug #6 — [BLOCKING cho riêng nhánh `pdf_scan`, không chặn `pdf_digital`] Overlay chữ xoay
+(P1.1/G1e) không bao giờ kích hoạt cho job `pdf_scan` + `babeldoc`, vì OCR bridge luôn làm phẳng
+góc xoay về 0°, không có tầng nào flag lại việc mất góc này.**
+
+- **File liên quan**: `src/preprocess/searchable_pdf.py:211-236` (`_insert_invisible_text`,
+  nguồn gốc trực tiếp), `src/services/mineru_runner.py` (tầng OCR không cung cấp góc — cần xác
+  nhận thêm liệu MinerU 3.4.5 có API/field nào khác chứa góc mà app chưa đọc, hay MinerU hoàn
+  toàn không tính góc — QA chỉ xác nhận được `middle.json` hiện tại không có field này, CHƯA
+  đọc source MinerU để khẳng định 100% không có cách nào lấy góc từ nó — đánh dấu
+  `[CHƯA VERIFY]` phần này, cần Tech Lead tự tra cứu theo đúng Protocol 5 R5-01 trước khi thiết
+  kế fix, không suy đoán tiếp từ báo cáo QA), `src/postprocess/rotated_text_overlay.py` (nạn
+  nhân im lặng — bản thân module này ĐÚNG, không cần sửa).
+- **Ảnh hưởng**: mọi job `pdf_scan` có chữ/khối nghiêng thật trong ảnh gốc — kể cả trang trí
+  quan trọng như trang 67 sách gốc mà cả roadmap U3/U4 P1.1 chọn làm ví dụ chính — sẽ **luôn**
+  bị babeldoc dàn lại thành khung chữ NGANG đè lên ảnh nền còn nghiêng, git một kết quả hình ảnh
+  lệch lạc dễ thấy hơn cả hành vi "vứt chữ để trống" ban đầu mà cả roadmap này được thiết kế ra
+  để sửa — và **không hề được flag** cho QA/PM biết để soi tay (khác chính sách U7-E3 "review
+  thủ công bắt buộc 100% cho mọi trang có chữ xoay", vì cơ chế phát hiện chữ xoay của chính app
+  cho nhánh này đã báo "không có trang nào cần soi" một cách sai).
+- **Khác Bug #5 gốc như thế nào**: Bug #5 là lỗi KHÔNG NỐI 2 bước (OCR text không đi vào input
+  dịch). Bug #6 này 2 bước ĐÃ nối đúng (nội dung dịch được, không rỗng — xem mục 4) — lỗi nằm ở
+  **1 thuộc tính cụ thể (góc xoay) bị rớt mất khi đi qua đúng đường ống đã nối đúng**, một dạng
+  lineage-mất-thuộc-tính khác với lineage-mất-toàn-bộ-nội-dung của Bug #5, nhưng cùng họ "test
+  từng bước riêng lẻ đều theo assumption của chính nó, không ai kiểm tra dữ liệu cụ thể sống sót
+  qua ranh giới bước" mà Protocol 6 được lập ra để bắt.
+- **Không phải lỗi của lineage fix Reviewer vòng 2 vừa duyệt** — lineage đó (dùng
+  `translation_source_path` thay vì `file_path`) là ĐÚNG và CẦN THIẾT (nếu không sửa, overlay sẽ
+  quét nhầm `file_path` — file scan gốc không hề có text layer, `scan_rotated_lines()` sẽ crash
+  hoặc luôn trả rỗng vì `page.get_text("dict")` trên ảnh thuần không có block type 0 nào). Lineage
+  fix chỉ chưa đủ — vì file đích của lineage fix đó (bridge) tự nó thiếu dữ liệu góc, một tầng
+  sâu hơn phạm vi review vòng 2 đã xét (review vòng 2 xác nhận đúng biến `source_pdf_path` được
+  truyền, không xét tới nội dung `dir` bên trong file đó).
+
+### 7. Circuit breaker Dev↔QA
+
+Đây là bug MỚI phát hiện lần đầu ở Vòng 6 (không phải Dev sửa sai 1 bug QA đã báo trước) — tính
+là 1 vòng mới. Circuit breaker Dev↔QA hiện tại: theo `project_state.json` trước khi vòng này là
+4/5 (đã đóng ở QA Vòng 5); Vòng 6 này đưa lên **5/5** — **ĐÃ CHẠM GIỚI HẠN Protocol 3**. Theo
+đúng quy định: dừng pipeline, không tự động giao thêm cho Dev vòng thứ 6, báo cáo PM/user kèm
+log lỗi chi tiết (mục 4/5 ở trên) để người quyết định hướng đi tiếp — có thể là: (a) tăng giới
+hạn có chủ đích cho riêng bug này (đây là phát hiện kiến trúc mới, không phải Dev sửa lặp sai),
+hoặc (b) escalate thẳng lên Tech Lead thiết kế lại hướng lấy góc xoay cho nhánh `pdf_scan` (ví
+dụ: MinerU có hỗ trợ trả góc/orientation qua tham số nào khác không — cần Tech Lead tự tra cứu
+source/doc thật theo Protocol 5 R5-01, KHÔNG suy đoán) trước khi Dev implement tiếp, đúng tinh
+thần R5-02 (spike verify trước khi code).
+
+### 8. Ghi chú vận hành khác (non-blocking, không thuộc bug P1.1)
+
+- **Log nội bộ app không xuất hiện trong `/private/tmp/bb-app.log`**: xác nhận qua thực nghiệm ở
+  mục 2 — `grep -ci "overlay"` trên toàn bộ file log (bao trùm nhiều job/nhiều ngày) trả về `0`,
+  dù chắc chắn phải có ít nhất vài `logger.warning(...)` từ các nhánh best-effort khác (retry,
+  cancel, v.v.) từng chạy qua session đó. `src/api/main.py` không gọi `logging.basicConfig()`
+  hay cấu hình handler nào cho logger `src.*` — chỉ log access của uvicorn xuất hiện. Nghĩa là
+  MỌI `logger.warning(..., exc_info=True)` trong các nhánh best-effort của app (bao gồm chính
+  nhánh swallow exception của `overlay_rotated_text()` ở `job_orchestrator.py:533-539`) **im
+  lặng hoàn toàn trong log production**, không chỉ riêng feature này — nếu overlay từng crash
+  (không phải trường hợp Vòng 6 này, ở đây nó không crash, chỉ tìm thấy 0 block), sẽ không có
+  cách nào biết được từ log. Đề xuất backlog riêng cho Dev/Tech Lead: thêm
+  `logging.basicConfig()`/handler thật ở `src/api/main.py` startup, tách biệt khỏi bug P1.1 này.
+- **Server production cổng 8000 chạy code cũ hơn `b9c8952`** (mục 2) — khuyến nghị PM restart
+  trước khi tự tay thử nghiệm bất kỳ tính năng nào mới release, để tránh kết luận sai do code cũ.
+
+### 9. Dọn dẹp
+
+- Đã xoá toàn bộ 4 job test (`e3b20358...`, `e47d2c34...`, `506a2b95...`, `8e16a756...`) khỏi
+  `jobs`/`chunks`/`layout_qa_findings`/`batches`, xoá `data/uploads/`, `data/processing/<job_id>/`,
+  `data/outputs/<job_id>/` tương ứng — verify lại `SELECT count(*) FROM jobs` về đúng baseline
+  gốc (9, khớp trước khi Vòng 6 bắt đầu).
+- Đã dừng instance `uvicorn --port 8001` QA tự dựng để chẩn đoán (`pkill`, verify
+  `curl :8001/health` không phản hồi). Instance cổng 8000 (không phải do QA dựng) giữ nguyên,
+  không đụng vào — chỉ khuyến nghị PM restart, không tự ý restart hộ (có thể đang phục vụ phiên
+  làm việc khác của PM/Dev).
+- Không sửa `docs/Architecture.md`/`uv.lock` (2 file đang show modified trong git status là từ
+  công việc trước đó của Tech Lead/PM, QA không đụng vào, đã verify bằng `git diff` trước khi
+  bắt đầu và sau khi kết thúc — không đổi thêm).
+
+### Kết luận Vòng 6
+
+**KHÔNG sẵn sàng release P1.1 (overlay chữ xoay) cho nhánh `pdf_scan` + `babeldoc`.**
+Nhánh `pdf_digital` + `babeldoc` của P1.1: **PASS**, verify sống bằng DeepSeek thật, góc xoay
+khớp chính xác, không cần thay đổi gì thêm. Nhánh `pdf_scan` + `babeldoc`: **Bug #6 BLOCKING
+mới**, chạm giới hạn circuit breaker Dev↔QA (5/5) — dừng pipeline, cần PM/Tech Lead quyết định
+hướng đi trước khi có vòng Dev↔QA tiếp theo. R5-03: **ĐÃ ĐÓNG** (MinerU thật, không cần đánh dấu
+"release blocked pending live verification" — vấn đề không nằm ở việc gọi được MinerU thật hay
+không, mà ở dữ liệu MinerU trả về thiếu 1 thuộc tính). R6-03: **ĐÃ ĐÓNG** theo đúng nghĩa "đã chạy
+E2E thật và mở file kiểm tra nội dung" — và chính việc làm đúng R6-03 (không chỉ tin diff code)
+là thứ duy nhất phát hiện ra Bug #6, một bug mà review code tĩnh (Reviewer vòng 1/2) không có
+cách nào thấy được vì nó nằm ở giá trị dữ liệu runtime cụ thể (`dir=(1.0,0.0)` trong 1 file
+trung gian), không phải ở cấu trúc code.
+

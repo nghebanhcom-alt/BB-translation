@@ -83,6 +83,8 @@ Xây dựng document-translation pipeline xử lý PDF/EPUB 200-500 trang chứa
 
 Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu sau khi ghép, file output có 0 ký tự đọc được — không được để lọt silent failure như Bug #5 (xem BR-OCR-03).
 
+**Known limitation (Bug #6 Phase 1, xem Architecture.md "Final Decision" mục V6)**: với PDF scan, hệ thống giờ **phát hiện và FLAG** (ghi vào `layout_qa_findings`, check_type `rotated_text_scan_unsupported`) các khối chữ xoay (caption, pull-quote, nhãn nghiêng...) để QA/PM soát tay thủ công, nhưng **chưa tái tạo lại đúng góc xoay** trong bản dịch — bản dịch vẫn vẽ chữ đã dịch nằm ngang tại đúng vị trí. Nguyên nhân gốc nằm ở tầng OCR: endpoint HTTP của MinerU (`mineru_endpoint`) làm phẳng góc xoay trước khi trả `middle.json`, không có field nào chứa lại góc gốc (chi tiết đầy đủ + nguồn verify tại Architecture.md 6.13.1 S-M3 và mục V1/V4). Phase 2 (tái tạo hình học thật, thiết kế đã chốt nhưng CHƯA implement) sẽ kích hoạt khi có job `pdf_scan` thật trong production sinh ra finding này.
+
 ### US-05: Xử lý text tràn
 **As a** người dịch sách, **I want** hệ thống tự co/nén font khi text VI tràn, **so that** layout không vỡ.
 
