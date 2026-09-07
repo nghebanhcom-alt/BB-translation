@@ -243,6 +243,7 @@ class JobOrchestrator:
             return self._babeldoc_runner or BabeldocRunner(
                 executable=self._settings.babeldoc_executable,
                 deepseek_base_url=self._settings.deepseek_base_url,
+                line_split_shim_enabled=self._settings.babeldoc_line_split_shim_enabled,
             )
         return self._pdf2zh_runner
 

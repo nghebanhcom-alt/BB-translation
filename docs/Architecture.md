@@ -6424,3 +6424,321 @@ duyệt đi tiếp: Dev copy vào `tests/fixtures/babeldoc/`, KHÔNG viết tay 
 
 **Trạng thái**: Phân tích/research xong — **không có code nào được viết**. Chờ Domain Expert phản
 biện rồi PM/user quyết định.
+
+---
+
+### Bug #7/#8 — Final Decision sau phản biện Domain Expert (2026-09-07)
+
+Section này **thay thế phần đề xuất** ở mục W6/W7 của section trước (W0–W7 giữ nguyên làm hồ sơ
+điều tra). Nơi nào mâu thuẫn, **section này thắng**.
+
+#### X0. Phán quyết một dòng
+
+Domain Expert **đúng ở cả 4 điểm phản biện chính**. Tôi đã tự verify độc lập bằng cách viết lại
+thuật toán từ source (không dùng script của Expert) và tái tạo **chính xác** con số Expert báo cáo.
+Hai đề xuất của tôi ở W6/W7 bị **rút lại**: B-2a (`count < 2`) và "đồng bộ scale toàn bảng về MIN".
+
+#### X1. Bảo toàn bằng chứng (làm trước tiên)
+
+Golden IL dump đã được đưa vào repo, nén gzip để giảm 17MB → 613KB:
+
+`tests/fixtures/babeldoc/paragraph_finder_p74_77_dump.json.gz`
+
+Nguồn: `/tmp/bdprobe/wd/p74_77/paragraph_finder.json`, sinh bởi babeldoc 0.6.4 `--debug` trên
+Figoni p74–77 (cách tái tạo: W1-b của section trước). Mọi số liệu dưới đây tái tạo được **từ chính
+file này** (Protocol 5 mục 3 — golden file, không phải mock viết tay). Đọc bằng
+`gzip.open(path, "rt")`.
+
+#### X2. Tự verify độc lập — kết quả
+
+**Phương pháp**: tôi viết lại `_split_paragraph_into_lines` bằng numpy từ source đã cài
+(`step=0.25`, cùng công thức difference-array của `_compute_collision_counts_histogram`), chạy trên
+golden dump. Ground truth = cluster baseline `char.box.y` (dung sai 3pt) trên ký tự **có mực**
+(loại space). Loại "space dummy" (`pdf_character_id is None`, do `add_space_dummy_chars` chèn SAU
+bước thread) khỏi tập ký tự.
+
+**Fidelity của reimplementation**: tái tạo đúng số `pdf_line` có thật trong dump ở mức
+**162/163 paragraph** — đủ để tin rằng tôi đang đo đúng thuật toán thật, không phải đo mô hình của
+chính mình.
+
+| Biến thể | Đúng / 163 | Under-split còn lại | Hồi quy |
+|---|---|---|---|
+| Hiện tại (`count<1`, tính cả space) | **147** | 16 | — |
+| B-2a của tôi (`count<2`) | **149** | 14 | 0 (trên mẫu này) |
+| Expert (`count<1`, **loại ký tự trắng khỏi phép đếm**) | **161** | 2 | 0 |
+
+→ **Cả ba con số 147 / 149 / 161 trên 163 khớp tuyệt đối với báo cáo của Expert.** Đây là replication
+độc lập (tôi viết script riêng từ source + mô tả phương pháp), không phải chạy lại script của Expert.
+
+**Chi tiết 16 paragraph hiện đang sai** (in ra từ script):
+
+| Trang | GT | Hiện tại | `count<2` | Loại-space | Nội dung |
+|---|---|---|---|---|---|
+| p0 | 2 | 1 | 1 | 1 | `)60` — nhãn `abandon` (số trang) |
+| p0 | 3 | 1 | **1** | **3** | `1. Explain what is meant by…` |
+| p0 | 3 | 1 | **1** | **3** | `2. Explain what is meant by…` |
+| p1 | 7 | 2 | 2 | **7** | `Using regular (water-soluble) blue food coloring…` |
+| p1 | 5 | 1 | 2 | **5** | `Compare the texture of properly stored…` |
+| p1 | 7 | 1 | 1 | **7** | `Compare the texture of two products…` |
+| p2 | 2 | 1 | 1 | 1 | `)62` — nhãn `abandon` |
+| p2 | 5 | 1 | 1 | **5** | `Apple juice is a relatively mild-tasting juice…` |
+| p2 | 3 | 1 | 1 | **3** | `Work slowly through this exercise…` |
+| p2 | 3 | 1 | 1 | **3** | `While diluted apple juice is used…` |
+| p2 | 2 | 1 | 2 | 2 | `■ To identify and describe differences…` |
+| p2 | 6 | 1 | **1** | **6** | `■ To demonstrate how sugar affects…` |
+| p2 | 5 | 1 | **3** | **5** | `■ Sugar and acid ■ Other…` |
+| p2 | 3 | 1 | **2** | **3** | `■ No additions (control product) ■ Sugar ■ Acid` |
+| p2 | 2 | 1 | 2 | 2 | `■ Tannin powder ■ Caffeine` |
+| p2 | 2 | 1 | **1** | **2** | `■ Apple juice, 6 quarts (liters) or more…` |
+
+Ba kết luận rút ra, **tất cả đều xác nhận Expert**:
+
+1. **Trên 6 paragraph bullet `■` — bằng chứng chính của tôi cho Ca B — `count<2` chỉ sửa đúng 2/6**
+   (2 ca cải thiện một phần nhưng vẫn sai, 1 ca không đổi gì). Cách loại ký tự trắng sửa **6/6**.
+2. **Ca A KHÔNG chỉ là lỗi tầng ghép đoạn.** Hai mục numbered-list `1. Explain…` / `2. Explain…`
+   bị nén từ 3 dòng thật xuống **1 `PdfLine` duy nhất ngay ở tầng tách dòng**. `count<2` **không
+   sửa được** (vẫn =1); loại ký tự trắng sửa đúng =3. Đây là điểm mô tả sai của tôi ở W2, và nó
+   tạo ra một **dependency** mà tôi chưa nêu: **B-2b bắt buộc phải chạy SAU khi tầng dòng được sửa**,
+   nếu không nó chỉ nhìn thấy một dòng gộp `"1. Explain… 2. Explain…"` và không có gì để tách.
+3. **Phạm vi lỗi rộng hơn hẳn "bullet lồng nhau"**: 6 paragraph văn xuôi bình thường (không list,
+   không bullet) cũng đang bị nén sai — nặng nhất là 7 dòng → 1 dòng. Mô tả của tôi ở W2 giới hạn
+   lỗi vào list là **hẹp hơn thực tế**.
+
+2 ca còn sai sau fix Expert đều là `)60` / `)62` nhãn `abandon` (page furniture, không đi vào nội
+dung dịch) — **không đáng xử lý**.
+
+##### X2-b. Rủi ro hồi quy của `count<2` — tôi tự dựng ca tổng hợp và XÁC NHẬN có thật
+
+Expert cảnh báo `count<2` sẽ gộp sai mọi dòng chỉ có **đúng 1 ký tự** (ô bảng số hẹp, chữ cái đơn,
+số trang 1 chữ số) vì dòng đó không bao giờ đạt count ≥ 2. Mẫu 4 trang không tình cờ có ca này nên
+tôi chưa đo được. Tôi dựng ca tổng hợp bằng chính reimplementation:
+
+| Ca | GT | `count<1` | `count<2` | Loại-space |
+|---|---|---|---|---|
+| 1 chữ số đứng riêng 1 dòng + 1 dòng văn xuôi bên dưới | 2 | 2 | **1 ✗** | 2 |
+| 2 dòng, mỗi dòng đúng 1 chữ số (cột số hẹp) | 2 | 2 | **1 ✗** | 2 |
+
+→ **Hồi quy có thật, và rơi đúng vào bảng số** — chính là loại nội dung Bug #8 đang xử lý. Đủ để
+loại bỏ B-2a hoàn toàn, độc lập với việc nó kém hiệu quả hơn.
+
+##### X2-c. Verify các claim về source (Protocol 5 R5-01)
+
+Nguồn: babeldoc **0.6.4** đã cài tại
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/`
+— cộng thêm fetch upstream `main` qua raw.githubusercontent.com để đối chiếu.
+
+| Claim của Expert | Kết quả tự verify |
+|---|---|
+| `_get_effective_y_bounds` có dead code sau `return` | ✅ **Đúng** — `paragraph_finder.py:608-613`: `return visual_box.y, visual_box.y2` rồi mới tới nhánh IoU/`pdf_box`, **không bao giờ chạy**; docstring `:601-606` mô tả đúng cái nhánh chết đó. Upstream `main` **y hệt**. |
+| Lời gọi `_sort_characters_in_lines` bị comment out | ✅ **Đúng** — hàm tồn tại `:1032`, lời gọi `:305` là `# self._sort_characters_in_lines(page)`. Upstream `main` **y hệt**. **Tôi phát hiện thêm**: 3 chỗ sort theo x **ngay trong** `_split_paragraph_into_lines` cũng bị comment (`:696`, `:738`, `:772`) — tức thứ tự ký tự trong dòng **hoàn toàn không được đảm bảo**, mạnh hơn cả cảnh báo của Expert. |
+| Docstring "less than 2" vs code `count < 1` | ✅ **Đúng** — docstring `:660-662`, code `:727`. Upstream `main` **y hệt** (chưa ai sửa). |
+| Ký tự space giữ `visual_bbox` cao bằng font_size | ✅ **Đúng** — `il_creater.py:1048-1054` gán `visual_bbox` mặc định = `char.bbox` dịch theo descent; `:1092-1108` chỉ **thay** bằng bbox glyph khi `volume > 1`. Space không có glyph → `volume` = 0 → **giữ nguyên box cao bằng cả font_size**. |
+| `scale < 0.7` mới kích hoạt giãn khung | ✅ **Đúng** — `typesetting.py:1017`. |
+| Sau khi giãn khung thành công vẫn giữ scale thấp | ✅ **Đúng, và tệ hơn Expert mô tả** — `:1036-1037` và `:1055-1056` `continue` giữ scale hiện tại; nhưng `:1060-1062` lại **reset `scale = 1.0` đúng khi giãn khung THẤT BẠI**. Logic **bị đảo ngược**: thành công (khung to hơn, đáng thử lại từ 1.0) thì giữ scale thấp; thất bại (khung không đổi) thì reset về 1.0. |
+| mode-scale tính theo `unit_count` toàn tài liệu | ✅ **Đúng, và mạnh hơn "side effect"** — `:892-935`: `all_paragraphs`/`all_scales` tích luỹ **qua mọi trang**, mỗi paragraph đóng góp `unit_count` phiếu; sau đó **mọi** paragraph có `optimal_scale > mode` bị **kẹp xuống bằng mode**. Một bảng nhiều ô nhỏ **kéo tụt văn xuôi toàn tài liệu**, không chỉ cùng trang. |
+
+**Về "docstring nói 2 nên chủ đích ban đầu là 2"**: tôi **rút lại** kết luận này ở W2. Expert đúng —
+với `_get_effective_y_bounds` có dead code và 4 lời gọi sort bị comment, đây rõ ràng là code thử
+nghiệm dở dang; không thể suy ra chủ đích từ docstring, và không có git blame để chốt. Nó là **dấu
+hiệu** đáng nghi, **không phải bằng chứng**.
+
+##### X2-d. Verify claim Bug #8
+
+Đo trên `page_number == 1` của golden dump (trang chứa TABLE 4.2):
+
+| Claim | Kết quả |
+|---|---|
+| 77 ô bảng mang nhãn `fallback_line`, **không** ô nào nhãn `table` | ✅ **Đúng chính xác** — lọc paragraph có tâm nằm trong box layout `table`: được **đúng 77** paragraph, tập nhãn = `{'fallback_line'}`. **Spec W6 của tôi ("gom các ô theo vùng layout `table`" hiểu là gom theo nhãn paragraph) sẽ gom được 0 ô.** |
+| Vẫn có căn cứ hình học để gom nhóm | ✅ **Có** — `page.page_layout` **có** entry `class_name == "table"`, `id=1`, box `(87.0, 252.0)-(583.0, 741.0)`. Phải gom theo **chứa trong box này**, không theo `paragraph.layout_label`. |
+| 3 cụm cột x ≈ 96-97 / 241-242 / 432-433 | ✅ **Đúng** — cluster: x~96.2–97.3 (n=14), x~241.1–242.3 (n=31), x~431.8–433.3 (n=32). |
+| Cột 2/3 còn thừa ~70–75pt ngang | ✅ **Đúng về hướng, số còn LỚN HƠN** — slack tới ô kế bên cùng hàng (hoặc mép bảng): median **cột 2 = 109.7pt**, **cột 3 = 98.1pt**. |
+| Cột 1 "gần như dùng hết chỗ ngang" | ⚠️ **Chỉ đúng một phần** — median slack cột 1 = **51.8pt**, min toàn bảng = 12.2pt (nằm ở cột 1). Cột 1 chật **hơn** cột 2/3 nhưng **không hết chỗ**. Kỳ vọng cải thiện của (8a) nên bao gồm cả cột 1, chỉ là biên độ nhỏ hơn. |
+
+**Phát hiện riêng của tôi — chặn một sai lầm trong roadmap đo đạc**: `paragraph.scale` và
+`optimal_scale` là `None` ở **mọi** IL dump (`paragraph_finder`, `layout_generator`,
+`styles_and_formulas`, `il_translated`, `add_debug_information` — kiểm tra cả 1230 paragraph).
+Typesetting tính scale **trong bộ nhớ** rồi ghi thẳng ra PDF, **không persist vào IL**. Con số
+`0.45` ở W6 đến từ **đo cỡ chữ trong PDF output production**, không phải từ dump. ⇒ **Bước đo
+histogram của Bug #8 KHÔNG thể làm từ IL dump**; phải hoặc (i) đo font size trong PDF output bằng
+pymupdf, hoặc (ii) instrument `typesetting.py` để log `optimal_scale`. Nếu không ghi rõ, Dev sẽ mất
+thời gian tìm một field không tồn tại.
+
+#### X3. Cơ chế thật của Bug #7 (thay thế mô tả ở W2)
+
+Mô tả cũ ở W2 — "ký tự đuôi `g` trong *Sugar* bắc cầu qua khe giữa 2 dòng" — **đúng hiện tượng
+quan sát được nhưng sai nguyên nhân gốc**. Cơ chế thật:
+
+1. Ký tự **khoảng trắng** không có glyph ⇒ `il_creater.py` giữ `visual_bbox` mặc định **cao đúng
+   bằng `font_size`** (`:1092-1108`, chỉ thay khi `volume > 1`).
+2. Với font 10.0pt và pitch dòng 12pt, mỗi space **lấp 10/12pt** chiều cao ⇒ khe hở thật giữa 2
+   dòng chỉ còn **~2pt**.
+3. Bất kỳ ký tự nào có descender (`g`, `y`, `p`, `q`, `j` — và **dấu tiếng Việt**) chọc vào 2pt còn
+   lại là đủ để `count` không bao giờ về 0 ⇒ `gaps` rỗng ⇒ **cả paragraph gộp thành 1 `PdfLine`**.
+
+Chữ `g` trong "Sugar" chỉ là **giọt nước tràn ly**. Đây là lý do đổi ngưỡng sang `<2` chỉ sửa được
+những dòng có **đúng một** ký tự descender — phần lớn câu tiếng Anh có nhiều hơn một, và tiếng Việt
+thì gần như luôn có dấu.
+
+**Hệ quả cho fix**: loại ký tự trắng khỏi **phép đếm va chạm** trả lại khe hở thật ~10pt giữa các
+dòng. Ký tự trắng **vẫn được gán vào đúng dòng của nó** theo tâm y như thường (không mất space),
+chỉ là không được bỏ phiếu vào việc "có khe hở hay không". Vì thế nó **không** mang rủi ro dòng-1-ký-tự
+như `count<2`.
+
+#### X4. Điểm tôi bổ sung thêm ngoài phản biện của Expert
+
+**X4-1. Vector kỹ thuật để áp patch — chưa ai nêu, và nó quyết định effort.**
+App gọi babeldoc **qua subprocess CLI** (`BabeldocRunner(executable="babeldoc")`,
+`asyncio.create_subprocess_exec`), **không** import babeldoc trong process của app; babeldoc cài
+bằng `uv tool` ở venv **riêng**, không phải dependency trong `pyproject.toml`. ⇒ **Monkey-patch
+thuần Python trong code app sẽ KHÔNG có tác dụng.** Ba vector khả thi, theo thứ tự ưu tiên:
+
+- **(V1) `sitecustomize.py` shim qua `PYTHONPATH`** (khuyến nghị): đặt một thư mục shim trong repo,
+  truyền `PYTHONPATH=<shim_dir>` vào `env` của subprocess. CPython tự import `sitecustomize` lúc
+  khởi động; shim cài một `meta_path` hook, đợi module `…midend.paragraph_finder` được import xong
+  rồi thay `_split_paragraph_into_lines`. Không đụng file trong venv của tool, gỡ ra chỉ cần bỏ
+  biến môi trường, và **tự vô hiệu hoá an toàn** nếu đường dẫn module đổi ở version sau.
+- **(V2) Thêm `babeldoc` thành dependency của app** rồi chạy `python -m <wrapper>` thay vì binary
+  `babeldoc`. Sạch hơn về mặt kiểm soát version, nhưng kéo toàn bộ cây phụ thuộc nặng của babeldoc
+  vào app venv — cần cân nhắc riêng, **không làm trong scope này**.
+- **(V3) Vendor/patch file trong venv của tool** — **loại bỏ**: mất khi `uv tool upgrade`, không tái
+  lập được trên máy khác, vi phạm tinh thần Protocol 5 (bind cứng vào một bản cài cục bộ).
+
+⇒ Chốt **V1**. Shim phải **fail-safe**: nếu không patch được (đổi tên hàm/module ở version khác),
+**log cảnh báo và chạy tiếp với hành vi gốc**, tuyệt đối không crash job. Và phải có một
+**assertion version**: shim chỉ áp dụng khi `babeldoc.__version__ == "0.6.4"`; version khác → log
+cảnh báo, không patch (Protocol 5 mục 5: đổi version ⇒ verify lại contract).
+
+**X4-2. Không đồng ý hoàn toàn về "cột 1 hết chỗ"** — xem X2-d, median slack cột 1 vẫn 51.8pt.
+
+**X4-3. Bổ sung ràng buộc đo cho Bug #8** — scale không có trong IL dump (X2-d). Bước 1 của roadmap
+Bug #8 phải nêu rõ công cụ đo, nếu không sẽ tắc.
+
+**X4-4. Về yêu cầu tự sort theo x của Expert cho B-2b**: đồng ý, và **mạnh hơn** — không chỉ
+`_sort_characters_in_lines` ở `:305` bị tắt, mà cả 3 lời gọi sort **bên trong** chính
+`_split_paragraph_into_lines` (`:696`, `:738`, `:772`) cũng bị comment. Wrapper B-2b **bắt buộc**
+tự sort theo `visual_bbox.box.x` trước khi ghép chuỗi tìm marker. Ghi vào spec trước khi giao Dev.
+
+#### X5. QUYẾT ĐỊNH CUỐI — Bug #7
+
+**D7-1. CHẤP NHẬN fix của Expert; RÚT LẠI B-2a.**
+Sửa: **loại ký tự trắng khỏi phép đếm va chạm**, **giữ nguyên ngưỡng `count < 1`**. Ký tự trắng vẫn
+được phân vào dòng theo tâm y như cũ. Không đổi ngưỡng — `count<2` đã được chứng minh (X2-b) là hồi
+quy thật với dòng 1 ký tự trong bảng số.
+
+**D7-2. Vector: V1 (sitecustomize shim qua `PYTHONPATH`)**, fail-safe + gate version `0.6.4` (X4-1).
+
+**D7-3. Thứ tự bắt buộc — có dependency, không được đảo:**
+
+| Bước | Nội dung | Gate trước khi qua bước sau |
+|---|---|---|
+| **7.0** | Spike: shim V1 patch được thật, `--debug` trên p74–77 sinh IL mới | Số `pdf_line` trong IL mới khớp ground truth **≥ 161/163**; job chạy xanh; shim tắt được bằng env |
+| **7.1** | Ship fix tầng dòng (D7-1) | Chạy lại **cả 4 trang lần này VÀ 7 trang của nghiên cứu Q2**; đọc **nội dung** PDF output (R6-03), không tin `status` |
+| **7.2** | Ca A — tách numbered-list theo marker tăng dần (B-2b) | **Chỉ bắt đầu sau khi 7.1 xanh.** Wrapper tự sort theo x (X4-4). Phải loại được false-positive kiểu `"2 cups"` trong công thức |
+| **7.3** | Ca C — mục lục: **chưa code gì**, chỉ **đo lại** sau 7.1 | Đọc nội dung thật trang Contents; đo **cả 2 chiều**: cấu trúc tốt lên **và** tỷ lệ cắt nhầm caption (RC-1) |
+
+**D7-4. Effort ước lượng**: 7.0 + 7.1 ≈ **0.5–1 ngày** (logic lõi ~15 dòng; phần lớn công là shim
++ test lineage + đo 11 trang). 7.2 ≈ **1–1.5 ngày** (heuristic marker + chống false-positive).
+7.3 ≈ **2–3 giờ** (thuần đo).
+
+**D7-5. Test bắt buộc (Protocol 6 R6-02)**: test không được chỉ assert "đã gọi". Phải có test chạy
+hàm tách dòng đã patch **trên golden fixture** `paragraph_finder_p74_77_dump.json.gz` và assert
+**số dòng cụ thể** của các paragraph đã liệt kê ở bảng X2 (ví dụ `1. Explain…` phải ra **3** dòng,
+`■ To demonstrate…` phải ra **6**). Bảng X2 chính là **oracle** cho test này.
+
+#### X6. QUYẾT ĐỊNH CUỐI — Bug #8
+
+**D8-1. RÚT LẠI hoàn toàn đề xuất "đồng bộ scale toàn vùng bảng về MIN".**
+Lập luận của tôi ở W6 ("không tạo tràn chữ mới vì không ô nào bị phóng to") đúng hình học nhưng sai
+mục tiêu: MIN của TABLE 4.2 là **0.45** ⇒ **cả 77 ô xuống 4.05pt**, không đọc được. Nó biến một vấn
+đề cục bộ (vài ô xấu) thành hỏng **toàn bảng** — tệ hơn cả sàn cứng 0.7 mà chính tôi lo ngại.
+Expert đúng.
+
+**D8-2. Chấp nhận hướng của Expert: sửa nguyên nhân gốc (babeldoc bỏ phí chỗ trống ngang) trước,
+chính sách sàn sau.**
+
+| Bước | Nội dung | Gate |
+|---|---|---|
+| **8.1** | **Đo trước khi code.** Histogram scale trên **≥ 5 trang có bảng**, tách số liệu **theo từng cột**, kèm slack ngang mỗi ô. **Công cụ: đo font size trong PDF output bằng pymupdf, HOẶC instrument `typesetting.py` — KHÔNG có trong IL dump (X2-d).** | Có histogram thật; ước lượng được (8a) cứu được bao nhiêu % ô |
+| **8.2** | **(8a) Nới khung ô TRƯỚC khi babeldoc tìm scale.** Với mỗi paragraph có tâm nằm trong box layout `class_name == "table"` (**gom theo hình học, KHÔNG theo `layout_label`** — X2-d), đặt lại `box.x2` = mép trái ô kế bên cùng hàng (hoặc `get_max_right_space`) trừ đệm; rồi để babeldoc tìm scale **từ 1.0 trên khung mới** | Cột 2/3 đạt scale ~1.0; **không** ô nào tràn sang ô bên cạnh — kiểm tra bằng mắt trên PDF output |
+| **8.3** | **(8b) Đồng đều scale theo TỪNG CỘT + sàn**, sàn chọn **từ histogram 8.1** (tham chiếu khởi đầu ~0.67 ≈ 6pt với font gốc 9pt, **không phải kết luận**). Ô cần thấp hơn sàn → **giữ bằng sàn** và **ghi flag `layout_qa_findings` NGAY TRONG CÙNG lần implement này** | Không ô nào < sàn mà không có flag |
+
+Đơn vị đồng đều hoá là **cột**, không phải bảng — mắt người so cỡ chữ dọc theo cột, và nó chặn được
+đúng rủi ro "1 ô xấu kéo cả bảng".
+
+**D8-3. Sàn và flag KHÔNG được tách làm 2 giai đoạn.** Sàn không kèm flag = đổi một lỗi im lặng lấy
+một lỗi im lặng khác — đúng bài học Bug #6.
+
+**D8-4. Effort**: 8.1 ≈ **0.5 ngày** (viết harness đo, không có sẵn field ⇒ tốn hơn dự kiến ban đầu).
+8.2 ≈ **1 ngày**. 8.3 ≈ **0.5–1 ngày**.
+
+**D8-5. Không đổi engine.** pdf2zh không giảm `size` mà chỉ giảm `line_height` rồi để chữ tràn ⇒
+không mắc Bug #8 nhưng mắc nhóm lỗi T (chồng/tràn chữ) đã biết. Đây không phải lý do đổi default.
+*(Nguồn: Expert đọc `converter.py`; **tôi chưa tự verify**, và nó không ảnh hưởng quyết định.)*
+
+#### X7. Tương tác Bug #7 ↔ Bug #8 — ràng buộc thứ tự
+
+Fix tầng dòng đổi số dòng/paragraph ⇒ đổi `unit_count` ⇒ đổi mode-scale toàn tài liệu
+(`typesetting.py:892-935`, kẹp **xuyên trang**) ⇒ **mọi số đo của Bug #8 trước fix #7 đều hết hạn**.
+
+⇒ **Bước 8.1 (đo histogram) BẮT BUỘC chạy SAU bước 7.1.** Đo trước sẽ phải đo lại. Và lần đo sau
+7.1 phải bao cả **11 trang** (4 trang lần này + 7 trang Q2), đo đồng thời **3 chiều**: cấu trúc list,
+tỷ lệ cắt nhầm caption (RC-1), và histogram scale.
+
+#### X8. Báo cáo upstream babeldoc
+
+Nên report (tinh thần P2.2), nhưng **theo đúng cơ chế thật**, không theo hướng "docstring nói 2":
+
+1. Ký tự khoảng trắng không có glyph được gán `visual_bbox` cao bằng cả `font_size`
+   (`il_creater.py:1092-1108`) ⇒ lấp khe giữa các dòng ⇒ `_split_paragraph_into_lines` gộp nhầm.
+   Số đo: **147 → 161 / 163** paragraph đúng, 0 hồi quy.
+2. `_get_effective_y_bounds` (`paragraph_finder.py:608-613`) có dead code sau `return`.
+3. Logic **đảo ngược** ở `typesetting.py:1036-1062`: giãn khung **thành công** thì giữ scale thấp,
+   **thất bại** thì reset `scale = 1.0`.
+
+Đính kèm script tái tạo (X9) + golden fixture. **Không chờ phản hồi upstream để đóng task nào.**
+
+#### X9. Script tái tạo số liệu
+
+Không commit thành file `.py` trong repo (Protocol 7: mọi file code phải qua Reviewer; commit này
+là docs + fixture). Dev tái tạo bằng cách chép khối dưới đây ra file tạm rồi chạy bằng python có
+numpy. Nó **chính là** oracle cho test ở D7-5.
+
+- Đọc fixture: `gzip.open("tests/fixtures/babeldoc/paragraph_finder_p74_77_dump.json.gz", "rt")`.
+- Lọc paragraph: bỏ paragraph có composition `pdf_same_style_unicode_characters.debug_info` (chú
+  thích debug của babeldoc); gom ký tự từ `pdf_line` / `pdf_formula` / `pdf_character` /
+  `pdf_same_style_characters`; **bỏ ký tự có `pdf_character_id is None`** (space dummy chèn SAU bước
+  thread); giữ paragraph có ≥ 2 ký tự ⇒ **163 paragraph**.
+- Thuật toán: sao đúng `_compute_collision_counts_histogram` (difference array, `step=0.25`), dùng
+  `visual_bbox.box.y/.y2`; `(ymax-ymin) < 5` ⇒ 1 dòng; gap khi `count < 1`; separator = `y` tại
+  index bắt đầu mỗi gap; gán ký tự theo tâm y.
+- 3 biến thể: (a) nguyên trạng; (b) `count < 2`; (c) loại ký tự trắng khỏi mảng `y1/y2` đưa vào
+  histogram, giữ `count < 1`.
+- Ground truth: cluster `char.box.y` của ký tự **có mực**, dung sai **3pt**.
+- Kỳ vọng: fidelity **162/163**; đúng **147 / 149 / 161**; hồi quy **0 / 0**.
+
+#### X10. Bảng trạng thái verify (Protocol 5 R5-01) — cập nhật
+
+| Claim | Trạng thái |
+|---|---|
+| Con số 147 / 149 / 161 trên 163 của Expert | ✅ **Verified** — replication độc lập trên golden fixture (X2) |
+| Cơ chế thật = space không glyph, `visual_bbox` cao bằng font_size | ✅ **Verified** — `il_creater.py:1048-1054, 1092-1108` |
+| `count<2` gây hồi quy với dòng 1 ký tự | ✅ **Verified** — ca tổng hợp X2-b, 2/2 sai |
+| Ca A cũng hỏng từ tầng dòng (⇒ B-2b phụ thuộc 7.1) | ✅ **Verified** — 2 paragraph numbered-list, gt=3 → cur=1 |
+| Phạm vi lỗi gồm cả văn xuôi, không chỉ list | ✅ **Verified** — 6 paragraph văn xuôi, nặng nhất 7 dòng → 1 |
+| Dead code trong `_get_effective_y_bounds` | ✅ **Verified** — `:608-613` + upstream `main` |
+| Lời gọi sort bị comment (`:305`, `:696`, `:738`, `:772`) | ✅ **Verified** — + upstream `main` |
+| 77 ô bảng nhãn `fallback_line`, 0 ô nhãn `table` | ✅ **Verified** — golden fixture, page_number 1 |
+| Có box layout `class_name == "table"` để gom theo hình học | ✅ **Verified** — id=1, `(87,252)-(583,741)` |
+| Slack ngang cột 2 = 109.7pt, cột 3 = 98.1pt (median) | ✅ **Verified** — golden fixture |
+| "Cột 1 gần như hết chỗ" | ⚠️ **Sai một phần** — median slack 51.8pt (X2-d) |
+| `scale`/`optimal_scale` KHÔNG có trong mọi IL dump | ✅ **Verified** — 1230 paragraph, 5 dump, 0 giá trị |
+| mode-scale kẹp xuyên trang theo `unit_count` | ✅ **Verified** — `typesetting.py:892-935` |
+| Logic reset scale bị đảo khi giãn khung | ✅ **Verified** — `typesetting.py:1036-1062` |
+| Shim V1 (`PYTHONPATH` + `sitecustomize`) patch được babeldoc subprocess | ⚠️ **`[UNVERIFIED]`** — **spike 7.0 bắt buộc** (R5-02) trước khi giao Dev |
+| B-2b heuristic marker tăng dần không false-positive | ⚠️ **`[UNVERIFIED]`** — spike, và chỉ sau 7.1 |
+| (8a) nới khung không gây tràn sang ô bên cạnh | ⚠️ **`[UNVERIFIED]`** — spike 8.2 |
+| Giá trị sàn cụ thể (~0.67 chỉ là tham chiếu) | ⚠️ **`[UNVERIFIED]`** — phải chốt từ histogram 8.1 |
+| pdf2zh không giảm `size`, chỉ giảm `line_height` | ⚠️ **`[UNVERIFIED]`** — Expert đọc source, tôi chưa tự verify; không ảnh hưởng quyết định |
+
+**Trạng thái**: quyết định đã chốt, **vẫn chưa có dòng code nào được viết**. Việc tiếp theo là
+**spike 7.0** (shim V1) — cần PM/user duyệt trước khi giao Dev (Protocol 2).

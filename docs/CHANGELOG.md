@@ -3722,3 +3722,124 @@ uv run ruff format --check  → 7 files already formatted
 `JobOrchestrator`) — theo Protocol 7 (R7-01/R7-02), **CHƯA qua Reviewer thật**. PM sẽ tự spawn
 Reviewer riêng trước khi coi task này là "xong" — Dev KHÔNG tự báo cáo "xong"/"đã review"/"sẵn
 sàng".
+
+## Bug #7 fix — bước 7.0 (spike) + 7.1 (ship) — sitecustomize shim loại ký tự trắng khỏi
+## phép đếm va chạm tách dòng (2026-09-07)
+
+Theo `docs/Architecture.md` mục "Bug #7/#8 — Final Decision sau phản biện Domain Expert
+(2026-09-07)" (X3/X4-1/X5, bảng thứ tự D7-3). Chỉ làm **7.0 + 7.1** — **KHÔNG** làm 7.2
+(numbered-list, Ca A) và 7.3 (đo lại mục lục, Ca C) theo đúng phạm vi PM giao.
+
+### 7.0 — Spike: xác nhận vector kỹ thuật (sitecustomize shim qua PYTHONPATH) hoạt động thật
+
+App gọi `babeldoc` qua subprocess CLI (`asyncio.create_subprocess_exec`), không import babeldoc
+trong process app (cài ở venv riêng qua `uv tool`) — monkey-patch Python thường **không có tác
+dụng**. Dùng đúng Vector V1 đã chốt (Architecture.md X4-1): `sitecustomize.py` trong thư mục mới
+`src/babeldoc_shim/`, truyền `PYTHONPATH=<thư mục đó>` vào `env` của subprocess babeldoc —
+CPython tự `import sitecustomize` lúc khởi động interpreter con, trước cả entry point `babeldoc`.
+
+**Verify sống (Protocol 5 R5-02, không suy đoán)**: chạy `babeldoc` 0.6.4 CLI thật (đã cài tại
+`~/.local/share/uv/tools/babeldoc/`) với `--debug` trên p74–77 (Figoni, file trích sẵn
+`/private/tmp/bdprobe/p74_77.pdf` từ spike trước), `--openai-base-url http://127.0.0.1:1/v1`
+(cổng chết, 0 token/0 USD, dump `paragraph_finder.json` vẫn ghi vì nằm TRƯỚC bước dịch) + đúng
+flag production (`--split-short-lines --short-line-split-factor 0.8`):
+
+| Cấu hình | pdf_line đúng / tổng paragraph (>=2 ký tự có mực) | Ghi chú |
+|---|---|---|
+| Shim TẮT (không `PYTHONPATH`) | **147 / 163** | Khớp CHÍNH XÁC baseline đã ghi ở Architecture.md X2 — xác nhận môi trường đo đúng, không phải trùng hợp |
+| Shim BẬT (`PYTHONPATH` trỏ `src/babeldoc_shim/`) | **170 / 172** | 2 ca còn sai là `)60`/`)62` (nhãn `abandon`, số trang — đúng như X2 dự đoán là "không đáng xử lý", KHÔNG liên quan Bug #7) |
+
+Gate 7.0 (Architecture.md D7-3): pdf_line khớp ground truth ≥161/163 ✅ (170/172), job chạy xanh
+(exit 0) cả 2 lần ✅, tắt được bằng cách bỏ `PYTHONPATH` (quay lại đúng 147/163 gốc) ✅. **Spike đạt
+gate — tiếp tục 7.1.**
+
+### 7.1 — Ship fix
+
+1. **`src/babeldoc_shim/line_split.py`** (mới): thuật toán tách dòng thuần Python (không
+   dependency numpy — `_compute_collision_counts_histogram` viết lại bằng difference-array thuần
+   Python, cùng phép toán với bản numpy gốc của babeldoc, đã verify lại kết quả không đổi trước/
+   sau khi bỏ numpy bằng cách chạy lại spike 7.0 — vẫn 170/172). Sao y logic gốc
+   `_split_paragraph_into_lines` (`paragraph_finder.py:652-776`), CHỈ khác ở bước tính histogram
+   va chạm: loại ký tự khoảng trắng (`is_space=True`) khỏi mảng đưa vào đếm, **giữ nguyên ngưỡng
+   gốc `count < 1`** (KHÔNG đổi thành `count < 2` — X2-b đã chứng minh đó là hồi quy thật với dòng
+   chỉ có đúng 1 ký tự, ví dụ ô số hẹp trong bảng). Ký tự khoảng trắng vẫn được gán vào đúng dòng
+   theo tâm y ở bước cuối như cũ — không mất nội dung.
+2. **`src/babeldoc_shim/sitecustomize.py`** (mới): meta-path import hook đợi module
+   `babeldoc.format.pdf.document_il.midend.paragraph_finder` import xong rồi patch
+   `ParagraphFinder._split_paragraph_into_lines` (adapter mỏng gọi `line_split.split_into_line_groups`).
+   Assertion version bắt buộc: chỉ patch khi `babeldoc.__version__ == "0.6.4"` — version khác thì
+   log cảnh báo, KHÔNG patch (verify sống bằng cách giả lập `babeldoc.__version__` khác trước khi
+   import — xác nhận hook không được cài). Fail-safe: mọi lỗi trong lúc patch (đổi tên hàm/module ở
+   version khác) đều bị bắt, log cảnh báo, babeldoc chạy tiếp với hành vi GỐC — verify bằng cách
+   patch thất bại giả lập, không crash job.
+3. **`src/services/babeldoc_runner.py`**: `BabeldocRunner.__init__` thêm tham số
+   `line_split_shim_enabled: bool = True`; `translate_pages()` nối `PYTHONPATH` (trỏ
+   `src/babeldoc_shim/`) vào `env` của subprocess khi bật — nối thêm bằng `os.pathsep` vào
+   `PYTHONPATH` hiện có nếu đã tồn tại, không ghi đè.
+4. **`src/core/config.py`**: `Settings.babeldoc_line_split_shim_enabled: bool = True` — không bắt
+   buộc theo spec (spec không yêu cầu feature flag riêng) nhưng thêm để giữ cùng mẫu rollback tức
+   thời với `babeldoc_rotated_text_overlay` đã có, theo gợi ý của PM.
+5. **`src/core/job_orchestrator.py`**: truyền `line_split_shim_enabled=self._settings.babeldoc_line_split_shim_enabled`
+   khi khởi tạo `BabeldocRunner` trong `_translator_runner` (điểm chọn engine duy nhất, 6.14.7).
+
+**Test mới (Protocol 6 R6-02, `tests/test_babeldoc_line_split_shim.py`, 19 test)**: gọi ĐÚNG
+`src.babeldoc_shim.line_split.split_into_line_groups` (hàm production, cùng hàm mà
+`sitecustomize.py` monkey-patch vào babeldoc thật) trên chính golden fixture
+`tests/fixtures/babeldoc/paragraph_finder_p74_77_dump.json.gz` — assert **số dòng cụ thể** theo
+đúng bảng oracle X2 (copy nguyên số liệu, không suy diễn): 14 case tham số hoá (ví dụ
+`"1. Explain…"` → 3 dòng, `"■ To demonstrate…"` → 6 dòng) + 2 case "known unfixed" ghi lại tường
+minh 2 ca `)60`/`)62` vẫn còn sai sau fix (X2: không phải hồi quy, không đáng xử lý, chỉ để không
+ai nhầm là hồi quy) + 3 test hình học tổng hợp (không hồi quy dòng-1-ký-tự theo X2-b, ký tự trắng
+bị loại khỏi đếm nhưng vẫn được gán đúng dòng theo X3, và tái hiện đúng hành vi lỗi GỐC khi không
+loại ký tự trắng — chứng minh bug có thật trước khi có fix, không phải hiện tượng tự dựng của
+fixture).
+
+**Verify sống R6-03 (đọc nội dung PDF output thật, không tin `status`)** — chạy qua ĐÚNG
+`BabeldocRunner.translate_pages()` (production class, không hàm rời rạc) với provider DeepSeek
+thật (`.env`), shim mặc định BẬT (production default sau 7.1), trên **11 trang**:
+
+**(a) 4 trang p74–77 (Figoni, chính nơi bug được báo cáo)**:
+
+| Vị trí | Trước fix (Architecture.md W2, v1.2.6) | Sau fix 7.1 (live, lần này) |
+|---|---|---|
+| Bullet `■` trang 77: bắt đầu dòng / giữa dòng | 7 / 16 bắt đầu, 10 giữa dòng | **16 / 17 bắt đầu, 1 giữa dòng** — khớp gần đúng phân bố nguồn EN (16 đầu dòng, 1 giữa dòng) |
+| `"1. Explain…" / "2. Explain…"` (trang 75, EXPERIMENT prompts) | Gộp 1 dòng (bug X2 point 2) | Mỗi mục tách đúng dòng riêng — khớp oracle test |
+| `"QUESTIONS FOR REVIEW"` 1–17 (trang 74): bắt đầu dòng `N.` / giữa dòng | 3 / 17 bắt đầu, 10 giữa dòng | 7 bắt đầu, 6 giữa dòng — **cải thiện nhưng CHƯA hết** (đúng dự đoán: đây là Ca A/lỗi tầng GHÉP ĐOẠN `is_bullet_point`/`process_independent_paragraphs`, một hàm khác hoàn toàn với `_split_paragraph_into_lines` — cần B-2b ở bước 7.2, KHÔNG nằm trong scope 7.1) |
+
+**(b) 7 trang nghiên cứu Q2** (trang sách 8, 13, 14, 17, 20, 21, 22 — trích lại từ
+`data/uploads/937b1d1c-…Figoni….pdf`, mapping trang sách N ↔ PyMuPDF index N-1 đã verify khớp nội
+dung mô tả ở Q2): so với số liệu `true08` (cấu hình production hiện tại) đã đo trong Architecture.md
+Q3 — **không hồi quy** trên bất kỳ trang nào trong 7 trang (số block/ký tự cùng thang, không mất
+nội dung; trang 13 văn xuôi thuần và trang 8 mục lục giữ nguyên 0 lỗi dính chữ; trang 17/14 vẫn
+giữ mức chất lượng tương đương baseline đã tốt, dao động trong biên độ ngẫu nhiên bình thường của
+1 lần dịch LLM khác — không có mẫu hình xấu đi hệ thống nào).
+
+**Giả định tự chọn** (không dừng lại hỏi, ghi rõ lý do theo yêu cầu):
+1. `line_split.py` viết bằng Python thuần thay vì numpy như bản gốc babeldoc — vì module này bị
+   import cả trong app (test golden fixture) lẫn trong subprocess babeldoc (qua `PYTHONPATH`);
+   subprocess babeldoc vốn có sẵn numpy nhưng app thì không, và không muốn thêm numpy vào
+   `pyproject.toml` chỉ để phục vụ 1 module test nội bộ. Đã verify lại spike 7.0 sau khi viết lại
+   (170/172, không đổi) để đảm bảo tương đương toán học.
+2. `Settings.babeldoc_line_split_shim_enabled` là feature flag KHÔNG bắt buộc theo spec — thêm
+   theo gợi ý tuỳ chọn của PM, cùng mẫu với `babeldoc_rotated_text_overlay`.
+3. Mapping "trang sách N" ↔ PyMuPDF index N-1 cho 7 trang Q2: tự verify bằng cách đọc nội dung
+   trích ra và so khớp với mô tả bố cục ở bảng Q2 (Architecture.md) — không có tài liệu nào ghi rõ
+   quy ước 1-indexed/0-indexed trước đó.
+
+**Kết quả cuối**:
+```
+uv run pytest -q            → 369 passed (350 + 19 test moi), 419 warnings
+uv run ruff check           → All checks passed!
+uv run ruff format --check  → 7 files (touched) already formatted
+```
+
+**File đã tạo mới**: `src/babeldoc_shim/__init__.py`, `src/babeldoc_shim/line_split.py`,
+`src/babeldoc_shim/sitecustomize.py`, `tests/test_babeldoc_line_split_shim.py`.
+**File đã sửa**: `src/services/babeldoc_runner.py` (PYTHONPATH wiring), `src/core/config.py`
+(`babeldoc_line_split_shim_enabled`), `src/core/job_orchestrator.py` (truyền flag vào
+`BabeldocRunner`).
+
+**Trạng thái**: Đây là thay đổi hành vi runtime quan trọng — đụng cách gọi babeldoc cho MỌI job
+dùng engine `babeldoc` (mặc định production). Theo Protocol 7 (R7-01/R7-02), **CHƯA qua Reviewer
+thật** — Dev KHÔNG tự báo cáo "xong"/"đã review"/"sẵn sàng". **KHÔNG làm 7.2 (numbered-list, Ca A)
+và 7.3 (đo lại mục lục, Ca C)** — PM quyết định hướng tiếp theo sau khi xem kết quả 7.1 này.

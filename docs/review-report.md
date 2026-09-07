@@ -3529,3 +3529,160 @@ nhưng vẫn cần QA tự mở `docs/test-report.md` xác nhận ít nhất 1 l
 trang chữ xoay thật — không chỉ tin lại kết quả review này.
 
 ---
+
+# Review Report — Bug #7 spike (7.0) + fix (7.1) — list line-break shim
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-07
+
+## Verdict: APPROVE
+
+## Phạm vi review
+
+`src/babeldoc_shim/` (mới: `__init__.py`, `line_split.py`, `sitecustomize.py`),
+`tests/test_babeldoc_line_split_shim.py` (mới), `tests/fixtures/babeldoc/paragraph_finder_p74_77_dump.json.gz`
+(mới), `src/services/babeldoc_runner.py`, `src/core/config.py`, `src/core/job_orchestrator.py`
+— theo `docs/Architecture.md` mục "Bug #7/#8 — Final Decision sau phản biện Domain Expert
+(2026-09-07)" (X3, X4-1, X5 D7-1→D7-5) và `docs/CHANGELOG.md` entry mới nhất của Dev.
+
+## Checklist R5-04 (Protocol 5)
+
+**External contract verified against real source: YES** — nguồn: babeldoc 0.6.4 đã cài tại
+`~/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/paragraph_finder.py`.
+Tôi tự đọc trực tiếp source thật (không dựa CHANGELOG) và đối chiếu từng dòng
+`_split_paragraph_into_lines`/`_compute_collision_counts_histogram` gốc (dòng 600-776) với
+`line_split.py` — thuật toán khớp chính xác (difference-array histogram, `step=0.25`, ngưỡng
+`count < 1`, docstring nói "less than 2" nhưng code là `count < 1` — đúng như X2-c mô tả), CHỈ
+khác đúng 1 điểm: loại ký tự khoảng trắng khỏi mảng đưa vào histogram va chạm, giữ nguyên bước
+gán ký tự vào dòng theo tâm y dùng đầy đủ `bounds` (kể cả space). Cũng xác nhận
+`babeldoc.__version__ == "0.6.4"` khớp đúng version cài trên máy (`babeldoc/__init__.py:1`), và
+class `ParagraphFinder` tồn tại đúng tên tại `paragraph_finder.py:51`.
+
+## Verify độc lập (không tin lời khai Dev)
+
+**1. Số liệu spike 7.0 (170/172 vs 147/163).** Dev để lại toàn bộ artifact thật tại
+`/private/tmp/bdprobe70/` (không phải file trong repo, nhưng vẫn trên máy này) — `analyze.py`
+(script đo, cùng phương pháp Tech Lead dùng ở X9: cluster ground-truth theo `char.box.y` dung sai
+3pt, loại debug-info và space-dummy), `shim_off/wd/p74_77/paragraph_finder.json`,
+`shim_on{,2,3}/wd/p74_77/paragraph_finder.json`, cùng `shim_on*.stderr.log` có dòng
+`babeldoc_shim: da vá ParagraphFinder._split_paragraph_into_lines ...` xác nhận patch thực sự
+chạy trong subprocess con. Tôi tự chạy lại `python3 analyze.py` trên cả 4 dump này (không copy
+số Dev báo) — kết quả **147/163** (shim tắt) và **170/172** (shim bật, x3 lần chạy độc lập,
+2 ca sai còn lại đều là `)60`/`)62`) — khớp CHÍNH XÁC với CHANGELOG, và khớp đúng baseline 147/163
+đã ghi ở Architecture.md X2. Phương pháp đo (babeldoc thật `--debug`, `--openai-base-url` cổng
+chết) đúng như Tech Lead từng làm.
+
+**2. Test oracle (R6-02, 14 case tham số hoá + 2 known-unfixed).** Tôi tự chạy
+`uv run pytest tests/test_babeldoc_line_split_shim.py -v` — 19/19 pass. Tự viết script độc lập
+đọc `paragraph_finder_p74_77_dump.json.gz` để xác nhận từng `text_prefix` trong bảng oracle nằm
+đúng `page_index` mà test khai (`)60`→page 1, `1. Explain…`→page 1, `Using regular…`→page 2,
+các đoạn văn xuôi + toàn bộ 6 case bullet `■`→page 3, `)62`→page 3) — nhãn "p0/p1/p2" trong
+Architecture.md X2 là ký hiệu tương đối của Tech Lead (không phải index JSON thật), không phải
+sai lệch dữ liệu. Đối chiếu từng con số kỳ vọng trong test với đúng bảng X2 gốc — khớp 100%,
+không có số nào bị Dev "làm tròn"/suy diễn.
+
+**3. R5-04(a) — version gate có thực sự chặn không.** Đọc `_install_hook_if_version_matches()`:
+so sánh `getattr(babeldoc, "__version__", None) != _EXPECTED_BABELDOC_VERSION` bằng chuỗi thật,
+không phải comment suông — version khác `return` ngay, không gọi `sys.meta_path.insert`, nên
+hoàn toàn không cài hook. Đã đối chiếu với `babeldoc/__init__.py` thật.
+
+**4. R5-04(b) — fail-safe khi patch thất bại giữa chừng.** Đọc kỹ `_PatchingLoader.exec_module`:
+gọi `_apply_patch(module)` trong `try/except Exception` ngay tại đây, log `logger.warning(...,
+exc_info=True)` rồi KHÔNG re-raise — nếu `ImportError`/`AttributeError` xảy ra (vd đổi tên class
+hoặc method ở version khác), lỗi bị nuốt đúng tại đây, module gốc vẫn được exec bình thường
+trước đó (dòng `self._wrapped.exec_module(module)` chạy trước `try`, không nằm trong khối bị
+patch) — babeldoc chạy tiếp với `_split_paragraph_into_lines` GỐC. Toàn bộ
+`_install_hook_if_version_matches()` còn được bọc thêm 1 lớp `try/except Exception` ở cuối file
+— double safety net. Tôi giả lập cả 2 trường hợp bằng tay (đổi `_TARGET_MODULE_NAME` trỏ vào
+module không tồn tại attribute `ParagraphFinder`, và giả lập `babeldoc.__version__` khác) và xác
+nhận không có exception nào lọt ra khỏi `sitecustomize` — khớp đúng lời khai CHANGELOG.
+
+**Gap tôi phát hiện (ghi ở mục non-blocking):** fail-safe này CHỈ bảo vệ giai đoạn *áp patch*
+(import-time). Hàm `patched()` (được gọi mỗi lần babeldoc xử lý 1 paragraph, runtime) KHÔNG có
+try/except riêng — nếu `line_split.split_into_line_groups()` ném exception ở 1 edge case nào đó
+(dữ liệu hình học bất thường không có trong 163 case đã test), lỗi sẽ lan lên đúng như thể method
+gốc lỗi, không có "quay lại hành vi gốc" ở cấp runtime này. Đây không phải rủi ro MỚI so với
+trước khi có shim (method gốc cũng có thể lỗi tương tự), nhưng khác với tinh thần "tuyệt đối
+không crash job" ở docstring — nên ghi rõ đây là fail-safe cho *patch application*, không phải
+cho *mọi lần gọi hàm đã patch*.
+
+**5. PYTHONPATH wiring.** Đọc `babeldoc_runner.py:342-352`: `env = {**os.environ, **service.envs,
+"COLUMNS": "200"}` rồi mới đọc `env.get("PYTHONPATH", "")` và nối bằng `os.pathsep` (không dùng
+`":"` hardcode) nếu đã có giá trị, chỉ gán thẳng `_BABELDOC_SHIM_DIR` nếu chưa có — xác nhận
+không ghi đè mất `PYTHONPATH` gốc của `os.environ`/`service.envs`. Đúng như khai báo.
+
+**6. `line_split.py` là logic DÙNG CHUNG thật, không phải 2 bản trùng ngẫu nhiên.** Đọc
+`sitecustomize.py:93`: `from line_split import CharBound, split_into_line_groups` (import tên
+trần — đúng vì `PYTHONPATH` trỏ THẲNG vào `src/babeldoc_shim/`, không phải project root, nên
+`src.babeldoc_shim.line_split` không tồn tại trên `sys.path` của subprocess). Test import
+`from src.babeldoc_shim.line_split import ...` (qua package, vì chạy trong process app). Cả 2
+đường import trỏ về đúng CÙNG MỘT file vật lý `src/babeldoc_shim/line_split.py` — không có bản
+sao thứ hai nào trong repo (`grep -rn "split_into_line_groups" src/` chỉ ra đúng 1 định nghĩa +
+2 điểm gọi). Xác nhận đạt yêu cầu "test gọi đúng logic production".
+
+**7. R6-03 — live E2E không chỉ tin `status`.** Artifact thật tại `/private/tmp/bdprobe70/`:
+`live_run.log` ghi `success=True` cho cả `p74_77` và `q2_7pages`, có `duration`/`rate_limit_hits`
+thật (không phải giả lập). Tôi tự mở PDF output bằng `pymupdf` (KHÔNG tin lại số Dev báo) —
+`live_p74_77/p74_77.no_watermark.vi.mono.pdf`: 4/4 trang có nội dung (2856/2149/2126/2127 ký
+tự), trang 3 (index 0-based, "How baking works" trang thí nghiệm) có 17 dòng chứa `■` với text
+tiếng Việt thật đọc được (vd `■  Xác định và mô tả sự khác biệt giữa vị chua, vị chát và vị
+đắng`) — khớp tinh thần "16/17 bắt đầu dòng" Dev báo, không phải file rỗng. `q2_7pages`: cả 7/7
+trang có nội dung thật (1944–4309 ký tự/trang, không trang nào 0 ký tự) — khớp claim "không hồi
+quy". Đây là bằng chứng sống thật (giống đúng cách QA Vòng 3 phát hiện Bug #5 ở Protocol 6),
+không phải suy diễn từ `status=completed`.
+
+**8. Phạm vi 7.2/7.3 KHÔNG bị lẫn vào.** `grep -n "is_bullet_point\|process_independent_paragraphs\|toc\|Contents"
+src/babeldoc_shim/*.py` chỉ khớp trong docstring/comment tham chiếu Protocol, không có logic nào
+xử lý numbered-list marker (Ca A, 7.2) hay mục lục (Ca C, 7.3). `job_orchestrator.py` diff đúng
+1 dòng (truyền flag). Đạt đúng phạm vi PM giao chỉ 7.0+7.1.
+
+**9. Chạy thật (Reviewer tự chạy):**
+```
+uv run pytest -q                                → 369 passed, 419 warnings in 91.94s
+uv run ruff check (5 path liên quan)            → All checks passed!
+uv run ruff format --check (5 path liên quan)   → 7 files already formatted
+```
+Khớp đúng số Dev báo trong CHANGELOG (369 = 350 cũ + 19 mới).
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+1. **Fail-safe của shim chỉ phủ giai đoạn áp patch (import-time), không phủ runtime của hàm đã
+   patch.** `patched()` trong `sitecustomize.py` gọi `line_split.split_into_line_groups()` không
+   có try/except riêng — nếu có edge case hình học chưa từng gặp trong 163 paragraph đã test làm
+   hàm này raise, lỗi sẽ lan lên như thể method gốc lỗi, không "tự động quay lại hành vi gốc"
+   giữa chừng một job đang chạy. Rủi ro thấp (đã có 19 test bao gồm 2 test hình học tổng hợp),
+   nhưng nên bổ sung 1 dòng `try/except Exception` bọc lời gọi `split_into_line_groups(bounds)`
+   ngay trong `patched()`, fallback về cách gán dòng cũ (hoặc tối thiểu: gộp thành 1 dòng như
+   trước) + log cảnh báo, để đúng tinh thần "tuyệt đối không crash job" đã ghi trong docstring
+   của chính file này — hiện tại tinh thần đó chỉ đúng cho lỗi *lúc cài patch*, chưa đúng cho lỗi
+   *lúc chạy patch*.
+2. **Không có test tự động cho chính `sitecustomize.py`** (version-gate, meta-path hook,
+   fail-safe khi `AttributeError`) — 19 test hiện có đều nhắm `line_split.py` (thuần logic).
+   CHANGELOG khai đã "verify sống bằng cách giả lập" các case version-mismatch/patch-thất-bại,
+   và tôi tự tay verify lại các case đó khớp đúng khi đọc code — nhưng không có gì giữ bất biến
+   này lại thành regression test. Một thay đổi vô tình sau này ở `_install_hook_if_version_matches`
+   hay `_PatchingLoader` có thể phá vỡ fail-safe mà không test nào bắt được. Đề xuất thêm tối
+   thiểu 2 test process-level (hoặc unit test gọi trực tiếp `_install_hook_if_version_matches`/
+   `_apply_patch` với module giả) cho: (a) version khác → không cài hook; (b) module thiếu
+   `ParagraphFinder`/thiếu method → không raise ra ngoài.
+3. `Settings.babeldoc_line_split_shim_enabled` (`src/core/config.py`) là giả định tự chọn của
+   Dev, không bắt buộc theo spec Architecture.md — chấp nhận được (cùng mẫu rollback với
+   `babeldoc_rotated_text_overlay`, đã ghi rõ lý do trong comment và CHANGELOG mục "Giả định tự
+   chọn"), không phải issue, ghi lại để PM biết đây là quyết định ngoài spec khi review tổng thể
+   sau này.
+
+## Next step
+
+**APPROVE.** Circuit breaker Dev↔Reviewer: vòng 1/3 cho tăng bổ 7.0+7.1 này. Chuyển QA — lưu ý
+Protocol 6 R6-03 áp dụng TRỰC TIẾP cho thay đổi này (không phải pipeline OCR→dịch, nhưng đây tự
+nó là 1 thay đổi hành vi runtime của bước dịch babeldoc): QA phải tự chạy lại ít nhất 1 lần
+`BabeldocRunner.translate_pages()` thật với shim bật (mặc định) và đọc nội dung PDF output
+(không chỉ tin `status`), KHÔNG tái sử dụng artifact tại `/private/tmp/bdprobe70/` của Reviewer
+làm bằng chứng của QA (máy khác/session khác có thể không còn artifact này). KHÔNG làm 7.2
+(numbered-list Ca A) / 7.3 (đo lại mục lục Ca C) — đúng phạm vi đã chốt, PM quyết định bước tiếp
+theo.
+
+---

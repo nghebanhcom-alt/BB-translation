@@ -25,6 +25,14 @@ _GEMINI_OPENAI_COMPAT_BASE_URL = "https://generativelanguage.googleapis.com/v1be
 #: khong co Settings nao duoc truyen (review-report.md, non-blocking suggestion).
 _DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
+#: Thu muc chua `sitecustomize.py` shim (Bug #7 fix, Architecture.md X4-1/X5
+#: D7-2). Truyen qua `PYTHONPATH` cua subprocess babeldoc — CPython tu dong
+#: `import sitecustomize` luc khoi dong interpreter con, TRUOC ca entry point
+#: `babeldoc`. Khong import babeldoc trong process app duoc (chay qua
+#: subprocess CLI o venv rieng qua `uv tool`) nen day la vector DUY NHAT co
+#: tac dung — xem docstring day du trong `src/babeldoc_shim/sitecustomize.py`.
+_BABELDOC_SHIM_DIR = str(Path(__file__).resolve().parent.parent / "babeldoc_shim")
+
 
 def _resolve_openai_compat(
     service: Pdf2zhService, *, deepseek_base_url: str = _DEFAULT_DEEPSEEK_BASE_URL
@@ -214,9 +222,17 @@ class BabeldocRunner:
         self,
         executable: str = "babeldoc",
         deepseek_base_url: str = _DEFAULT_DEEPSEEK_BASE_URL,
+        line_split_shim_enabled: bool = True,
     ) -> None:
         self._executable = executable
         self._deepseek_base_url = deepseek_base_url
+        #: Bug #7 fix (Architecture.md X5 D7-2). Mac dinh True — khong yeu
+        #: cau feature flag rieng theo spec, nhung giu co che tat khan cap
+        #: giong cac feature flag khac cua project (vd
+        #: `babeldoc_rotated_text_overlay`, `mineru_det_probe_enabled`) de
+        #: rollback tuc thi khong can deploy lai code neu shim gay van de o
+        #: version babeldoc khac ngoai du kien.
+        self._line_split_shim_enabled = line_split_shim_enabled
 
     async def translate_pages(
         self,
@@ -324,6 +340,16 @@ class BabeldocRunner:
             args.append("--ignore-cache")
 
         env = {**os.environ, **service.envs, "COLUMNS": "200"}
+        if self._line_split_shim_enabled:
+            # Noi vao PYTHONPATH hien co (neu co), khong ghi de — dung
+            # os.pathsep de dung tren ca macOS/Linux (":") lan Windows (";")
+            # neu can sau nay (Architecture.md X4-1 D7-2).
+            existing_pythonpath = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{_BABELDOC_SHIM_DIR}{os.pathsep}{existing_pythonpath}"
+                if existing_pythonpath
+                else _BABELDOC_SHIM_DIR
+            )
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(

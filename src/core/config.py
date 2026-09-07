@@ -200,6 +200,17 @@ class Settings(BaseSettings):
     # needing a UI round-trip.
     babeldoc_rotated_text_overlay: bool = True
 
+    # Bug #7 fix (Architecture.md "Bug #7/#8 — Final Decision sau phản biện
+    # Domain Expert", X5 D7-2): `sitecustomize.py` shim (`src/babeldoc_shim/`)
+    # vá `ParagraphFinder._split_paragraph_into_lines` cua babeldoc 0.6.4 qua
+    # PYTHONPATH cua subprocess — loai ky tu khoang trang khoi phep dem va
+    # cham dung de tim khe giua 2 dong (giu nguyen nguong goc `count < 1`).
+    # Khong bat buoc theo spec (khong yeu cau feature flag rieng), nhung giu
+    # cung mau rollback tuc thi voi `babeldoc_rotated_text_overlay` o tren —
+    # shim tu fail-safe (khong patch/khong crash) neu version babeldoc doi,
+    # nhung co the tat het qua bien nay ma khong can deploy lai code.
+    babeldoc_line_split_shim_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:
