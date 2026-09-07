@@ -7373,3 +7373,391 @@ assertion đó là **bắt buộc** cho test 7.4-c.
 | Luật dòng nối theo thụt đầu dòng đúng cho sách ngoài 3 cuốn đã xem | ⚠️ `[CHƯA VERIFY]` |
 | Bảng công thức không bị layout model nhận là `table` (nhãn `plain text`) có kích hoạt TOC-1 không | ⚠️ `[CHƯA VERIFY]` — chưa có mẫu |
 | Giá trị chống FP thực tế của cổng monotonic | ⚠️ Chưa chứng minh — chưa từng chặn gì trên dữ liệu |
+
+---
+
+### Bug #7 Ca C — Quyết định cuối sau phản biện Domain Expert + kế hoạch spike 7.4-a (Tech Lead, 2026-09-08)
+
+> **ĐÂY LÀ QUYẾT ĐỊNH CUỐI ĐỂ GIAO DEV.** Section này **thay thế** phần thiết kế Y4/Y7/Y10/Y11 của
+> mục "Bug #7 Ca C — Đề xuất thiết kế fix mục lục" (Y0–Y13 giữ nguyên làm hồ sơ điều tra). Nơi nào
+> mâu thuẫn, **section này thắng**. Không còn bước "chờ duyệt thêm" — Protocol 2 đã qua ở vòng
+> trước; việc tiếp theo là Dev chạy spike 7.4-a theo AA8.
+>
+> Viết theo đúng khuôn mẫu "Bug #7/#8 — Final Decision sau phản biện Domain Expert" (X0–X10): trả
+> lời **từng** điểm phản biện, rồi chốt.
+
+#### AA0. Phán quyết một dòng
+
+Domain Expert **đúng ở 9/10 điểm**, gồm cả điểm quan trọng nhất (Z6 — bug `unicode=""` của 7.2, đã
+hotfix ở `a31ac42`). Tôi **KHÔNG ĐỒNG Ý đúng 1 điểm**: đề xuất Z8-2(i) *"guard bỏ qua paragraph có
+tâm nằm trong box layout `table`"*. Tôi đã tự đo và guard đó **giết 5/11 paragraph mục lục + 24/64
+điểm tách của Le Cordon Bleu** (trang Contents thứ 2 của LCB **bị chính layout model gán nhãn
+`table`**), trong khi **không cứu được gì** trên cả 3 trang công thức bánh (ở đó TOC-1 vốn đã kích
+hoạt 0 lần, và **không paragraph nhiều dòng nào** có tâm trong box `table`). Thay bằng một guard
+khác **rẻ hơn, mạnh hơn, không mất recall**: **deny-list theo `paragraph.layout_label`** — bằng
+chứng ở AA3.
+
+Thiết kế chốt là **TOC-1 v2** (AA4/AA5/AA6). Oracle cuối cùng, tự đo lại trong task này trên **12 bộ
+dump IL thật**: **31 paragraph kích hoạt / 130 điểm tách** trên 4 trang mục lục, **0 kích hoạt** trên
+**8 trang không phải mục lục** (3 trang công thức/bảng, 1 trang index, 4 trang văn xuôi/list).
+
+#### AA1. Tôi đã tự verify lại những gì trong task này (Protocol 5 R5-01)
+
+**Không kế thừa số liệu của ai.** Tôi viết script riêng (`toc1_v2.py`, không dùng `toc1_sim.py` của
+Expert, không dùng script của vòng Y) và chạy trên dump IL thật:
+
+| Việc | Kết quả |
+|---|---|
+| Tái tạo số liệu của Expert trên LCB | ✅ **Khớp tuyệt đối**: 11 paragraph kích hoạt, 64 điểm tách (6 fire/40 cut ở p0 + 5 fire/24 cut ở p1), monotonic 11/11 |
+| Tái tạo số liệu của vòng Y trên Figoni | ✅ **Khớp tuyệt đối**: p7 = 8 fire/28 cut, p8 = 12 fire/38 cut ⇒ **20 paragraph / 66 điểm tách** |
+| `paragraph_finder.py:245` là `page.pdf_paragraph = paragraphs` | ✅ Đọc trực tiếp — **Expert đúng**, Y12 ghi nhầm `:247` |
+| `_same_layout_and_xobj` (`:382-391`) có đòi `xobj_id is not None` | ✅ Source đúng như Y1 ghi, **nhưng suy luận của Y1 sai**: đo trên dump thật, `xobj_id` chỉ nhận **`-1`** (101 paragraph rỗng) và **`0`** (56 paragraph nội dung) trên `figoni_p25_recipe` — **không bao giờ `None`** ⇒ guard đó **không chặn gì**. Expert đúng; Expert ghi "`= 0`", chính xác hơn là **`0` hoặc `-1`, không bao giờ `None`** |
+| `page.page_layout` có `class_name` + `box` + `id` để làm guard bảng | ✅ Verified — `figoni_p25_recipe` có 101 entry: `fallback_line`×82, `abandon`×9, `title`×4, `plain text`×3, **`table`×3** |
+| Guard `table` theo hình học có mất recall không | ✅ **Verified — CÓ, mất nặng** (AA3) |
+| Nhãn của **mọi** paragraph kích hoạt TOC-1 | ✅ **31/31 đều là `'plain text'`** — không có `title`, `abandon`, `table`, `fallback_line` nào |
+| Slug in ấn `abandon` lọt luật mức dòng | ✅ Verified — LCB `'57131_fm_i_xv.indd 5'` ratio **0.82**, Figoni `'c04.indd 62'` ~0.92 (Expert). Chỉ thoát vì là paragraph **1 dòng** |
+| Độ nhạy ngưỡng `TOC_GAP_RATIO` | ✅ Quét 0.5 → 1.0 trên **12 dump**: FP **luôn = 0**, recall chỉ đổi 131 → 128 điểm tách. **Ngưỡng KHÔNG phải bộ lọc chính** (AA2/Z3) |
+| Luật dòng nối theo thụt đầu (Z7-a) có phải no-op trên dữ liệu hiện có | ✅ Verified — **6 ranh giới "dòng đánh dấu → dòng không đánh dấu"** trong toàn bộ paragraph kích hoạt, delta thụt đầu dòng = **−13.0, −1.1, +0.0, +0.0, +0.0, +0.1 pt** ⇒ với ngưỡng 1.0 em, **no-op tuyệt đối** |
+| Hotfix Z6 đã ship chưa | ✅ Commit `a31ac42` — `update_unicode=True` cho **cả 2** lời gọi. ⚠️ **`render_order` KHÔNG được copy** (grep `render_order` trong `src/babeldoc_shim/sitecustomize.py` = 0 hit) ⇒ nợ Y10-b **vẫn còn nguyên** |
+
+**Nguồn dữ liệu (còn sống, đã kiểm tra hôm nay 2026-09-08)** — 6 dump mới của Expert **và** PDF nguồn
+đã trích sẵn, nằm tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/2d559074-2821-4566-91ff-969cf281d898/scratchpad/`
+(`pdfs/*.pdf`, `wd/<tên>/<tên>/paragraph_finder.json`, `run_all.sh` để tái tạo). Cộng 6 dump cũ ở
+`/tmp/bdprobe/wd_toc*`, `/tmp/bdprobe/wd74c`, `/tmp/bdprobe/wd72c`, `/tmp/bdprobe/wd_p20`,
+`/tmp/bdprobe/wd_p22`. **Đây vẫn là artifact tạm** — nhiệm vụ số 1 của 7.4-a là commit golden fixture
+(AA8 bước 1).
+
+#### AA2. Trả lời từng điểm phản biện của Domain Expert
+
+| # | Điểm Expert nêu | Phán quyết | Lý do |
+|---|---|---|---|
+| Z2-a | Y12 ghi `:247`, đúng là `:245` | ✅ **ĐỒNG Ý** | Tự đọc lại source. Đính chính ở AA11 |
+| Z2-b / Z5-a | Lập luận "guard `xobj_id is not None` chặn `merge_alternating_line_number_paragraphs`" là **SAI** | ✅ **ĐỒNG Ý** | Tự đo: `xobj_id ∈ {0, −1}`, không bao giờ `None`. **Kết luận "không bị gộp lại" vẫn đứng**, nhưng nhờ `_is_ascii_digit_or_space_paragraph` (paragraph TOC-1 luôn có chữ) + `layout_id` phải trùng + TOC-1 chèn liền kề nên không có paragraph thuần số chen giữa. **Dev bị CẤM** viết test/comment dựa vào guard `xobj_id` |
+| Z3-a | FP-4 (bảng công thức) **không kích hoạt** vì layout model đã tách mỗi ô thành paragraph `fallback_line` 1 dòng | ✅ **ĐỒNG Ý** — tự đo lại 3 trang, xác nhận 0 kích hoạt. Đây là rủi ro `[UNVERIFIED]` lớn nhất của Y12, **nay đóng lại** ở mức "3 trang công thức thật của cuốn chính" | Bổ sung của tôi: trên cả 3 trang, **số paragraph nhiều dòng có tâm trong box `table` = 0** — tức FP-4 không những không xảy ra, mà còn **không thể** được cứu bởi guard `table` |
+| Z3-b | Nếu cột công thức có bị tách từng dòng thì đó là **cải thiện**, không phải hỏng | ✅ **ĐỒNG Ý** | Đúng bản chất Ca C. Rủi ro duy nhất còn lại là `unit_count`/mode-scale (X7) — giữ ràng buộc thứ tự 7.4 trước 8.1 |
+| Z3-c | **Đề xuất guard `table` theo hình học** | ❌ **KHÔNG ĐỒNG Ý — BÁC BỎ** | Chi tiết bằng chứng ở **AA3**. Thay bằng deny-list `layout_label` |
+| Z3-d | Mô tả "khe an toàn rộng (TOC 1.0 vs văn xuôi 0.64)" là **sai/gây hiểu nhầm** | ✅ **ĐỒNG Ý** | Tự đo thêm: quét ngưỡng 0.5→1.0 trên 12 dump cho FP = 0 ở **mọi** ngưỡng, recall chỉ đổi 131→128. Ngưỡng **không** là bộ lọc; **cổng cố kết paragraph mới là**. Giữ 0.8 vì đó là ngưỡng đã có nhiều dữ liệu nhất, **không** vì "khe an toàn". Đính chính ở AA11 |
+| Z3-e | "0 FP / 4657 block PyMuPDF" **gần như không có trọng lượng bằng chứng** (phép quét đó không phát hiện nổi chính mục lục) | ✅ **ĐỒNG Ý HOÀN TOÀN** | Rút khỏi mọi lập luận. Bằng chứng FP hợp lệ **chỉ còn** 12 bộ dump IL. Đính chính ở AA11 |
+| Z4 | Giữ cổng monotonic làm **điều kiện cứng**; rủi ro "gom chéo cột" là lý thuyết | ✅ **ĐỒNG Ý** | Tự xác nhận 31/31 paragraph kích hoạt đều monotonic, **0** paragraph bị cổng này chặn. Chấp nhận Z8-2(iv): **log 1 dòng mỗi lần cổng chặn** để 7.4-e có số liệu thật thay vì lý thuyết |
+| Z5-c | Hook sớm còn được `update_paragraph_data(..., update_unicode=True)` ở `:293-294` — **TL bỏ sót, và đây là lý do mạnh nhất** | ✅ **ĐỒNG Ý, và nâng lên lý do #1** | Chính là cơ chế gây Bug Z6 cho 7.2. Hook `process_independent_paragraphs` khiến TOC-1 **miễn nhiễm** với lớp lỗi đó **theo thiết kế**, không phải nhờ nhớ gọi đúng cờ. Cập nhật thứ tự lý do ở AA6 |
+| Z5-b | `fix_overlapping_paragraphs` (`:302`) chỉ sửa `box`, no-op trên Figoni (khe 2.85–2.95pt), nhưng là **khác biệt hành vi thật** so với hook 7.2 | ✅ **ĐỒNG Ý** | Đưa vào gate đo của 7.4-e (AA8 bước 6) |
+| Z6 | 7.2 ship với bug `unicode=""` ⇒ paragraph tách ra **không được dịch** | ✅ **ĐỒNG Ý — phát hiện đúng và quan trọng nhất của cả vòng phản biện** | Đã hotfix `a31ac42`, Reviewer APPROVE, live 0/35 + 0/40 mục còn tiếng Anh. **Điều kiện tiên quyết Z8-0 coi như ĐÃ THOẢ.** ⚠️ Phần `render_order` của Z8-0 **chưa làm** — xem AA10-b |
+| Z7-a | Bo Friberg đặt số trang ở **dòng ĐẦU** của mục xuống dòng ⇒ cần luật dòng nối theo thụt đầu dòng | ✅ **ĐỒNG Ý CÓ ĐIỀU KIỆN — nhận vào thiết kế** | Tự đo: trên **toàn bộ** 6 ranh giới "đánh dấu → không đánh dấu" của 31 paragraph kích hoạt, thụt đầu dòng = −13.0 … +0.1 pt ⇒ với ngưỡng **1.0 × font_size** luật này là **no-op tuyệt đối** trên dữ liệu hiện có (Friberg: 284 vs 230 = **6.75 em**, cách ngưỡng rất xa). Nhận vì rẻ + hướng thất bại an toàn; **điều kiện**: spike phải chứng minh nó là no-op (gate AA9-4) |
+| Z7-b | Recall LCB là ~82/84, không phải 100% | ✅ **ĐỒNG Ý** | Sửa Y9 (AA11). Ghi thành chỉ tiêu gate riêng cho LCB |
+| Z7-c | Dùng ASCII `0-9` thay `str.isdigit()` (`'²'.isdigit()` là True) | ✅ **ĐỒNG Ý** | Vào spec AA4 bước 2 |
+| Z7-d | Friberg: số trang là paragraph **riêng** ⇒ Ca C của sách kiểu này nằm ngoài tầm TOC-1 | ✅ **ĐỒNG Ý** | Ghi thành **biên thiết kế tường minh** (AA4, bảng biên). Tự xác nhận: TOC-1 v2 kích hoạt **0** trên `friberg_toc` — đúng như dự đoán, và đây là **kết quả mong đợi**, không phải FN cần sửa |
+| Z7-e | FP-7 (index) đã verify thật trên LCB index | ✅ **ĐỒNG Ý** | Chuyển FP-7 sang ✅ Verified (AA12) |
+| Z8-4 | Gate 7.4-d phải đo **2** thứ: ranh giới mục **và** số mục còn tiếng Anh | ✅ **ĐỒNG Ý — bắt buộc** | Vào gate AA9-6. Chính là bài học R6-03 từ Z6 |
+
+#### AA3. Điểm KHÔNG ĐỒNG Ý — bác bỏ guard `table` theo hình học (Z8-2 mục i)
+
+Expert đề xuất: *"bỏ qua paragraph có tâm nằm trong box layout `table`"*. Tôi đã cài đúng luật đó vào
+mô phỏng và đo trên **cùng** bộ dump Expert dùng:
+
+| Dump | Không guard | **Có guard `table` hình học** |
+|---|---|---|
+| `lcb_toc` trang 0 | 6 fire / 40 cut | 6 fire / 40 cut |
+| **`lcb_toc` trang 1** | **5 fire / 24 cut** | **0 fire / 0 cut** ❌ |
+| `figoni_p7_toc` | 8 fire / 28 cut | 8 fire / 28 cut |
+| `figoni_p8_toc` | 12 fire / 38 cut | 12 fire / 38 cut |
+| `figoni_p25_recipe`, `figoni_p45_recipe`, `figoni_p7_tables` (3 trang công thức/bảng) | 0 / 0 | 0 / 0 (**không cứu được gì**) |
+| `lcb_index`, `friberg_toc` | 0 / 0 | 0 / 0 |
+
+**Nguyên nhân**: layout model của babeldoc gán **1 box `class_name="table"`** phủ gần trọn trang
+Contents thứ 2 của Le Cordon Bleu (mục lục 2 cột **trông giống bảng**) — **8/8** paragraph nhiều dòng
+của trang đó có tâm nằm trong box ấy. Guard sẽ **xoá 37.5% tác dụng của fix trên chính cuốn sách thứ 2
+dùng để chứng minh tính tổng quát**.
+
+**Và guard đó không thể cứu FP-4 ngay cả về nguyên tắc**: trên cả 3 trang công thức/bảng, số paragraph
+**nhiều dòng** có tâm trong box `table` = **0** (đo thật). Lý do chính là điều Expert đã chỉ ra ở Z3:
+trong vùng bảng, mỗi ô thành **paragraph 1 dòng** `fallback_line` ⇒ `L < 2` ⇒ TOC-1 không xét. Còn ca
+FP-4 thật sự đáng sợ — **bảng công thức không kẻ khung, bị gán nhãn `plain text`** (Expert tự đánh dấu
+`[CHƯA VERIFY]`) — thì **theo định nghĩa không có box `table`** nên guard cũng vô hiệu. ⇒ Guard này là
+**toàn chi phí, không lợi ích**.
+
+**Thay bằng: deny-list theo `paragraph.layout_label`** (rẻ hơn, không phụ thuộc hình học, đo được):
+
+- Bằng chứng recall: **31/31** paragraph kích hoạt trên 4 trang mục lục đều có `layout_label ==
+  'plain text'` ⇒ deny-list **không mất một điểm tách nào** (đã chạy: 20/66 Figoni + 11/64 LCB giữ
+  nguyên sau khi bật deny-list).
+- Bằng chứng phòng thủ: lớp nội dung **có tỷ lệ khe cao nhất** trong toàn bộ dữ liệu mà **không phải**
+  mục lục là **slug nhà in nhãn `abandon`** (`'57131_fm_i_xv.indd 5'` = 0.82; Figoni `'c04.indd 62'` ≈
+  0.92). Hôm nay chúng chỉ thoát nhờ là paragraph 1 dòng — **một sự may mắn, không phải một luật**.
+  Deny-list biến may mắn đó thành luật.
+
+Nếu sau này có bằng chứng thật về FP trong vùng bảng, mở lại — **nhưng lúc đó phải là luật khác**, vì
+guard hình học đã chứng minh là chọn nhầm trục.
+
+Để không mất dấu: TOC-1 v2 **vẫn tính** cờ "tâm paragraph nằm trong box `table`" và **chỉ ghi log**
+(`toc_split: fired_inside_table_box=N`), không dùng để chặn. 7.4-a/7.4-e báo cáo con số này.
+
+#### AA4. TOC-1 v2 — thiết kế CHỐT (thay thế Y4)
+
+Toàn bộ quyết định nằm trong module thuần Python `src/babeldoc_shim/toc_split.py` (không import
+babeldoc), dùng chung bởi `sitecustomize.py` và test — đúng khuôn `numbered_list_split.py` của 7.2
+(R6-02: test phải gọi **đúng** logic production).
+
+**Bước 0 — cổng paragraph (MỚI, thay guard `table` của Expert)**
+Bỏ qua ngay nếu `paragraph.layout_label` (chuẩn hoá lower/strip) thuộc **deny-list**:
+`abandon`, `header`, `footer`, `page_header`, `page_footer`, `table`, `table_cell`, `wired_table_cell`,
+`wireless_table_cell`, `table_cell_hybrid`, `table_text`, `table_caption`, `table_footnote`, `figure`,
+`figure_caption`, `figure_text`, `formula`, `isolate_formula`, `formula_caption`.
+Bỏ qua nếu số composition `L < 2`.
+(Tên nhãn lấy từ tập hợp lệ trong `utils/layout_helper.py:655-690` và `:789-845` của babeldoc 0.6.4 —
+đã đọc thật.)
+
+**Bước 1 — chuẩn bị ký tự của một dòng**
+Lấy `composition.pdf_line.pdf_character`, **bỏ mọi ký tự `.isspace()`** (gồm dummy space do
+`add_space_dummy_chars` chèn, `paragraph_finder.py:279`), rồi **tự sort theo `visual_bbox.box.x`** —
+bắt buộc, vì cả 4 lời gọi sort của babeldoc đều bị comment (`:305,696,738,772`, X4-4). Bỏ qua dòng có
+< 2 ký tự.
+
+**Bước 2 — đánh dấu "đuôi mục TOC"** (tất cả điều kiện phải đúng)
+1. `k` = độ dài dãy **ASCII `0-9`** liền cuối (**không** dùng `str.isdigit()` — Z7-c). Loại nếu
+   `k == 0`, `k > TOC_MAX_DIGITS`, hoặc `k == len(chars)` (cả dòng là số ⇒ folio/ô bảng).
+2. Phần thân (`chars[:-k]`) phải chứa **≥ 1 cụm ≥ 2 chữ cái ASCII** (`[A-Za-z]{2,}`).
+3. `1 ≤ n ≤ 9999` với `n` = giá trị dãy số.
+4. `size = chars[-k-1].pdf_style.font_size`; bỏ qua nếu `size <= 0`.
+5. `gap = chars[-k].visual_bbox.box.x − chars[-k-1].visual_bbox.box.x2`
+   (**hệ đo bắt buộc: `visual_bbox`** — chốt theo Z3, KHÔNG dùng advance-width của PyMuPDF).
+6. `ratio = gap / size ≥ TOC_GAP_RATIO`.
+
+**Bước 3 — cổng cố kết ở mức paragraph** (lớp chống FP **chính**, không phải ngưỡng ở bước 2)
+`m` = số dòng đánh dấu, `L` = số composition. Chỉ tách khi **cả ba**:
+`m ≥ TOC_MIN_TAIL_LINES` **và** `m / L ≥ TOC_MIN_TAIL_FRACTION` **và** dãy `n` **không giảm**
+(cho phép bằng nhau). Khi cổng `m/L` hoặc monotonic chặn một paragraph có `m ≥ 2`, **ghi log 1 dòng**
+(Z8-2 iv).
+
+**Bước 4 — điểm tách + luật dòng nối (MỚI, Z7-a)**
+Với mỗi dòng đánh dấu ở chỉ số `i`: đặt `j = i`; **trong khi** composition `j+1` tồn tại, là `pdf_line`
+**không** được đánh dấu, và `min_x(dòng j+1) ≥ min_x(dòng i) + TOC_CONT_INDENT_EM × size(dòng i)`
+⇒ `j += 1` (dòng nối kiểu Bo Friberg thuộc **group trước**). Ranh giới nằm **ngay sau** composition `j`;
+bỏ nếu `j == L-1`.
+Composition không phải `pdf_line` (`pdf_formula`, `pdf_character`) không bao giờ được đánh dấu và dính
+vào group liền trước — giống hệt 7.2.
+
+**Bước 5 — thực thi**
+Cắt `pdf_paragraph_composition` theo group. Group đầu **giữ nguyên object paragraph gốc**; mỗi group sau
+tạo `PdfParagraph` theo **đúng nguyên mẫu babeldoc `paragraph_finder.py:868-888`**: `box=Box(0,0,0,0)`,
+`unicode=""`, `debug_id=generate_base58_id()`, copy `layout_label` + `layout_id`, rồi
+`paragraphs.insert(...)`. **KHÔNG cần** tự gọi `update_paragraph_data(update_unicode=True)` và **KHÔNG
+cần** tự gán `render_order` — hook ở AA6 nằm **trước** `:293-294` và `:310` nên babeldoc tự làm cả hai.
+Đây chính là điểm khiến TOC-1 miễn nhiễm với bug Z6 **theo thiết kế**.
+
+**Biên thiết kế tường minh (cố ý KHÔNG xử lý)**
+
+| Dạng | Xử lý |
+|---|---|
+| Số trang cuối dòng, khe rộng, cùng paragraph (Figoni, LCB) | ✅ Ca chính |
+| Dot leader ≥ 20 chấm | ✅ babeldoc gốc đã lo (`:864-866`) |
+| Dot leader < 20 chấm | ❌ TOC-1b **TẮT** ở v1 (`TOC_DOT_LEADER_FALLBACK = False`) |
+| Số trang La Mã (`"Preface vii"`) | ❌ Cố ý không hỗ trợ (Y9) |
+| **Số trang nằm ở paragraph RIÊNG (Bo Friberg)** | ❌ **Ngoài tầm TOC-1** — lỗi ở tầng layout/grouping. `friberg_toc` kích hoạt 0 là **đúng**, không phải FN (Z7-d) |
+| Mục bị `--split-short-lines` cắt sẵn sang 2 paragraph (LCB) | ❌ Ngoài tầm — nguồn của 2/84 mục sót (Z7-b) |
+
+#### AA5. Tham số cuối
+
+| Tham số | Giá trị chốt | Căn cứ |
+|---|---|---|
+| `TOC_GAP_RATIO` | **0.8** (theo `visual_bbox`) | Quét 0.5→1.0 trên 12 dump: FP = 0 ở mọi mức, recall 131→128. Giữ 0.8 vì có nhiều dữ liệu nhất và chặn slug `abandon` 0.82 ở mức dòng. **Không phải "khe an toàn"** |
+| `TOC_MIN_TAIL_LINES` | **2** | Tín hiệu chống FP mạnh nhất (Y7 + Z3 đều đồng ý) |
+| `TOC_MIN_TAIL_FRACTION` | **0.6** | 31/31 paragraph mục lục thoả |
+| `TOC_MIN_BODY_ALPHA_RUNS` | **1** (cụm ≥ 2 chữ cái ASCII) | Loại ô bảng thuần số, `"4.0"`, folio |
+| `TOC_MAX_DIGITS` | **4** | Số trang sách ≤ 9999 |
+| `TOC_REQUIRE_NON_DECREASING` | **True** (cứng) | Z4. Log mỗi lần chặn |
+| `TOC_CONT_INDENT_EM` | **1.0** | Đo thật: ranh giới thật ≤ 0.1pt; Friberg 6.75 em. Biên rất rộng |
+| `TOC_DOT_LEADER_FALLBACK` | **False** | Chưa có dữ liệu |
+| `TOC_LAYOUT_LABEL_DENY` | danh sách ở AA4 bước 0 | AA3 |
+| Cờ runtime | `BABELDOC_SHIM_TOC_SPLIT`, `Settings.babeldoc_toc_split_enabled` — **mặc định `False` ở lần ship đầu**, bật sau khi QA live xanh | Giữ nguyên Y10-a: kill-switch RIÊNG, độc lập với 7.1/7.2 |
+
+#### AA6. Điểm hook cuối
+
+**Giữ nguyên đề xuất Y6**: bọc `ParagraphFinder.process_independent_paragraphs(paragraphs,
+median_width)` (`paragraph_finder.py:287`) — chạy hàm gốc trước, rồi chạy TOC-1 v2 trên **cùng list
+`paragraphs`** (mutate in-place; `page.pdf_paragraph` trỏ cùng object list, gán ở **`:245`**).
+
+Lý do, **đã xếp lại theo phản biện Z5-c**:
+
+1. **(Mới, mạnh nhất)** `:293-294` gọi `update_paragraph_data(paragraph, update_unicode=True)` cho
+   **mọi** paragraph ⇒ paragraph TOC-1 tạo ra **luôn có `unicode` đúng** ⇒ **miễn nhiễm với đúng lớp
+   bug đã làm hỏng 7.2** (Z6: `unicode=""` ⇒ `il_translator_llm_only.py:556-568` bỏ qua ⇒ không dịch).
+   Đây là **an toàn theo cấu trúc**, không phải theo trí nhớ của người viết code.
+2. `_set_paragraph_render_order` (`:310`) chạy sau ⇒ paragraph mới có `render_order` thật (tránh nợ
+   Y10-b của 7.2).
+3. `add_debug_info` (`:307`) vẽ debug rect cho paragraph mới — phục vụ chính việc đo của 7.4.
+4. Đúng tầng ngữ nghĩa: nhánh mục lục dot-leader của babeldoc cũng nằm trong hàm này.
+
+**Bề mặt tương tác đã trace hết (Y6 + Z5, không còn ẩn số)**: `merge_alternating_line_number_paragraphs`
+(`:290-291`) không gộp lại được (lý do đúng: `_is_ascii_digit_or_space_paragraph` + `layout_id`, **không
+phải** `xobj_id`); `fix_overlapping_paragraphs` (`:302`) chỉ sửa `box`, đo được là no-op trên Figoni
+(khe dọc 2.85–2.95pt) nhưng **có thể cắt ~1pt** với sách leading chặt ⇒ đưa vào 7.4-e; patch 7.2 (bọc
+`process`, chạy sau) không xung đột vì mục TOC không có marker đầu dòng.
+
+**Không di dời 7.2 sang hook này trong 7.4** — giữ nguyên quyết định Y6. Ghi tech debt (AA10-b).
+
+#### AA7. Oracle cuối cùng — con số Dev phải tái tạo ĐÚNG ở 7.4-a
+
+Đo bằng TOC-1 v2 đầy đủ (deny-list + luật dòng nối bật):
+
+| Fixture | Loại | fire | cut points | Ghi chú oracle |
+|---|---|---|---|---|
+| `figoni_p7_toc` | TOC | **8** | **28** | 12 paragraph nhiều dòng; 4 không fire = tiêu đề chương 2 dòng |
+| `figoni_p8_toc` | TOC | **12** | **38** | 18 paragraph nhiều dòng |
+| `lcb_toc` (2 trang) | TOC 2 cột | **11** | **64** | p0: 6/40, p1: 5/24. `fired_inside_table_box = 5` (chỉ log) |
+| `friberg_toc` | TOC quy ước ngược | **0** | **0** | **Đúng theo thiết kế** (AA4 biên) — không phải FN |
+| `lcb_index` | FP-7 | **0** | **0** | |
+| `figoni_p25_recipe` | **FP-4** | **0** | **0** | |
+| `figoni_p45_recipe` | **FP-4** | **0** | **0** | |
+| `figoni_p7_tables` | FP-3/FP-4 | **0** | **0** | |
+| `p74_77` (4 trang) | hồi quy 7.1 | **0** | **0** | |
+| `page14_numbered_list_source` | hồi quy 7.2 | **0** | **0** | |
+| `figoni_p20`, `figoni_p22` | bảng + caption | **0** | **0** | |
+| **Tổng** | | **31 / 130** | | **0 kích hoạt trên 8 trang không phải mục lục** |
+
+#### AA8. Kế hoạch spike 7.4-a — giao Dev ngay
+
+**Nguyên tắc**: đây là **spike theo R5-02**. Sản phẩm là **bằng chứng + fixture**, KHÔNG phải feature.
+
+**Bước 1 — Bảo toàn bằng chứng (làm ĐẦU TIÊN, trước mọi thứ khác)**
+Artifact đang nằm ở `/tmp` và scratchpad phiên khác, **sẽ mất**. Đã kiểm tra còn sống hôm nay
+2026-09-08. Gzip và commit **8 file** vào `tests/fixtures/babeldoc/` (đọc bằng `gzip.open(path,"rt")`,
+đúng khuôn `paragraph_finder_p74_77_dump.json.gz` đã có):
+
+| File nguồn | Tên fixture đề xuất | gz |
+|---|---|---|
+| `<SP>/wd/lcb_toc/lcb_toc/paragraph_finder.json` | `toc_lcb_contents_p6_p7_dump.json.gz` | 222KB |
+| `<SP>/wd/friberg_toc/friberg_toc/paragraph_finder.json` | `toc_friberg_contents_dump.json.gz` | 53KB |
+| `<SP>/wd/lcb_index/lcb_index/paragraph_finder.json` | `toc_lcb_index_dump.json.gz` | 192KB |
+| `<SP>/wd/figoni_p25_recipe/.../paragraph_finder.json` | `toc_figoni_p25_recipe_dump.json.gz` | 127KB |
+| `<SP>/wd/figoni_p45_recipe/.../paragraph_finder.json` | `toc_figoni_p45_recipe_dump.json.gz` | 165KB |
+| `<SP>/wd/figoni_p7_tables/.../paragraph_finder.json` | `toc_figoni_tables_dump.json.gz` | 185KB |
+| `/tmp/bdprobe/wd_toc/figoni_p7_toc/paragraph_finder.json` | `toc_figoni_contents_p7_dump.json.gz` | 104KB |
+| `/tmp/bdprobe/wd_toc2/figoni_p8_toc/paragraph_finder.json` | `toc_figoni_contents_p8_dump.json.gz` | 133KB |
+
+`<SP>` = `/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/2d559074-2821-4566-91ff-969cf281d898/scratchpad`.
+Tổng ≈ **1.2 MB** — chấp nhận được. Cũng copy **6 PDF nguồn** ở `<SP>/pdfs/` vào
+`tests/fixtures/babeldoc/toc_sources/` (tổng ~1.1MB) và cập nhật `tests/fixtures/babeldoc/README.md`
+với lệnh tái tạo (`<SP>/run_all.sh`, đã có sẵn, dùng đúng flag production của `BabeldocRunner` + LLM
+port chết ⇒ **0 token**).
+
+**Nếu file nguồn đã bị xoá**: tái tạo bằng `run_all.sh` — trang cần trích bằng `pymupdf.insert_pdf` từ
+`data/uploads/`: Figoni bản đầy đủ idx **40** (`figoni_p25_recipe`), idx **60** (`figoni_p45_recipe`),
+idx **22** (`figoni_p7_tables`); Le Cordon Bleu idx **6–7** (`lcb_toc`), idx **408** (`lcb_index`);
+Bo Friberg idx **6** (`friberg_toc`). **KHÔNG được tự viết tay mock** (Protocol 5 mục 3).
+
+**Bước 2 — Viết `toc_split.py` ở mức spike**
+Đúng spec AA4 + tham số AA5. Thuần Python, không import babeldoc, nhận **dict đã parse từ dump JSON**
+(hoặc object IL — cùng tên field) để chạy được offline. **Chưa** wiring vào `sitecustomize.py`.
+
+**Bước 3 — Chạy trên 8 fixture, báo cáo bảng AA7**
+Báo cáo **từng fixture**: `fire`, `cut points`, và 3 counter mới: `blocked_by_monotonic`,
+`blocked_by_fraction`, `fired_inside_table_box`.
+
+**Bước 4 — Đo riêng luật dòng nối (Z7-a)**
+In **mọi** ranh giới "dòng đánh dấu → dòng không đánh dấu" trong các paragraph kích hoạt, kèm delta
+thụt đầu dòng. **Kỳ vọng: 6 ranh giới, delta ∈ [−13.0, +0.1] pt ⇒ luật là no-op** (kết quả đo của Tech
+Lead). Nếu Dev đo ra khác ⇒ dừng, escalate.
+
+**Bước 5 — Chứng minh hook mutate in-place (mục `[UNVERIFIED]` cuối cùng của Y12)**
+Chạy **1** lần babeldoc thật với `sitecustomize.py` đã bọc `process_independent_paragraphs` bằng một
+patch **rỗng nhưng có instrument** (chỉ đếm + chèn 1 paragraph đánh dấu tổng hợp), trên
+`figoni_p7_toc.pdf`, LLM port chết, `--debug`. Đọc dump ra và xác nhận: (a) paragraph chèn thêm **có mặt**
+trong `page.pdf_paragraph`, (b) nó có `unicode != ""`, (c) nó có `render_order is not None`.
+**Đây là bằng chứng sống cho AA6 lý do 1 và 2** — bắt buộc, vì đó chính là cơ chế bảo vệ khỏi bug Z6.
+
+**Bước 6 — Báo cáo**
+Ghi kết quả vào `docs/CHANGELOG.md` (**đọc file hiện có, APPEND section mới vào cuối, KHÔNG xoá/ghi đè
+nội dung cũ** — Protocol 7 R7-03). Kèm bảng đối chiếu với AA7.
+
+**Ngoài phạm vi 7.4-a (làm ở 7.4-b trở đi, chỉ khi spike PASS)**: `sitecustomize.py` patch thứ 3, wiring
+`config.py` / `babeldoc_runner.py` / `job_orchestrator.py`, unit test đầy đủ, live E2E, đo hồi quy 11
+trang, Reviewer.
+
+#### AA9. Gate PASS/FAIL của 7.4-a
+
+**PASS khi ĐỦ 6 điều**:
+
+1. **Recall Figoni**: `figoni_p7_toc` = **8 fire / 28 cut** và `figoni_p8_toc` = **12 fire / 38 cut**
+   (tổng **20 / 66**) — **khớp chính xác**, không xê dịch.
+2. **Recall LCB**: **11 fire / 64 cut**, monotonic 11/11. Chấp nhận **≥ 80/84** mục được tách đúng
+   (oracle Expert: 82/84; 2 mục sót do `--split-short-lines` cắt sẵn, **không** tính là fail).
+3. **FP = 0 tuyệt đối** trên **8** fixture không phải mục lục (`friberg_toc`, `lcb_index`,
+   `figoni_p25_recipe`, `figoni_p45_recipe`, `figoni_p7_tables`, `p74_77`, `page14_...`,
+   `figoni_p20`+`p22`). **Bất kỳ kích hoạt nào ở đây = FAIL, không có ngưỡng "chấp nhận được"**.
+4. **Luật dòng nối là no-op**: 0 điểm tách bị dịch chuyển so với khi tắt luật đó (bước 4).
+5. **Bước 5 xanh**: paragraph chèn qua hook có `unicode != ""` **và** `render_order is not None`.
+6. **8 fixture + 6 PDF nguồn đã commit** vào `tests/fixtures/babeldoc/`, README cập nhật.
+
+**FAIL ⇒ DỪNG, escalate cho Tech Lead** (không tự chỉnh tham số, không tự đổi thiết kế):
+
+| Triệu chứng | Hành động |
+|---|---|
+| **Bất kỳ FP nào**, đặc biệt trên `figoni_p25_recipe`/`p45`/`p7_tables` (**FP-4**) | Dừng ngay. Báo cáo **paragraph nào, dòng nào, ratio bao nhiêu, `layout_label` gì**. Tech Lead quyết định — **có thể** mở lại hướng guard bảng theo trục khác |
+| Recall lệch oracle AA7 | Dừng. Nhiều khả năng khác hệ đo (`visual_bbox` vs `box`) hoặc quên sort theo x hoặc quên bỏ dummy space |
+| Luật dòng nối làm dịch điểm tách | Dừng — nghĩa là ngưỡng 1.0 em sai với dữ liệu thật |
+| Bước 5 cho `unicode == ""` hoặc `render_order is None` | **Dừng — nghiêm trọng**: giả định nền của AA6 sai, TOC-1 sẽ tái diễn bug Z6. Tech Lead phải thiết kế lại điểm hook |
+| Fixture nguồn đã mất và tái tạo ra số khác | Dừng, báo cáo cả 2 bộ số |
+
+Escalate bằng cách báo cho **PM**, PM chuyển **Tech Lead**. Không escalate thẳng sang tự sửa
+Architecture.md.
+
+#### AA10. Nhắc lại ràng buộc quy trình
+
+**(a) ĐÂY VẪN LÀ SPIKE (Protocol 5 R5-02).** Dev **CHƯA ĐƯỢC** viết code production đầy đủ cho tới khi
+spike PASS gate AA9: **không** tạo patch thứ 3 trong `src/babeldoc_shim/sitecustomize.py` (trừ patch
+instrument tạm của bước 5, **không commit**), **không** wiring
+`src/core/config.py` / `src/services/babeldoc_runner.py` / `src/core/job_orchestrator.py`, **không**
+viết bộ test đầy đủ 7.4-c. Sản phẩm commit của 7.4-a chỉ gồm: **fixture + `toc_split.py` mức spike +
+script đo + entry CHANGELOG**.
+
+**(b) Nợ kỹ thuật vẫn mở, KHÔNG thuộc 7.4** — hotfix `a31ac42` đã sửa `unicode=""` nhưng **chưa** copy
+`render_order` (`grep render_order src/babeldoc_shim/sitecustomize.py` = 0 hit). Paragraph do **7.2**
+tạo vẫn có `render_order = None` ⇒ `pdf_creater.py:52-55` ép về `9999999999999999` ⇒ ký tự bị vẽ **sau
+cùng** trong content stream (Z2, Expert đã trace hạ nguồn). Không crash, chưa thấy triệu chứng.
+**Task riêng, ưu tiên thấp.** TOC-1 **không** thừa hưởng lỗi này (AA6 lý do 2).
+
+**(c) Ràng buộc thứ tự (giữ nguyên Y8/X7)**: 7.4 **phải xong trước** bước **8.1**. TOC-1 tăng số
+paragraph ⇒ đổi `unit_count` ⇒ đổi mode-scale **xuyên trang** (`typesetting.py:892-935`). Nếu 8.1 đã
+đo histogram trước, **số đo đó hết hạn**.
+
+**(d) Gate 7.4-d (làm sau, ghi sẵn để không quên)**: phải đo **2** thứ — ranh giới mục **và** **số mục
+còn tiếng Anh** trong PDF output (Z8-4). Bài học Z6: gate chỉ đo cấu trúc đã bỏ lọt một bug production
+suốt 1 vòng release.
+
+#### AA11. Đính chính các phát biểu cũ (Y-section)
+
+| Chỗ | Sai | Đúng |
+|---|---|---|
+| Y12 | "`:247` gán cùng object list" | **`:245`** — `page.pdf_paragraph = paragraphs` |
+| Y1, Y6 | "`_same_layout_and_xobj` còn đòi cả hai `xobj_id is not None` ⇒ không gộp" | Source đúng nhưng **suy luận sai**: `xobj_id ∈ {0, −1}`, không bao giờ `None`. Lý do thật: `_is_ascii_digit_or_space_paragraph` + `layout_id` phải trùng + TOC-1 chèn liền kề |
+| Y7, Y12 | "khe an toàn rộng: TOC 1.0 vs văn xuôi tệ nhất 0.64" | **Bỏ.** Đo trên `visual_bbox`: TOC Figoni 1.05–1.21, TOC LCB **tràn xuống 0.43**; slug `abandon` **0.82–0.93**. Ngưỡng 0.5→1.0 cho FP = 0 như nhau ⇒ **ngưỡng không phải bộ lọc; cổng cố kết paragraph mới là** |
+| Y0, Y8 | "quét toàn sách PyMuPDF: 0 FP / 4657 block" là điểm mạnh | **Rút hoàn toàn.** Phép quét đó không phát hiện nổi chính mục lục (Figoni 0/152 block; LCB 2/184 dòng) ⇒ **không dùng làm bằng chứng** |
+| Y9 | "đã thấy khớp trên 2 đầu sách" | **Figoni 20/20 paragraph; LCB ~82/84 mục** (2 mục sót do `--split-short-lines` cắt sẵn) |
+| Y4 bước 2 | `str.isdigit()` | **ASCII `0-9`** (`'²'.isdigit()` là `True`) |
+| Y4 bước 3 | "tách NGAY SAU mọi dòng đánh dấu" | Thêm **luật dòng nối theo thụt đầu dòng** (AA4 bước 4) cho quy ước kiểu Bo Friberg |
+| Y7 FP-4 | "⚠️ chưa đo được — rủi ro thật" | ✅ **Đã đo: 0 kích hoạt** trên 3 trang công thức/bảng thật. Cơ chế bảo vệ là **layout model tách ô thành paragraph 1 dòng**, không phải luật của TOC-1 |
+| Y11 bước 7.4-a | Bảng mô tả chung | **Thay bằng AA8 + AA9** |
+| Z8-2 (i) | Guard `table` theo hình học | **BÁC BỎ** — thay bằng deny-list `layout_label` (AA3) |
+
+#### AA12. Bảng trạng thái verify của section này (Protocol 5 R5-01)
+
+| Claim | Trạng thái |
+|---|---|
+| Oracle AA7 (31 fire / 130 cut; 0 FP trên 8 fixture không phải TOC) | ✅ **Verified** — script riêng của Tech Lead trên 12 dump IL thật, trong task này |
+| Tái tạo được số của Expert (LCB 11/64) và của vòng Y (Figoni 20/66) | ✅ **Verified** — replication độc lập, khớp tuyệt đối |
+| Guard `table` hình học làm mất 5 fire / 24 cut trên `lcb_toc` p1 | ✅ **Verified** — đo trực tiếp, có/không guard |
+| Guard `table` hình học **không** cứu được FP-4 (0 paragraph nhiều dòng có tâm trong box `table` trên 3 trang công thức) | ✅ **Verified** |
+| 31/31 paragraph kích hoạt có `layout_label == 'plain text'` ⇒ deny-list mất 0 recall | ✅ **Verified** |
+| Slug nhà in nhãn `abandon` lọt luật mức dòng (0.82–0.93), chỉ thoát vì là paragraph 1 dòng | ✅ **Verified** — LCB `'57131_fm_i_xv.indd 5'` = 0.82 |
+| `TOC_GAP_RATIO` 0.5→1.0 đều cho FP = 0 | ✅ **Verified** — quét 6 mức trên 12 dump |
+| Luật dòng nối (1.0 em) là no-op trên dữ liệu hiện có | ✅ **Verified** — 6/6 ranh giới, delta ≤ +0.1pt |
+| `page.page_layout[].class_name/box/id` tồn tại, có `"table"` | ✅ **Verified** — dump `figoni_p25_recipe` |
+| `xobj_id ∈ {0, −1}`, không bao giờ `None` | ✅ **Verified** — dump thật |
+| `paragraph_finder.py:245/:287/:293-294/:302/:307/:310` đúng như mô tả | ✅ **Verified** — đọc source 0.6.4 đã cài, trong task này |
+| Danh sách nhãn layout hợp lệ (`layout_helper.py:655-690`, `:789-845`) | ✅ **Verified** — đọc source |
+| Hotfix `a31ac42` có `update_unicode=True`, **không** có copy `render_order` | ✅ **Verified** — `git show` + grep |
+| Hook `process_independent_paragraphs` mutate in-place, paragraph mới nhận `unicode` + `render_order` | ⚠️ **`[UNVERIFIED]`** — **gate cứng của 7.4-a bước 5**. Đây là mục `[UNVERIFIED]` duy nhất còn lại chặn implement |
+| Bảng công thức **không kẻ khung** (nhãn `plain text`) có kích hoạt TOC-1 không | ⚠️ **`[CHƯA VERIFY]`** — chưa có mẫu trong 6 đầu sách. Rủi ro tồn đọng, theo dõi ở 7.4-d/7.4-e; **không chặn** 7.4-a |
+| `fix_overlapping_paragraphs` cắt box với sách leading chặt | ⚠️ **`[CHƯA VERIFY]`** — no-op trên Figoni (khe 2.85–2.95pt); đo ở 7.4-e |
+| Biên độ TOC-1 làm đổi mode-scale của Bug #8 | ⚠️ **Verified về cơ chế, chưa đo biên độ** — ràng buộc thứ tự AA10-c |

@@ -45,3 +45,35 @@ Trích trực tiếp từ `data/uploads/f88282bb-…_Le-Cordon-Bleu-Patisserie-a
 
 Xem `docs/Architecture.md` section "Root Cause Analysis: Text Overlap, Content-Loss &
 Reading-Order trên trang layout phức tạp (2026-09-07)".
+
+## Fixtures cho Bug #7 Ca C — TOC-1 v2 spike 7.4-a (Dev, 2026-09-08)
+
+8 file `toc_*_dump.json.gz` + 6 PDF nguồn trong `toc_sources/`, dùng để đo lại đúng oracle
+"Bug #7 Ca C — Quyết định cuối..." AA7/AA8/AA9 trong `docs/Architecture.md`. Nguồn gốc (theo
+AA8 bước 1 — artifact tạm ở `/tmp`/scratchpad phiên trước, đã kiểm tra còn sống 2026-09-08
+trước khi commit):
+
+| Fixture (`.json.gz`) | Nguồn `paragraph_finder.json` | PDF nguồn (`toc_sources/`) |
+|---|---|---|
+| `toc_lcb_contents_p6_p7_dump.json.gz` | `<SP>/wd/lcb_toc/lcb_toc/` | `lcb_toc.pdf` (LCB idx 6-7) |
+| `toc_friberg_contents_dump.json.gz` | `<SP>/wd/friberg_toc/friberg_toc/` | `friberg_toc.pdf` (Friberg idx 6) |
+| `toc_lcb_index_dump.json.gz` | `<SP>/wd/lcb_index/lcb_index/` | `lcb_index.pdf` (LCB idx 408) |
+| `toc_figoni_p25_recipe_dump.json.gz` | `<SP>/wd/figoni_p25_recipe/.../` | `figoni_p25_recipe.pdf` (Figoni idx 40) |
+| `toc_figoni_p45_recipe_dump.json.gz` | `<SP>/wd/figoni_p45_recipe/.../` | `figoni_p45_recipe.pdf` (Figoni idx 60) |
+| `toc_figoni_tables_dump.json.gz` | `<SP>/wd/figoni_p7_tables/.../` | `figoni_p7_tables.pdf` (Figoni idx 22) |
+| `toc_figoni_contents_p7_dump.json.gz` | `/tmp/bdprobe/wd_toc/figoni_p7_toc/` | (không copy PDF riêng — trùng nguồn Figoni đầy đủ, xem log spike) |
+| `toc_figoni_contents_p8_dump.json.gz` | `/tmp/bdprobe/wd_toc2/figoni_p8_toc/` | (như trên) |
+
+`<SP>` = `/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/2d559074-2821-4566-91ff-969cf281d898/scratchpad`.
+Tất cả sinh từ `babeldoc --debug` thật (flag production của `BabeldocRunner`), LLM port chết
+(`http://127.0.0.1:1/v1`) ⇒ **0 token** tốn, `--ignore-cache`. Lệnh tái tạo đầy đủ: xem
+`<SP>/run_all.sh` (2 fixture `figoni_p7_toc`/`figoni_p8_toc` dùng lệnh tương tự, working-dir
+`wd_toc`/`wd_toc2`, không có trong `run_all.sh` vì chạy ở phiên trước đó).
+
+Nếu nguồn gốc `<SP>`/`/tmp/bdprobe` đã mất: trích lại trang bằng `pymupdf.insert_pdf` từ
+`data/uploads/` — Figoni bản đầy đủ idx 40/60/22 (0-index), Le Cordon Bleu idx 6-7/408,
+Bo Friberg idx 6 — rồi chạy lại `babeldoc --debug` với flag production ở trên. **Tuyệt đối
+không viết tay mock nội dung** (Protocol 5 mục 3) — dump JSON phải là output thật của babeldoc.
+
+Dùng bởi `scripts/toc_split_spike_measure.py` (script đo, không phải test chính thức — 7.4-c
+sẽ có `tests/test_babeldoc_toc_split.py` viết trên đúng các fixture này sau khi spike PASS).

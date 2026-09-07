@@ -4143,3 +4143,160 @@ hiện: Domain Expert** (đang trong lúc phản biện thiết kế Ca C, khôn
 đây là lý do giữ nguyên quy trình 2 vai trò (Tech Lead đề xuất, Domain Expert phản biện độc lập
 bằng cách tự đọc source/tự đo) cho các thay đổi runtime quan trọng, kể cả khi việc đang bàn là một
 task khác.
+
+## Bug #7 Ca C — Spike 7.4-a (Dev, 2026-09-08)
+
+### Kết quả: **PASS** cả 6/6 điều kiện gate AA9 của `docs/Architecture.md` mục "Bug #7 Ca C —
+### Quyết định cuối sau phản biện Domain Expert + kế hoạch spike 7.4-a (Tech Lead, 2026-09-08)"
+
+Thực hiện đúng 6 bước AA8 theo thứ tự. Đây là **spike theo Protocol 5 R5-02** — sản phẩm là
+bằng chứng + fixture, KHÔNG phải feature. Không có patch thứ 3 nào được commit vào
+`src/babeldoc_shim/sitecustomize.py`, không wiring `config.py`/`babeldoc_runner.py`/
+`job_orchestrator.py`, không viết bộ test đầy đủ — đúng ràng buộc AA10(a).
+
+### Bước 1 — Bảo toàn bằng chứng
+
+Đã kiểm tra: cả 8 nguồn `paragraph_finder.json` (6 ở scratchpad phiên trước, 2 ở
+`/tmp/bdprobe/wd_toc*`) và 6 PDF nguồn ở `<SP>/pdfs/` **còn sống nguyên vẹn** — không cần tái
+tạo lại bằng `run_all.sh`. Đã gzip + commit đúng 8 file vào `tests/fixtures/babeldoc/` với tên
+theo đúng bảng AA8 bước 1, và copy 6 PDF nguồn vào `tests/fixtures/babeldoc/toc_sources/`.
+Cập nhật `tests/fixtures/babeldoc/README.md` với bảng nguồn + lệnh tái tạo.
+
+File mới:
+- `tests/fixtures/babeldoc/toc_lcb_contents_p6_p7_dump.json.gz` (222KB)
+- `tests/fixtures/babeldoc/toc_friberg_contents_dump.json.gz` (53KB)
+- `tests/fixtures/babeldoc/toc_lcb_index_dump.json.gz` (188KB)
+- `tests/fixtures/babeldoc/toc_figoni_p25_recipe_dump.json.gz` (127KB)
+- `tests/fixtures/babeldoc/toc_figoni_p45_recipe_dump.json.gz` (165KB)
+- `tests/fixtures/babeldoc/toc_figoni_tables_dump.json.gz` (185KB)
+- `tests/fixtures/babeldoc/toc_figoni_contents_p7_dump.json.gz` (104KB)
+- `tests/fixtures/babeldoc/toc_figoni_contents_p8_dump.json.gz` (133KB)
+- `tests/fixtures/babeldoc/toc_sources/{figoni_p25_recipe,figoni_p45_recipe,figoni_p7_tables,
+  friberg_toc,lcb_index,lcb_toc}.pdf`
+
+### Bước 2 — `src/babeldoc_shim/toc_split.py`
+
+Module thuần Python mới, **không import babeldoc**, implement đúng AA4 (thuật toán 6 bước) +
+AA5 (tham số chốt: `TOC_GAP_RATIO=0.8`, `TOC_MIN_TAIL_LINES=2`, `TOC_MIN_TAIL_FRACTION=0.6`,
+`TOC_MIN_BODY_ALPHA_RUNS=1`, `TOC_MAX_DIGITS=4`, `TOC_REQUIRE_NON_DECREASING=True`,
+`TOC_CONT_INDENT_EM=1.0`, `TOC_DOT_LEADER_FALLBACK=False`, deny-list `TOC_LAYOUT_LABEL_DENY`).
+
+Thiết kế theo đúng khuôn `numbered_list_split.py` của 7.2: hàm quyết định (`evaluate_paragraph`)
+nhận kiểu dữ liệu thuần (`TocChar`, tuple toạ độ `(x, y, x2, y2)`) thay vì object IL thật của
+babeldoc hay dict JSON thô — việc trích field thật (từ dump JSON ở spike này, hoặc từ object IL
+thật khi wiring vào `sitecustomize.py` ở 7.4-c) là việc của caller, không phải của module này.
+Điều này giữ module test được độc lập với cấu trúc object cụ thể.
+
+API chính: `TocChar`, `LineMark`, `ContinuationBoundary`, `ParagraphSplitResult`,
+`sort_line_chars`, `mark_toc_tail`, `evaluate_paragraph`.
+
+### Bước 3 — Đo trên 8+3 fixture, đối chiếu oracle AA7
+
+Script đo: `scripts/toc_split_spike_measure.py` (`uv run python scripts/toc_split_spike_measure.py`).
+Gọi đúng `evaluate_paragraph` (Protocol 6 R6-02), không chép lại logic quyết định.
+
+| Fixture | fire | cut points | blocked_by_monotonic | blocked_by_fraction | fired_inside_table_box | Oracle AA7 |
+|---|---|---|---|---|---|---|
+| `figoni_p7_toc` | **8** | **28** | 0 | 0 | 0 | 8/28 ✅ khớp |
+| `figoni_p8_toc` | **12** | **38** | 0 | 0 | 0 | 12/38 ✅ khớp |
+| `lcb_toc` | **11** | **64** | 0 | 0 | **5** | 11/64, `fired_inside_table_box=5` ✅ khớp |
+| `friberg_toc` | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp (đúng thiết kế, ngoài tầm TOC-1) |
+| `lcb_index` | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp (FP-7) |
+| `figoni_p25_recipe` | **0** | **0** | 0 | 0 | 0 | 0/0 ✅ khớp (FP-4, KHÔNG có false-positive) |
+| `figoni_p45_recipe` | **0** | **0** | 0 | 0 | 0 | 0/0 ✅ khớp (FP-4, KHÔNG có false-positive) |
+| `figoni_p7_tables` | **0** | **0** | 0 | 0 | 0 | 0/0 ✅ khớp (FP-3/FP-4, KHÔNG có false-positive) |
+| `p74_77` (4 trang, dùng fixture `paragraph_finder_p74_77_post71_dump.json.gz` đã có sẵn từ 7.1) | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp |
+| `page14_numbered_list_source` (dùng fixture `paragraph_finder_numbered_list_post71_dump.json.gz` đã có sẵn từ 7.2) | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp |
+| `figoni_p20` (đọc trực tiếp từ `/tmp/bdprobe/wd_p20/`, KHÔNG commit — không nằm trong 8 file bắt buộc của AA8 bước 1) | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp |
+| `figoni_p22` (đọc trực tiếp từ `/tmp/bdprobe/wd_p22/`, KHÔNG commit) | 0 | 0 | 0 | 0 | 0 | 0/0 ✅ khớp |
+| **TỔNG** | **31** | **130** | 0 | 0 | 5 | **31/130, 0 FP trên 8 fixture không phải mục lục** ✅ khớp tuyệt đối |
+
+**Không có bất kỳ false-positive nào** trên 8 fixture không phải mục lục, kể cả 3 fixture công
+thức bánh (`figoni_p25_recipe`, `figoni_p45_recipe`, `figoni_p7_tables`) — điều kiện FAIL nghiêm
+trọng nhất theo brief KHÔNG xảy ra.
+
+### Bước 4 — Đo riêng luật dòng nối (Z7-a, `TOC_CONT_INDENT_EM=1.0`)
+
+Tìm được đúng **6** ranh giới "dòng đánh dấu → dòng không đánh dấu" trong 31 paragraph kích
+hoạt (tất cả đều nằm trong `lcb_toc`):
+
+| marked_idx | next_idx | indent_delta (pt) | extended |
+|---|---|---|---|
+| 3 | 4 | −1.08 | False |
+| 3 | 4 | +0.00 | False |
+| 2 | 3 | +0.00 | False |
+| 5 | 6 | +0.07 | False |
+| 2 | 3 | +0.00 | False |
+| 4 | 5 | −13.03 | False |
+
+`min=-13.03pt, max=+0.07pt` — khớp gần như tuyệt đối với số đo của Tech Lead ở AA1/AA8
+(`−13.0 … +0.1 pt`, sai khác chỉ do làm tròn). **0/6 ranh giới được `extended`** ⇒ luật dòng nối
+là **no-op tuyệt đối** trên dữ liệu hiện có — 0 điểm tách bị dịch chuyển so với khi tắt luật này
+(vì luật không bao giờ kích hoạt). Đúng kỳ vọng AA8 bước 4 / điều kiện AA9-4.
+
+### Bước 5 — Chứng minh hook mutate in-place (mục `[UNVERIFIED]` cuối cùng của AA12)
+
+Thêm 1 patch TẠM THỜI (instrument) vào `src/babeldoc_shim/sitecustomize.py`, bọc
+`ParagraphFinder.process_independent_paragraphs`: chạy hàm gốc trước, rồi chèn 1 lần duy nhất 1
+`PdfParagraph` tổng hợp (mượn lại 1 composition `pdf_line` thật từ paragraph đầu tiên có dòng,
+`unicode=""`, `debug_id="TOC_SPIKE_STEP5_PROBE"`) vào **cùng list** `paragraphs` bằng
+`paragraphs.append(...)` — kích hoạt qua biến môi trường riêng `TOC_SPIKE_STEP5_INSTRUMENT=1`
+để không bao giờ vô tình chạy trong production.
+
+Chạy `babeldoc --debug` thật trên `figoni_p7_toc.pdf`, LLM port chết (`127.0.0.1:1`),
+`--ignore-cache`, working-dir tạm. Đọc `paragraph_finder.json` kết quả, tìm paragraph có
+`debug_id == "TOC_SPIKE_STEP5_PROBE"`:
+
+```
+so luong tim thay: 1
+page_number = 0
+unicode = 'CONTENTS'
+render_order = 5
+layout_label = fallback_line   layout_id = 24
+```
+
+**Cả 3 điều kiện đều xanh**: (a) paragraph chèn thêm **có mặt** trong `page.pdf_paragraph`,
+(b) `unicode = 'CONTENTS'` (**khác `""`**), (c) `render_order = 5` (**không phải `None`**) — dù
+code TOC-1 hoàn toàn không tự gán 2 field này. Xác nhận sống cơ chế AA6 lý do 1+2: hook đặt
+TRƯỚC `update_paragraph_data(..., update_unicode=True)` (`:293-294`) và `_set_paragraph_render_order`
+(`:310`) khiến paragraph mới **tự động** nhận đủ `unicode`/`render_order` từ chính babeldoc, không
+phụ thuộc code TOC-1 nhớ gọi đúng — TOC-1 miễn nhiễm với lớp bug Z6 (đã hại 7.2) **theo thiết kế**.
+
+**Đã revert patch tạm ngay sau khi đo xong** — `git diff --stat src/babeldoc_shim/sitecustomize.py`
+= rỗng, `grep -n TOC_SPIKE_STEP5 src/babeldoc_shim/sitecustomize.py` = 0 hit. File này **không**
+nằm trong commit của spike 7.4-a, đúng AA10(a).
+
+### Đối chiếu Gate AA9 — PASS 6/6
+
+| # | Điều kiện AA9 | Kết quả |
+|---|---|---|
+| 1 | Recall Figoni khớp chính xác 8/28 + 12/38 | ✅ **PASS** — khớp tuyệt đối |
+| 2 | Recall LCB 11/64, monotonic 11/11 | ✅ **PASS** — 11 fire, 64 cut, `blocked_by_monotonic=0` (không paragraph nào bị chặn bởi cổng monotonic ⇒ monotonic 11/11) |
+| 3 | FP = 0 tuyệt đối trên 8 fixture không phải mục lục | ✅ **PASS** — 0 kích hoạt trên cả 8 |
+| 4 | Luật dòng nối là no-op | ✅ **PASS** — 6/6 ranh giới không được `extended`, 0 điểm tách bị dịch chuyển |
+| 5 | Bước 5 xanh (`unicode != ""` và `render_order is not None`) | ✅ **PASS** — `unicode='CONTENTS'`, `render_order=5` |
+| 6 | 8 fixture + 6 PDF nguồn đã commit, README cập nhật | ✅ **PASS** |
+
+### Kết quả kiểm tra chất lượng
+
+```
+uv run pytest -q                                                            → 401 passed, 420 warnings
+uv run ruff check src/babeldoc_shim/toc_split.py scripts/toc_split_spike_measure.py       → All checks passed!
+uv run ruff format --check src/babeldoc_shim/toc_split.py scripts/toc_split_spike_measure.py → 2 files formatted
+```
+
+Số lượng test pass **không đổi** (401, giống baseline trước spike) — đúng chủ đích AA10(a): spike
+này không viết bộ test đầy đủ (`tests/test_babeldoc_toc_split.py` thuộc phạm vi 7.4-c).
+
+**File đã tạo mới**: `src/babeldoc_shim/toc_split.py`, `scripts/toc_split_spike_measure.py`,
+8 fixture `.json.gz` + 6 PDF trong `tests/fixtures/babeldoc/` (+ `toc_sources/`).
+**File đã cập nhật**: `tests/fixtures/babeldoc/README.md`.
+**File KHÔNG có thay đổi nào được commit**: `src/babeldoc_shim/sitecustomize.py` (patch tạm đã
+revert), `src/core/config.py`, `src/services/babeldoc_runner.py`, `src/core/job_orchestrator.py`.
+
+**Trạng thái**: **Spike PASS toàn bộ gate AA9.** Theo AA9, bước tiếp theo là báo cáo cho
+PM/Tech Lead để quyết định mở 7.4-b (wiring `toc_split.py` vào `sitecustomize.py` như patch thứ
+3 thật, cờ runtime `BABELDOC_SHIM_TOC_SPLIT`/`Settings.babeldoc_toc_split_enabled` mặc định
+`False`) — **chưa tự ý làm tiếp** trong task này (đúng AA10(a): "ĐÂY VẪN LÀ SPIKE"). Chưa qua
+Reviewer (không bắt buộc cho spike theo brief, nhưng 7.4-b trở đi PHẢI qua Reviewer thật theo
+Protocol 7 R7-01 trước khi coi là "xong").

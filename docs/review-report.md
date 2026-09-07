@@ -4034,3 +4034,171 @@ PDF output, không chỉ tin status):
   tài liệu, không phải code sai.
 
 ---
+
+# Review — Bug #7 Ca C — Spike 7.4-a (Protocol 5 R5-02) (Reviewer, 2026-09-08)
+
+## Phạm vi
+
+Review spike theo brief PM: `src/babeldoc_shim/toc_split.py` (MỚI), `scripts/toc_split_spike_measure.py`
+(MỚI), phần mới của `tests/fixtures/babeldoc/README.md`, cùng xác nhận `sitecustomize.py` không bị
+đổi và các con số CHANGELOG là thật. Đọc trước: `docs/Architecture.md` mục "Bug #7 Ca C — Quyết định
+cuối sau phản biện Domain Expert + kế hoạch spike 7.4-a" (AA0–AA12, dòng 7379–7762) và
+`docs/CHANGELOG.md` entry "## Bug #7 Ca C — Spike 7.4-a (Dev, 2026-09-08)" (dòng 4147–4302). Đây LÀ
+MỘT SPIKE (Protocol 5 R5-02, AA10-a) — không đòi hỏi test suite đầy đủ hay wiring production, đúng
+phạm vi PM đã nêu.
+
+## Đối chiếu code với đặc tả AA4/AA5
+
+Đọc từng dòng `toc_split.py` (397 dòng) và so khớp thủ công với AA4 (6 bước) + AA5 (tham số):
+
+| Hạng mục | Kết quả |
+|---|---|
+| Bước 0 — deny-list `layout_label` (chuẩn hoá lower/strip) + `L < 2` | ✅ Khớp — `evaluate_paragraph:305-313` |
+| `TOC_LAYOUT_LABEL_DENY` đúng 19 nhãn liệt kê ở AA4 bước 0 | ✅ Khớp từng nhãn |
+| Bước 1 — bỏ ký tự `.isspace()` rồi tự sort theo `x` (không dùng sort có sẵn của babeldoc) | ✅ Khớp — `sort_line_chars` |
+| Bước 2 — 6 điều kiện đánh dấu đuôi TOC, đúng thứ tự, dùng ASCII `0-9` (không `str.isdigit()`, Z7-c) | ✅ Khớp — `mark_toc_tail`, `_ASCII_DIGITS` là `frozenset("0123456789")` |
+| Bước 2 điều kiện 5 — hệ đo `visual_bbox` (không phải advance-width PyMuPDF) | ✅ Khớp về mặt hợp đồng dữ liệu (`TocChar.x/x2` docstring ghi rõ bắt buộc `visual_bbox.box.x/.x2`); script đo trích đúng `char["visual_bbox"]["box"]` khi tạo `TocChar` — xác nhận thật, không chỉ tin docstring |
+| Bước 3 — cổng `m ≥ TOC_MIN_TAIL_LINES`, `m/L ≥ TOC_MIN_TAIL_FRACTION`, dãy `n` không giảm | ✅ Khớp — đúng thứ tự 3 điều kiện |
+| Bước 4 — điểm tách + luật dòng nối theo thụt đầu dòng (`TOC_CONT_INDENT_EM`), so với `min_x`/`size` của **dòng đánh dấu gốc** `i` (không phải dòng `j` đang mở rộng) | ✅ Khớp — biến `mark` giữ cố định trong suốt vòng lặp mở rộng |
+| Bước 5 — thực thi (chỉ tạo `cut_after`, không tự dựng `PdfParagraph`) | ⚠️ N/A ở mức spike — đúng AA10(a): spike CHƯA thực thi bước cắt paragraph thật, chỉ trả về chỉ số cắt. Đây là chủ đích, không phải thiếu sót |
+| AA5 — toàn bộ 9 tham số (`TOC_GAP_RATIO=0.8`, `TOC_MIN_TAIL_LINES=2`, `TOC_MIN_TAIL_FRACTION=0.6`, `TOC_MIN_BODY_ALPHA_RUNS=1`, `TOC_MAX_DIGITS=4`, `TOC_REQUIRE_NON_DECREASING=True`, `TOC_CONT_INDENT_EM=1.0`, `TOC_DOT_LEADER_FALLBACK=False`, deny-list) | ✅ Khớp từng giá trị |
+| Module không `import babeldoc`, chưa wiring vào `sitecustomize.py` | ✅ Xác nhận (`grep -n "^import\|^from" src/babeldoc_shim/toc_split.py` không có babeldoc; xem mục "Chạy thật" dưới) |
+
+**Xác minh độc lập nguồn của deny-list (Protocol 5 R5-01, không tin lại citation của Tech Lead)**: tự
+đọc file `layout_helper.py` trong package `babeldoc-0.6.4` **thật đã cài** trên máy
+(`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/utils/layout_helper.py`).
+Xác nhận: **toàn bộ 19 nhãn** trong `TOC_LAYOUT_LABEL_DENY` (`abandon`, `header`, `footer`,
+`page_header`, `page_footer`, `table`, `table_cell`, `wired_table_cell`, `wireless_table_cell`,
+`table_cell_hybrid`, `table_text`, `table_caption`, `table_footnote`, `figure`, `figure_caption`,
+`figure_text`, `formula`, `isolate_formula`, `formula_caption`) đều là nhãn thật xuất hiện trong danh
+sách `layout_priority` (hàm `get_character_layout`) của package đã cài — **không có nhãn nào bịa**.
+Có 1 sai lệch nhỏ về **số dòng trích dẫn**: AA4 ghi `:655-690` và `:789-845`, nhưng trên bản cài thật
+`layout_priority = [` nằm ở **dòng 659** và `def is_text_layout` ở **dòng 801** — lệch khoảng 10-40
+dòng (có thể do Tech Lead đếm trên 1 lần cài khác hoặc version patch khác trong cùng 0.6.4). Nội dung
+đúng, chỉ số dòng trích dẫn hơi lệch — ghi vào issue non-blocking #2 dưới đây, KHÔNG chặn approve vì
+bản chất claim (nhãn có thật) đã được tôi tự verify độc lập là đúng.
+
+## Đối chiếu số liệu — tự chạy, không tin lại CHANGELOG
+
+```
+uv run python scripts/toc_split_spike_measure.py
+```
+
+Kết quả tôi tự chạy **khớp tuyệt đối 100%** với bảng CHANGELOG đã báo:
+- Tổng: **fire=31, cuts=130**, FP=0 trên 8 fixture không phải mục lục — khớp oracle AA7 và gate AA9-1/2/3.
+- Từng fixture (`figoni_p7_toc` 8/28, `figoni_p8_toc` 12/38, `lcb_toc` 11/64 với
+  `fired_inside_table_box=5`, 8 fixture còn lại đều 0/0) — khớp từng dòng bảng CHANGENLOG.
+- Bước 4 (luật dòng nối): đúng **6** ranh giới, delta từ **-13.03pt đến +0.07pt**, **0/6 `extended`**
+  — khớp CHANGELOG (làm tròn `+0.1` → tôi đo ra `+0.07`, sai khác không đáng kể do làm tròn khi viết
+  báo cáo, KHÔNG phải sai lệch số liệu).
+
+**Xác nhận script đo gọi đúng logic production (Protocol 6 R6-02 tinh thần)**: `scripts/toc_split_spike_measure.py`
+import trực tiếp `evaluate_paragraph` từ `src.babeldoc_shim.toc_split` (dòng 28-34) và gọi thẳng nó
+(dòng 134-139) — không có bất kỳ hàm nào trong script tự triển khai lại điều kiện đánh dấu/tách. Phần
+việc riêng của script chỉ là trích field thô từ JSON dump (`_char_to_tocchar`, `_paragraph_line_chars`,
+`_paragraph_box`, `_table_boxes`) thành các kiểu dữ liệu thuần (`TocChar`, tuple toạ độ) — đúng đúng
+ranh giới trách nhiệm mà docstring `toc_split.py` mô tả. **Không có hiện tượng "tự chấm điểm giả"**.
+
+## Xác nhận `sitecustomize.py` không đổi
+
+```
+git diff HEAD -- src/babeldoc_shim/sitecustomize.py   → (rỗng)
+grep -n "TOC_SPIKE_STEP5" src/babeldoc_shim/sitecustomize.py   → 0 hit
+```
+Khớp đúng lời khai của Dev (patch tạm bước AA8-5 đã revert, không commit).
+
+## `tests/fixtures/babeldoc/README.md`
+
+Phần mới ("Fixtures cho Bug #7 Ca C — TOC-1 v2 spike 7.4-a") ghi rõ nguồn gốc từng file (`<SP>`
+scratchpad + `/tmp/bdprobe`), xác nhận sinh từ `babeldoc --debug` thật với LLM port chết (0 token),
+có bảng map fixture ↔ PDF nguồn ↔ trang gốc, và có hướng dẫn tái tạo nếu nguồn mất (trích từ
+`data/uploads/` bằng `pymupdf.insert_pdf`, **không viết tay mock** — đúng Protocol 5 mục 3). Khớp với
+nội dung 6 PDF thật đã thấy trong `git status` (`toc_sources/{figoni_p25_recipe,figoni_p45_recipe,
+figoni_p7_tables,friberg_toc,lcb_index,lcb_toc}.pdf`).
+
+## Chạy thật (Reviewer tự chạy, không tin lại số Dev báo)
+
+```
+uv run pytest -q                                                                → 401 passed, 419 warnings (91s)
+uv run ruff check src/babeldoc_shim/toc_split.py scripts/toc_split_spike_measure.py       → All checks passed!
+uv run ruff format --check src/babeldoc_shim/toc_split.py scripts/toc_split_spike_measure.py → 2 files already formatted
+```
+Khớp đúng số Dev báo (401 passed, ruff sạch). Lưu ý: `uv run ruff format --check .` (toàn repo, không
+giới hạn 2 file mới) cho thấy 19 file **khác, không liên quan tới spike này** cần format lại — đây là
+nợ định dạng có sẵn từ trước, không phải do spike này gây ra, không thuộc phạm vi review này.
+
+## Checklist R5-04 (CLAUDE.md project — external dependency verification cho service wrapper)
+
+`toc_split.py` **không phải** `*_runner.py`/`*_provider.py` gọi subprocess/HTTP tới tool bên thứ 3 —
+đây là hàm quyết định thuần Python, nhận dữ liệu đã được caller trích sẵn (không tự đọc object IL
+thật hay gọi babeldoc). Theo đúng phạm vi áp dụng ghi trong CLAUDE.md project ("Không áp dụng cho thư
+viện nội bộ Python thuần code logic"), checklist R5-04 dạng "external contract verified" **không áp
+dụng trực tiếp cho chữ ký hàm/API của module này**.
+
+Tuy nhiên module CÓ 1 claim cụ thể về hệ thống ngoài (babeldoc) cần verify theo kỷ luật gắn nhãn
+chung (CLAUDE.md global, "Protocol 1 — mở rộng"): danh sách nhãn `layout_label` hợp lệ dùng cho
+deny-list. **External contract verified against real source: YES** — tôi tự đọc trực tiếp
+`layout_helper.py` của package `babeldoc-0.6.4` **đã cài thật** trên máy (đường dẫn nêu ở mục trên),
+xác nhận toàn bộ 19 nhãn trong `TOC_LAYOUT_LABEL_DENY` đều là nhãn thật (có sai lệch nhỏ về số dòng
+trích dẫn trong Architecture.md, xem issue non-blocking #2).
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+
+1. **Luật dòng nối (bước 4) có thể gán sai nhóm cho composition không phải `pdf_line` (formula) nằm
+   ngay sau 1 dòng đánh dấu.** Docstring `ContinuationBoundary`/AA4 bước 4 mô tả "composition không
+   phải `pdf_line` ... dính vào group liền trước", nhưng trace tay code (`evaluate_paragraph:354-375`):
+   khi dòng kế tiếp không phải `pdf_line` (`next_chars is None`), vòng lặp `break` ngay với `j` giữ
+   nguyên `= i` (dòng đánh dấu), rồi `cut_after.append(j)` — nghĩa là composition không-phải-`pdf_line`
+   đó sẽ rơi vào **group SAU** điểm cắt (cùng nhóm với dòng đánh dấu kế tiếp, nếu có), chứ không phải
+   "dính vào group liền trước" (nhóm của chính dòng đánh dấu `i`) như văn bản mô tả. Rủi ro hiện tại
+   **thấp/lý thuyết**: không có formula/pdf_character nào xuất hiện trong 31 paragraph kích hoạt trên
+   cả 12 dump thật (mục lục sách nấu ăn hiếm khi có công thức toán), nên AA9 không phát hiện ra sai
+   lệch này. Đề xuất: trước khi wiring 7.4-c, hoặc thêm 1 fixture có formula xen giữa mục lục để chốt
+   hành vi đúng là gì, hoặc sửa lại câu mô tả trong Architecture.md cho khớp code thật (chọn 1 trong 2,
+   không để văn bản và code lệch nhau khi đọc lại sau này).
+2. **Trích dẫn số dòng nguồn trong Architecture.md AA4 bước 0 lệch nhẹ so với bản cài thật.** AA4 ghi
+   `utils/layout_helper.py:655-690` và `:789-845`; trên `babeldoc-0.6.4` thật cài tại máy này,
+   `layout_priority = [` nằm ở dòng **659** và `def is_text_layout` ở dòng **801** (lệch ~10-40 dòng).
+   Nội dung (tập nhãn) đúng — tôi đã tự verify độc lập ở mục trên — chỉ số dòng trích dẫn không khớp
+   100%. Không ảnh hưởng code, chỉ nên sửa lại citation nếu có dịp cập nhật Architecture.md.
+3. **`scripts/toc_split_spike_measure.py` không cô lập lỗi khi đọc fixture** (Protocol 1 mở rộng, tiêu
+   chí "batch không crash vì 1 file lỗi" — áp dụng tinh thần dù đây chỉ là script đo, không phải batch
+   feature production): vòng lặp qua `_TOC_SPIKE_FIXTURES`/`_REGRESSION_FIXTURES` gọi thẳng
+   `_load_gzip_json` không có `try/except` — nếu 1 trong 8 file `.json.gz` đã commit bị hỏng, cả script
+   dừng ngay, không in được bảng cho các fixture còn lại. Ngược lại, `_REGRESSION_FIXTURES_PLAIN` (2
+   file đọc tạm từ `/tmp/bdprobe`) đã có `path.exists()` + cảnh báo + bỏ qua, cho thấy Dev nhận thức
+   được vấn đề này nhưng chỉ áp dụng cho nhóm fixture "không bắt buộc còn sống". Chấp nhận được cho
+   phạm vi spike một-lần hiện tại; nên bổ sung nếu script này được tái sử dụng làm gate CI sau này.
+
+## Next step
+
+**APPROVE.** Đủ điều kiện commit qua git pre-commit hook (Protocol 7 R7-02). Lý do:
+
+- Code khớp đặc tả AA4/AA5 đã duyệt ở mọi bước tôi trace được, không có sai lệch tham số nào.
+- Deny-list nhãn layout được tôi tự verify độc lập với package `babeldoc-0.6.4` thật đã cài — không
+  chỉ tin lại citation của Tech Lead (Protocol 5 R5-01).
+- Số liệu 31 fire/130 cut, 0 FP trên 8 fixture, 6/6 ranh giới không `extended` — tôi tự chạy lại
+  script và khớp tuyệt đối với CHANGENLOG, không tin lại con số Dev báo.
+- Script đo gọi đúng `evaluate_paragraph` thật, không tự chép lại thuật toán rồi tự chấm điểm
+  (Protocol 6 R6-02 tinh thần) — không có gian lận số liệu.
+- Fixture có nguồn gốc xác thực (dump JSON + PDF thật từ `babeldoc --debug`, không phải mock viết tay
+  — Protocol 5 mục 3).
+- `sitecustomize.py` xác nhận không có thay đổi sót lại; không có wiring/side-effect nguy hiểm nào lọt
+  vào ngoài phạm vi spike đã khai báo (AA10-a).
+- `uv run pytest -q` (401 passed), `uv run ruff check`/`ruff format --check` trên 2 file mới đều sạch.
+- 3 issue non-blocking ở trên không chặn spike PASS — đều là ghi chú cho bước 7.4-b/7.4-c (wiring
+  production), không phải lỗi của chính spike này.
+
+**Không có blocking issue.** Không tính vào giới hạn vòng lặp Protocol 3 (đây là review đầu tiên và
+duy nhất cần cho spike này, không phải 1 vòng sửa lỗi Dev↔Reviewer).
+
+Chuyển PM/Tech Lead quyết định mở 7.4-b theo đúng AA9 ("Trạng thái: Spike PASS toàn bộ gate AA9") —
+lưu ý riêng cho 7.4-b/7.4-c: xử lý issue non-blocking #1 (hành vi formula trong luật dòng nối) trước
+khi coi thuật toán là hoàn chỉnh cho production, vì lúc đó rủi ro không còn "lý thuyết" nếu sách có
+mục lục chứa công thức toán hoặc ký hiệu đặc biệt được babeldoc phân loại `pdf_formula`.
+
+---
