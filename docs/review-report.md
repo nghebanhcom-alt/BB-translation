@@ -4202,3 +4202,229 @@ khi coi thuật toán là hoàn chỉnh cho production, vì lúc đó rủi ro k
 mục lục chứa công thức toán hoặc ký hiệu đặc biệt được babeldoc phân loại `pdf_formula`.
 
 ---
+
+# Review — Bug #7 Ca C — Implement đầy đủ 7.4-b→e (wiring + test + live E2E + hồi quy) (Reviewer, 2026-09-08)
+
+## Phạm vi
+
+Review implement đầy đủ (không còn spike) theo brief PM: patch thứ 3 trong
+`src/babeldoc_shim/sitecustomize.py` (bọc `ParagraphFinder.process_independent_paragraphs`), fix bug
+continuation-line trong `src/babeldoc_shim/toc_split.py` (issue non-blocking #1 của chính tôi ở review
+spike 7.4-a), wiring `src/core/config.py` / `src/services/babeldoc_runner.py` /
+`src/core/job_orchestrator.py`, test mới `tests/test_babeldoc_toc_split.py` (33 test), và đối chiếu số
+liệu live E2E + hồi quy trong `docs/CHANGELOG.md`. Đọc trước khi review: `docs/Architecture.md` AA0–AA12
+(dòng 7379–7762), review spike 7.4-a của chính tôi (mục ngay trên), và 2 entry CHANGELOG cuối
+("7.4-b/c/d/e" dòng 4304–4486 và "Implement đầy đủ (7.4-b→e)" dòng 4488–4577) — **không tin lại số liệu
+Dev/PM báo, tự kiểm chứng lại trong task này** (Protocol 5 R5-01 tinh thần, áp cho brief giao việc).
+
+## 1. Fix bug continuation-line (issue non-blocking #1 của chính tôi) — XÁC NHẬN ĐÃ SỬA ĐÚNG
+
+Đọc lại `evaluate_paragraph` (`src/babeldoc_shim/toc_split.py:348-391`), trace tay nhánh
+`next_chars is None` (composition không phải `pdf_line`, vd `pdf_formula`):
+
+- **Trước fix** (đã ghi trong review spike 7.4-a): gặp composition non-line thì `break` ngay với `j`
+  giữ nguyên `= i` (dòng đánh dấu) rồi `cut_after.append(j)` → composition đó rơi vào group **SAU**
+  điểm cắt — sai với đặc tả AA4 bước 4.
+- **Sau fix** (dòng 374-375): `j = next_idx; continue` — không `break`, không ghi `ContinuationBoundary`
+  cho composition non-line (đúng vì nó không có `font_size`/`x` để đo "thụt đầu dòng"), vòng lặp tiếp
+  tục xét composition kế tiếp. Khi sau đó gặp 1 dòng đánh dấu khác → `break`, `cut_after.append(j)` với
+  `j` đã được đẩy tới đúng chỉ số của composition non-line cuối cùng trước dòng đánh dấu mới → composition
+  non-line nằm **TRONG** group của dòng đánh dấu gốc `i` (group liền TRƯỚC), khớp đúng đặc tả "giống hệt
+  7.2".
+- Tự trace tay cả 3 ca biên: (a) 1 formula đơn ngay sau dòng đánh dấu, dính đúng group trước; (b) 2
+  formula liên tiếp, cả 2 đều dính group trước (vòng lặp `continue` xử lý tuần tự từng composition non-
+  line, không chỉ ca đầu tiên); (c) formula ở cuối paragraph (`next_idx >= composition_count` sau khi đã
+  `j = next_idx` do formula) → `break` do hết composition, `j` = chỉ số formula, `j < composition_count -
+  1` là `False` → không tạo cut thừa, không crash. Cả 3 ca đều khớp 3 test mới tương ứng trong
+  `tests/test_babeldoc_toc_split.py` (`test_non_pdf_line_composition_right_after_marked_line_sticks_to_
+  previous_group`, `test_multiple_non_pdf_line_compositions_all_stick_to_previous_group`,
+  `test_non_pdf_line_composition_at_paragraph_end_produces_no_cut`) — tự chạy `pytest` xác nhận cả 3 PASS
+  (xem mục 5).
+
+**Kết luận: bug continuation-line đã được sửa ĐÚNG theo đặc tả AA4 bước 4** — không còn hành vi sai đã
+nêu ở issue #1 của review spike trước.
+
+## 2. `sitecustomize.py` patch thứ 3 — đối chiếu với patch 1/2 đã có
+
+`git diff HEAD -- src/babeldoc_shim/sitecustomize.py` (190 dòng thêm):
+
+| Tiêu chí | Kết quả |
+|---|---|
+| Cùng cơ chế fail-safe: `_apply_patch` kiểm tra `hasattr` cho CẢ 3 method TRƯỚC khi gán bất kỳ attribute nào, gọi từ `_PatchingLoader.exec_module` bọc `try/except` chung | ✅ Đọc trực tiếp `_apply_patch` (dòng ~446-480) và `_PatchingLoader.exec_module` (dòng 494-505): xác nhận patch mới (`process_independent_paragraphs`) nằm CÙNG hàm `_apply_patch`, CÙNG khối `try/except` với 2 patch cũ — đúng docstring "cả 3 patch đều rollback cùng nhau" |
+| Cùng gate version `babeldoc.__version__ == "0.6.4"` áp dụng cho toàn bộ hook (không phải riêng patch mới) | ✅ `_install_hook_if_version_matches` (dòng 541-556) chạy TRƯỚC khi cài `_ParagraphFinderPatchFinder`, áp dụng chung cho cả 3 patch — không có gate version riêng cho patch 3 |
+| Cờ runtime riêng, mặc định NGƯỢC với 2 patch trước | ✅ `_toc_split_enabled()` (dòng 144-147) đọc `BABELDOC_SHIM_TOC_SPLIT`, mặc định `"0"` (TẮT) — đúng AA5 "mặc định False ở lần ship đầu", khác `_numbered_list_split_enabled()` mặc định `"1"` (BẬT) |
+| Điểm hook đúng AA6: bọc `process_independent_paragraphs`, KHÔNG bọc `process()` như 7.2 | ✅ `_build_patched_process_independent_paragraphs` (dòng 391-406): gọi hàm gốc TRƯỚC (`original_process_independent_paragraphs(self, paragraphs, median_width)`), rồi mới gọi `_split_toc_paragraphs_in_list` nếu cờ bật — đúng thứ tự AA6 |
+| Mutate in-place đúng cơ chế AA6 (không cần `page`) | ✅ `_split_toc_paragraphs_in_list` (dòng 308-388) nhận thẳng `paragraphs` (list object), kết thúc bằng `paragraphs[:] = new_paragraphs` (slice assignment, giữ nguyên object identity) — không truyền/nhận `page` — khớp đúng lý do AA6 (`page.pdf_paragraph` và tham số `paragraphs` của `process_independent_paragraphs` trỏ CÙNG 1 list, gán tại `paragraph_finder.py:245`) |
+| Patch mới KHÔNG tự gọi `update_paragraph_data(..., update_unicode=True)` và KHÔNG tự gán `render_order` | ✅ Đọc dòng 372-388: `self.update_paragraph_data(paragraph)` (group đầu, KHÔNG `update_unicode=True`) và `self.update_paragraph_data(new_paragraph)` (group sau) — không có `update_unicode=True` ở đâu trong hàm này, không có gán `render_order` — dựa hoàn toàn vào cơ chế "chạy trước babeldoc tự làm việc đó" (AA6) |
+| Nguyên mẫu `PdfParagraph` mới đúng AA4 bước 5 | ✅ `box=Box(0, 0, 0, 0)`, `unicode=""`, `debug_id=generate_base58_id()`, copy `layout_label`/`layout_id` — xem mục 3 dưới để đối chiếu với source thật |
+
+## 3. Tự đọc lại source babeldoc 0.6.4 thật — xác nhận cơ chế AA6 (không chỉ tin lại claim của Dev/Tech Lead)
+
+Đọc trực tiếp
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/paragraph_finder.py`
+(bản `babeldoc 0.6.4` thật đã cài, xác nhận qua `babeldoc --version`), KHÔNG suy đoán lại từ Architecture.md:
+
+- Dòng **245**: `page.pdf_paragraph = paragraphs` — khớp CHÍNH XÁC citation AA1/AA6 (không phải `:247`
+  như lỗi cũ của vòng Y đã đính chính ở AA11).
+- Dòng **287**: `self.process_independent_paragraphs(paragraphs, median_width)` — khớp chính xác điểm
+  hook AA6.
+- Dòng **291**: `self.merge_alternating_line_number_paragraphs(paragraphs)`.
+- Dòng **293-294**: vòng `for paragraph in paragraphs: self.update_paragraph_data(paragraph,
+  update_unicode=True)` — chạy SAU điểm hook, cho MỌI paragraph trong `paragraphs` (bao gồm paragraph
+  TOC-1 v2 mới tạo) — **xác nhận trực tiếp bằng mắt trên source thật**: đây chính là cơ chế khiến patch
+  mới miễn nhiễm với bug Z6 (`unicode=""`), không phải suy đoán.
+- Dòng **302, 307, 310**: `fix_overlapping_paragraphs(page)`, `add_debug_info(page)`,
+  `_set_paragraph_render_order(page)` — đúng thứ tự AA6 lý do 2/3.
+- Hàm `process_independent_paragraphs` (dòng 841-928), nhánh dot-leader (dòng 866-889): nguyên mẫu
+  `PdfParagraph` thật là `box=Box(0, 0, 0, 0)`, `pdf_paragraph_composition=...`, `unicode=""`,
+  `debug_id=generate_base58_id()`, `layout_label=paragraph.layout_label`,
+  `layout_id=paragraph.layout_id`, sau đó gọi `self.update_paragraph_data(paragraph)` (group cũ, KHÔNG
+  `update_unicode=True`) và `self.update_paragraph_data(new_paragraph)` (group mới) — **khớp TỪNG TRƯỜNG
+  MỘT** với `_split_toc_paragraphs_in_list` trong `sitecustomize.py` (mục 2 ở trên). Không có sai lệch.
+
+**Kết luận mục 3**: claim cốt lõi của AA6 ("hook chạy trước babeldoc tự gán `unicode` + `render_order`
+đúng, TOC-1 miễn nhiễm bug Z6 theo thiết kế") đã được **tôi tự verify độc lập bằng cách đọc trực tiếp
+source babeldoc 0.6.4 thật đã cài trên máy này** trong chính task review này — không tin lại citation
+của Tech Lead/Dev, và không có sai lệch nào giữa citation và source thật.
+
+## 4. Wiring `config.py` / `babeldoc_runner.py` / `job_orchestrator.py`
+
+`git diff HEAD` trên cả 3 file:
+
+- `src/core/config.py`: `babeldoc_toc_split_enabled: bool = False` — **xác nhận mặc định `False`** đúng
+  AA5 ("mặc định False ở lần ship đầu, bật sau khi QA live xanh") — đây là điểm QUAN TRỌNG NHẤT của
+  wiring, đã kiểm tra kỹ, không bị đổi thành `True`.
+- `src/services/babeldoc_runner.py`: param `toc_split_enabled: bool = False` (khớp default), env
+  `BABELDOC_SHIM_TOC_SPLIT` chỉ được set **BÊN TRONG** khối `if self._line_split_shim_enabled:` (dòng
+  356) — cùng khối với `BABELDOC_SHIM_NUMBERED_LIST_SPLIT` — xác nhận đúng: cờ TOC-1 v2 chỉ có tác dụng
+  khi shim tổng đang bật, không set env "mồ côi" khi shim tổng tắt.
+- `src/core/job_orchestrator.py`: `_translator_runner` truyền `toc_split_enabled=self._settings.
+  babeldoc_toc_split_enabled` — dùng **keyword argument**, không phải positional — nên thứ tự tham số
+  mới thêm vào `BabeldocRunner.__init__` không có rủi ro lệch tham số âm thầm. Tự `grep -rn
+  "BabeldocRunner("` toàn repo: chỉ có đúng 1 call site (trong `job_orchestrator.py`) ngoài định nghĩa
+  — không có call site nào khác dùng positional args có thể bị vỡ.
+
+**Kết luận mục 4**: wiring đúng, an toàn, mặc định tắt đúng yêu cầu.
+
+## 5. Tự chạy lại toàn bộ (không tin lại số Dev/PM báo)
+
+```
+uv run pytest -q                                    → 434 passed, 420 warnings (~87s)
+uv run pytest -q tests/test_babeldoc_toc_split.py   → 33 passed
+uv run ruff check .                                 → All checks passed!
+uv run ruff format --check <6 file đã sửa/tạo>      → sạch (đã format đúng)
+uv run python scripts/toc_split_spike_measure.py    → fire=31 cuts=130, FP=0 tren 8 fixture,
+                                                        6/6 ranh gioi khong 'extended'
+                                                        (khop tuyet doi oracle AA7/AA9, kop
+                                                        CHANGELOG sau khi sua bug continuation-line)
+```
+
+Khớp đúng số CHANGELOG báo ở cả 2 entry (434 passed, ruff sạch, 31/130/0 FP không đổi sau bug fix —
+đúng dự đoán "Reviewer" ở review spike rằng đây là rủi ro thấp/lý thuyết).
+
+## 6. Live E2E (7.4-d) và hồi quy (7.4-e) — đối chiếu 2 entry CHANGELOG, không tự chạy lại toàn bộ
+
+Không đủ điều kiện (thời gian/API key DeepSeek trong phiên review này) để tự chạy lại toàn bộ live E2E
++ 4 fixture hồi quy `babeldoc --debug` như brief gợi ý làm "nếu có thể" — thay vào đó xác nhận qua cách
+khác theo đúng chỉ dẫn dự phòng của brief ("nếu không đủ thời gian, ít nhất xác nhận logic/test golden-
+fixture tự chạy pass và khớp oracle AA7" — đã làm ở mục 5) cộng thêm đối chiếu chéo dưới đây:
+
+- **Test golden-fixture đã bao phủ đúng phần thuật toán quyết định tách** (mục 5) — đây là phần rủi ro
+  cao nhất (sai thuật toán → sai toàn bộ pipeline hạ nguồn), đã verify độc lập.
+- Phần live E2E/hồi quy còn lại phụ thuộc hành vi babeldoc thật + DeepSeek thật, không thể mock lại mà
+  không vi phạm Protocol 5 mục 3 — chấp nhận dựa vào số liệu Dev/PM báo cho phần NÀY, có 1 quan sát cần
+  ghi lại (xem "Danh sách issue" #2 dưới): **2 entry CHANGELOG mô tả CÙNG 1 lần thực hiện 7.4-b→e nhưng
+  báo 2 bộ số liệu live E2E KHÔNG giống nhau** (số dòng "ranh giới mục" 27→57/40→78 ở entry 1 so với số
+  "block" 26→54 ở entry 2 cho cùng trang p7) — nhiều khả năng là 2 lần chạy DeepSeek thật ĐỘC LẬP (dịch
+  không xác định/non-deterministic + 2 cách đếm khác nhau: dòng theo regex vs block theo PyMuPDF), không
+  phải 1 bộ số bị chép nhầm. Không phủ nhận kết luận chung (TOC-1 v2 tách đúng, Z6 không tái diễn) vì cả
+  2 entry đều đồng thuận về hướng kết quả, nhưng đây là dấu hiệu công việc bị làm TRÙNG LẶP — xem issue
+  non-blocking #2.
+- `fix_overlapping_paragraphs` no-op trên hồi quy: chấp nhận claim "0 thay đổi" của CHANGENLOG cho mục
+  này vì đã có bằng chứng gián tiếp vững (test suite hiện tại 434 passed bao gồm mọi test hồi quy cũ của
+  7.1/7.2, không có test nào fail sau khi thêm patch 3) dù chưa tự chạy lại `babeldoc --debug` 4 fixture
+  hồi quy trong phiên review này.
+
+## 7. Checklist R5-04 (external contract verified against real source)
+
+`sitecustomize.py`/`toc_split.py` không phải `*_runner.py`/`*_provider.py` gọi subprocess/HTTP tới tool
+ngoài — theo đúng phạm vi CLAUDE.md project, R5-04 dạng "service wrapper" không áp dụng trực tiếp. Tuy
+nhiên module CÓ 2 claim cụ thể về hệ thống ngoài (babeldoc 0.6.4) cần verify theo kỷ luật gắn nhãn
+chung: **External contract verified against real source: YES** — cả điểm hook AA6 (mục 3 ở trên) VÀ
+danh sách nhãn layout deny-list (đã verify độc lập ở review spike 7.4-a, không đổi trong task này) đều
+đã được tôi tự đọc trực tiếp source `babeldoc-0.6.4` thật đã cài trên máy trong 2 lần review liên tiếp
+(spike + implement đầy đủ) — không có claim nào còn ở trạng thái suy đoán chưa verify.
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+
+1. **Yêu cầu "ghi log 1 dòng mỗi lần cổng chặn" (Z8-2 iv, AA4 bước 3, AA2 hàng Z4 — thuộc phần THIẾT KẾ
+   CHỐT của Architecture.md, không phải mục thảo luận phụ) chưa được implement ở tầng production.**
+   `grep -rn "logging\|logger\." src/babeldoc_shim/toc_split.py` = 0 hit — module này không import
+   `logging`, không có bất kỳ câu lệnh ghi log nào. `sitecustomize.py`'s `_split_toc_paragraphs_in_list`
+   cũng không log khi `evaluate_paragraph` trả về `REASON_NOT_MONOTONIC`/`REASON_LOW_FRACTION` với
+   `tail_marks >= 2`. Yêu cầu này CHỈ được hiện thực trong `scripts/toc_split_spike_measure.py`
+   (`blocked_by_monotonic`, `blocked_by_fraction`) — một script đo một-lần đọc dump JSON tĩnh, KHÔNG
+   chạy trong subprocess babeldoc thật lúc production, nên không tạo ra bất kỳ tín hiệu quan sát được
+   nào khi hệ thống chạy thật. AA2 ghi rõ mục đích của log này là "để **7.4-e** có số liệu thật thay vì
+   lý thuyết" — nhưng 7.4-e (đo hồi quy) trong CHANGENLOG chỉ so sánh `paragraph_finder.json` dump trực
+   tiếp (không đọc log), nên yêu cầu logging vẫn chưa từng được thực thi ở bất kỳ đường nào ngoài spike
+   script. Rủi ro thực tế thấp (0 paragraph bị chặn bởi 2 cổng này trên toàn bộ 12 dump đã đo), nhưng đây
+   là 1 khoảng cách rõ ràng giữa đặc tả CHỐT và code đã merge. Đề xuất: thêm logging thật (qua `logger`
+   có sẵn trong `sitecustomize.py`, gọi từ `_split_toc_paragraphs_in_list` khi phát hiện
+   `result.reason in (REASON_NOT_MONOTONIC, REASON_LOW_FRACTION)` và `result.tail_marks >= 2`) trước khi
+   bật `babeldoc_toc_split_enabled=True` mặc định cho production, hoặc ghi nhận tường minh vào
+   Architecture.md rằng yêu cầu này bị hoãn/hạ mức ưu tiên có chủ đích.
+2. **2 entry CHANGELOG liên tiếp ("## Bug #7 Ca C — 7.4-b/c/d/e..." dòng 4304 và "## Bug #7 Ca C —
+   Implement đầy đủ (7.4-b→e)..." dòng 4488) mô tả 2 lần thực hiện ĐỘC LẬP của CÙNG 1 phạm vi việc
+   (7.4-b→e) trên CÙNG 1 trạng thái diff chưa commit** (`git diff HEAD --stat` chỉ cho ra đúng 1 bộ thay
+   đổi file, không phải 2 commit riêng biệt) — bằng chứng: 2 entry báo số liệu live E2E (7.4-d) KHÁC
+   NHAU cho cùng 1 cặp trang Figoni p7/p8 (entry 1: "27→57"/"40→78" dòng ranh giới + English word count
+   "18→17"/"17→18"; entry 2: "26→54" block trang 0) — nhiều khả năng 2 phiên Dev/PM khác nhau đều tự
+   chạy `babeldoc`+DeepSeek thật độc lập cho cùng nhiệm vụ mà không biết phiên kia đã làm xong. Không
+   ảnh hưởng tính đúng đắn của code cuối cùng (cả 2 entry đều đồng thuận kết luận, và code hiện tại chỉ
+   có 1 phiên bản), nhưng là dấu hiệu lãng phí công sức/chi phí API và làm khó truy vết "báo cáo nào là
+   bản cuối cùng đáng tin". Đề xuất PM: khi giao lại 1 task đã có entry CHANGENLOG dở dang, kiểm tra
+   trạng thái file/diff hiện có trước khi spawn lại Dev từ đầu.
+3. **`uv.lock` có 1 thay đổi không liên quan tới Ca C** (`bb-translation` version `1.2.5` → `1.2.6`)
+   nằm lẫn trong diff của task này — `pyproject.toml` đã có `version = "1.2.6"` từ commit `5732a41`
+   (trước cả nhánh việc Bug #7), nên đây chỉ là `uv.lock` tự đồng bộ lại khi có ai chạy `uv run`/`uv
+   sync`, không phải thay đổi cố ý của Ca C. Không có rủi ro (giá trị đúng), nhưng nên tách khỏi commit
+   của tính năng này để lịch sử git rõ ràng hơn nếu có dịp.
+
+## Next step
+
+**APPROVE.** Đủ điều kiện commit qua git pre-commit hook (Protocol 7 R7-02). Lý do:
+
+- Bug continuation-line (issue #1 của chính tôi ở review spike trước) đã được sửa ĐÚNG theo đặc tả AA4
+  bước 4 — tự trace tay code + xác nhận qua 3 test mới tương ứng, cả 3 đều PASS.
+- Điểm hook AA6 (cơ chế miễn nhiễm bug Z6) đã được tôi **tự đọc lại source `babeldoc-0.6.4` thật đã cài
+  trên máy trong CHÍNH task review này** (không tin lại citation cũ) — khớp TUYỆT ĐỐI từng số dòng, từng
+  trường dữ liệu với `sitecustomize.py`. Đây là claim quan trọng nhất của toàn bộ thiết kế Ca C và đã
+  được verify độc lập 2 lần liên tiếp (spike + implement).
+- Wiring `config.py`/`babeldoc_runner.py`/`job_orchestrator.py` đúng, mặc định `babeldoc_toc_split_
+  enabled=False` được xác nhận KHÔNG bị đổi — đúng yêu cầu AA5 quan trọng nhất của giai đoạn ship đầu.
+- `uv run pytest -q` (434 passed, gồm 33 test mới gọi đúng hàm production), `ruff check`/`ruff format
+  --check` đều sạch — tự chạy lại, khớp CHANGENLOG.
+- Tự chạy lại `scripts/toc_split_spike_measure.py` sau bug fix: 31 fire/130 cut, FP=0, 6/6 ranh giới
+  không `extended` — khớp tuyệt đối oracle AA7/AA9, xác nhận bug fix continuation-line không làm lệch số
+  liệu đã duyệt.
+- 3 issue non-blocking ở trên (thiếu logging Z8-2 iv ở tầng production, 2 entry CHANGENLOG trùng lặp
+  công việc, `uv.lock` version drift không liên quan) không chặn approve — không phải lỗi correctness/
+  security/data-lineage của chính code, nhưng cần PM/Tech Lead lưu ý trước khi bật
+  `babeldoc_toc_split_enabled=True` mặc định cho production.
+
+**Không có blocking issue.** Đây là vòng review thứ 2 cho Ca C (spike 7.4-a + implement đầy đủ) — không
+tính vào giới hạn Protocol 3 Dev↔Reviewer (không phải vòng sửa lỗi do Reviewer reject, spike trước đã
+APPROVE ngay từ đầu).
+
+**Khuyến nghị cho QA**: theo AA5 ("bật sau khi QA live xanh") và Protocol 5 R5-03/Protocol 6 R6-03, QA
+cần tự chạy live E2E thật (không chỉ tin lại 2 entry CHANGENLOG của Dev/PM — đặc biệt vì mục 6 ở trên đã
+phát hiện 2 entry có số liệu không khớp nhau) trước khi đề xuất đổi `babeldoc_toc_split_enabled` mặc định
+sang `True`. Đồng thời QA/Tech Lead nên quyết định có bắt buộc implement logging Z8-2(iv) (issue non-
+blocking #1) trước khi bật mặc định production hay không.
+
+---

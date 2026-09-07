@@ -83,3 +83,26 @@ def test_numbered_list_split_touches_only_the_documented_two_call_sites() -> Non
         "di trong vong lap groups) — neu so cho tao PdfParagraph doi, test pin cung "
         "o tren co the khong con bao ve dung cho"
     )
+
+
+def test_toc_split_logs_when_monotonic_or_fraction_gate_blocks_a_candidate() -> None:
+    """Pin cứng yêu cầu Z8-2(iv)/AA2 dòng Z4 (Domain Expert, chấp nhận bởi Tech
+    Lead trong "Quyết định cuối..." AA2): khi cổng `m/L` (`REASON_LOW_FRACTION`)
+    hoặc cổng số trang không giảm (`REASON_NOT_MONOTONIC`) CHẶN một paragraph đã
+    có >= 2 dòng được đánh dấu là đuôi mục lục, `_split_toc_paragraphs_in_list`
+    PHẢI log 1 dòng cảnh báo — để 7.4-e/7.4-d có số liệu thật về tần suất các
+    cổng này chặn nhầm thay vì chỉ có lý luận trên giấy. Ban đầu yêu cầu này chỉ
+    được implement trong script đo của spike 7.4-a, KHÔNG có trong code production
+    — Reviewer phát hiện thiếu (non-blocking, review 7.4-b→e) và đã được bổ sung."""
+    source = _SITECUSTOMIZE_PATH.read_text(encoding="utf-8")
+    func_body = _extract_function_body(source, "_split_toc_paragraphs_in_list")
+
+    assert "REASON_LOW_FRACTION" in func_body and "REASON_NOT_MONOTONIC" in func_body, (
+        "ham nay phai tham chieu ca 2 hang REASON_LOW_FRACTION va "
+        "REASON_NOT_MONOTONIC de biet khi nao can log canh bao (AA2 dong Z4)"
+    )
+    assert "logger.warning" in func_body and "tail_marks" in func_body, (
+        "ham nay phai log 1 dong canh bao (dung result.tail_marks) khi cong "
+        "m/L hoac monotonic chan mot paragraph co >= 2 dong danh dau — thieu "
+        "logging nay la issue non-blocking Reviewer da flag o review 7.4-b→e"
+    )

@@ -70,6 +70,56 @@ goi sort theo x cua chinh babeldoc deu bi comment (`paragraph_finder.py:305,
 Doc lap voi bien BABELDOC_SHIM_NUMBERED_LIST_SPLIT (mac dinh "1" — bat):
 `BabeldocRunner` truyen bien nay rieng, tat duoc heuristic 7.2 ma khong dong
 ca shim 7.1 (Settings.babeldoc_numbered_list_split_enabled).
+
+BUOC 7.4-b — CA C: TACH MUC LUC KHONG DOT-LEADER "DU DAY" (TOC-1 v2)
+---------------------------------------------------------------------
+Architecture.md muc "Bug #7 Ca C — Quyet dinh cuoi sau phan bien Domain
+Expert + ke hoach spike 7.4-a (Tech Lead, 2026-09-08)" (AA0-AA12). Spike
+7.4-a (module `toc_split.py`, thuat toan thuan) da PASS toan bo gate AA9 va
+qua Reviewer APPROVE (`docs/review-report.md`, "Review spike 7.4-a") — patch
+NAY (7.4-b) wiring thuat toan do vao babeldoc that.
+
+Diem hook (AA6, KHAC 2 patch tren): boc `ParagraphFinder.
+process_independent_paragraphs(paragraphs, median_width)` — KHONG boc
+`process()` nhu 7.2. Ham nay chay o `process_page` (`paragraph_finder.py:287`)
+NGAY SAU khi `page.pdf_paragraph = paragraphs` (`:245`, cung 1 list object)
+va TRUOC 3 buoc quan trong chay SAU no trong `process_page`:
+  1. `merge_alternating_line_number_paragraphs` (`:291`) — khong gop lai duoc
+     paragraph TOC-1 tao ra (ly do that: `_is_ascii_digit_or_space_paragraph`
+     + `layout_id` phai trung, KHONG phai `xobj_id` nhu suy doan sai cua vong
+     Y — da tu doc source xac nhan, AA1/AA2 Z2-b).
+  2. `for paragraph in paragraphs: update_paragraph_data(paragraph,
+     update_unicode=True)` (`:293-294`) — chay cho MOI paragraph trong cung
+     list `paragraphs` ma patch nay mutate in-place, nen paragraph TOC-1 tao
+     moi LUON co `.unicode` dung — MIEN NHIEM voi dung lop bug da lam hong
+     7.2 (Z6: `unicode=""` khien `il_translator_llm_only.py` bo qua, khong
+     dich). Day la ly do CHINH chon hook nay (AA6 ly do 1) — an toan theo
+     CAU TRUC, khong phai theo tri nho nguoi viet code phai tu goi
+     `update_paragraph_data(update_unicode=True)`.
+  3. `_set_paragraph_render_order` (`:310`) — chay SAU, nen paragraph TOC-1
+     co `render_order` THAT, khong ke thua no cua 7.2 (Y10-b, `render_order`
+     khong duoc copy khi tach — AA10-b, van con o 7.2, KHONG thuoc pham vi
+     7.4).
+Vi 2 dieu nay, patch nay KHONG tu goi `update_paragraph_data(...,
+update_unicode=True)` va KHONG tu gan `render_order` — khac han patch 7.2 o
+tren (`_split_numbered_list_paragraphs_on_page` phai tu lam ca hai vi no hook
+SAU cung 1 loi goi nay trong `process()`).
+
+Thuat toan tach thuan (AA4 6 buoc + AA5 tham so) nam trong `toc_split.py`,
+dung chung voi test golden fixture (`tests/test_babeldoc_toc_split.py`,
+Protocol 6 R6-02). Ham o day (`_split_toc_paragraphs_in_list`) chi thuc thi
+ket qua `evaluate_paragraph(...)` tra ve tren object babeldoc that: cat
+`pdf_paragraph_composition` theo `cut_after`, tao `PdfParagraph` moi cho tung
+nhom tu nhom thu 2 tro di — dung nguyen mau chinh nhanh dot-leader (>= 20
+cham) da co san CUA CHINH `process_independent_paragraphs` goc
+(`paragraph_finder.py:868-885`, da doc source that AA4 buoc 5).
+
+Doc lap voi bien BABELDOC_SHIM_TOC_SPLIT (mac dinh "0" — TAT, KHAC 2 patch
+tren mac dinh BAT): day la heuristic MOI NHAT/rui ro cao nhat theo AA5, chi
+bat sau khi QA live xanh (Settings.babeldoc_toc_split_enabled). Cung gate
+version `0.6.4` va cung co che rollback-chung (try/except o `_apply_patch`)
+voi 2 patch kia — babeldoc doi cau truc code se lam CA 3 patch rollback cung
+nhau, khong rieng patch nay.
 """
 
 from __future__ import annotations
@@ -89,6 +139,12 @@ _TARGET_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.paragraph_finder"
 
 def _numbered_list_split_enabled() -> bool:
     return os.environ.get("BABELDOC_SHIM_NUMBERED_LIST_SPLIT", "1") != "0"
+
+
+def _toc_split_enabled() -> bool:
+    # Mac dinh "0" (TAT) — KHAC 2 patch tren mac dinh BAT (AA5: heuristic moi
+    # nhat/rui ro cao nhat, chi bat sau khi QA live xanh).
+    return os.environ.get("BABELDOC_SHIM_TOC_SPLIT", "0") == "1"
 
 
 def _is_whitespace_char(char: object) -> bool:
@@ -249,6 +305,142 @@ def _split_numbered_list_paragraphs_on_page(self, page, paragraph_finder_module)
     page.pdf_paragraph = new_paragraphs
 
 
+def _split_toc_paragraphs_in_list(
+    self, paragraphs: list, paragraph_finder_module: ModuleType
+) -> None:
+    """Buoc 7.4-b (TOC-1 v2, "Bug #7 Ca C"): sau khi `process_independent_
+    paragraphs` GOC (nhanh dot-leader >= 20 cham) da chay xong tren CHINH
+    list `paragraphs` nay, tach tiep cac paragraph con gom nhieu muc muc luc
+    KHONG co dot-leader du day (< 20 cham). Moi quyet dinh CO tach hay khong
+    VA tach O DAU deu do `toc_split.evaluate_paragraph` (thuan Python,
+    testable — Protocol 6 R6-02) tra ve; ham nay chi thuc thi ket qua do tren
+    cac object babeldoc that: cat `pdf_paragraph_composition` theo
+    `cut_after`, tao `PdfParagraph` moi cho tung nhom tu nhom thu 2 tro di —
+    dung nguyen mau chinh nhanh dot-leader cua ham goc
+    (`paragraph_finder.py:868-885`, da doc source that AA4 buoc 5).
+
+    Mutate `paragraphs` IN-PLACE qua slice assignment (`paragraphs[:] = ...`)
+    — AA6 dua vao viec `page.pdf_paragraph` va tham so `paragraphs` cua ham
+    `process_independent_paragraphs` TRO CUNG 1 list object
+    (`paragraph_finder.py:245`), nen sua list nay tai cho se tu dong phan
+    anh sang `page.pdf_paragraph` MA KHONG can duoc truyen `page`.
+
+    KHONG tu goi `update_paragraph_data(..., update_unicode=True)` va KHONG
+    tu gan `render_order` cho paragraph moi (AA4 buoc 5) — hook nay chay
+    TRUOC `paragraph_finder.py:293-294` va `:310` nen babeldoc GOC se tu lam
+    ca hai cho MOI paragraph con lai trong `paragraphs` (bao gom paragraph
+    moi ham nay vua chen), giong het cach nhanh dot-leader cua chinh
+    `process_independent_paragraphs` khong tu goi `update_unicode=True`.
+    """
+    from toc_split import (
+        REASON_LOW_FRACTION,
+        REASON_NOT_MONOTONIC,
+        TocChar,
+        evaluate_paragraph,
+    )
+
+    PdfParagraph = paragraph_finder_module.PdfParagraph
+    Box = paragraph_finder_module.Box
+    generate_base58_id = paragraph_finder_module.generate_base58_id
+
+    new_paragraphs = []
+    for paragraph in paragraphs:
+        compositions = paragraph.pdf_paragraph_composition
+        if len(compositions) <= 1:
+            new_paragraphs.append(paragraph)
+            continue
+
+        line_chars: list[list[TocChar] | None] = []
+        for comp in compositions:
+            if not comp.pdf_line:
+                line_chars.append(None)
+                continue
+            line_chars.append(
+                [
+                    TocChar(
+                        x=char.visual_bbox.box.x,
+                        x2=char.visual_bbox.box.x2,
+                        unicode=char.char_unicode,
+                        font_size=char.pdf_style.font_size or 0.0,
+                    )
+                    for char in comp.pdf_line.pdf_character
+                ]
+            )
+
+        result = evaluate_paragraph(paragraph.layout_label, line_chars)
+        if not result.fired:
+            # AA4 buoc 3 / Z8-2(iv): khi cong m/L hoac monotonic CHAN mot
+            # paragraph da co >= 2 dong duoc danh dau la duoi muc luc, ghi
+            # log 1 dong de 7.4-e/7.4-d co so lieu THAT thay vi ly thuyet
+            # (Tech Lead AA2 dong Z4 chap nhan yeu cau nay cua Domain Expert).
+            # KHONG log cho REASON_DENY_LAYOUT/REASON_TOO_SHORT/
+            # REASON_FEW_TAIL_LINES (tail_marks < 2 - khong phai ca dang lo
+            # ngai) de tranh spam log tren moi trang van xuoi binh thuong.
+            if (
+                result.reason in (REASON_LOW_FRACTION, REASON_NOT_MONOTONIC)
+                and result.tail_marks >= 2
+            ):
+                logger.warning(
+                    "babeldoc_shim toc_split: paragraph co %d dong duoi muc "
+                    "luc nhung BI CHAN boi %s (composition_count=%d) — khong "
+                    "tach. Neu day la mot muc luc that bi bo lot, xem lai "
+                    "tham so TOC_MIN_TAIL_FRACTION/TOC_REQUIRE_NON_DECREASING.",
+                    result.tail_marks,
+                    result.reason,
+                    result.composition_count,
+                )
+            new_paragraphs.append(paragraph)
+            continue
+
+        # `cut_after` (tuple khong rong vi `fired=True`) la cac chi so
+        # composition ma ranh gioi tach nam NGAY SAU no — chia thanh
+        # `len(cut_after) + 1` nhom lien tiep (nhom cuoi la phan con lai sau
+        # diem tach cuoi cung, AA4 buoc 5 bao dam luon con it nhat 1
+        # composition o nhom nay vi buoc 4 da bo diem tach `j == L-1`).
+        groups: list[list] = []
+        offset = 0
+        for cut_after in result.cut_after:
+            groups.append(compositions[offset : cut_after + 1])
+            offset = cut_after + 1
+        groups.append(compositions[offset:])
+
+        for group_idx, comp_slice in enumerate(groups):
+            if group_idx == 0:
+                paragraph.pdf_paragraph_composition = comp_slice
+                self.update_paragraph_data(paragraph)
+                new_paragraphs.append(paragraph)
+                continue
+            new_paragraph = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=comp_slice,
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+            )
+            self.update_paragraph_data(new_paragraph)
+            new_paragraphs.append(new_paragraph)
+
+    paragraphs[:] = new_paragraphs
+
+
+def _build_patched_process_independent_paragraphs(paragraph_finder_module: ModuleType):
+    """Boc `ParagraphFinder.process_independent_paragraphs` (buoc 7.4-b, AA6):
+    chay ham goc (nhanh dot-leader >= 20 cham) truoc, roi chay TOC-1 v2 tren
+    CUNG list `paragraphs` (mutate in-place)."""
+    original_process_independent_paragraphs = (
+        paragraph_finder_module.ParagraphFinder.process_independent_paragraphs
+    )
+
+    def patched(self, paragraphs, median_width):
+        original_process_independent_paragraphs(self, paragraphs, median_width)
+        if not _toc_split_enabled():
+            return
+        _split_toc_paragraphs_in_list(self, paragraphs, paragraph_finder_module)
+
+    return patched
+
+
 def _build_patched_process(paragraph_finder_module: ModuleType):
     """Boc `ParagraphFinder.process` (buoc 7.2): chay ham goc (da vá 7.1)
     truoc, roi tach tiep numbered-list tren tung trang cua `document.page`
@@ -268,15 +460,16 @@ def _build_patched_process(paragraph_finder_module: ModuleType):
 
 
 def _apply_patch(paragraph_finder_module: ModuleType) -> None:
-    """Ap patch len `ParagraphFinder._split_paragraph_into_lines` (7.1) va
-    `ParagraphFinder.process` (7.2).
+    """Ap patch len `ParagraphFinder._split_paragraph_into_lines` (7.1),
+    `ParagraphFinder.process` (7.2) va `ParagraphFinder.
+    process_independent_paragraphs` (7.4-b, TOC-1 v2 — Bug #7 Ca C).
 
     Goi tu `exec_module` wrapper cua import hook, SAU KHI module da import
     xong hoan toan. Boc trong try/except o noi goi (`_PatchingLoader`), noi
     day gia dinh moi thu ton tai dung nhu verify — neu sai (doi ten
     class/method o version khac), exception se bi bat va log canh bao o tang
-    tren, KHONG patch GI CA (ca 2 patch deu rollback cung nhau — neu cau truc
-    doi du de 1 patch sai thi patch kia cung dang nghi).
+    tren, KHONG patch GI CA (ca 3 patch deu rollback cung nhau — neu cau truc
+    doi du de 1 patch sai thi 2 patch kia cung dang nghi).
     """
     ParagraphFinder = paragraph_finder_module.ParagraphFinder
     if not hasattr(ParagraphFinder, "_split_paragraph_into_lines"):
@@ -289,16 +482,26 @@ def _apply_patch(paragraph_finder_module: ModuleType) -> None:
             "ParagraphFinder khong co method process — cau truc babeldoc co "
             "the da doi, khong ap patch."
         )
+    if not hasattr(ParagraphFinder, "process_independent_paragraphs"):
+        raise AttributeError(
+            "ParagraphFinder khong co method process_independent_paragraphs "
+            "— cau truc babeldoc co the da doi, khong ap patch."
+        )
     ParagraphFinder._split_paragraph_into_lines = _build_patched_split_paragraph_into_lines(
         paragraph_finder_module
     )
     ParagraphFinder.process = _build_patched_process(paragraph_finder_module)
+    ParagraphFinder.process_independent_paragraphs = _build_patched_process_independent_paragraphs(
+        paragraph_finder_module
+    )
     logger.warning(
         "babeldoc_shim: da vá ParagraphFinder._split_paragraph_into_lines "
         "(Bug #7 fix — loai ky tu khoang trang khoi phep dem va cham, giu "
-        "nguyen nguong count<1) va ParagraphFinder.process (buoc 7.2 — tach "
-        "numbered-list, %s). PYTHONPATH shim dang hoat dong.",
+        "nguyen nguong count<1), ParagraphFinder.process (buoc 7.2 — tach "
+        "numbered-list, %s) va ParagraphFinder.process_independent_paragraphs "
+        "(buoc 7.4-b — tach muc luc Ca C, %s). PYTHONPATH shim dang hoat dong.",
         "bat" if _numbered_list_split_enabled() else "TAT qua BABELDOC_SHIM_NUMBERED_LIST_SPLIT=0",
+        "bat" if _toc_split_enabled() else "TAT qua BABELDOC_SHIM_TOC_SPLIT=0 (mac dinh)",
     )
 
 

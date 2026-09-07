@@ -221,6 +221,19 @@ class Settings(BaseSettings):
     # live tren 11 trang) — tat rieng bien nay khi 7.1 van chay binh thuong.
     babeldoc_numbered_list_split_enabled: bool = True
 
+    # Bug #7 fix buoc 7.4-b — Ca C (Architecture.md "Bug #7 Ca C — Quyet
+    # dinh cuoi sau phan bien Domain Expert + ke hoach spike 7.4-a", AA5):
+    # cung `sitecustomize.py` shim tren, vá THEM `ParagraphFinder.
+    # process_independent_paragraphs` de tach paragraph gom nhieu muc muc
+    # luc KHONG co dot-leader "du day" (< 20 cham) — TOC-1 v2. Doc lap voi
+    # `babeldoc_numbered_list_split_enabled`: co bien rollback rieng vi day
+    # la heuristic MOI NHAT/rui ro cao nhat trong ca 3 (spike 7.4-a da PASS
+    # gate AA9 + qua Reviewer APPROVE, nhung CHUA co lich su production that
+    # — khac 7.1/7.2 da qua R6-03 live). Mac dinh TAT (`False`, KHAC 2 flag
+    # tren mac dinh `True`) — chi bat sau khi QA live xanh (AA5), khong tu y
+    # doi trong task 7.4-b.
+    babeldoc_toc_split_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

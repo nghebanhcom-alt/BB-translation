@@ -357,7 +357,23 @@ def evaluate_paragraph(
             if next_idx >= composition_count:
                 break
             next_chars = sorted_lines[next_idx]
-            if next_chars is None or marks[next_idx] is not None:
+            if next_chars is None:
+                # AA4 buoc 4 (sua theo issue non-blocking #1 cua Reviewer
+                # spike 7.4-a): composition khong phai `pdf_line` (vd
+                # `pdf_formula`) khong bao gio duoc danh dau VA LUON dinh
+                # vao group LIEN TRUOC — giong het 7.2 (`extract_leading_marker`
+                # tra ve None cho composition khong phai dong, no khong bao
+                # gio la diem tach, tu nhien nam trong group truoc no). Khong
+                # co font_size/x de do "thut dau dong" cho mot composition
+                # khong phai dong, nen KHONG ghi `ContinuationBoundary` cho no
+                # (boundary chi danh cho cap dong-danh-dau -> dong-khong-
+                # danh-dau that su, phuc vu dung do rieng cua AA8 buoc 4) —
+                # chi don gian keo `j` vuot qua no roi tiep tuc xet composition
+                # ke tiep (co the la dong that, hoac 1 composition non-line
+                # khac).
+                j = next_idx
+                continue
+            if marks[next_idx] is not None:
                 break
             if not next_chars:
                 # Dong ton tai nhung sau khi bo khoang trang khong con ky tu

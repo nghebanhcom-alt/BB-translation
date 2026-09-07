@@ -4300,3 +4300,187 @@ PM/Tech Lead để quyết định mở 7.4-b (wiring `toc_split.py` vào `sitec
 `False`) — **chưa tự ý làm tiếp** trong task này (đúng AA10(a): "ĐÂY VẪN LÀ SPIKE"). Chưa qua
 Reviewer (không bắt buộc cho spike theo brief, nhưng 7.4-b trở đi PHẢI qua Reviewer thật theo
 Protocol 7 R7-01 trước khi coi là "xong").
+
+## Bug #7 Ca C — 7.4-b/c/d/e: Implement production + test + live E2E + hồi quy (Dev, 2026-09-08)
+
+Tiếp nối spike 7.4-a (PASS gate AA9, đã qua Reviewer APPROVE — mục ngay trên). Nhiệm vụ: implement
+đầy đủ production cho TOC-1 v2 (AA4-AA9), viết test, chạy live E2E, đo hồi quy — theo brief PM.
+**Chưa spawn Reviewer** (Protocol 7 R7-01 — PM sẽ tự làm việc đó sau task này).
+
+### 7.4-b — Sửa bug continuation-line (issue non-blocking #1 của Reviewer) TRƯỚC khi implement
+
+Review spike 7.4-a (`docs/review-report.md`, "Review spike 7.4-a", issue non-blocking #1) chỉ ra:
+luật dòng nối (AA4 bước 4) trong `evaluate_paragraph` (`src/babeldoc_shim/toc_split.py`) gán SAI
+nhóm cho 1 composition **không phải** `pdf_line` (vd `pdf_formula`) đứng NGAY SAU dòng đã đánh dấu
+— code cũ `break` ngay với `j` giữ nguyên `= i` rồi `cut_after.append(j)`, đẩy composition đó vào
+group **SAU** điểm cắt, trong khi đặc tả AA4 bước 4 nói rõ nó phải **dính vào group LIỀN TRƯỚC**
+— giống hệt 7.2 (`numbered_list_split.find_numbered_list_split_index` trả `None` cho composition
+không phải dòng, nên nó tự nhiên nằm trong group trước khi slicing).
+
+**Sửa**: khi `next_chars is None` (composition không phải `pdf_line`), thay vì `break` ngay, gán
+`j = next_idx` rồi `continue` — kéo composition đó (và mọi composition non-line liên tiếp sau nó)
+vào group của dòng đánh dấu, không log `ContinuationBoundary` cho nó (không có `font_size`/`x` để
+đo "thụt đầu dòng" cho 1 composition không phải dòng — boundary chỉ dành cho cặp dòng-đánh-dấu →
+dòng-không-đánh-dấu thật sự). Đã tự đo lại `scripts/toc_split_spike_measure.py` sau khi sửa: **kết
+quả AA7/AA8 KHÔNG đổi** (31 fire/130 cut, 6/6 ranh giới không `extended`, min=−13.03pt
+max=+0.07pt) — đúng dự đoán của Reviewer ("rủi ro thấp/lý thuyết", không fixture nào trong 12 dump
+thật có `pdf_formula` xen giữa mục lục).
+
+### 7.4-b — Wiring patch thứ 3 vào `sitecustomize.py`
+
+Theo đúng khuôn `_split_numbered_list_paragraphs_on_page` (bước 7.2), nhưng điểm hook KHÁC hẳn
+(AA6): bọc `ParagraphFinder.process_independent_paragraphs(paragraphs, median_width)`
+(`paragraph_finder.py:287`, **không** bọc `process()` như 7.2) — chạy hàm gốc trước (xử lý nhánh
+dot-leader ≥ 20 chấm có sẵn), rồi chạy `toc_split.evaluate_paragraph` trên **cùng list**
+`paragraphs`, mutate in-place qua `paragraphs[:] = new_paragraphs` (`page.pdf_paragraph` và tham
+số `paragraphs` trỏ cùng 1 list object từ `paragraph_finder.py:245`, đã verify source thật ở
+AA1/spike 7.4-a).
+
+**Đã đọc lại trực tiếp source `paragraph_finder.py` (0.6.4 đã cài) trong task này** để xác nhận
+điểm hook đúng như AA6 mô tả (không suy đoán lại): `process_independent_paragraphs` gọi ở dòng 287
+— NGAY SAU `page.pdf_paragraph = paragraphs` (dòng 245) và TRƯỚC `merge_alternating_line_number_
+paragraphs` (dòng 291), `update_paragraph_data(paragraph, update_unicode=True)` (dòng 293-294),
+`fix_overlapping_paragraphs` (dòng 302), `add_debug_info` (dòng 307), `_set_paragraph_render_order`
+(dòng 310). Cũng đọc `process_independent_paragraphs` (dòng 841-889): nhánh dot-leader tạo
+`PdfParagraph` mới với `box=Box(0,0,0,0)`, `unicode=""`, `debug_id=generate_base58_id()`, rồi chỉ
+gọi `update_paragraph_data(paragraph)`/`update_paragraph_data(new_paragraph)` (KHÔNG
+`update_unicode=True`) — patch mới (`_split_toc_paragraphs_in_list`) tái dùng ĐÚNG nguyên mẫu này,
+không tự gọi `update_unicode=True` và không tự gán `render_order` (khác hẳn patch 7.2 phải tự làm
+cả hai vì nó hook SAU cùng điểm này trong `process()`).
+
+Cờ runtime: `BABELDOC_SHIM_TOC_SPLIT` — mặc định `"0"` (TẮT, khác 2 patch trước mặc định `"1"`) —
+đọc qua `_toc_split_enabled()`. `_apply_patch` cập nhật để patch cả 3 (rollback chung nếu babeldoc
+đổi cấu trúc — patch mới thêm `hasattr(ParagraphFinder, "process_independent_paragraphs")` check
+riêng, cùng cơ chế fail-safe try/except ở tầng trên).
+
+### 7.4-b — Wiring config/runner/orchestrator
+
+- `src/core/config.py`: `Settings.babeldoc_toc_split_enabled: bool = False` (mặc định TẮT theo
+  AA5 — "bật sau khi QA live xanh"), comment theo đúng khuôn 2 flag trước.
+- `src/services/babeldoc_runner.py`: `BabeldocRunner.__init__` thêm param `toc_split_enabled: bool
+  = False`; `translate_pages()` nối `env["BABELDOC_SHIM_TOC_SPLIT"] = "1"/"0"` — chỉ khi shim tổng
+  đang bật qua `PYTHONPATH` (cùng khối `if self._line_split_shim_enabled:` như 2 biến kia).
+- `src/core/job_orchestrator.py`: `_translator_runner` truyền thêm
+  `toc_split_enabled=self._settings.babeldoc_toc_split_enabled` khi dựng `BabeldocRunner`.
+
+### 7.4-c — Test (`tests/test_babeldoc_toc_split.py`, Protocol 6 R6-02)
+
+33 test, tất cả gọi **đúng** hàm production (`evaluate_paragraph`, `mark_toc_tail`,
+`sort_line_chars` từ `src.babeldoc_shim.toc_split`) — không chép lại thuật toán:
+
+**Unit test (22 test)** — từng điều kiện AA4 bước 0-4 + các ca chống false-positive named ở
+AA4/AA7: folio đứng riêng (`k == len`), ô bảng số kiểu `"4.0"` (thiếu cụm ≥2 chữ cái), văn xuôi
+kết thúc bằng số liệu (gap quá nhỏ, ratio ~0.3 < 0.8), số trang ngoài phạm vi (0, >4 chữ số), font
+size ≤ 0, ASCII digit vs `str.isdigit()` (Z7-c, `'²'`), deny-list layout (chuẩn hoá lower/strip),
+cổng `TOC_MIN_TAIL_LINES`/`TOC_MIN_TAIL_FRACTION`, monotonic (Z4, cho phép bằng nhau), luật dòng
+nối cả 2 nhánh `extended=True/False`, và **4 test riêng cho bug continuation-line vừa sửa**
+(composition non-line ngay sau dòng đánh dấu dính đúng group trước; nhiều composition non-line
+liên tiếp; composition non-line ở cuối paragraph không tạo cut thừa).
+
+Phát hiện phụ trong lúc viết test: `REASON_NO_CUT_POINTS` (nhánh "đánh dấu đủ điều kiện nhưng
+không có điểm tách nào") **không thể xảy ra được** với `TOC_MIN_TAIL_LINES=2` hiện tại — chứng
+minh bằng tay: bất kỳ dòng đánh dấu nào không phải dòng đánh dấu CUỐI CÙNG luôn tạo ra đúng 1
+`cut_after` (vòng lặp mở rộng luôn dừng ngay khi gặp dòng đánh dấu tiếp theo, không bao giờ "nuốt"
+được nó), nên có ≥2 dòng đánh dấu thì `cut_after` luôn khác rỗng. Đây là code phòng thủ hợp lệ cho
+trường hợp tham số đổi trong tương lai (vd `TOC_MIN_TAIL_LINES=1`), không phải bug — không escalate,
+chỉ ghi lại ở đây để không ai mất công viết lại test cho nhánh này lần nữa.
+
+**Golden-fixture test (11 test)** — trên **8 fixture đã commit**
+(`tests/fixtures/babeldoc/toc_*_dump.json.gz`), parametrize + test tổng: khớp **chính xác từng
+dòng** bảng oracle AA7 (`figoni_p7_toc`=8/28, `figoni_p8_toc`=12/38, `lcb_toc`=11/64, 5 fixture còn
+lại=0/0) và **tổng 31 fire/130 cut** — tự chạy lại, không tin lại số cũ. Riêng `test_golden_
+fixtures_zero_false_positive_on_non_toc_pages` assert FP=0 tuyệt đối (AA9 điều kiện 3) và
+`test_golden_fixture_lcb_toc_all_fires_are_plain_text_layout` xác nhận lại phát hiện AA1 (31/31
+paragraph kích hoạt có `layout_label == 'plain text'`) trên chính `lcb_toc` (fixture có
+`fired_inside_table_box=5`, ca dễ vô tình mất recall nếu deny-list sai).
+
+**Kết quả**: `uv run pytest -q` → **434 passed** (401 cũ + 33 mới), `uv run ruff check .` → All
+checks passed, `uv run ruff format --check` trên toàn bộ file đã sửa/tạo → sạch.
+
+### 7.4-d — Live E2E (R6-03, đo CẢ 2 thứ theo AA9(d)/Z8-4)
+
+Dịch thật qua **đúng** `BabeldocRunner.translate_pages()` với DeepSeek (`.env` có key), so sánh
+`toc_split_enabled=False` (baseline) vs `toc_split_enabled=True` (bật tường minh), trên PDF ghép 2
+trang Contents Figoni (p7+p8) — **chính là 2 trang nguồn** đã dùng để sinh 2 fixture đã commit
+`toc_figoni_contents_p7/p8_dump.json.gz`, lấy lại từ `/tmp/bdprobe/figoni_p7_toc.pdf` +
+`figoni_p8_toc.pdf` (còn sống, kiểm tra hôm nay), ghép bằng `pymupdf.insert_pdf`. Dùng đúng flag
+production khác (`split_short_lines=True`, `short_line_split_factor=0.8` từ `Settings`).
+
+Đọc PDF output thật bằng PyMuPDF, đếm 2 chỉ số theo AA9(d)/Z8-4:
+
+| Trang | Số dòng "ranh giới mục" (regex trùng AA4 bước 2) baseline → TOC-1 v2 | Số từ còn tiếng Anh (regex `[A-Za-z]{3,}` không kèm dấu tiếng Việt) baseline → TOC-1 v2 |
+|---|---|---|
+| p7 (Contents, trang 0) | 27 → **57** | 18 → 17 |
+| p8 (Contents, trang 1) | 40 → **78** | 17 → 18 |
+
+**(a) Ranh giới mục**: tăng rõ rệt và đúng — đọc trực tiếp text PDF, baseline gộp nhiều mục liền
+nhau thành 1 dòng dài (đúng bài học 7.3, ví dụ:
+`"Tầm Quan Trọng của Độ Chính Xác trong Lò Bánh 2 Cân và Thước Cân 2 Đơn Vị Đo Lường 3"` — 3 mục
+dính 1 dòng), còn bản TOC-1 v2 tách đúng từng dòng riêng:
+`"Tầm Quan Trọng của Độ Chính Xác trong Lò Bánh 2"`, `"Cân và Cân Điện Tử 2"`,
+`"Đơn Vị Đo Lường 3"` — xác nhận bằng mắt trên toàn bộ text 2 trang, không chỉ tin đếm số dòng.
+
+**(b) Số mục còn tiếng Anh (Z6 check)**: KHÔNG tăng có ý nghĩa (18→17, 17→18 — dao động ±1 do
+LLM chọn từ khác nhau giữa 2 lần gọi thật, không phải hồi quy). Đã tự kiểm tra TỪNG từ bị regex bắt
+— toàn bộ đều là **false-positive của chính regex đơn giản** (từ tiếng Việt không dấu như "Giai",
+"Quan", "trong", "Cho", "nhu", "quy", "tinh", "cao"; số La Mã "III:"; thuật ngữ/danh từ riêng giữ
+nguyên hợp lý "Gluten", "Gelatin", "Ounce", "Patent", "GEL") — **không có cụm từ tiếng Anh nguyên
+câu nào còn sót**, khác hẳn dấu hiệu Z6 thật (paragraph nguyên vẹn không dịch). **Kết luận: Z6
+KHÔNG tái diễn.**
+
+### 7.4-e — Đo hồi quy (0 thay đổi trên 7.1/7.2, kể cả `fix_overlapping_paragraphs`)
+
+Chạy `babeldoc --debug` thật (dump IL, LLM port chết `127.0.0.1:1`, `--ignore-cache`,
+`--split-short-lines --short-line-split-factor 0.8`) trên 4 fixture của 7.1/7.2, MỖI fixture 2 lần
+(`BABELDOC_SHIM_TOC_SPLIT=0` rồi `=1`), so sánh `paragraph_finder.json` — mỗi paragraph so theo
+`unicode` + số composition + `layout_label` + `box` (bỏ qua `debug_id`/`render_order`, có thể đổi
+giữa 2 lần chạy vì lý do không liên quan TOC-1):
+
+| Fixture | Số trang | Kết quả so sánh TẮT vs BẬT `TOC_SPLIT` |
+|---|---|---|
+| `p74_77` (4 trang, nguồn `/tmp/bdprobe/p74_77.pdf`) | 4 | **IDENTICAL — 0 thay đổi** trên cả 4 trang |
+| `page14_numbered_list_source` (nguồn: `tests/fixtures/babeldoc/page14_numbered_list_source.pdf`, đã commit) | 1 | **IDENTICAL — 0 thay đổi** |
+| `figoni_p20` (nguồn `/tmp/bdprobe/figoni_p20.pdf`) | 1 | **IDENTICAL — 0 thay đổi** |
+| `figoni_p22` (nguồn `/tmp/bdprobe/figoni_p22.pdf`) | 1 | **IDENTICAL — 0 thay đổi** |
+
+**0/4 fixture có bất kỳ khác biệt nào** — đúng yêu cầu AA10-c/7.4-e ("không phải mục lục, TOC-1
+không được kích hoạt gì cả"). Log `sitecustomize.py` xác nhận patch áp dụng đúng cả 2 chiều
+(`... process_independent_paragraphs (buoc 7.4-b — tach muc luc Ca C, TAT qua
+BABELDOC_SHIM_TOC_SPLIT=0 (mac dinh))` / `..., bat)`).
+
+**`fix_overlapping_paragraphs` (AA6, nợ `[CHƯA VERIFY]` ở AA12)**: vì phép so sánh trên bao gồm cả
+field `box` của mọi paragraph và 4/4 fixture đều IDENTICAL tuyệt đối, đây là bằng chứng gián tiếp
+nhưng trực tiếp trên dữ liệu thật rằng hàm này **không cắt box khác đi** khi TOC-1 v2 bật trên các
+trang KHÔNG PHẢI mục lục — khớp đúng dự đoán no-op của Tech Lead (AA6 mục cuối). Vẫn giữ nguyên
+trạng thái `[CHƯA VERIFY]` cho ca sách leading chặt trên trang MỤC LỤC thật (ngoài phạm vi 4
+fixture hồi quy này, vốn không phải mục lục) — không tự ý đóng nợ kỹ thuật này.
+
+### Kết quả kiểm tra chất lượng cuối task
+
+```
+uv run pytest -q                     → 434 passed, 420 warnings (~94s)
+uv run ruff check .                  → All checks passed!
+uv run ruff format --check <files đã sửa/tạo> → sạch
+```
+
+**File đã sửa**: `src/babeldoc_shim/toc_split.py` (bug fix continuation-line),
+`src/babeldoc_shim/sitecustomize.py` (patch thứ 3 + docstring), `src/core/config.py`
+(`babeldoc_toc_split_enabled`), `src/services/babeldoc_runner.py` (param + env),
+`src/core/job_orchestrator.py` (wiring).
+**File mới**: `tests/test_babeldoc_toc_split.py`.
+**KHÔNG đổi default** `babeldoc_toc_split_enabled` — vẫn `False` theo đúng chỉ đạo brief (quyết
+định bật để sau QA, không phải việc của Dev).
+
+### Vấn đề cần Tech Lead/Expert quyết định
+
+**Không có.** Mọi kết quả đo (7.4-c oracle AA7, 7.4-d live E2E, 7.4-e hồi quy) đều khớp hoặc tốt
+hơn kỳ vọng của AA7/AA9 — không phát sinh sai lệch nào cần escalate. 2 quan sát phụ (không phải
+vấn đề, chỉ ghi lại để không mất dấu):
+1. `REASON_NO_CUT_POINTS` hiện không thể xảy ra với tham số hiện tại (xem mục 7.4-c) — code phòng
+   thủ hợp lệ, không phải bug.
+2. `fix_overlapping_paragraphs` xác nhận thêm no-op trên dữ liệu hồi quy (không phải mục lục) —
+   nợ `[CHƯA VERIFY]` ở AA12 cho ca sách leading chặt trên trang mục lục thật **vẫn còn mở**, chưa
+   có dữ liệu để đóng.
+
+**Chưa spawn Reviewer** (Protocol 7 R7-01) — PM sẽ tổ chức Reviewer thật trước khi coi 7.4-b/c/d/e
+là "xong".

@@ -224,6 +224,7 @@ class BabeldocRunner:
         deepseek_base_url: str = _DEFAULT_DEEPSEEK_BASE_URL,
         line_split_shim_enabled: bool = True,
         numbered_list_split_enabled: bool = True,
+        toc_split_enabled: bool = False,
     ) -> None:
         self._executable = executable
         self._deepseek_base_url = deepseek_base_url
@@ -240,6 +241,11 @@ class BabeldocRunner:
         #: `sitecustomize.py` doc va co the tat rieng heuristic numbered-list
         #: (moi hon, rui ro cao hon 7.1) ma khong dong ca shim.
         self._numbered_list_split_enabled = numbered_list_split_enabled
+        #: Bug #7 fix buoc 7.4-b — Ca C (Architecture.md AA5). Doc lap voi 2
+        #: co tren, cung ly do: chi co tac dung khi shim tong CUNG bat, truyen
+        #: qua bien moi truong RIENG de tat duoc mot minh TOC-1 v2 (heuristic
+        #: moi nhat/rui ro cao nhat, mac dinh TAT) ma khong dong 7.1/7.2.
+        self._toc_split_enabled = toc_split_enabled
 
     async def translate_pages(
         self,
@@ -360,6 +366,7 @@ class BabeldocRunner:
             env["BABELDOC_SHIM_NUMBERED_LIST_SPLIT"] = (
                 "1" if self._numbered_list_split_enabled else "0"
             )
+            env["BABELDOC_SHIM_TOC_SPLIT"] = "1" if self._toc_split_enabled else "0"
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(

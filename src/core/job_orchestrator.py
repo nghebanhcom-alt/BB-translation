@@ -245,6 +245,7 @@ class JobOrchestrator:
                 deepseek_base_url=self._settings.deepseek_base_url,
                 line_split_shim_enabled=self._settings.babeldoc_line_split_shim_enabled,
                 numbered_list_split_enabled=self._settings.babeldoc_numbered_list_split_enabled,
+                toc_split_enabled=self._settings.babeldoc_toc_split_enabled,
             )
         return self._pdf2zh_runner
 
