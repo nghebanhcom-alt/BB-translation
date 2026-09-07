@@ -47,6 +47,29 @@ FAIL-SAFE BẮT BUỘC
 3. Tắt shim: bỏ biến môi trường `PYTHONPATH` trỏ tới thư mục này (hoặc không
    truyền nó) — babeldoc quay lại hành vi gốc hoàn toàn, không cần chỉnh gì
    trong venv của tool.
+
+BUOC 7.2 — CA A: TACH NUMBERED-LIST (Architecture.md X5 D7-3, "7.2")
+---------------------------------------------------------------------
+Sau khi tang dong duoc sua (7.1 o tren), mot so paragraph van con GOM CHUNG
+nhieu muc numbered-list (vd 8 muc "8./9./.../15." dinh lien trong 1
+paragraph — xac nhan bang spike song, khong suy doan) vi `is_bullet_point`
+goc cua babeldoc CHI xet ky tu dau tien cua dong VA khong nhan chu so la
+bullet. Vá THEM `ParagraphFinder.process` (bao boc: chay ham goc truoc, roi
+duyet IL VUA duoc tao va tach tiep) — CHUA duoc phep chay TRUOC 7.1 (phu
+thuoc thu tu, X5 D7-3: patch tang dong phai ap dung xong het thi cac dong
+numbered-list moi tach dung, moi co gi de B-2b tach tiep o tang paragraph).
+
+Heuristic: dong DAU TIEN cua 1 paragraph la "marker neo" (vd "8."); tim dong
+DAU TIEN xuat hien sau do co marker dung bang marker neo + 1 (vd "9.") de
+tach. Thuat toan thuan (khong phu thuoc babeldoc) nam o
+`numbered_list_split.py`, dung chung voi test golden fixture. Tu sort ky tu
+theo x (`visual_bbox.box.x`) truoc khi ghep chuoi di tim marker — cac loi
+goi sort theo x cua chinh babeldoc deu bi comment (`paragraph_finder.py:305,
+696,738,772`), nen thu tu ky tu KHONG duoc dam bao.
+
+Doc lap voi bien BABELDOC_SHIM_NUMBERED_LIST_SPLIT (mac dinh "1" — bat):
+`BabeldocRunner` truyen bien nay rieng, tat duoc heuristic 7.2 ma khong dong
+ca shim 7.1 (Settings.babeldoc_numbered_list_split_enabled).
 """
 
 from __future__ import annotations
@@ -54,6 +77,7 @@ from __future__ import annotations
 import importlib.abc
 import importlib.util
 import logging
+import os
 import sys
 from types import ModuleType
 
@@ -61,6 +85,10 @@ logger = logging.getLogger("babeldoc_shim")
 
 _EXPECTED_BABELDOC_VERSION = "0.6.4"
 _TARGET_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.paragraph_finder"
+
+
+def _numbered_list_split_enabled() -> bool:
+    return os.environ.get("BABELDOC_SHIM_NUMBERED_LIST_SPLIT", "1") != "0"
 
 
 def _is_whitespace_char(char: object) -> bool:
@@ -140,14 +168,96 @@ def _build_patched_split_paragraph_into_lines(paragraph_finder_module: ModuleTyp
     return patched
 
 
+def _split_numbered_list_paragraphs_on_page(self, page, paragraph_finder_module) -> None:
+    """Buoc 7.2 (Ca A, X5 D7-3): duyet `page.pdf_paragraph` SAU KHI
+    `process()` goc (da vá 7.1) chay xong, tach tiep cac paragraph con gom
+    chung nhieu muc numbered-list. Moi quyet dinh CO tach hay khong VA tach
+    O DAU deu do `numbered_list_split.split_paragraph_lines` (thuan Python,
+    testable — Protocol 6 R6-02) tra ve; ham nay chi thuc thi ket qua do
+    tren cac object babeldoc thuc: cat `pdf_paragraph_composition` theo do
+    dai moi nhom, tao `PdfParagraph` moi cho tu nhom thu 2 tro di (tai su
+    dung nguyen mau cua babeldoc `process_independent_paragraphs`,
+    `paragraph_finder.py:868-925` — khong chep lai logic typeset/box).
+    """
+    from numbered_list_split import build_sorted_line_text, split_paragraph_lines
+
+    PdfParagraph = paragraph_finder_module.PdfParagraph
+    Box = paragraph_finder_module.Box
+    generate_base58_id = paragraph_finder_module.generate_base58_id
+
+    new_paragraphs = []
+    for paragraph in page.pdf_paragraph:
+        compositions = paragraph.pdf_paragraph_composition
+        if len(compositions) <= 1:
+            new_paragraphs.append(paragraph)
+            continue
+
+        line_texts: list[str | None] = []
+        for comp in compositions:
+            if not comp.pdf_line:
+                line_texts.append(None)
+                continue
+            chars = [
+                (char.visual_bbox.box.x, char.char_unicode) for char in comp.pdf_line.pdf_character
+            ]
+            line_texts.append(build_sorted_line_text(chars))
+
+        groups = split_paragraph_lines(line_texts)
+        if len(groups) == 1:
+            new_paragraphs.append(paragraph)
+            continue
+
+        offset = 0
+        for group_idx, group in enumerate(groups):
+            comp_slice = compositions[offset : offset + len(group)]
+            offset += len(group)
+            if group_idx == 0:
+                paragraph.pdf_paragraph_composition = comp_slice
+                self.update_paragraph_data(paragraph)
+                new_paragraphs.append(paragraph)
+                continue
+            new_paragraph = PdfParagraph(
+                box=Box(0, 0, 0, 0),
+                pdf_paragraph_composition=comp_slice,
+                unicode="",
+                debug_id=generate_base58_id(),
+                layout_label=paragraph.layout_label,
+                layout_id=paragraph.layout_id,
+            )
+            self.update_paragraph_data(new_paragraph)
+            new_paragraphs.append(new_paragraph)
+
+    page.pdf_paragraph = new_paragraphs
+
+
+def _build_patched_process(paragraph_finder_module: ModuleType):
+    """Boc `ParagraphFinder.process` (buoc 7.2): chay ham goc (da vá 7.1)
+    truoc, roi tach tiep numbered-list tren tung trang cua `document.page`
+    da duoc `process()` dien day du (Architecture.md X5 D7-3, phu thuoc
+    thu tu bat buoc voi 7.1).
+    """
+    original_process = paragraph_finder_module.ParagraphFinder.process
+
+    def patched(self, document):
+        original_process(self, document)
+        if not _numbered_list_split_enabled():
+            return
+        for page in document.page:
+            _split_numbered_list_paragraphs_on_page(self, page, paragraph_finder_module)
+
+    return patched
+
+
 def _apply_patch(paragraph_finder_module: ModuleType) -> None:
-    """Ap patch len `ParagraphFinder._split_paragraph_into_lines`.
+    """Ap patch len `ParagraphFinder._split_paragraph_into_lines` (7.1) va
+    `ParagraphFinder.process` (7.2).
 
     Goi tu `exec_module` wrapper cua import hook, SAU KHI module da import
     xong hoan toan. Boc trong try/except o noi goi (`_PatchingLoader`), noi
     day gia dinh moi thu ton tai dung nhu verify — neu sai (doi ten
     class/method o version khac), exception se bi bat va log canh bao o tang
-    tren, KHONG crash job.
+    tren, KHONG patch GI CA (ca 2 patch deu rollback cung nhau — neu cau truc
+    doi du de 1 patch sai thi patch kia cung dang nghi).
     """
     ParagraphFinder = paragraph_finder_module.ParagraphFinder
     if not hasattr(ParagraphFinder, "_split_paragraph_into_lines"):
@@ -155,13 +265,21 @@ def _apply_patch(paragraph_finder_module: ModuleType) -> None:
             "ParagraphFinder khong co method _split_paragraph_into_lines — "
             "cau truc babeldoc co the da doi, khong ap patch."
         )
+    if not hasattr(ParagraphFinder, "process"):
+        raise AttributeError(
+            "ParagraphFinder khong co method process — cau truc babeldoc co "
+            "the da doi, khong ap patch."
+        )
     ParagraphFinder._split_paragraph_into_lines = _build_patched_split_paragraph_into_lines(
         paragraph_finder_module
     )
+    ParagraphFinder.process = _build_patched_process(paragraph_finder_module)
     logger.warning(
         "babeldoc_shim: da vá ParagraphFinder._split_paragraph_into_lines "
         "(Bug #7 fix — loai ky tu khoang trang khoi phep dem va cham, giu "
-        "nguyen nguong count<1). PYTHONPATH shim dang hoat dong."
+        "nguyen nguong count<1) va ParagraphFinder.process (buoc 7.2 — tach "
+        "numbered-list, %s). PYTHONPATH shim dang hoat dong.",
+        "bat" if _numbered_list_split_enabled() else "TAT qua BABELDOC_SHIM_NUMBERED_LIST_SPLIT=0",
     )
 
 

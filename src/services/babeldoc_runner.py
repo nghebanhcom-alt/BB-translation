@@ -223,6 +223,7 @@ class BabeldocRunner:
         executable: str = "babeldoc",
         deepseek_base_url: str = _DEFAULT_DEEPSEEK_BASE_URL,
         line_split_shim_enabled: bool = True,
+        numbered_list_split_enabled: bool = True,
     ) -> None:
         self._executable = executable
         self._deepseek_base_url = deepseek_base_url
@@ -233,6 +234,12 @@ class BabeldocRunner:
         #: rollback tuc thi khong can deploy lai code neu shim gay van de o
         #: version babeldoc khac ngoai du kien.
         self._line_split_shim_enabled = line_split_shim_enabled
+        #: Bug #7 fix buoc 7.2 — Ca A (Architecture.md X5 D7-3). Doc lap voi
+        #: `line_split_shim_enabled`: chi co tac dung khi shim tren CUNG bat
+        #: (PYTHONPATH phai duoc set), truyen qua bien moi truong rieng de
+        #: `sitecustomize.py` doc va co the tat rieng heuristic numbered-list
+        #: (moi hon, rui ro cao hon 7.1) ma khong dong ca shim.
+        self._numbered_list_split_enabled = numbered_list_split_enabled
 
     async def translate_pages(
         self,
@@ -349,6 +356,9 @@ class BabeldocRunner:
                 f"{_BABELDOC_SHIM_DIR}{os.pathsep}{existing_pythonpath}"
                 if existing_pythonpath
                 else _BABELDOC_SHIM_DIR
+            )
+            env["BABELDOC_SHIM_NUMBERED_LIST_SPLIT"] = (
+                "1" if self._numbered_list_split_enabled else "0"
             )
 
         start = time.monotonic()

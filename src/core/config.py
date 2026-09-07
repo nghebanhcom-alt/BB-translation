@@ -211,6 +211,16 @@ class Settings(BaseSettings):
     # nhung co the tat het qua bien nay ma khong can deploy lai code.
     babeldoc_line_split_shim_enabled: bool = True
 
+    # Bug #7 fix buoc 7.2 — Ca A (Architecture.md X5 D7-3, "7.2"): cung
+    # `sitecustomize.py` shim tren, vá THEM `ParagraphFinder.process` de tach
+    # paragraph tai cac dong mo dau bang marker numbered-list tang dan dung 1
+    # don vi (vd "8." roi "9."), CHI chay SAU khi tang dong (7.1, o tren) da
+    # xong — phu thuoc thu tu bat buoc, khong duoc dao (X5 D7-3). Doc lap voi
+    # `babeldoc_line_split_shim_enabled`: co bien rollback rieng vi day la
+    # heuristic moi hon, chua co lich su production (khac 7.1 da qua R6-03
+    # live tren 11 trang) — tat rieng bien nay khi 7.1 van chay binh thuong.
+    babeldoc_numbered_list_split_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

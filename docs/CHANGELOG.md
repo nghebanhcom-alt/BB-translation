@@ -3843,3 +3843,129 @@ uv run ruff format --check  → 7 files (touched) already formatted
 dùng engine `babeldoc` (mặc định production). Theo Protocol 7 (R7-01/R7-02), **CHƯA qua Reviewer
 thật** — Dev KHÔNG tự báo cáo "xong"/"đã review"/"sẵn sàng". **KHÔNG làm 7.2 (numbered-list, Ca A)
 và 7.3 (đo lại mục lục, Ca C)** — PM quyết định hướng tiếp theo sau khi xem kết quả 7.1 này.
+
+## Bug #7 fix — bước 7.2 (Ca A) — tách paragraph numbered-list theo marker
+## tăng dần (B-2b) (2026-09-07)
+
+Theo `docs/Architecture.md` mục "Bug #7/#8 — Final Decision sau phản biện Domain Expert
+(2026-09-07)" (X5 D7-3, bảng "7.2"). Chỉ làm **7.2** — **KHÔNG** làm 7.3 (đo lại mục lục, Ca C),
+đúng phạm vi PM giao ("tiếp tục với bước 7.2 (numbered-list)").
+
+### Root cause / giải pháp do ai đưa ra (trả lời câu hỏi PM hỏi giữa task)
+
+Root cause tầng dòng (X3 — ký tự trắng giữ `visual_bbox` cao bằng `font_size`) do **Domain
+Expert** phát hiện, phản biện lại phân tích ban đầu sai của Tech Lead (W2: "ký tự đuôi `g` bắc
+cầu"); Tech Lead tự verify độc lập và xác nhận Expert đúng. Riêng insight "Ca A cũng hỏng từ
+tầng tách dòng ⇒ B-2b phải chạy SAU 7.1" (X2 điểm 2) cũng do Domain Expert chỉ ra. **Giải pháp
+B-2b** (bọc `process()`, tách paragraph theo marker số tăng dần, tự sort theo x) là đề xuất gốc
+của **Tech Lead** (W6, "chưa chốt, chờ Domain Expert phản biện") — Expert không bác bỏ B-2b
+(chỉ bác B-2a), Tech Lead giữ nguyên và chốt thứ tự trong D7-3.
+
+### Spike (R5-02, bắt buộc trước khi implement đầy đủ — B-2b còn `[UNVERIFIED]` ở X10)
+
+Chạy `babeldoc` 0.6.4 thật (shim 7.1 đang bật qua `PYTHONPATH`, `--debug`, `--openai-base-url`
+cổng chết 0 token) trên 2 fixture, dump `paragraph_finder.json` SAU KHI 7.1 đã chạy (input thật
+cho 7.2):
+
+1. `tests/fixtures/babeldoc/page14_numbered_list_source.pdf` (danh sách 35 mục "EQUIPMENT AND
+   SMALLWARES", có sẵn từ increment cũ) — quét toàn bộ text thật: SAU 7.1 vẫn còn đúng **4 cặp
+   mục dính chung 1 paragraph** (11+12, 23+24+dòng tiếp nối `"1½ quart"`, 31+32, 33+34) —
+   `is_bullet_point` gốc của babeldoc không nhận chữ số là bullet nên không tách được.
+2. Trích đoạn p74-77 (Figoni) dùng lại ở spike 7.0/7.1 — trang "QUESTIONS FOR REVIEW": SAU 7.1
+   còn đúng 1 paragraph gồm **8 mục liên tiếp dính chung** (8..15).
+3. Quét TOÀN BỘ marker số+dấu `.`/`)` xuất hiện trên cả 2 fixture (không chỉ tại các paragraph
+   đã biết lỗi) để tìm false-positive: **0 ca sai** — mọi marker tìm được đều là mục danh sách
+   thật, kể cả các dòng có số lượng dễ gây nhầm như `"1½ quart"`, `"2- and 4-quart sizes"`,
+   `"2" or 2½\" or equivalent"` (không khớp regex vì thiếu dấu `.`/`)` ngay sau chữ số, hoặc ký tự
+   sau chữ số không phải khoảng trắng).
+
+**Gate 7.2 (từ D7-3: "loại được false-positive kiểu '2 cups' trong công thức") ✅ đạt** — spike
+xác nhận trên dữ liệu thật, không suy đoán. Tiếp tục implement đầy đủ.
+
+### Implementation
+
+1. **`src/babeldoc_shim/numbered_list_split.py`** (mới, thuần Python, không phụ thuộc babeldoc):
+   - `extract_leading_marker(text)`: regex `^\s*(\d{1,3})[.)]\s+\S` — bắt buộc `.`/`)` NGAY SAU
+     chữ số rồi khoảng trắng rồi có nội dung — đây là cơ chế chặn false-positive chính (loại
+     `"2 cups"` vì thiếu `.`/`)`; loại `"2.5 cups"` vì không có khoảng trắng ngay sau `.`).
+   - `find_numbered_list_split_index(line_texts)`: marker của dòng ĐẦU TIÊN của paragraph là
+     "marker neo"; tìm dòng ĐẦU TIÊN xuất hiện sau đó có marker = neo + 1 → trả về index đó để
+     tách. KHÔNG cập nhật lại marker neo theo các marker không khớp giữa đường (an toàn hơn: một
+     con số không liên quan xuất hiện giữa đường sẽ bị bỏ qua, không làm hỏng chuỗi tìm kiếm).
+   - `split_paragraph_lines(line_texts)`: gọi lặp `find_numbered_list_split_index` để tách hết
+     TẤT CẢ điểm tách trong 1 paragraph (cascade, tương đương vòng lặp ngoài của
+     `process_independent_paragraphs` gốc) — đây là hàm DUY NHẤT quyết định ranh giới tách, dùng
+     chung bởi `sitecustomize.py` (patch thật) và test golden fixture (Protocol 6 R6-02).
+   - `build_sorted_line_text(chars)`: ghép ký tự theo x tăng dần (X4-4 — 4 lời gọi sort theo x
+     của chính babeldoc đều bị comment, thứ tự ký tự thô KHÔNG được đảm bảo).
+2. **`src/babeldoc_shim/sitecustomize.py`**: vá THÊM `ParagraphFinder.process` (bọc: chạy hàm gốc
+   đã vá 7.1 trước, rồi duyệt `document.page` vừa được tạo, tách numbered-list trên từng trang).
+   Thực thi hoàn toàn dựa trên kết quả của `split_paragraph_lines` — cắt `pdf_paragraph_composition`
+   theo độ dài mỗi nhóm, tạo `PdfParagraph` mới cho từ nhóm thứ 2 trở đi (tái dùng nguyên mẫu tách
+   của babeldoc `process_independent_paragraphs`, `paragraph_finder.py:868-925` — không chép lại
+   logic typeset/box, gọi `self.update_paragraph_data`). Cả 2 patch (7.1 + 7.2) rollback CÙNG NHAU
+   nếu cấu trúc babeldoc đổi (cùng 1 `try/except` ở `_PatchingLoader`, cùng gate version `0.6.4`).
+3. **`src/core/config.py`**: `Settings.babeldoc_numbered_list_split_enabled: bool = True` — bộ
+   rollback RIÊNG với `babeldoc_line_split_shim_enabled` (7.1), vì B-2b mới hơn/rủi ro cao hơn
+   7.1 (7.1 đã qua R6-03 sống trên 11 trang, 7.2 chỉ mới qua 2 fixture) — tắt được 7.2 mà không
+   tắt luôn 7.1.
+4. **`src/services/babeldoc_runner.py`**: `BabeldocRunner.__init__` thêm
+   `numbered_list_split_enabled: bool = True`; khi shim 7.1 đang bật, nối thêm biến môi trường
+   `BABELDOC_SHIM_NUMBERED_LIST_SPLIT=1/0` vào `env` của subprocess — `sitecustomize.py` đọc biến
+   này để quyết định có áp patch `process()` hay không (độc lập với patch `_split_paragraph_into_lines`).
+5. **`src/core/job_orchestrator.py`**: truyền `numbered_list_split_enabled=self._settings.babeldoc_numbered_list_split_enabled`
+   khi khởi tạo `BabeldocRunner`.
+
+**Test mới (Protocol 6 R6-02, `tests/test_babeldoc_numbered_list_split.py`, 30 test)**:
+- Unit test `extract_leading_marker`/`find_numbered_list_split_index` cho các ca chống
+  false-positive named tường minh trong Architecture.md (`"2 cups flour"`, `"2.5 cups flour"`,
+  `"1½ quart"`, marker không liên tiếp giữa đường).
+- Golden-fixture test (2 fixture MỚI, ghi từ babeldoc thật — Protocol 5 mục 3, không mock tay):
+  `tests/fixtures/babeldoc/paragraph_finder_numbered_list_post71_dump.json.gz` và
+  `paragraph_finder_p74_77_post71_dump.json.gz` (dump `paragraph_finder.json` SAU 7.1, TRƯỚC khi
+  có code 7.2 — đúng input thật mà B-2b phải xử lý). Assert số paragraph kết quả và NỘI DUNG cụ
+  thể từng nhóm sau tách (ví dụ mục 24 phải giữ đúng dòng tiếp nối `"1½ quart"`; mục 8-15 phải
+  cascade ra đúng 8 nhóm riêng theo đúng thứ tự) — copy nguyên text đọc ra từ fixture, không suy
+  diễn.
+
+**Verify sống R6-03 (đọc nội dung PDF output thật qua ĐÚNG `BabeldocRunner.translate_pages()`,
+provider DeepSeek thật, KHÔNG tin `status`)**:
+
+| Fixture | Trước 7.2 (sau 7.1) | Sau 7.2 (live, lần này) |
+|---|---|---|
+| `page14_numbered_list_source.pdf` (35 mục) | 4 cặp mục vẫn dính chung 1 paragraph | **35/35 mục xuống dòng đúng, 0 ca dính chữ** (`grep [^\d\s]\d{1,2}[.)]\s` → rỗng), mục 24 giữ đúng dòng tiếp nối `"1½ quart"` |
+| p74-77, trang "QUESTIONS FOR REVIEW" (17 mục) | 7 bắt đầu dòng / 6 giữa dòng (ghi ở entry 7.1) | **17/17 bắt đầu dòng, 0 giữa dòng, 0 dính chữ** |
+
+Nội dung không đổi (so tổng ký tự multiset trước/sau — bằng nhau, không mất chữ).
+
+**Quan sát thêm (KHÔNG phải bug của 7.2, ghi lại minh bạch để theo dõi)**: ở cả 2 lần chạy live,
+một số mục (3 mục trong list 35-mục: #12, #32, #34; và nhiều mục trong "QUESTIONS FOR REVIEW":
+#3, #5, #7, #9-15) bị babeldoc fallback về giữ nguyên text gốc tiếng Anh (log
+`il_translator_llm_only.py:828 "Fallback to simple translation"` — do DeepSeek trả kết quả
+"too long/too short" hoặc giống input). Có khả năng liên quan tới việc mỗi mục giờ là 1 paragraph
+NGẮN riêng biệt (trước 7.2 các mục bị dính chung thành block dài hơn, tỷ lệ fallback có thể khác).
+Đây là hành vi fallback CÓ SẴN của babeldoc (`il_translator_llm_only.py`), không phải lỗi do code
+7.2 gây ra — nhưng đáng theo dõi vì có thể ảnh hưởng tỷ lệ dịch hoàn chỉnh của numbered-list sau
+khi 7.2 lên production. Chưa điều tra sâu (ngoài phạm vi 7.2) — PM/user quyết định có cần task
+riêng không.
+
+**Kết quả cuối**:
+```
+uv run pytest -q            → 399 passed (369 + 30 test moi), 419 warnings
+uv run ruff check           → All checks passed!
+uv run ruff format --check  → tat ca file da sua deu da dung format
+```
+
+**File đã tạo mới**: `src/babeldoc_shim/numbered_list_split.py`,
+`tests/test_babeldoc_numbered_list_split.py`,
+`tests/fixtures/babeldoc/paragraph_finder_numbered_list_post71_dump.json.gz`,
+`tests/fixtures/babeldoc/paragraph_finder_p74_77_post71_dump.json.gz`.
+**File đã sửa**: `src/babeldoc_shim/sitecustomize.py` (vá thêm `ParagraphFinder.process`),
+`src/core/config.py` (`babeldoc_numbered_list_split_enabled`), `src/services/babeldoc_runner.py`
+(env `BABELDOC_SHIM_NUMBERED_LIST_SPLIT`), `src/core/job_orchestrator.py` (truyền flag vào
+`BabeldocRunner`), `docs/Architecture.md` (X10: đánh dấu B-2b ✅ Verified).
+
+**Trạng thái**: Đây là thay đổi hành vi runtime — đụng cách gọi babeldoc cho MỌI job dùng engine
+`babeldoc` có numbered-list (mặc định production). Theo Protocol 7 (R7-01/R7-02), **CHƯA qua
+Reviewer thật** — PM sẽ tự spawn Reviewer riêng trước khi coi task này là "xong". **KHÔNG làm 7.3
+(đo lại mục lục, Ca C)** — đúng phạm vi PM giao lần này.

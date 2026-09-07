@@ -3686,3 +3686,159 @@ làm bằng chứng của QA (máy khác/session khác có thể không còn art
 theo.
 
 ---
+
+## Review — Bug #7 fix, bước 7.2 (Ca A) — tách numbered-list theo marker tăng dần (B-2b) (2026-09-07)
+
+Phạm vi: `src/babeldoc_shim/numbered_list_split.py` (mới), `src/babeldoc_shim/sitecustomize.py`
+(vá thêm `ParagraphFinder.process`), `src/services/babeldoc_runner.py`
+(`numbered_list_split_enabled` + env `BABELDOC_SHIM_NUMBERED_LIST_SPLIT`), `src/core/config.py`
+(`babeldoc_numbered_list_split_enabled`), `src/core/job_orchestrator.py` (1 dòng truyền flag),
+`tests/test_babeldoc_numbered_list_split.py` (30 test, mới), 2 golden fixture mới, đoạn đổi
+trong `docs/Architecture.md` X10, entry mới trong `docs/CHANGELOG.md`. Theo Architecture.md
+"Bug #7/#8 — Final Decision sau phản biện Domain Expert (2026-09-07)", X5 D7-3, bước "7.2".
+
+### External contract verified against real source: YES
+
+Đã tự đọc trực tiếp source code babeldoc 0.6.4 THẬT đã cài trên máy này (KHÔNG suy đoán/nhớ lại):
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/paragraph_finder.py`
+và `.../document_il/il_version_1.py`.
+
+- Version: `__init__.py:1`, `const.py:9`, `main.py:29` đều ghi `__version__ = "0.6.4"` — khớp
+  đúng gate version trong `sitecustomize.py` (`_EXPECTED_BABELDOC_VERSION`).
+- `ParagraphFinder.process(self, document)` (`paragraph_finder.py:196`) — khớp chính xác chữ ký
+  hàm `patched(self, document)` bọc nó trong `_build_patched_process`.
+- Xác nhận **thứ tự phụ thuộc bắt buộc 7.1 → 7.2 là đúng thật**, không chỉ suy luận: `process_page`
+  (gọi từ trong `process()` gốc) gọi `self._split_paragraph_into_lines(...)` ở dòng 275 **TRƯỚC**
+  `self.process_independent_paragraphs(paragraphs, median_width)` ở dòng 287 — và quan trọng hơn:
+  `page.pdf_paragraph = paragraphs` được gán **CÙNG list object** (không copy) từ đầu
+  `process_page` (dòng ~243, dataclass field thường, không có property/setter copy — xác nhận qua
+  `il_version_1.py:1291 pdf_paragraph: list[PdfParagraph] = field(...)` là dataclass field trần).
+  `process_independent_paragraphs` mutate list đó bằng `.insert()` ngay trên chính list đó, nên
+  khi `original_process(self, document)` (bên trong `patched process()`) chạy xong, `document.page`
+  mà code 7.2 duyệt tiếp theo đã phản ánh ĐẦY ĐỦ kết quả của cả `_split_paragraph_into_lines` (7.1)
+  và `process_independent_paragraphs` (bullet/TOC split gốc) — đúng như comment "7.1 phải patch
+  xong trước khi wrap `process()`" khẳng định, không phải giả định chưa kiểm.
+- **Mẫu tạo `PdfParagraph` mới khi tách** (`_split_numbered_list_paragraphs_on_page`) là COPY Y
+  NGUYÊN mẫu babeldoc tự dùng trong chính `process_independent_paragraphs` — đọc trực tiếp
+  `paragraph_finder.py` (khối quanh dòng 868-911, 2 nhánh tách TOC-dot-leader và tách theo
+  short-line/bullet đều dùng chung mẫu): `PdfParagraph(box=Box(0, 0, 0, 0), pdf_paragraph_composition=...,
+  unicode="", debug_id=generate_base58_id(), layout_label=paragraph.layout_label,
+  layout_id=paragraph.layout_id)` rồi gọi `self.update_paragraph_data(...)` cho cả 2 đoạn — khớp
+  TỪNG FIELD với code shim. `generate_base58_id` xác nhận là hàm module-level thật (dòng 46), truy
+  cập qua `paragraph_finder_module.generate_base58_id` là đúng.
+- `PdfCharacter.visual_bbox` (kiểu `VisualBbox | None`) và `char_unicode` (`il_version_1.py:646,671`),
+  `PdfLine.pdf_character` (`:1062`) — khớp đúng cách `sitecustomize.py`/`numbered_list_split.py`
+  truy cập `char.visual_bbox.box.x` / `char.char_unicode` / `comp.pdf_line.pdf_character`.
+  Lưu ý field `visual_bbox` là Optional theo khai báo — nhưng bản thân `paragraph_finder.py` GỐC
+  (chưa vá gì) cũng truy cập `char.visual_bbox.box` không hề kiểm tra None ở ít nhất 6 nơi khác
+  (dòng 152-176, 429-458, 608, 1042) — nên rủi ro `AttributeError` nếu `visual_bbox` là `None` ở
+  giai đoạn này là rủi ro CÓ SẴN của chính babeldoc tại đúng bước xử lý này, không phải rủi ro MỚI
+  do shim gây ra. Không cần fix, ghi lại để không ai nhầm là lỗi mới.
+- Trích dẫn dòng `paragraph_finder.py:868-925` trong docstring/CHANGELOG hơi lệch — hàm
+  `process_independent_paragraphs` thực ra bắt đầu ở dòng 841 (không phải 868), nhưng đúng khối mẫu
+  tạo `PdfParagraph` được cite thì đúng nằm trong vùng đó. Cosmetic, không ảnh hưởng đúng/sai logic.
+
+### Tự verify độc lập golden fixture (không tin lại số Dev báo)
+
+Viết script riêng (không dùng lại helper của test) đọc thẳng 2 file `.json.gz`, tự áp cùng regex
+marker rồi tự quét toàn bộ paragraph có ≥ 2 marker:
+- `paragraph_finder_numbered_list_post71_dump.json.gz`: ra đúng **4 cặp** `[11,12]`, `[23,24]`
+  (kèm dòng tiếp nối `"1½ quart"`), `[31,32]`, `[33,34]` — khớp 100% với claim trong CHANGELOG,
+  không suy diễn từ code test.
+- `paragraph_finder_p74_77_post71_dump.json.gz`: ra 4 paragraph gộp `[2,3]`, `[4,5]`, `[6,7]`, và
+  `[8..15]` (8 mục) — claim CHANGELOG chỉ nêu case "8..15" làm ví dụ đại diện nhưng test
+  (`test_golden_fixture_page0_no_residual_merge_after_split`) có quét TOÀN BỘ trang nên vẫn bắt
+  được cả 3 cặp còn lại, không bị bỏ sót.
+- Tự quét TOÀN BỘ dòng có chứa chữ số bắt đầu dòng trên cả 2 fixture để săn false-positive độc lập:
+  bắt được các dòng ngờ vực như `"60)"`, `"62)"`, `"1 BEING NOT VERY SMOOTH"`,
+  `"2- and 4-quart sizes"`, `"1½ quart"` — **tất cả đều bị regex loại đúng** (thiếu `\s+\S` sau
+  marker, hoặc ký tự sau chữ số không phải `.`/`)`) — xác nhận độc lập claim "0 false-positive".
+
+### Chạy thật (Reviewer tự chạy, không tin lại số Dev báo)
+
+```
+uv run pytest -q                                                → 399 passed, 419 warnings (90s)
+uv run ruff check (6 path liên quan)                             → All checks passed!
+uv run ruff format --check (6 path liên quan)                    → 6 files already formatted
+uv run pytest --collect-only tests/test_babeldoc_numbered_list_split.py → 30 tests collected
+```
+Khớp đúng số Dev báo trong CHANGELOG (399 = 369 + 30 test mới).
+
+**Giới hạn của lần review này (minh bạch)**: KHÔNG tự chạy lại live E2E qua babeldoc thật +
+DeepSeek thật (R6-03 claim của Dev) — tốn API cost thật và thời gian, và bằng chứng gián tiếp
+(source code khớp từng field với babeldoc thật, golden fixture tự verify độc lập khớp 100%, toàn
+bộ 399 test xanh) đã đủ tin cậy cho quyết định approve/reject ở review này. Đây KHÔNG thay thế
+yêu cầu R6-03 cho QA — QA vẫn phải tự chạy live ít nhất 1 lần trước khi release (như review trước
+đã ghi cho 7.0+7.1).
+
+## Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking:**
+
+1. **Fail-safe của patch 7.2 chỉ phủ giai đoạn CÀI patch (import-time), không phủ RUNTIME của
+   `patched(self, document)`** — cùng loại vấn đề đã ghi ở non-blocking #1 của review 7.0+7.1
+   (chưa được sửa ở đó, giờ lặp lại thêm 1 lần ở tầng paragraph). `_build_patched_process` gọi
+   `original_process(self, document)` rồi `_split_numbered_list_paragraphs_on_page(...)` cho mỗi
+   trang, không có `try/except` nào bọc riêng đoạn code MỚI (7.2) này. Nếu 1 trang thật có hình
+   dạng dữ liệu chưa từng gặp trong 2 fixture đã test khiến hàm này raise (vd một edge-case nào đó
+   của `compositions`/`pdf_line` chưa lường tới), lỗi sẽ lan lên thành crash TOÀN BỘ job dịch của
+   babeldoc, không "tự động quay lại hành vi gốc" — trái tinh thần "TUYỆT ĐỐI không được để lỗi ở
+   đây làm crash job dịch" ghi trong docstring đầu file (tinh thần đó hiện chỉ đúng cho lỗi *lúc
+   cài* patch). Đề xuất: bọc riêng lời gọi `_split_numbered_list_paragraphs_on_page` trong
+   `try/except Exception`, fallback giữ nguyên `page.pdf_paragraph` gốc (không tách) + log cảnh
+   báo, cho CẢ patch 7.1 (`patched` trong `_build_patched_split_paragraph_into_lines`) VÀ patch
+   7.2 — nên làm 1 lần cho cả 2 vì cùng root cause, tránh phải quay lại sửa riêng lẻ từng patch.
+2. **Không có test nào assert việc wiring biến môi trường `BABELDOC_SHIM_NUMBERED_LIST_SPLIT`
+   qua đúng subprocess `env` của `BabeldocRunner.translate_pages()`** — đã tự đọc code xác nhận
+   đúng (`babeldoc_runner.py:349-362`), nhưng không có gì giữ bất biến này lại thành regression
+   test. Cùng gap đã tồn tại từ 7.1 cho `PYTHONPATH`/`babeldoc_line_split_shim_enabled` (chưa từng
+   có test), giờ lặp lại thêm 1 biến nữa mà vẫn không ai thêm test. Đề xuất thêm ít nhất 1 test
+   mock `asyncio.create_subprocess_exec` (pattern đã có sẵn trong `tests/test_babeldoc_runner.py`
+   cho các flag khác) và assert `env["BABELDOC_SHIM_NUMBERED_LIST_SPLIT"]` đúng "1"/"0" theo
+   `numbered_list_split_enabled=True/False`.
+3. **Không có test assert `JobOrchestrator._translator_runner` truyền đúng
+   `numbered_list_split_enabled=self._settings.babeldoc_numbered_list_split_enabled` vào
+   `BabeldocRunner`** — đã tự đọc code xác nhận đúng (`job_orchestrator.py:247`), nhưng đây là
+   điểm nối lineage giữa `Settings` và `BabeldocRunner` (đúng loại lỗi Protocol 6 quan tâm) mà
+   không test nào bảo vệ. Cùng gap y hệt đã tồn tại cho `line_split_shim_enabled` từ 7.1. Đề xuất
+   1 test khởi tạo `JobOrchestrator` với `Settings(babeldoc_numbered_list_split_enabled=False)`
+   rồi assert `orchestrator._translator_runner._numbered_list_split_enabled is False`.
+4. **`docs/Architecture.md` có 2 bảng trạng thái verify mâu thuẫn nhau cho cùng 1 claim.** Bảng
+   "W7. Trạng thái verify (tổng hợp mục này)" (dòng 6417) vẫn ghi "B-2b heuristic marker tăng dần
+   không false-positive | ⚠️ `[UNVERIFIED]`" — trong khi bảng "X10" (dòng 6738, bảng được đặt tên
+   rõ là "— cập nhật") đã sửa đúng thành "✅ Verified" trong đúng lần sửa này. Đây là pattern đã có
+   từ trước (tài liệu là biên bản debate nhiều vòng W1-W7 rồi X1-X10, không phải 1 bảng canonical
+   duy nhất luôn tự nhất quán) — X10 rõ ràng là bảng thẩm quyền/mới nhất, và task này chỉ được giao
+   sửa đúng X10 nên không phải lỗi của Dev lần này. Nhưng rủi ro thật: một người/agent đọc từ trên
+   xuống dưới sẽ thấy dòng 6417 nói UNVERIFIED trước khi đọc tới X10 nói Verified — đúng kiểu mơ hồ
+   "đã verify" vs "chưa verify" mà Protocol 5 muốn tránh. Đề xuất (không cấp bách): thêm 1 chú
+   thích ngắn tại các dòng UNVERIFIED cũ đã được X10 cập nhật, kiểu "(→ xem X10, đã Verified
+   2026-09-07)", để không ai chỉ đọc W7 mà kết luận sai.
+5. **Ghi nhận minh bạch (không phải issue)**: diff thật của `docs/Architecture.md` sửa **2 dòng**
+   trong bảng X10 (cả claim "Shim V1 patch được babeldoc subprocess" VÀ "B-2b heuristic..."), không
+   phải chỉ 1 dòng B-2b như mô tả trong brief giao việc cho Reviewer. Đã kiểm tra: dòng "Shim V1"
+   được cập nhật đúng, có cơ sở thật (khớp nội dung review-report.md của 7.0+7.1 ở trên) — đây là
+   1 sửa muộn hợp lệ cho 1 dòng bị bỏ sót từ tăng bổ trước, không phải lỗi/scope creep của code. Ghi
+   lại theo kỷ luật gắn nhãn verify (CLAUDE.md global, "Protocol 1 — mở rộng") vì đây là 1 điểm
+   brief-vs-thực-tế lệch nhau, dù không ảnh hưởng kết luận review.
+6. **Quan sát "fallback dịch giữ tiếng Anh" Dev ghi trong CHANGENLOG (đã gắn `[CHƯA VERIFY]` đúng
+   cách)** — hợp lý để coi là ngoài phạm vi 7.2 (bản thân việc TÁCH đúng ranh giới paragraph đã
+   verify chắc chắn; tỷ lệ fallback dịch là hành vi có sẵn của babeldoc's LLM-output-sanity check,
+   độc lập với đúng/sai của thuật toán tách). Không chặn approve, nhưng đồng ý với Dev rằng nên có
+   task riêng theo dõi nếu tỷ lệ fallback này ảnh hưởng thật tới chất lượng bản dịch production.
+
+## Next step
+
+**APPROVE.** Circuit breaker Dev↔Reviewer: vòng 1/3 cho bước 7.2 này (độc lập với circuit breaker
+đã dùng cho 7.0+7.1). Đúng phạm vi PM giao (chỉ 7.2, không làm 7.3). Chuyển QA — lưu ý Protocol 6
+R6-03 áp dụng cho thay đổi này y như đã áp dụng cho 7.0+7.1: QA phải tự chạy lại ít nhất 1 lần
+`BabeldocRunner.translate_pages()` thật (shim + numbered-list-split đều bật, mặc định) và đọc nội
+dung PDF output thật (không chỉ tin `status`) trên ít nhất 1 tài liệu có numbered-list thật —
+KHÔNG tái dùng lại số liệu Dev tự báo trong CHANGENLOG làm bằng chứng QA của chính QA. Nếu QA muốn
+theo dõi thêm quan sát "fallback giữ tiếng Anh" (issue non-blocking #6 ở trên), nên ghi riêng vào
+test-report.md, không trộn vào kết luận pass/fail của chính bước 7.2 (tách paragraph) — đó là 2
+câu hỏi độc lập. KHÔNG làm 7.3 (đo lại mục lục, Ca C) — đúng phạm vi đã chốt.
+
+---

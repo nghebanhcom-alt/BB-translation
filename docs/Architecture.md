@@ -6414,7 +6414,7 @@ implement.
 | Bug #8 — biểu hiện thật: 12 cỡ chữ, scale 0.45–1.0 trong 1 bảng | ✅ **Verified** — đo output production page 75 |
 | U7-E1 (sàn 0.7) chưa từng được implement | ✅ **Verified** — `grep -rn "min_scale" src/` → 0 kết quả |
 | B-2a (`count < 2`) không gây tách nhầm trên tài liệu thật | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
-| B-2b heuristic marker tăng dần không false-positive | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
+| B-2b heuristic marker tăng dần không false-positive | ⚠️ **`[UNVERIFIED]`** tại thời điểm viết mục này — bảng này (W7) đã bị section "Bug #7/#8 — Final Decision…" phía dưới thay thế; xem bảng X10 (đã ✅ Verified sau bước 7.2, 2026-09-07) cho trạng thái mới nhất |
 | Đồng bộ scale theo vùng `table` không gây tràn chữ | ⚠️ **`[UNVERIFIED]`** — spike bắt buộc (R5-02) |
 | Con số sàn tối ưu (0.7 hay khác) | ⚠️ **`[UNVERIFIED]`** — phải đo histogram trước khi chốt |
 
@@ -6734,8 +6734,8 @@ numpy. Nó **chính là** oracle cho test ở D7-5.
 | `scale`/`optimal_scale` KHÔNG có trong mọi IL dump | ✅ **Verified** — 1230 paragraph, 5 dump, 0 giá trị |
 | mode-scale kẹp xuyên trang theo `unit_count` | ✅ **Verified** — `typesetting.py:892-935` |
 | Logic reset scale bị đảo khi giãn khung | ✅ **Verified** — `typesetting.py:1036-1062` |
-| Shim V1 (`PYTHONPATH` + `sitecustomize`) patch được babeldoc subprocess | ⚠️ **`[UNVERIFIED]`** — **spike 7.0 bắt buộc** (R5-02) trước khi giao Dev |
-| B-2b heuristic marker tăng dần không false-positive | ⚠️ **`[UNVERIFIED]`** — spike, và chỉ sau 7.1 |
+| Shim V1 (`PYTHONPATH` + `sitecustomize`) patch được babeldoc subprocess | ✅ **Verified** — spike 7.0 + ship 7.1 (xem "Bug #7 fix — bước 7.0+7.1" trong CHANGELOG.md), job chạy xanh sống nhiều lần |
+| B-2b heuristic marker tăng dần không false-positive | ✅ **Verified** (7.2, 2026-09-07) — spike sống (R5-02): quét TOÀN BỘ text thật trên 2 fixture ("QUESTIONS FOR REVIEW" 1-17, "EQUIPMENT AND SMALLWARES" 35-mục, gồm cả các dòng có số lượng như `"1½ quart"`, `"2- and 4-quart sizes"`) — 0 false-positive. Live E2E qua đúng `BabeldocRunner.translate_pages()` với DeepSeek thật (R6-03): 35/35 và 17/17 mục xuống dòng đúng, 0 ca dính chữ, 0 mất nội dung. Xem CHANGELOG.md "Bug #7 fix — bước 7.2 (Ca A)". |
 | (8a) nới khung không gây tràn sang ô bên cạnh | ⚠️ **`[UNVERIFIED]`** — spike 8.2 |
 | Giá trị sàn cụ thể (~0.67 chỉ là tham chiếu) | ⚠️ **`[UNVERIFIED]`** — phải chốt từ histogram 8.1 |
 | pdf2zh không giảm `size`, chỉ giảm `line_height` | ⚠️ **`[UNVERIFIED]`** — Expert đọc source, tôi chưa tự verify; không ảnh hưởng quyết định |
