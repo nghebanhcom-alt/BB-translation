@@ -5034,3 +5034,544 @@ Mặc định giao Dev là **(A)**, trừ khi PM/user chọn (B).
 | Hành vi với ảnh có `/SMask` hoặc `/ImageMask` | ⚠️ **`[UNVERIFIED]`** — không có mẫu nào trong dữ liệu hiện có (0/357). Thiết kế **bỏ qua** các ảnh này (S6 bước 4), tức nhánh code an toàn theo mặc định; nhưng chính đường `skip` đó chưa từng chạy trên dữ liệu thật. Không chặn Dev implement (hành vi mong đợi là "không làm gì"). |
 | Lựa chọn (A)/(B) ở S8 | ⏸ **Chờ PM/user quyết định** — không chặn phần còn lại của US-16 |
 
+
+---
+
+## Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order trên trang layout phức tạp (2026-09-07)
+
+**Tác giả**: Tech Lead — phân tích/research, KHÔNG implement.
+**Đầu vào**: `docs/ux-review-report.md` (UX-A…UX-E, 21 ảnh trang PDF đã dịch).
+**Trạng thái**: ⏸ **Chưa phải kết luận cuối** — PM sẽ mời Domain Expert phản biện trước khi chốt.
+
+### T1. Kết luận ngắn
+
+Năm nhóm hiện tượng UX báo cáo **KHÔNG có chung một nguyên nhân**. Có ít nhất **3 lỗi độc
+lập**:
+
+| Nhóm UX | Root cause | Nằm ở đâu | Mức verify |
+|---------|-----------|-----------|-----------|
+| UX-A (overlap 2 block), UX-B (vỡ box), UX-E (font không đều) | **Cùng 1 nguyên nhân**: babeldoc typeset mỗi paragraph ĐỘC LẬP, neo tuyệt đối vào bbox GỐC của chính nó, không reflow theo chiều cao thực tế của paragraph trước; khi text dịch tràn đáy box thì **vẫn vẽ tiếp ra ngoài box** thay vì dừng | babeldoc `typesetting.py` | ✅ Verified (source + đo trên output thật) |
+| UX-C (mất nội dung → ô trắng) | **Lỗi KHÁC HẲN**: mọi glyph có góc xoay ≠ 0°/90° (±0.1°) bị **loại bỏ khỏi IL ngay bước parse** → không dịch, không vẽ lại, mà text gốc thì đã bị xoá | babeldoc `il_creater.py:968-978` | ✅ Verified (source + tái hiện live 1 trang) |
+| UX-D (sai thứ tự đọc) | **Chưa xác định** — chạy lại đúng trang mục lục đó ở chế độ 1-trang-độc-lập thì render ĐÚNG, không tái hiện được | phụ thuộc ngữ cảnh nhiều trang / chunk | ⚠️ `[UNVERIFIED]` |
+
+Giả thuyết chính của UX ("tiếng Việt dài hơn, khung không giãn, sai lệch cộng dồn") **đúng
+cho UX-A/B/E** và **sai cho UX-C** — UX-C không liên quan gì tới độ dài text.
+Giả thuyết phụ của UX ("xoá text gốc xong nhưng vẽ text mới thất bại") **đúng về hiện tượng,
+sai về cơ chế**: không có bước "vẽ thất bại", mà là **chưa bao giờ có gì để vẽ** vì ký tự đã
+bị vứt từ bước đọc PDF.
+
+### T2. Nguồn xác thực (Protocol 5 / R5-01)
+
+babeldoc **0.6.4** đã cài (`babeldoc --version` → `babeldoc 0.6.4`), source tại
+`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`.
+Prefix `format/pdf/document_il/` viết tắt là `IL/`.
+
+| # | Claim | Nguồn (file:line) |
+|---|-------|-------------------|
+| T-01 | `on_lt_char()` **return sớm** (bỏ hẳn ký tự) nếu góc xoay của text matrix không nằm trong `-0.1..0.1` hoặc `89.9..90.1` độ | `IL/frontend/il_creater.py:968-974` |
+| T-02 | Góc xoay tính bằng `atan2(b, a)` từ matrix ký tự | `il_creater.py:390-397` |
+| T-03 | Mỗi paragraph được typeset bắt đầu từ **đỉnh bbox của CHÍNH NÓ** (`current_y = box.y2 - avg_height`, `current_x = box.x`) — không có tham số nào mang chiều cao thực tế của paragraph trước vào | `IL/midend/typesetting.py:1349-1350` |
+| T-04 | Khi xuống dòng vượt đáy box: chỉ set cờ `all_units_fit = False`, **comment ghi rõ "这里不要 break，继续排版剩余内容"** (đừng break, tiếp tục xếp phần còn lại) → text tràn được **vẽ ra ngoài box**, đè lên block dưới | `typesetting.py:1440-1444` |
+| T-05 | Vòng thu nhỏ font: `scale` giảm 0.05 (khi >0.6) rồi 0.1, tới `min_scale = 0.1` | `typesetting.py:967-1015` |
+| T-06 | **Giãn khung chỉ được thử khi `scale < 0.7`**, và chỉ 2 lần: giãn xuống (`get_max_bottom_space`) rồi giãn phải (`get_max_right_space`); giãn thất bại (không còn chỗ trống) → reset `scale = 1.0` và tiếp tục thu nhỏ | `typesetting.py:1017-1062` |
+| T-07 | `preprocess_document()` gom `optimal_scale` của **mọi paragraph trong CẢ tài liệu**, lấy **mode**, rồi ép mọi paragraph có scale > mode **xuống bằng mode** | `typesetting.py:919-935` |
+| T-08 | Trước khi render, có bước chống chồng lấn nhưng nó chỉ **cắt ngắn box trên từ phía dưới** (`p_upper.box.y = new_y`), **không đẩy block dưới xuống** — tức làm box trên NHỎ đi (dễ tràn hơn), không tạo thêm chỗ | `typesetting.py:1172-1211` |
+| T-09 | `render_paragraph()` gán `pdf_paragraph_composition = []` TRƯỚC khi gọi retypeset; nếu retypeset không apply được thì composition ở lại rỗng | `typesetting.py:1277-1280` |
+| T-10 | Paragraph có composition rỗng → `render_paragraph_to_char()` trả list rỗng, log `ERROR "Unable to export paragraphs that have not yet been formatted"` | `IL/backend/pdf_creater.py:831-836` |
+| T-11 | `debug_id` được sinh **luôn luôn** (`generate_base58_id()`), không phụ thuộc `--debug` → guard `typesetting.py:1008` thực tế không chặn vòng thu nhỏ | `IL/midend/paragraph_finder.py:500, 874, 911` |
+| T-12 | `--translate-table-text` mặc định **False**; bật lên mới nạp `RapidOCRModel` cho table detection | `main.py:238-242, 586-591` |
+| T-13 | `--max-pages-per-part` **không set thì không split** → 1 lần gọi babeldoc = 1 "document" cho T-07 | `main.py:222-225`; `format/pdf/split_manager.py:27-40` |
+| T-14 | `--ocr-workaround` (vẽ nền trắng dưới text) mặc định False; `BabeldocRunner` **không** truyền flag này → ô trắng quan sát được **không phải** do rectangle nền trắng | `main.py:256`; `pdf_creater.py:882-887`; `src/services/babeldoc_runner.py:280-311` |
+
+### T3. Bằng chứng sống (Protocol 6 / R6-03) — đo trên output production thật
+
+**Dữ liệu**: job `136645f9-ffe8-4927-afb2-b725236ede44` (Le Cordon Bleu Pâtisserie and Baking
+Foundations, 418 trang, `pdf_digital`, status `completed`).
+Nguồn: `data/uploads/f88282bb-…_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf`;
+output: `data/outputs/136645f9-…/translated_vi.pdf`. Đo bằng PyMuPDF `get_text("blocks")` /
+`get_text("dict")`.
+
+**(a) Chồng lấn text tăng vọt sau khi dịch** — đếm cặp block có diện tích giao > 5% diện tích
+block nhỏ hơn (đúng ngưỡng DoD-UX-01):
+
+| Trang | Cặp chồng lấn ở BẢN GỐC | Cặp chồng lấn ở BẢN DỊCH | Tỉ lệ giao lớn nhất |
+|-------|------------------------|--------------------------|---------------------|
+| 6 (mục lục) | 3 | 8 | 0.95 |
+| 12 | 7 | 18 | 1.00 |
+| 13 | 28 | 62 | 1.00 |
+| 26 | 3 | 9 | 1.00 |
+| 21, 27, 39 | 0 | 5 mỗi trang | 0.90 |
+
+→ DoD-UX-01 **FAIL** rõ rệt; trang văn xuôi thường (21, 27, 39) vốn 0 cặp chồng ở bản gốc
+cũng thành 5 cặp. Khớp nhận định UX-A "xảy ra trên văn xuôi bình thường".
+
+**(b) Tổng ký tự bản dịch THẤP HƠN bản gốc**: 520.855 / 573.211 = **0,909**. Tiếng Việt lẽ ra
+phải **dài hơn** ~20–40% → thiếu hụt thực tế lớn hơn con số 9% này nhiều.
+
+**(c) Ký tự bị xoay trong bản gốc** (`line["dir"]` ≠ 0°/90°, đúng ngưỡng T-01): **7.832 ký tự
+trên 19/418 trang** (1,17% toàn sách). Danh sách trang: 11, 12, 13, 14, 25, 26, 66, 69, 73,
+75, 80, 83, 86, 158, 159, 160, 171, 229, 268.
+
+**(d) Tái hiện live UX-C** — trích trang 67 (0-index 66) ra file 1 trang, chạy babeldoc THẬT
+(deepseek-chat, đúng bộ flag production + `--debug`): khối chú giải nghiêng "Disaccharide — The
+word disaccharide is composed of…" (16 dòng, `dir = (0.982, -0.191)` ≈ **-11°**) **biến mất
+hoàn toàn** khỏi output ở CẢ bản chạy độc lập LẪN bản production. Không có dòng log `ERROR`
+nào — đúng như T-01 dự đoán: ký tự bị bỏ ở bước parse nên không có gì để báo lỗi ở bước render.
+Cùng cơ chế với bảng quy đổi trang 15 (bảng nghiêng, mất 39/58 block).
+
+**(e) Đối chứng loại trừ T-09/T-10 làm nguyên nhân chính**: 3 trang chạy lại độc lập
+(trang 7 mục lục, 63 Fiche de Technique, 67) — **không** trang nào sinh log
+`"Unable to export paragraphs that have not yet been formatted"`. Cơ chế T-09/T-10 **tồn tại
+trong source nhưng chưa quan sát thấy kích hoạt** trên dữ liệu này → giữ lại như rủi ro đã
+biết, KHÔNG kết luận là nguyên nhân của UX-C.
+
+**(f) Kết quả bất ngờ, quan trọng cho UX-D**: trang mục lục (trang 7, 0-index 6) và trang
+"Fiche de Technique" (trang 63) khi chạy LẠI ở chế độ **1 trang độc lập** thì render **ĐÚNG** —
+dòng nối tiếp đều đặn `y = 289.5 → 305.1 → 320.7 → 336.3`, cùng `x = 119.9`, không lệch cột,
+không đè heading. Trong bản production **cùng trang đó** các dòng nối tiếp lại nhảy ngược lên
+trên và lệch trái (`y=289.6 x=119.9` → dòng tiếp theo `y=271.1 x=101.0`), và dòng
+"Hai chữ T: Nhiệt độ" (`y=329.7 x=328.2`, cỡ 10.0) đè lên heading cha "4. Kỹ Thuật và Kỹ Năng
+Làm Bánh 172" (`y=330.2 x=330.0`, cỡ 12.0) — **đúng hiện tượng UX-D**.
+
+⚠️ **`[UNVERIFIED]`** — chưa xác định được biến nào tạo ra khác biệt production vs 1-trang.
+Hai ứng viên, cả hai đều **chưa** kiểm chứng:
+1. **T-07 (nghi ngờ mạnh nhất)**: mode-scale tính trên TOÀN BỘ document của 1 lần gọi babeldoc.
+   Production gọi babeldoc theo **chunk ~38 trang** (11 chunk cho 418 trang) → mode lấy trên 38
+   trang; chạy 1 trang → mode lấy trên 1 trang → `optimal_scale` khác → font khác → số dòng
+   khác → vị trí khác. Số đo ủng hộ: các dòng lệch trong production đều có cỡ chữ **nhỏ hơn**
+   (8.3/9.2/9.9/10.0) so với các dòng đặt đúng (10.2/12.8).
+2. Độ dài text LLM trả về khác nhau giữa 2 lần chạy (không deterministic).
+
+Không được viết fix cho UX-D trước khi phân biệt được 2 khả năng này (xem T6-1).
+
+### T4. Root cause chi tiết
+
+#### RC-T1 — UX-A / UX-B / UX-E: không có reflow giữa các paragraph, tràn box vẫn vẽ
+
+Chuỗi nhân quả, mỗi mắt xích có nguồn:
+
+1. Text dịch VI dài hơn EN → cần nhiều dòng hơn trong đúng bbox gốc.
+2. Vòng `_find_optimal_scale_and_layout` thu nhỏ font để cứu (T-05). Mỗi paragraph tự chọn
+   scale riêng → **UX-E (font-size không đều)**. UX đoán đúng: UX-E là **hệ quả**, không phải
+   lỗi độc lập.
+3. Giãn khung chỉ được thử **sau khi đã thu nhỏ xuống dưới 0.7** và chỉ khi cạnh dưới/phải còn
+   khoảng trống (T-06). Trong box trang trí cỡ cố định hoặc ô bảng chật, không có chỗ trống →
+   giãn thất bại → chỉ còn cách bóp chữ → **UX-B**. Box text ngắn (caption "Antonin Carême")
+   vừa ngay ở scale 1.0 → không hỏng. Đúng đối chứng UX nêu: biến quyết định là **tỉ lệ độ dài
+   text / sức chứa khung**, không phải loại box.
+4. Nếu tới `min_scale = 0.1` vẫn không vừa: **không có nhánh nào cắt bớt hay dừng vẽ** — T-04
+   nói thẳng là cố ý vẽ tiếp ra ngoài box.
+5. Paragraph kế tiếp vẫn neo vào `box.y2` gốc của chính nó (T-03), không hề biết paragraph
+   trước đã tràn tới đâu → chữ tràn nằm chồng lên chữ của block dưới → **UX-A**.
+6. Bước chống chồng lấn duy nhất (T-08) đi **sai hướng**: nó **cắt ngắn** box trên chứ không
+   đẩy block dưới xuống → giảm chỗ chứa, làm bước 4 dễ xảy ra hơn.
+
+Điểm này giải thích luôn quan sát baseline "đầu trang sạch, cuối trang nát" của UX: không phải
+sai số cộng dồn theo toạ độ, mà là **xác suất cộng dồn** — trang càng xuống dưới càng nhiều
+paragraph đã tràn đè lên nhau, và block dưới không có cách nào tự tránh.
+
+#### RC-T2 — UX-C: ký tự xoay bị vứt ở bước parse (lỗi ĐỘC LẬP, không liên quan độ dài text)
+
+`il_creater.py:968-974` (T-01): bất kỳ glyph nào có góc xoay ngoài `0°±0.1` và `90°±0.1` bị
+`return` — không vào IL, không được dịch, không được vẽ lại. Vì babeldoc **dựng lại content
+stream** thay vì sửa tại chỗ, text gốc cũng không còn → đúng hiện tượng "ô trắng trống, không
+ai biết mình đang thiếu gì".
+
+Sách Le Cordon Bleu dùng rất nhiều khối nghiêng nhẹ (~11°) làm chú giải/pull-quote và bảng
+quy đổi đặt nghiêng → 7.832 ký tự / 19 trang mất trắng (T3-c). Đây là **Blocker** đúng như UX
+xếp hạng.
+
+Lưu ý phân biệt: hiện tượng "vài ô trong bảng Fiche de Technique trống" mà UX quan sát **không**
+tái hiện được khi chạy lại trang đó độc lập (T3-e/f: 42 block / 1.352 ký tự, gần bằng bản gốc
+41 block / 1.320 ký tự). Nhiều khả năng phần lớn "ô trống" trong ảnh chụp trang đó thực ra là
+**chữ bị dời chỗ (RC-T1)** chứ không phải mất hẳn — người đọc nhìn ảnh không phân biệt được 2
+loại. Chỉ nội dung xoay là mất thật, đã chứng minh.
+
+#### RC-T3 — UX-D: chưa xác định, phụ thuộc ngữ cảnh chunk
+
+Xem T3-f. `[UNVERIFIED]`. Không gộp vào RC-T1 vì RC-T1 chỉ giải thích được dịch chuyển **xuống
+dưới**, còn quan sát production là dòng nối tiếp nhảy **lên trên và sang trái**.
+
+### T5. Phần thuộc về code của team (không phải "toàn bộ nằm ở babeldoc")
+
+Khác kết luận RC-1 (2026-09-06, "root cause không nằm trong code của team"), lần này team có
+đóng góp thật vào triệu chứng:
+
+| # | Vấn đề phía team | Nguồn |
+|---|------------------|-------|
+| P-1 | Chunk theo trang (~38 trang/chunk) = **ranh giới document của T-07**. Mode-scale — tức cỡ chữ cuối cùng — phụ thuộc vào việc trang nào rơi vào chunk nào. Cùng 1 trang, chunk khác nhau ⇒ cỡ chữ khác nhau ⇒ **UX-E xuyên chương** và (nghi) **UX-D**. | T-07 + `src/core/chunking.py` (chunk theo `page_start/page_end`) |
+| P-2 | `BabeldocRunner` **không** truyền `--translate-table-text` (T-12). Chưa đo được flag này ảnh hưởng gì tới trang bảng — có thể tốt hơn, có thể tệ hơn. | `babeldoc_runner.py:280-311` |
+| P-3 | `BabeldocRunner` **không** truyền `--max-pages-per-part` (T-13) → không kiểm soát được đơn vị tính mode-scale độc lập với kích thước chunk. | như trên |
+| P-4 | Không có kiểm tra hậu kỳ nào phát hiện chồng lấn hay mất nội dung. Job báo `completed` với 19 trang mất chữ và hàng trăm cặp block chồng nhau. Đây đúng dạng lỗ hổng Protocol 6 R6-03 đã mô tả, ở cấp **chất lượng render** thay vì cấp **liên kết bước**. | `src/core/job_orchestrator.py` |
+
+### T6. Phương án đề xuất — theo TỪNG nhóm lỗi
+
+Không có 1 giải pháp chung. Effort tính theo ngày-người của 1 Dev.
+
+#### G1 (UX-C, Blocker) — patch runtime cho ngưỡng góc xoay của babeldoc
+
+Nới điều kiện `il_creater.py:973` từ `±0.1°` lên ngưỡng cấu hình được (đề xuất `±15°`), để text
+nghiêng nhẹ vẫn vào IL. Có 3 cách thực thi:
+
+| Cách | Mô tả | Effort | Risk |
+|------|-------|--------|------|
+| G1a | **Fork/patch có kiểm soát**: `uv tool` cài babeldoc từ fork nội bộ đã sửa 1 dòng đó | 1–2 ngày (gồm dựng pipeline build fork) | **Cao** — nợ bảo trì vĩnh viễn, mỗi lần babeldoc lên version phải rebase; đúng loại nợ Protocol 5 sinh ra để tránh |
+| G1b | **`sitecustomize`/wrapper monkey-patch**: vì gọi qua **subprocess**, có thể chèn 1 module patch qua `PYTHONPATH` + `PYTHONSTARTUP` không đụng file cài | 1 ngày | **Cao** — sửa hành vi tool bên thứ 3 từ bên ngoài, khó debug, dễ vỡ âm thầm khi đổi version |
+| G1c | **Tiền xử lý: "duỗi thẳng" text nghiêng** — dùng PyMuPDF phát hiện line có `dir` ngoài 0°/90°, redact text gốc và vẽ lại cùng nội dung ở góc 0° trong cùng bbox, TRƯỚC khi đưa vào babeldoc | 2–3 ngày | **Trung bình** — không đụng babeldoc; đánh đổi: mất hiệu ứng nghiêng thẩm mỹ (chấp nhận được: thà chữ thẳng còn hơn mất chữ). Rủi ro thật: bbox của text nghiêng rộng hơn text thẳng nên thường đủ chỗ, nhưng **chưa verify** trên mẫu thật |
+| G1d | **Chấp nhận + cảnh báo**: không sửa render, nhưng **phát hiện và báo cáo** — quét trước, ghi vào job "19 trang chứa 7.832 ký tự xoay sẽ bị mất", xuất phụ lục text các khối đó | 0,5 ngày | **Thấp** |
+
+**Khuyến nghị**: **G1d ngay** (rẻ, biến lỗi im lặng thành lỗi nhìn thấy được — đúng tinh thần
+UX xếp UX-C là Blocker *vì người đọc không biết mình mất gì*), rồi **G1c** làm fix thật.
+**Không** chọn G1a/G1b nếu chưa thử G1c.
+
+⚠️ **`[UNVERIFIED]`**: G1c chưa được spike. Bắt buộc R5-02 spike trên trang 67 và trang 15
+trước khi implement đầy đủ.
+
+#### G2 (UX-A/B/E, Critical) — giảm áp lực tràn thay vì sửa engine typeset
+
+Viết lại thuật toán typeset của babeldoc là ngoài tầm (≈ toàn bộ `typesetting.py`, 1.682 dòng).
+Bốn hướng khả thi:
+
+| Hướng | Mô tả | Effort | Risk | Ghi chú |
+|-------|-------|--------|------|---------|
+| G2a | **Prompt "dịch cô đọng"**: bắt buộc bản dịch ≤ ~110% độ dài nguồn (đo bằng ký tự), thêm chỉ thị vào `src/core/prompt_builder.py` biến thể babeldoc | 0,5 ngày | Thấp | Chỉ giảm áp lực, không xoá lỗi. PRD đã có chiến lược "concise prompt" — hiện chưa áp cho nhánh babeldoc. **Đo được**: so tỉ lệ ký tự VI/EN trước–sau |
+| G2b | **Chuẩn hoá đơn vị tính mode-scale**: truyền `--max-pages-per-part` cố định (vd 4) độc lập với chunk size → cỡ chữ không còn phụ thuộc chunk nào chứa trang nào (P-1/P-3) | 0,5 ngày | Thấp–TB | Sửa **UX-E xuyên chương** và có thể cả UX-D. **Phải A/B đo trước** — chưa verify part nhỏ hơn có tốt hơn không |
+| G2c | **Gate chất lượng tự động (DoD-UX-01/02)**: hậu kiểm output — đếm cặp block chồng > 5% và block gốc không có text dịch tương ứng; vượt ngưỡng → đánh dấu trang cần review, không báo `completed` trắng trơn | 1,5–2 ngày | Thấp | Script đo đã có sẵn ở T3 (chạy thật rồi). Đây là món **giá trị nhất trên đơn vị công**: không sửa được lỗi nhưng chặn được việc giao hàng lỗi mà không ai biết |
+| G2d | **Fallback engine cho trang phức tạp**: phát hiện trang nhiều cột/bảng → dịch bằng `pdf2zh` thay vì babeldoc | 3–5 ngày | **Cao** | ⚠️ **`[UNVERIFIED]` — CHƯA ĐƯỢC ĐỀ XUẤT**: chưa đo pdf2zh trên đúng các trang này. pdf2zh cũng neo bbox gốc và cũng có tràn chữ (chính lý do project thêm babeldoc). **Không implement trước khi có 1 lần đo A/B thật trên trang 6, 13, 63, 67** |
+
+**Khuyến nghị**: **G2c + G2a** trước (rẻ, rủi ro thấp, kết quả đo được ngay), **G2b** sau khi
+A/B; **G2d chỉ khi đã verify pdf2zh thực sự tốt hơn trên đúng bộ trang này**.
+
+#### G3 (UX-D, Major) — điều tra trước, sửa sau
+
+Chưa đủ dữ liệu để đề xuất fix. Việc cần làm (0,5 ngày, không cần code sản phẩm):
+chạy babeldoc trên **cùng trang mục lục** với 3 cấu hình — (i) 1 trang, (ii) 38 trang giống
+chunk production, (iii) 38 trang + `--max-pages-per-part 4` — rồi so vị trí/cỡ chữ. Nếu (ii)
+tái hiện lỗi còn (iii) thì không → xác nhận T-07 là nguyên nhân, và **G2b chính là fix cho cả
+UX-D**. Nếu cả (ii) và (iii) đều tái hiện → nguyên nhân khác, điều tra tiếp.
+
+#### G4 — Report upstream
+
+Cả RC-T1 (T-04, cố ý vẽ tràn) và RC-T2 (T-01, vứt ký tự xoay) đều là hành vi của babeldoc, ảnh
+hưởng mọi người dùng dịch sang ngôn ngữ dài hơn ngôn ngữ nguồn. Nên mở issue upstream kèm 2
+file tái hiện tối thiểu đã có sẵn (`p67.pdf`, `p15.pdf`). Effort 0,5 ngày, risk 0, nhưng
+**không tính là fix** — không được chờ upstream để đóng task.
+
+#### G5 — Known limitation trong PRD
+
+Dù chọn hướng nào, ghi vào PRD: bản dịch giữ layout PDF **không** đảm bảo 100% không chồng
+chữ trên trang bố cục phức tạp với engine hiện tại; kèm số đo thật ở T3 để người dùng biết quy
+mô. Effort 0,5 ngày.
+
+### T7. Yêu cầu test kèm bất kỳ fix nào (Protocol 5 + 6)
+
+1. **Golden fixture từ output thật, không viết tay** (Protocol 5 mục 3): lưu
+   `tests/fixtures/babeldoc/rotated_text_p67.pdf` (đã trích, có khối -11°) và
+   `toc_2col_p7.pdf`. Assert: sau khi dịch, **số ký tự của khối nghiêng > 0**.
+2. **Test theo DoD-UX-01/02 của UX**, không phải theo flag: đo cặp bbox giao > 5% và block gốc
+   không có text dịch — chính script ở T3.
+3. **Live E2E (R6-03)**: mở PDF output và **đọc nội dung** vùng khối nghiêng; không tin field
+   `status`.
+4. **Data lineage (R6-02)**: nếu làm G2b, assert giá trị `max_pages_per_part` từ `Settings` đi
+   thật tới `args` của subprocess, không chỉ `assert_awaited()`.
+
+### T8. Trạng thái verify (tổng hợp)
+
+| Claim | Trạng thái |
+|-------|-----------|
+| Ngưỡng góc xoay ±0.1° làm mất ký tự | ✅ Verified — source `il_creater.py:968-974` + tái hiện live trang 67 |
+| Quy mô mất chữ do xoay (7.832 ký tự / 19 trang) | ✅ Verified — đo trên PDF gốc thật |
+| Overflow được cố ý vẽ ra ngoài box | ✅ Verified — `typesetting.py:1440-1444` + comment gốc |
+| Không reflow giữa các paragraph | ✅ Verified — `typesetting.py:1349-1350` |
+| Giãn khung chỉ chạy khi scale < 0.7 | ✅ Verified — `typesetting.py:1017-1062` |
+| Mode-scale tính trên cả document | ✅ Verified — `typesetting.py:919-935` |
+| Chồng lấn tăng sau dịch (số liệu bảng T3-a) | ✅ Verified — đo trên output production |
+| T-09/T-10 (composition rỗng) là nguyên nhân UX-C | ❌ **Đã loại trừ trên dữ liệu này** — 3 lần chạy live không sinh log tương ứng; giữ lại như rủi ro đã biết |
+| Nguyên nhân UX-D | ⚠️ **`[UNVERIFIED]`** — không tái hiện được ở chế độ 1 trang; xem G3 |
+| Mode-scale/chunk là nguyên nhân UX-D và UX-E xuyên chương | ⚠️ **`[UNVERIFIED]`** — mới là suy luận từ source + 1 quan sát cỡ chữ; cần A/B ở G3 |
+| pdf2zh có bị lỗi tương tự hay không | ⚠️ **`[UNVERIFIED]`** — chưa đo. **Chặn** đề xuất G2d |
+| `--translate-table-text` ảnh hưởng trang bảng | ⚠️ **`[UNVERIFIED]`** — chưa đo |
+| G1c (duỗi thẳng text nghiêng) khả thi | ⚠️ **`[UNVERIFIED]`** — chưa spike (bắt buộc R5-02) |
+
+---
+
+## Final Decision: Babeldoc Layout Bug Fix Roadmap (sau phản biện Domain Expert, 2026-09-07)
+
+**Tác giả**: Tech Lead. **Đầu vào**: section "Root Cause Analysis: Text Overlap, Content-Loss
+& Reading-Order…" (T1–T8, 2026-09-07) + phản biện độc lập của Domain Expert (PDF typesetting).
+**Trạng thái**: ✅ **Đây là quyết định kỹ thuật cuối cùng** cho nhóm lỗi UX-A…UX-E. Ba mục
+thuộc thẩm quyền PM/user được tách riêng ở U7 (escalation).
+
+Mọi claim mới trong section này đã được Tech Lead **tự verify lại**, không kế thừa từ phản
+biện. Nguồn xác thực ghi ở U1.
+
+### U1. Kết quả tự verify các phát hiện mới của Domain Expert (Protocol 5 / R5-01)
+
+Môi trường: babeldoc **0.6.4** (`/Users/hieutt/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`),
+pdf2zh **1.9.11** (`/Users/hieutt/.local/share/uv/tools/pdf2zh/lib/python3.12/site-packages/pdf2zh/`),
+PyMuPDF **1.28.2 / MuPDF 1.28.2**. Prefix `IL/` = `format/pdf/document_il/`.
+
+| ID | Claim của Expert | Phán quyết | Nguồn xác thực Tech Lead tự chạy/đọc |
+|----|------------------|-----------|--------------------------------------|
+| V-1 | Backend babeldoc **không** render được chữ xoay góc tuỳ ý → nới ngưỡng góc KHÔNG phải fix tận gốc | ✅ **ĐÚNG — xác nhận** | `IL/backend/pdf_creater.py:111-120` chỉ phát 2 dạng `Tm`: `0 1 -1 0` (khi `char.vertical`) và `1 0 0 1` (mọi trường hợp khác). `IL/il_version_1.py:627-663`: `PdfCharacter` có `vertical: bool`, `scale: float` — **không có field góc xoay nào**. Kể cả nới ngưỡng ở `il_creater.py:973`, char nghiêng vẫn bị vẽ lại NGANG. |
+| V-2 | pdf2zh 1.9.11 **không** vứt chữ nghiêng nhẹ; chỉ lọc font dọc | ✅ **ĐÚNG — xác nhận** | `pdf2zh/converter.py:244`: điều kiện duy nhất liên quan matrix là `child.matrix[0] == 0 and child.matrix[3] == 0` (font dọc thuần). Char nghiêng ~11° có `matrix[0]≈matrix[3]≈0.98` → không khớp → đi tiếp như text thường; render tại `converter.py:384` với `1 0 0 1 x y Tm` (ngang). Kết luận: pdf2zh **không mất chữ**, nhưng **cũng duỗi thẳng** — thẩm mỹ ≈ G1c. |
+| V-3 | Text trong vùng nhãn `table` **không được dịch**, giữ nguyên tiếng Anh (loại content-loss thứ 4) | ❌ **BÁC BỎ** — xem U2 | Cơ chế Expert mô tả có thật nhưng **bị vô hiệu hoá bởi `fallback_line`**; và đo trên output production cho kết quả ngược lại. Chi tiết + số liệu ở U2. |
+| V-4 | `babeldoc` latest trên PyPI = 0.6.4 = bản đang cài; nên pin | ✅ **ĐÚNG — xác nhận** | PyPI JSON API `https://pypi.org/pypi/babeldoc/json` (fetch 2026-09-07): `info.version = 0.6.4`; releases gần nhất `0.5.9 → 0.6.0 → 0.6.1 → 0.6.2 → 0.6.3 → 0.6.4`. |
+| E-1 | `get_max_bottom_space()` đo chỗ trống thật, không đè paragraph khác → "giãn trước, bóp sau" là patch nhỏ không dây chuyền | ✅ **ĐÚNG — xác nhận** | `IL/midend/typesetting.py:1628-1660`: hàm loại trừ mọi `page.pdf_paragraph`, `page.pdf_character`, `page.pdf_figure` nằm dưới và có giao ngang, chặn dưới bằng `page.cropbox.box.y * 1.1`. **Phát hiện bổ sung của Tech Lead**: khi giãn xuống THÀNH CÔNG (`typesetting.py:1036-1037`) vòng lặp `continue` với `scale` ĐANG ở mức < 0.7 — **không bao giờ thử lại scale 1.0 trong box đã giãn**. Tức chữ bị bóp nhỏ vĩnh viễn dù sau đó đã có đủ chỗ. Đây là 1 lỗi logic thật, đúng như Expert dự đoán, và mạnh hơn Expert mô tả. |
+| E-2 | babeldoc vứt char xoay **im lặng**, không cả `logger.debug` | ✅ **ĐÚNG — xác nhận** | `IL/frontend/il_creater.py:968-974`: nhánh `return` ở dòng 974 không có log; chỉ nhánh `except` (dòng 975-979) mới `logger.warning`. |
+| E-3 | `insert_text(..., morph=(pivot, Matrix(angle)))` của PyMuPDF vẽ được text xoay góc tuỳ ý (khác `insert_textbox` chỉ 0/90/180/270) | ✅ **ĐÚNG — đã spike chạy thật** | Xem U3. |
+
+### U2. BÁC BỎ V-3 — bảng KHÔNG bị bỏ dịch (bằng cả source lẫn dữ liệu sống)
+
+Đây là điểm PM yêu cầu ưu tiên verify vì nếu đúng sẽ là loại content-loss thứ 4. **Kết luận:
+không phải.** Bốn tầng bằng chứng:
+
+**(1) Expert đọc `is_text_layout()` bị cắt cụt.** Expert trích `layout_helper.py:801-813` và
+kết luận danh sách "chỉ chứa `table_text`". Danh sách thật kéo dài tới **dòng 849**, gồm
+`table_caption`, `table_footnote`, `table_title`, `table_cell`, `wired_table_cell`,
+`wireless_table_cell`, `table_cell_hybrid`… (`layout_helper.py:803-849`). Đúng là **không có
+nhãn trần `table`** — phần này Expert nói đúng.
+
+**(2) Model layout mặc định thật sự sinh nhãn `table`** — nên nguy cơ là có thật, không phải
+tưởng tượng. Tech Lead nạp trực tiếp metadata của model ONNX đang dùng
+(`~/.cache/babeldoc/models/doclayout_yolo_docstructbench_imgsz1024.onnx`, đọc bằng
+`onnx.load` + `metadata_props`, đúng cách `docvision/doclayout.py:47-49` làm):
+
+```
+{0:'title', 1:'plain text', 2:'abandon', 3:'figure', 4:'figure_caption',
+ 5:'table', 6:'table_caption', 7:'table_footnote', 8:'isolate_formula', 9:'formula_caption'}
+```
+
+Chạy chính model này trên file gốc, trang 63 (Fiche de Technique) cho:
+`{'table': 1, 'table_caption': 1, 'abandon': 2}` với box `table` = `[88.8, 78.1, 612.8, 462.5]`
+— tức **gần trọn trang**. Nếu chỉ có cơ chế Expert mô tả thì cả trang 63 phải là tiếng Anh.
+
+**(3) Nhưng `fallback_line` chặn đường đó lại.** `IL/midend/layout_parser.py:171-208`: sau khi
+chạy model, babeldoc **luôn** gọi `generate_fallback_line_layout_for_page()` cho MỌI trang,
+sinh thêm 1 `PageLayout(class_name="fallback_line", conf=1)` bao quanh **từng cụm dòng chữ**.
+`fallback_line` **có** trong `is_text_layout` (`layout_helper.py:844`) và đứng **trên**
+`table`/`figure`/`image` trong `layout_priority` (`layout_helper.py:725-728`) —
+`get_character_layout()` trả về layout ưu tiên cao nhất khớp char, nên char trong ô bảng nhận
+`fallback_line`, **không** nhận `table` → không rơi vào `skip_chars` ở
+`paragraph_finder.py:454-455` → **được dịch bình thường**.
+
+**(4) Đo trên output production thật (R6-03)** — job `136645f9-…`, `translated_vi.pdf`, đếm ký
+tự trong block ≥ 25 ký tự không mang dấu tiếng Việt (chuẩn hoá NFD, bắt cả `ăâđêôơư`):
+
+| Chỉ số | Giá trị |
+|--------|---------|
+| Tổng ký tự (block ≥ 25 ký tự) | 631.947 |
+| Ký tự trong block **không có dấu tiếng Việt** | 17.180 (**2,7%**) |
+| Số trang có > 200 ký tự không dấu | **11 / 418** |
+| Trang 63 (Fiche de Technique, vùng `table` gần trọn trang) | 39 block, chỉ **3** block không dấu, đều là tên riêng: `"Fondant au chocolat, coulis de framboise"`, `"© Le Cordon Bleu International"`, `"Gluxit Protein 100 200"` (`Gluxit` LÀ tiếng Việt) |
+
+11 trang còn lại là **index/mục lục cuối sách (409–418)**, **credit ảnh** (`"Credits: …
+© iStockphoto.com"`, trang 18, 188) và **danh sách tên riêng** (trang 16: tên các cơ sở
+Le Cordon Bleu, tên người). Không có trang nào là bảng bị bỏ dịch.
+
+**Kết luận U2**: V-3 **sai về hệ quả**. Không tồn tại loại content-loss thứ 4. Cơ chế
+`is_text_layout` → `skip_chars` là **rủi ro đã biết** (nếu upstream đổi/bỏ `fallback_line`, hoặc
+nếu bật `--translate-table-text` làm đổi tập nhãn), nên ghi vào bảng rủi ro U6, **không** đưa
+vào roadmap fix.
+
+**Hệ quả cho đề xuất `--translate-table-text`**: Expert nâng flag này thành "quyết định sản
+phẩm hạng nhất" **dựa trên tiền đề vừa bị bác bỏ**. Vì bảng đã được dịch sẵn, flag này mất lý
+do chính. Nó vẫn có thể cải thiện **cách gom dòng** trong bảng (thay `fallback_line` theo dòng
+bằng `wired/wireless_table_cell` theo ô), nhưng đó là câu hỏi chất lượng dàn trang, kèm chi
+phí nạp thêm RapidOCR và rủi ro "experimental". → **Giữ nguyên mức P2 tuỳ chọn**, đo kèm trong
+thí nghiệm A/B duy nhất (P0.2), **không** nâng ưu tiên.
+
+### U3. G1e (overlay PyMuPDF `morph`) — ĐÃ SPIKE THẬT, KHẢ THI
+
+Tech Lead đã chạy spike (không mock), PyMuPDF 1.28.2:
+
+```python
+page.insert_text(pivot, text, fontsize=11,
+                 morph=(pivot, pymupdf.Matrix(11)),      # xoay 11°
+                 fontname="vi", fontfile="fonts/NotoSerif-Regular.ttf")
+```
+
+Kết quả đọc lại bằng `get_text("dict")` trên chính file vừa ghi:
+
+```
+dir: (0.9816271066665649, -0.19080941379070282)
+text: 'Đường nghiêng: nhiệt độ 180°C, 250g bột mì'
+```
+
+Hai điều được chứng minh cùng lúc:
+1. `morph` cho ra góc xoay tuỳ ý thật — và `dir` thu được **trùng khít** với `dir` của khối
+   nghiêng trang 67 trong sách gốc đã đo ở T3-d (`(0.982, -0.191)`). Tức đây đúng là công cụ
+   tái tạo lại được hiệu ứng thiết kế đã mất.
+2. Dấu tiếng Việt đầy đủ (`Đ ườ ệ độ ộ ì`) + ký hiệu `°C` render và trích xuất lại đúng, với
+   **font project đã có sẵn** — `fonts/NotoSerif-Regular.ttf` là file font duy nhất trong repo,
+   không cần thêm dependency.
+
+**Rủi ro còn lại của G1e (chưa spike, phải làm ở P1.1)**: `insert_text` **không tự xuống dòng**
+— phải tự tách dòng + tự bóp font cho vừa bbox nghiêng. Đây chính là "tam nan" ở U5 nhưng trong
+phạm vi **ta kiểm soát được**: bóp tới 70% (đúng DoD-UX-03) rồi FLAG, không bao giờ bóp tới 0.1
+như `min_scale` của babeldoc.
+
+**Quyết định**: **CHỌN G1e làm hướng chính cho UX-C**, thay thế G1c trong đề xuất T6. Lý do
+quyết định là **V-1**, không phải "nợ bảo trì": vì backend babeldoc không có khả năng render
+góc xoay (không có field góc trong `PdfCharacter`), **mọi** hướng đi xuyên qua babeldoc —
+G1a fork, G1b monkey-patch, G1c duỗi thẳng — đều **bắt buộc** mất góc nghiêng. G1e là hướng
+duy nhất giữ được thẩm mỹ, effort ngang G1c (2–3 ngày). **G1a/G1b bị LOẠI vĩnh viễn**: chúng
+không những mang nợ bảo trì mà còn **không đạt được mục tiêu** (V-1) — nới ngưỡng chỉ đổi "mất
+chữ" thành "chữ bị duỗi thẳng + gom dòng sai", vì `paragraph_finder` gom dòng bằng hình học
+ngang sẽ băm 1 dòng nghiêng 11° thành nhiều mảnh. Đồng ý với Expert ở điểm này.
+**G1c giữ lại làm phương án dự phòng** nếu spike fit-text của G1e thất bại.
+
+### U4. Roadmap đã chốt
+
+Nguyên tắc: **đo trước, mọi fix phải A/B được, KHÔNG fork engine reflow.**
+
+#### P0 — Thiết bị đo + khoá nền (≈ 3,5 ngày, làm trước mọi fix)
+
+**P0.1 — Gate chất lượng G2c MỞ RỘNG (2 ngày).** Hậu kiểm output PDF, 5 kiểm tra:
+
+| Kiểm tra | Nguồn / lý do | Ứng với |
+|----------|---------------|---------|
+| a. cặp block text giao > 5% diện tích block nhỏ hơn | script đã chạy thật ở T3-a | DoD-UX-01 / UX-A |
+| b. text vượt qua **đường viền vẽ** (`page.get_drawings()`) | ✅ đồng ý với Expert (5c) — gate chỉ đo text∩text sẽ cho PASS sai 1 trang có đúng 1 box tràn viền mà không đè text nào | DoD-UX-03 / UX-B |
+| c. text đè lên **ảnh** (`page.get_image_rects()`) | như trên | UX-B |
+| d. **pre-scan chữ xoay** trên file GỐC (`line["dir"]` ngoài 0°/90°) → cảnh báo trước + xuất phụ lục text (chính là G1d) | T3-c (7.832 ký tự / 19 trang) | UX-C |
+| e. **bảo toàn thực thể**: regex trích `số + đơn vị` (`180°C`, `250g`, `10 min`, `1/2`) từ block GỐC, assert xuất hiện đủ trong block dịch tương ứng | ✅ đồng ý với Expert (mục 2) — **đây là lỗ hổng nghiêm trọng nhất của đề xuất T6 cũ: toàn bộ test đang đo hình học, không có dòng nào đo nội dung** | DoD-UX-02 |
+
+Output **bắt buộc** là **hàng đợi review theo trang, xếp hạng mức nghiêm trọng + ảnh overlay**,
+không phải 1 kết quả pass/fail toàn tài liệu — với 418 trang, mục tiêu là QA soi 30–50 trang bị
+flag. ✅ Đồng ý hoàn toàn với Expert. Bổ sung của Tech Lead: gate phải **ghi số đo vào DB theo
+job** để so được giữa các lần chạy — nếu không thì không A/B được, và đó chính là lý do gate
+phải đứng TRƯỚC mọi fix.
+
+**P0.2 — MỘT thí nghiệm A/B duy nhất (1 ngày).** ✅ Đồng ý gộp G3 + G2b-A/B + P-2 + G2d thành
+1 lần chạy — chúng vốn là cùng 1 thí nghiệm; chạy tách là lãng phí 1 vòng round-trip.
+- Trang: **7, 13, 15, 63, 67** (đã trích sẵn từ T3; phủ mục lục / văn xuôi 2 cột / bảng nghiêng
+  / bảng lớn / khối chú giải nghiêng).
+- Cấu hình: (i) 1 trang; (ii) chunk 38 trang giống production; (iii) chunk 38 +
+  `--max-pages-per-part 4`; (iv) (ii) + `--translate-table-text`; (v) pdf2zh cùng bộ trang.
+- **Khoá biến "LLM không deterministic"** ✅ (đồng ý — Expert đúng, và đây là điều T6/G3 bỏ
+  sót): chạy (i) trước để làm ấm cache babeldoc, các lần sau **KHÔNG** truyền `--ignore-cache`
+  (`src/services/babeldoc_runner.py:323-324` chỉ thêm flag khi `ignore_cache=True` → chỉ cần
+  đặt False). Không khoá cache thì mọi kết luận đều bị nghi ngờ.
+- **Dump debug paragraph boxes; so SỐ PARAGRAPH + BOX, không chỉ so vị trí dòng cuối** ✅
+  (đồng ý). Tech Lead xác nhận tiền đề suy luận của Expert là đúng: RC-T3 ghi nguyên văn hiện
+  tượng production là dòng nhảy **"lên trên và sang trái"**, không phải xuống dưới — nên "gom
+  nhầm paragraph" là ứng viên hợp lệ ngang hàng T-07 mode-scale, và `--split-short-lines` (app
+  đang bật, `babeldoc_runner.py:308-309`) là biến nghi ngờ chính.
+- Trả lời **cùng lúc 4 câu**: UX-D do đâu; G2b (`--max-pages-per-part`) có đáng không;
+  `--translate-table-text` đổi gì trên trang bảng; pdf2zh có đáng làm fallback cho 19 trang chữ
+  xoay không.
+
+**P0.3 — Pin `babeldoc==0.6.4` (0,1 ngày).** ✅ Đồng ý. Mọi số đo ở T3/U1/U2 và toàn bộ thiết
+kế G1e đều gắn với hành vi bản này; upstream đang release dày (6 bản gần đây).
+
+#### P1 — Fix thật (≈ 3 ngày, chỉ bắt đầu sau khi P0 xanh)
+
+**P1.1 — UX-C: spike fit-text cho G1e (0,5 ngày) → implement (2 ngày).**
+Spike phải trả lời: với khối 16 dòng nghiêng −11° ở trang 67, bản dịch VI có vừa bbox gốc ở
+scale ≥ 0,7 không. Đạt → implement. Không đạt → **G1c** (duỗi thẳng, mất góc nghiêng) hoặc
+**pdf2zh cho riêng 19 trang xoay**, chọn theo số đo P0.2-(v).
+**Data lineage (R6-01)**: `rotated_blocks ← source.pdf` (quét bằng PyMuPDF, `line["dir"]`) →
+`translated_blocks ← LLM provider của app` (KHÔNG qua babeldoc) → overlay lên
+`babeldoc_output.pdf` bằng `insert_text(..., morph=…)`. Bước overlay đọc `translated_blocks`,
+**không** đọc lại `source.pdf`.
+G1d (phụ lục text cho QA) đã nằm trong P0.1-d và giao **luôn** kèm mọi phương án — nhưng ✅ đồng
+ý với Expert: đó là **phụ lục cho QA**, không phải sản phẩm giao người đọc.
+
+**P1.2 — Viết lại G2a theo hướng bất biến nội dung (0,5 ngày).** ✅ **Đồng ý với Expert, và đây
+là chỗ Tech Lead tự nhận đề xuất T6/G2a cũ SAI.** Bản cũ ghi "bắt buộc bản dịch ≤ ~110% độ dài
+nguồn" — hard cap độ dài trong prompt ép LLM lược bỏ định lượng/gộp bước. Với sách công thức,
+mất "180°C" hay "10 phút" nguy hiểm hơn UX-C nhiều: bản dịch **trông hoàn hảo**, gate hình học
+không bao giờ bắt được. G2a bản chốt:
+- (a) prompt nêu **bất biến nội dung tường minh**: mọi con số, đơn vị, nhiệt độ, thời gian, tên
+  nguyên liệu, số bước phải có đủ trong bản dịch;
+- (b) khuyến khích **văn phong cô đọng** (bỏ hư từ, câu ngắn) — KHÔNG đưa con số 110% vào
+  prompt; tỉ lệ ký tự chỉ là **metric đo SAU**, không phải chỉ thị cho LLM;
+- (c) chốt chặn là **gate P0.1-e** (bảo toàn số + đơn vị), không phải lời hứa của prompt.
+Ghi rõ: G2a chỉ tác dụng ở văn xuôi, **không cứu được UX-B** (box cố định vốn text đã ngắn).
+
+**P1.3 — G2b (`--max-pages-per-part`) chỉ implement nếu P0.2 chứng minh.** Kèm assert data
+lineage R6-02: giá trị từ `Settings` phải đi thật tới `args` của subprocess, không chỉ
+`assert_awaited()`.
+
+#### P2 — Nền dài hạn
+
+- **P2.1 — Chính sách "tam nan" theo loại phần tử** → **escalate PM/user**, xem U7.
+- **P2.2 — Upstream babeldoc**: 2 PR nhỏ + 1 issue.
+  - PR (a): **đảo thứ tự "giãn xuống TRƯỚC, bóp SAU"**. ✅ Đồng ý với Expert, và Tech Lead
+    verify ra lý do mạnh hơn (E-1): hiện tại khi giãn xuống thành công, vòng lặp `continue` với
+    `scale` đang < 0.7 và **không bao giờ thử lại 1.0** trong box mới — chữ bị bóp nhỏ vĩnh viễn
+    dù đã có đủ chỗ. Đây là **bug logic**, không chỉ "thứ tự chưa tối ưu" → khả năng merge cao.
+  - PR (b): biến ngưỡng góc `il_creater.py:973` thành tham số CLI + **thêm log khi vứt char**
+    (hiện `return` im lặng, E-2). Không đổi default → rủi ro merge thấp.
+  - Issue: kèm `p67.pdf` / `p15.pdf` (đã có sẵn từ T3).
+  Ghi rõ: **không được chờ upstream để đóng task** (giữ nguyên tinh thần G4).
+- **P2.3 — `--translate-table-text`**: chỉ xét lại nếu P0.2-(iv) cho số đo tốt hơn rõ rệt.
+  Không còn là ưu tiên sản phẩm sau khi V-3 bị bác bỏ (U2).
+- **P2.4 — G5 known limitation trong PRD**, kèm số đo thật ở T3 + U2.
+- **P2.5 — KHÔNG fork engine reflow.** ✅ Đồng ý tuyệt đối với Expert. Reflow đúng nghĩa = đẩy
+  paragraph N+1 xuống theo chiều cao thật của N → dây chuyền toàn trang → đụng hình/box cố
+  định/footer → phải tràn sang trang sau → **lệch số trang so với mục lục/index**. Đó là viết
+  lại 1 engine dàn trang, không phải patch. Nếu sau P0–P1 văn xuôi vẫn vượt ngưỡng chấp nhận,
+  thứ tự xét là: PR upstream (P2.2a) → monkey-patch có pin version (phương án cuối cùng, chỉ
+  khi PR bị từ chối).
+
+### U5. Khung "tam nan" — điểm Expert đúng mà T6 cũ nói chưa đủ rõ
+
+✅ Đồng ý, và ghi nhận đây là đóng góp có giá trị nhất của phản biện. Khi text đích dài hơn
+nguồn 20–40% mà khung giữ nguyên, phần dôi ra chỉ có 3 chỗ để đi: **(1) bóp font** (→ UX-E),
+**(2) giãn khung** (→ phá layout, đẩy khối dưới, tràn trang), **(3) cắt/rút text** (→ rủi ro
+nội dung). babeldoc chọn (1), và khi hết cách thì **cố ý vẽ tràn** (T-04) — đây là **quyết định
+POLICY của một tool dùng chung**, không phải bug ngẫu nhiên.
+
+Hệ quả với cách trình bày của T6 cũ: T6-G2c tuy có tự ghi "không sửa được lỗi, chỉ chặn giao
+hàng lỗi", nhưng đặt nó ở vị trí "khuyến nghị hàng đầu" dễ khiến người đọc hiểu thành "làm gate
+là xong". **Nói lại cho rõ**: gate là **thiết bị đo**, không phải fix. Nó đứng đầu P0 vì
+**không có nó thì không A/B được bất kỳ patch nào** — chứ không phải vì nó giải quyết được
+UX-A/B/E.
+
+### U6. Rủi ro đã biết (theo dõi, không fix ngay)
+
+| # | Rủi ro | Vì sao không fix ngay |
+|---|--------|----------------------|
+| RK-1 | `is_text_layout()` không chứa nhãn trần `table`; text vùng `table` chỉ thoát được nhờ `fallback_line` (U2-3). Nếu upstream bỏ/đổi `generate_fallback_line_layout_for_page`, **toàn bộ bảng sẽ ngừng được dịch trong im lặng** | Đã đo: hiện KHÔNG xảy ra (U2-4). Đã pin version (P0.3). Gate P0.1-e (bảo toàn số/đơn vị) sẽ bắt được nếu nó xảy ra về sau |
+| RK-2 | T-09/T-10 (paragraph composition rỗng → log `"Unable to export paragraphs…"`) | Đã loại trừ trên dữ liệu này (T3-e); giữ nguyên trạng thái theo dõi |
+| RK-3 | G1e overlay đặt text lên PDF đã qua `compress_pdf_images` (US-16) — thứ tự 2 bước phải cố định | Ghi vào spec P1.1: overlay chạy **sau** merge chunk, **trước** nén ảnh, để bước nén không đụng text mới thêm |
+
+### U7. Escalate cho PM/user (không thuộc thẩm quyền Tech Lead)
+
+✅ Đồng ý với Expert: đây là **quyết định sản phẩm**, phải do PM/user chốt rồi ghi vào PRD.
+Tech Lead chỉ trình bày lựa chọn và hệ quả.
+
+**E-1. Chính sách tam nan theo TỪNG loại phần tử.** Đề xuất của Tech Lead để PM duyệt:
+
+| Loại phần tử | Chính sách đề xuất | Hệ quả người dùng nhìn thấy |
+|--------------|-------------------|----------------------------|
+| Văn xuôi 1 cột có khoảng trắng dưới | Cho phép **giãn khung xuống** trước, giữ font 100% | Khoảng cách giữa các khối thay đổi nhẹ |
+| Box trang trí / ô bảng cỡ cố định | Bóp font tối đa tới **70%** (DoD-UX-03) rồi **FLAG**, KHÔNG bóp tới 0.1 | Một số box bị flag để QA sửa tay |
+| Mục lục / index | KHÔNG bóp, KHÔNG giãn — ưu tiên **rút gọn tiêu đề mục** | Tên mục có thể ngắn hơn bản gốc |
+| Khối chữ xoay | Overlay G1e giữ góc; không vừa thì bóp tới 70% rồi FLAG | Giữ được thiết kế nghiêng |
+
+**E-2. Ngưỡng chấp nhận release.** DoD-UX-01/02/03 hiện là "chặn release" tuyệt đối. Với số đo
+T3-a (trang văn xuôi thường cũng có 5 cặp chồng lấn), **giữ nguyên = không bao giờ release
+được**. PM cần chốt ngưỡng định lượng, ví dụ "≤ 5% số trang bị flag ở mức nghiêm trọng".
+
+**E-3. Review thủ công bắt buộc.** ✅ Đồng ý với Expert (5d): 3 lớp trang phải QA soi tay 100%
+**bất kể gate nói gì** — 19 trang chữ xoay (danh sách ở T3-c), mọi trang có vùng nhãn `table`,
+và mục lục/index. Ước tính ~40–60 trang — khả thi; 418 trang thì không. PM cần xác nhận QA có
+ngân sách thời gian cho việc này.
+
+### U8. Trạng thái verify (tổng hợp section này)
+
+| Claim | Trạng thái |
+|-------|-----------|
+| V-1 backend babeldoc không render được góc xoay tuỳ ý | ✅ Verified — `pdf_creater.py:111-120`, `il_version_1.py:627-663` |
+| V-2 pdf2zh không vứt chữ nghiêng nhẹ, nhưng cũng duỗi thẳng | ✅ Verified — `converter.py:244, 384` |
+| V-3 bảng chưa từng được dịch | ❌ **BÁC BỎ** — `layout_parser.py:171-208` + `layout_helper.py:725-728, 844` + đo output production (2,7% ký tự không dấu; trang 63 đã dịch) |
+| V-4 babeldoc latest = 0.6.4 | ✅ Verified — PyPI JSON, fetch 2026-09-07 |
+| E-1 "giãn trước, bóp sau" khả thi + scale không bao giờ về 1.0 sau khi giãn | ✅ Verified — `typesetting.py:1017-1062, 1628-1660` |
+| G1e `insert_text(morph=…)` xoay góc tuỳ ý + dấu tiếng Việt | ✅ Verified — spike chạy thật, PyMuPDF 1.28.2, `dir=(0.9816,−0.1908)` trùng khít khối gốc trang 67 |
+| G1e fit text dài trong bbox nghiêng | ⚠️ `[UNVERIFIED]` — spike bắt buộc ở P1.1 (R5-02) |
+| Nguyên nhân UX-D | ⚠️ `[UNVERIFIED]` — thí nghiệm P0.2 phải phân biệt mode-scale (T-07) vs gom nhầm paragraph (`--split-short-lines`) |
+| pdf2zh có tốt hơn babeldoc trên 19 trang xoay không | ⚠️ `[UNVERIFIED]` — đo ở P0.2-(v) |
+| `--translate-table-text` ảnh hưởng trang bảng | ⚠️ `[UNVERIFIED]` — đo ở P0.2-(iv); đã hạ ưu tiên sau U2 |

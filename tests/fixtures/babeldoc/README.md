@@ -31,3 +31,17 @@ Used by `tests/test_chunk_merge.py::test_merge_chunk_pdfs_golden_fixture_real_ba
 to assert `merge_chunk_pdfs` correctly auto-detects the chunk-scoped shape and slices by
 offset relative to `chunk.page_start`, instead of the absolute-indexing formula that
 caused Bug #8.
+
+## Fixtures cho RCA "Text Overlap, Content-Loss & Reading-Order" (2026-09-07)
+
+Trích trực tiếp từ `data/uploads/f88282bb-…_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf`
+(job `136645f9-ffe8-4927-afb2-b725236ede44`) bằng `pymupdf.insert_pdf`, KHÔNG chỉnh sửa.
+
+| File | Trang gốc (0-index) | Dùng để tái hiện |
+|------|--------------------|------------------|
+| `rotated_text_p67_source.pdf` | 66 | Khối chú giải nghiêng ~-11° (`dir=(0.982,-0.191)`) bị babeldoc 0.6.4 loại bỏ hoàn toàn (`il_creater.py:968-974`) |
+| `rotated_chart_p15_source.pdf` | 14 | Bảng quy đổi đặt nghiêng — mất 39/58 block |
+| `toc_2col_p7_source.pdf` | 6 | Mục lục 2 cột; render ĐÚNG khi chạy 1 trang, SAI trong production → dùng cho A/B ở G3 |
+
+Xem `docs/Architecture.md` section "Root Cause Analysis: Text Overlap, Content-Loss &
+Reading-Order trên trang layout phức tạp (2026-09-07)".
