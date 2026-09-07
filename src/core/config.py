@@ -227,12 +227,17 @@ class Settings(BaseSettings):
     # process_independent_paragraphs` de tach paragraph gom nhieu muc muc
     # luc KHONG co dot-leader "du day" (< 20 cham) — TOC-1 v2. Doc lap voi
     # `babeldoc_numbered_list_split_enabled`: co bien rollback rieng vi day
-    # la heuristic MOI NHAT/rui ro cao nhat trong ca 3 (spike 7.4-a da PASS
-    # gate AA9 + qua Reviewer APPROVE, nhung CHUA co lich su production that
-    # — khac 7.1/7.2 da qua R6-03 live). Mac dinh TAT (`False`, KHAC 2 flag
-    # tren mac dinh `True`) — chi bat sau khi QA live xanh (AA5), khong tu y
-    # doi trong task 7.4-b.
-    babeldoc_toc_split_enabled: bool = False
+    # la heuristic MOI NHAT/rui ro cao nhat trong ca 3.
+    #
+    # BAT mac dinh (`True`) tu ban release nay — dieu kien AA5 "chi bat sau
+    # khi QA live xanh" da thoa (QA Vong 8, docs/test-report.md: PASS qua ca
+    # BabeldocRunner truc tiep lan JobOrchestrator day du, live E2E that qua
+    # DeepSeek tren 2 trang Contents that, 0 false-positive tren 8 trang doi
+    # chung + 4 fixture hoi quy cua 7.1/7.2). Van giu bien
+    # `BABELDOC_SHIM_TOC_SPLIT`/bien Settings nay nhu kill-switch doc lap —
+    # tat duoc rieng TOC-1 v2 ma khong dong 7.1/7.2 neu phat sinh
+    # false-positive that tren layout/sach chua tung gap trong 12 dump da do.
+    babeldoc_toc_split_enabled: bool = True
 
 
 @lru_cache

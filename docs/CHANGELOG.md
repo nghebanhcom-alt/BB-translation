@@ -4484,3 +4484,64 @@ vấn đề, chỉ ghi lại để không mất dấu):
 
 **Chưa spawn Reviewer** (Protocol 7 R7-01) — PM sẽ tổ chức Reviewer thật trước khi coi 7.4-b/c/d/e
 là "xong".
+
+## Bug #7 Ca C — Xử lý issue non-blocking từ Reviewer 7.4-b→e (2026-09-08)
+
+Reviewer (`docs/review-report.md`, review 7.4-b→e) APPROVE kèm 3 issue non-blocking. Xử lý 2/3
+trong commit này (`2c47a03`):
+
+1. **Thiếu logging Z8-2(iv) trong code production**: yêu cầu "log 1 dòng khi cổng `m/L` hoặc
+   monotonic chặn 1 paragraph có ≥2 dòng nghi ngờ mục lục" (Tech Lead chấp nhận ở AA2 dòng Z4)
+   trước đó chỉ tồn tại trong script đo của spike (`scripts/toc_split_spike_measure.py`), chưa vào
+   `sitecustomize.py` thật. Thêm `logger.warning(...)` trong `_split_toc_paragraphs_in_list` khi
+   `result.reason` là `REASON_LOW_FRACTION`/`REASON_NOT_MONOTONIC` và `result.tail_marks >= 2`.
+   Thêm 1 test pin cứng (`tests/test_babeldoc_shim_unicode_regression.py`) xác nhận hàm có tham
+   chiếu đúng 2 hằng reason + gọi `logger.warning`.
+2. **2 entry CHANGELOG trùng nội dung** (do PM lỡ chạy trùng việc với 1 phiên Dev khác đang chạy
+   nền — xem chi tiết ở message commit `2c47a03`): đã xoá entry ngắn/trùng của PM, giữ lại entry
+   chi tiết của Dev (mục "7.4-b/c/d/e" ngay trên). Số liệu 2 lần đo live E2E khác nhau (đếm block
+   PyMuPDF vs đếm dòng theo regex) đã đối chiếu lại bằng cách đọc trực tiếp toàn bộ nội dung trang
+   dịch thật — xác nhận không có mục nào bị bỏ sót thật sự, chỉ là 2 phương pháp đếm khác nhau.
+3. **`uv.lock` version drift** (issue thứ 3): không liên quan tới Ca C, có từ trước, không xử lý
+   trong commit này.
+
+**Kết quả**: `uv run pytest -q` → 435 passed (434 + 1 test pin mới), `ruff check .`/`ruff format
+--check .` sạch. Đã qua Reviewer cho toàn bộ commit `2c47a03` (bao gồm cả 2 thay đổi này).
+
+## Bug #7 Ca C — Bật default sau QA Vòng 8 (2026-09-08)
+
+`Settings.babeldoc_toc_split_enabled` đổi default `False` → `True`, đúng điều kiện AA5 ("bật sau
+khi QA live xanh") — xem `docs/test-report.md` "QA Vòng 8" (PASS, tự chạy lại độc lập qua cả
+`BabeldocRunner` trực tiếp lẫn `JobOrchestrator.run_job()` đầy đủ với DB/DeepSeek thật). Biến môi
+trường `BABELDOC_SHIM_TOC_SPLIT`/chính field `Settings` này vẫn là kill-switch độc lập nếu cần
+rollback tức thời. `docs/Architecture.md` đã thêm section đóng vòng "Bug #7 Ca C — Đóng vòng:
+implement + QA + bật default" xác nhận không phát sinh câu hỏi thiết kế mới cần Tech Lead/Domain
+Expert quyết định — đây là quyết định cơ học đã được AA5 định tiêu chí từ trước.
+
+`uv run pytest -q` → 435 passed (không đổi số test, chỉ đổi giá trị default), `ruff check .`/`ruff
+format --check .` sạch.
+
+## Release v1.2.7 (2026-09-08)
+
+`pyproject.toml` bump `1.2.6` → `1.2.7`. Nội dung release: toàn bộ chuỗi fix Bug #7 (List
+line-break/numbered-list/mục lục regression) —
+
+- **7.0+7.1**: sitecustomize shim sửa lỗi tách dòng gốc (ký tự trắng lấp khe giữa 2 dòng).
+- **7.2 (Ca A)**: tách paragraph numbered-list dính chung qua marker tăng dần (B-2b).
+- **Hotfix 7.2**: sửa bug `unicode=""` khiến mục numbered-list bị bỏ dịch (phát hiện bởi Domain
+  Expert trong lúc phản biện thiết kế Ca C).
+- **7.3**: đo lại mục lục sau 7.1+7.2 — xác nhận Ca C còn nguyên, phát hiện thêm 1 lỗi heading
+  2 dòng bị đảo ký tự chéo nhau (7.1 vô tình sửa được).
+- **7.4 (Ca C)**: thiết kế TOC-1 v2 (Tech Lead, phản biện bởi Domain Expert) — tách mục lục theo
+  khoảng hở hình học trước số trang cuối dòng + cổng cố kết chống false-positive. Spike PASS 6/6
+  gate, implement đầy đủ, Reviewer APPROVE, QA Vòng 8 PASS — **bật default** trong bản release
+  này.
+
+Toàn bộ chuỗi đã qua đủ 6 vai trò theo CLAUDE.md (PM điều phối, Tech Lead thiết kế + phản biện
+Domain Expert, Dev implement, Reviewer — 6 lần review độc lập xuyên suốt chuỗi, QA — Vòng 8 verify
+release). `uv run pytest -q` → 435 passed, `ruff check`/`ruff format --check` sạch.
+
+**Known limitation mang sang, không chặn release** (đã ghi trong `project_state.json`, không phải
+phát sinh mới): Bug #6 (nhánh `pdf_scan` của tính năng overlay chữ xoay P1.1) vẫn đang BLOCKED ở
+circuit breaker Dev↔QA 5/5, cần PM/Tech Lead quyết định hướng thiết kế lại riêng — không liên quan
+và không bị ảnh hưởng bởi release Bug #7 này (2 tính năng độc lập).

@@ -7761,3 +7761,30 @@ suốt 1 vòng release.
 | Bảng công thức **không kẻ khung** (nhãn `plain text`) có kích hoạt TOC-1 không | ⚠️ **`[CHƯA VERIFY]`** — chưa có mẫu trong 6 đầu sách. Rủi ro tồn đọng, theo dõi ở 7.4-d/7.4-e; **không chặn** 7.4-a |
 | `fix_overlapping_paragraphs` cắt box với sách leading chặt | ⚠️ **`[CHƯA VERIFY]`** — no-op trên Figoni (khe 2.85–2.95pt); đo ở 7.4-e |
 | Biên độ TOC-1 làm đổi mode-scale của Bug #8 | ⚠️ **Verified về cơ chế, chưa đo biên độ** — ràng buộc thứ tự AA10-c |
+
+---
+
+### Bug #7 Ca C — Đóng vòng: implement + QA + bật default (2026-09-08)
+
+Cập nhật ngắn (không sửa bảng AA12 ở trên, chỉ đính chính trạng thái mới nhất tại đây theo đúng
+tinh thần "section sau thắng khi mâu thuẫn"):
+
+- **Gate 7.4-a bước 5 (hook mutate in-place, dòng `[UNVERIFIED]` duy nhất chặn implement ở AA12)**:
+  ✅ **Đã verify sống** trong spike — paragraph probe chèn qua hook có `unicode != ""` và
+  `render_order is not None`. Xem `docs/CHANGELOG.md` "Spike 7.4-a".
+- **7.4-b→e (implement, test, live E2E, hồi quy)**: hoàn tất, Reviewer APPROVE (`docs/review-report.md`,
+  2 lần review: spike + implement đầy đủ). Commit `0aea37b` (spike) → `2c47a03` (implement).
+- **QA Vòng 8** (`docs/test-report.md`): PASS — tự chạy lại độc lập qua cả `BabeldocRunner` trực
+  tiếp lẫn `JobOrchestrator.run_job()` đầy đủ (DB thật, DeepSeek thật), xác nhận điều kiện AA5
+  "bật sau khi QA live xanh" đã thoả.
+- **Quyết định**: `Settings.babeldoc_toc_split_enabled` đổi default `False` → **`True`** (PM chốt
+  dựa trên khuyến nghị QA — đây là quyết định cơ học đã được AA5 định sẵn tiêu chí từ trước, không
+  phát sinh câu hỏi thiết kế mới cần Tech Lead/Domain Expert trao đổi thêm).
+- **Nợ kỹ thuật còn mở, KHÔNG chặn release này** (giữ nguyên như AA10-b/AA12, chỉ nhắc lại):
+  `render_order` của paragraph do **7.2** tạo vẫn chưa được copy (khác TOC-1 v2 — miễn nhiễm theo
+  thiết kế); `fix_overlapping_paragraphs` trên sách leading chặt và bảng công thức không kẻ khung
+  vẫn ở mức `[CHƯA VERIFY]` — theo dõi tiếp khi có dữ liệu production thật, không phải điều kiện
+  chặn bật default.
+- **Ràng buộc AA10-c vẫn còn hiệu lực**: chưa bắt đầu Bug #8 (đo histogram mode-scale, bước 8.1)
+  cho tới khi Ca C ổn định trên production thật với default mới — TOC-1 đổi `unit_count` sẽ làm
+  hết hạn mọi số đo mode-scale đo trước thời điểm này.

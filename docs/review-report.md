@@ -4428,3 +4428,198 @@ sang `True`. Đồng thời QA/Tech Lead nên quyết định có bắt buộc i
 blocking #1) trước khi bật mặc định production hay không.
 
 ---
+
+## Review Release v1.2.7 — Đổi default feature flag + paperwork (2026-09-08)
+
+### Phạm vi
+
+Review CUỐI CÙNG trước khi commit + release v1.2.7 (mức độ nghiêm ngặt cao — quyết định release,
+không phải review 1 tính năng đơn lẻ). `git diff --stat` xác nhận đúng 7 file thay đổi trong working
+tree: `docs/Architecture.md` (+27/-0), `docs/CHANGELOG.md` (+61/-0), `docs/test-report.md` (+148/-0),
+`project_state.json`, `pyproject.toml`, `src/core/config.py`, `uv.lock`. Đọc trước khi review:
+`docs/review-report.md` 2 section review gần cuối (spike 7.4-a + implement 7.4-b→e, ngay trên), toàn
+bộ `docs/test-report.md` mục "QA Vòng 8", `docs/Architecture.md` mục "Bug #7 Ca C — Đóng vòng",
+`src/babeldoc_shim/sitecustomize.py` (đọc toàn văn, không chỉ diff).
+
+### 1. `src/core/config.py` — đổi default `babeldoc_toc_split_enabled`
+
+`git diff src/core/config.py`: **chỉ đúng 1 thay đổi thực chất** — `babeldoc_toc_split_enabled: bool
+= False` → `True`, cùng với việc viết lại đoạn comment ngay phía trên. Đối chiếu comment mới với
+`docs/test-report.md` "QA Vòng 8": khớp đúng — QA Vòng 8 PASS qua cả `BabeldocRunner` trực tiếp lẫn
+`JobOrchestrator.run_job()` đầy đủ (DB + DeepSeek thật), live E2E trên 2 trang Contents thật của
+Figoni, 0 false-positive trên 8 trang đối chứng + 4 fixture hồi quy 7.1/7.2 — đúng như comment mới
+trích dẫn. Không có field nào khác trong file bị đổi nhầm (đọc toàn bộ diff, chỉ 1 hunk). **Đạt.**
+
+### 2. `docs/CHANGELOG.md` — 3 entry cuối
+
+- `git diff --stat docs/CHANGELOG.md` → `61 insertions(+)`, **0 deletions** — xác nhận không có
+  lịch sử nào bị xoá/ghi đè (đúng Protocol 7 R7-03).
+- Entry 1 ("Xử lý issue non-blocking từ Reviewer 7.4-b→e"): claim "thêm `logger.warning(...)` trong
+  `_split_toc_paragraphs_in_list` khi `result.reason` là `REASON_LOW_FRACTION`/`REASON_NOT_MONOTONIC`
+  và `result.tail_marks >= 2`" — **tự đọc trực tiếp `src/babeldoc_shim/sitecustomize.py` dòng
+  371–391, xác nhận đúng 100%** logic và điều kiện y hệt mô tả. Test mới
+  `tests/test_babeldoc_shim_unicode_regression.py::test_toc_split_logs_when_monotonic_or_fraction_gate_blocks_a_candidate`
+  tồn tại và assert đúng 2 hằng `REASON_*` + `logger.warning`/`tail_marks` xuất hiện trong thân hàm
+  (lưu ý: đây là test kiểm tra TEXT của source code — "source-inspection" — không phải test thực thi
+  hàm và assert log call thật qua `caplog`; cùng phong cách với test liền trước nó trong file
+  (`test_numbered_list_split_touches_only_the_documented_two_call_sites`) nên là quy ước đã có sẵn
+  của codebase, không phải vấn đề mới — non-blocking, ghi nhận để không nhầm với test hành vi runtime
+  thật). Claim "2 entry CHANGELOG trùng nội dung đã xoá 1, giữ 1" — tự `grep -n "^## Bug #7 Ca C"
+  docs/CHANGELOG.md` xác nhận **chỉ còn đúng 1** entry "7.4-b/c/d/e" (dòng 4304), không có bản trùng
+  — khớp đúng claim.
+- Entry 2 ("Bật default sau QA Vòng 8"): khớp đúng nội dung mục 1 ở trên và `docs/test-report.md`
+  QA Vòng 8.
+- Entry 3 ("Release v1.2.7"): liệt kê đúng trình tự 7.0/7.1 → 7.2 → Hotfix 7.2 → 7.3 → 7.4, khớp với
+  lịch sử commit thật (`git log`: `41e8c83`, `831de76`, `b9c8952`, `bd920ed`, `5d1cf26`, `0aea37b`,
+  `2c47a03`) và với nội dung các entry CHANGELOG trước đó (đối chiếu bằng mắt, không phát hiện chi
+  tiết bịa/phóng đại). Dòng "Known limitation... Bug #6... không liên quan và không bị ảnh hưởng bởi
+  release Bug #7 này" — chính xác, khớp `project_state.json` blockers (Bug #6 vẫn nằm nguyên trong
+  danh sách, không bị xoá/thay đổi bởi diff này — xác nhận qua `git diff project_state.json`, đoạn
+  blockers không đổi ngoài việc thêm entry mới vào `by_increment`). **Đạt, không phát hiện sai lệch.**
+
+### 3. `pyproject.toml` + `uv.lock`
+
+`pyproject.toml`: `version = "1.2.6"` → `"1.2.7"` — đúng 1 dòng thay đổi. `uv.lock`: `bb-translation`
+`version = "1.2.5"` → `"1.2.7"`. Sau khi đổi, cả 2 file đồng bộ `1.2.7`. Quan sát phụ (không chặn
+release): `uv.lock` TRƯỚC diff này ghi `1.2.5`, trong khi `pyproject.toml` TRƯỚC diff này đã là
+`1.2.6` (từ commit `5732a41` release v1.2.6 US-16) — nghĩa là `uv.lock` đã lệch phía sau 1 version
+từ TRƯỚC KHI có diff đang review này (chính review-report.md, review implement 7.4-b→e, cũng đã ghi
+nhận đúng gap này ở issue non-blocking #3: "`uv.lock` version drift... không phải thay đổi cố ý của
+Ca C"). Diff hiện tại KHÔNG gây ra gap này, ngược lại đã sửa nó (đồng bộ về `1.2.7`) — tự verify
+bằng `git checkout -- uv.lock && git stash && uv run ruff format --check .` (side effect: `uv run`
+tự sync lock file) rồi `git checkout -- uv.lock && git stash pop` để phục hồi đúng trạng thái diff
+gốc — xác nhận hành vi tự-sync của `uv` là nguồn gốc hợp lý của gap cũ, không phải lỗi thao tác thủ
+công. Không tìm thấy version string `1.2.6`/`1.2.5` nào còn sót ở nơi khác ngoài `project_state.json`
+(chỉ trong text lịch sử `notes`, đúng ý nghĩa — ghi lại quá khứ, không phải version hiện hành). Không
+có `package.json` nào khác trong repo cần bump theo. **Đạt.**
+
+### 4. `project_state.json`
+
+- `python3 -c "import json; json.load(open('project_state.json'))"` → **valid JSON**.
+- `version: "1.2.7"`, `released_at: "2026-09-08"` (khớp ngày hôm nay), `status: "released"` (đổi từ
+  `"blocked"`) — hợp lý vì entry mới `bug7_line_break_numbered_list_toc_full_fix` có status
+  `approved_qa_round8_...`, không còn lý do giữ `"blocked"` ở cấp toàn cục cho riêng luồng Bug #7 (Bug
+  #6 vẫn `blocked` nhưng đó là 1 tính năng khác, độc lập, đã có tiền lệ trước đây `status` toàn cục
+  không phản ánh 100% mọi blocker con — xem cách các bản release trước vẫn ghi `"released"`/tương
+  đương dù còn blockers list không rỗng).
+- Entry mới `by_increment.bug7_line_break_numbered_list_toc_full_fix` (`dev_reviewer: 6, dev_qa: 1,
+  status: approved_qa_round8_live_verified_default_toc_split_enabled_true`) — khớp đúng số lần review
+  thực tế đếm được (spike 7.4-a + implement 7.4-b→e = 2 lần APPROVE liên tiếp không tính là "vòng sửa
+  lỗi" theo ghi chú trong chính review-report.md, nhưng số 6 khớp với con số PM/notes tự báo "Reviewer:
+  6 lần review độc lập xuyên suốt cả chuỗi" bao gồm cả 7.0/7.1/7.2/hotfix trước đó — nhất quán nội bộ
+  giữa `notes` và `by_increment`, không tự mâu thuẫn).
+- Quan sát phụ non-blocking: 2 bộ đếm cấp cao nhất `iterations.dev_reviewer` (6→7) và `dev_qa` (5→6)
+  chỉ tăng +1 mỗi bộ, trong khi entry mới tự khai `dev_reviewer: 6`. Đối chiếu với các entry trước
+  (vd `aimd_adaptive_concurrency_controller...: dev_reviewer: 6` cũng không làm cấp cao nhất tăng
+  thêm 6) xác nhận đây là quy ước ĐÃ CÓ TỪ TRƯỚC của file này — 2 con số cấp cao nhất KHÔNG phải tổng
+  cộng dồn của `by_increment`, có vẻ là một chỉ số khác (số "chu kỳ release" hoặc tương tự) không được
+  định nghĩa rõ ràng ở bất kỳ đâu. Không phải lỗi phát sinh từ diff này (hành vi nhất quán với lịch sử
+  file), nhưng đề xuất Tech Lead làm rõ ý nghĩa 2 field này trong 1 dịp khác — không chặn release.
+- `notes` entry mới ("v1.2.7 Bug #7 full fix...") mô tả đầy đủ 7.0→7.4, kết thúc bằng câu "Bug #6 (P1.1
+  pdf_scan rotated overlay) vẫn còn blocked riêng, KHÔNG liên quan và KHÔNG bị ảnh hưởng bởi release
+  này" — **đúng yêu cầu bắt buộc của brief PM** (task 4), không phóng đại, không thiếu sót nội dung
+  quan trọng đã biết (đối chiếu với review-report.md + test-report.md, không thấy chi tiết nào bị bỏ
+  sót hoặc bịa thêm). **Đạt.**
+
+### 5. Tự chạy lại toàn bộ (không tin lại số Dev/PM/QA báo)
+
+```
+uv run pytest -q                    → 435 passed, 419 warnings (~82s)  — khớp đúng kỳ vọng brief "435 passed"
+uv run ruff check .                 → All checks passed!
+uv run ruff format --check .        → 19 files would be reformatted (KHÔNG liên quan diff đang review)
+```
+
+Về 19 file `ruff format` — **tự verify đây là drift TIỀN TỒN TẠI, không phải do diff release này gây
+ra**: `git stash` toàn bộ diff (về đúng commit `2c47a03`, HEAD thật trước khi có thay đổi paperwork),
+chạy lại `ruff format --check .` → **vẫn ra đúng 19 file y hệt** (test files không liên quan, vd
+`test_gemini_provider.py`, `test_deepl_provider.py` — line quá dài do format tự động của `mocker.patch`
+nhiều dòng, không liên quan `babeldoc`/`config.py`/release paperwork). Đã `git checkout -- uv.lock &&
+git stash pop` để phục hồi đúng nguyên trạng diff sau khi verify (side-effect duy nhất của thao tác
+này là `uv run` tự đồng bộ `uv.lock` về version tại thời điểm stash — đã loại bỏ side-effect này bằng
+`git checkout -- uv.lock` trước khi pop). **Không phải noise Markdown như brief dự đoán, nhưng đúng
+tinh thần "pre-existing, không liên quan task này" — không chặn release.**
+
+### 6. Kill-switch độc lập — xác nhận bằng đọc `sitecustomize.py`
+
+Đọc toàn văn `src/babeldoc_shim/sitecustomize.py` + trace lineage:
+
+- `_toc_split_enabled()` (dòng 144–147) đọc **riêng** biến môi trường `BABELDOC_SHIM_TOC_SPLIT`,
+  hoàn toàn tách biệt với `_numbered_list_split_enabled()` (đọc `BABELDOC_SHIM_NUMBERED_LIST_SPLIT`,
+  patch 7.2) và với patch 7.1 (`_split_paragraph_into_lines`, không có cờ riêng — luôn chạy cùng với
+  việc patch tổng thể thành công).
+- Lineage đầy đủ: `Settings.babeldoc_toc_split_enabled` (`src/core/config.py:240`) →
+  `job_orchestrator.py:248` (`toc_split_enabled=self._settings.babeldoc_toc_split_enabled`, keyword
+  argument) → `BabeldocRunner.__init__` (`src/services/babeldoc_runner.py:227/248`) →
+  `env["BABELDOC_SHIM_TOC_SPLIT"]` (dòng 369) → `sitecustomize.py:_toc_split_enabled()`. Chỉ có
+  **1** call site `BabeldocRunner(` trong toàn repo (đã tự `grep -rn "BabeldocRunner("`), không có
+  rủi ro lệch tham số.
+- Tắt `babeldoc_toc_split_enabled` (hoặc set `BABELDOC_SHIM_TOC_SPLIT=0`) chỉ khiến
+  `_build_patched_process_independent_paragraphs` bỏ qua bước gọi `_split_toc_paragraphs_in_list`
+  (dòng 437–439) — **hàm gốc `process_independent_paragraphs` của babeldoc vẫn chạy đầy đủ trước đó**
+  (dòng 436), và 2 patch 7.1/7.2 (`_split_paragraph_into_lines`, `process`) **không nằm trong nhánh
+  điều kiện này**, tiếp tục hoạt động độc lập không bị ảnh hưởng. **Xác nhận: đây đúng là kill-switch
+  độc lập, an toàn để rollback ngay lập tức nếu TOC-1 v2 gây false-positive thật trên production, mà
+  không cần deploy lại code — chỉ cần set `BABELDOC_SHIM_TOC_SPLIT=0` (qua env) hoặc revert 1 dòng
+  default trong `config.py`.**
+
+### 7. Đối chiếu `docs/Architecture.md` mục "Bug #7 Ca C — Đóng vòng"
+
+Đọc toàn bộ section mới (27 dòng thêm cuối file): tường thuật khớp với commit thật (`0aea37b` spike,
+`2c47a03` implement), khớp `docs/test-report.md` QA Vòng 8, không giới thiệu claim mới nào về contract
+babeldoc chưa được verify (chỉ tóm tắt lại nợ kỹ thuật đã biết từ AA10-b/AA12, đúng như văn bản ghi
+"không sửa bảng AA12 ở trên, chỉ đính chính trạng thái mới nhất"). Không phát hiện sai lệch.
+
+### 8. Checklist R5-04
+
+`src/babeldoc_shim/sitecustomize.py` không phải dạng `*_runner.py`/`*_provider.py` (không tự gọi
+subprocess/HTTP tới tool ngoài mà không qua `BabeldocRunner`), nhưng có claim cụ thể về contract
+babeldoc 0.6.4 (điểm hook, thứ tự gọi `update_paragraph_data`) — đã được Reviewer tự verify độc lập
+bằng cách đọc trực tiếp source babeldoc 0.6.4 thật đã cài trên máy ở 2 lần review trước (spike +
+implement, xem mục 3 của section review implement ngay trên). Task review hiện tại (paperwork release)
+không tạo thêm claim contract mới nào cần verify lại — chỉ đổi giá trị default của 1 field boolean đã
+có sẵn. **External contract verified against real source: YES (kế thừa từ 2 lần verify trước, không
+có claim contract mới trong phạm vi task này).**
+
+### Danh sách issue
+
+**Blocking:** không có.
+
+**Non-blocking (không chặn release, ghi lại cho backlog):**
+
+1. Test mới `test_toc_split_logs_when_monotonic_or_fraction_gate_blocks_a_candidate` là dạng
+   "source-inspection" (kiểm tra text của hàm chứa đúng tên hằng/`logger.warning`), không phải test
+   thực thi hàm thật với `caplog` để xác nhận log thực sự được phát ra đúng lúc runtime. Chấp nhận
+   được vì cùng quy ước với test liền kề đã có từ trước, nhưng nếu có dịp nên bổ sung 1 test hành vi
+   thật (dựng `PdfParagraph` giả, gọi `_split_toc_paragraphs_in_list`, assert `caplog` có dòng log).
+2. `project_state.json` field `iterations.dev_reviewer`/`dev_qa` cấp cao nhất không có định nghĩa rõ
+   ràng về ý nghĩa (không phải tổng `by_increment`) — quy ước đã tồn tại từ trước, không phải lỗi của
+   diff này, nhưng nên làm rõ để tránh hiểu nhầm sau này.
+
+### Kết luận
+
+**APPROVE — đủ điều kiện commit + release v1.2.7 ngay bây giờ.**
+
+Căn cứ:
+
+- `src/core/config.py`: đúng 1 thay đổi thực chất (`babeldoc_toc_split_enabled` False→True), comment
+  khớp chính xác với QA Vòng 8, không có thay đổi ngoài ý muốn nào khác trong file.
+- `docs/CHANGELOG.md`/`docs/test-report.md`/`docs/Architecture.md`: cả 3 diff đều **insertions-only**
+  (0 deletions, tự xác nhận bằng `git diff --stat`) — đúng Protocol 7 R7-03, không mất lịch sử.
+- `pyproject.toml`/`uv.lock` đồng bộ đúng `1.2.7`; gap `uv.lock` cũ (`1.2.5` trước diff) là tồn đọng từ
+  trước, diff này SỬA chứ không gây ra.
+- `project_state.json` là JSON hợp lệ, `version`/`released_at`/`status`/`by_increment`/`notes` phản
+  ánh đúng thực tế, nhắc rõ Bug #6 vẫn blocked riêng và không liên quan release này (đúng yêu cầu bắt
+  buộc của brief).
+- `uv run pytest -q` → 435 passed (khớp kỳ vọng), `ruff check` sạch, `ruff format --check` có 19 file
+  drift nhưng đã tự verify là pre-existing (giống hệt trên cả base commit `2c47a03`), không liên quan
+  diff đang review.
+- Kill-switch `babeldoc_toc_split_enabled`/`BABELDOC_SHIM_TOC_SPLIT` xác nhận hoạt động **độc lập**
+  với patch 7.1/7.2 qua đọc trực tiếp `sitecustomize.py` — an toàn để rollback tức thời nếu TOC-1 v2
+  gây vấn đề trên production, không cần revert code, chỉ cần đổi 1 giá trị cấu hình.
+- 2 issue non-blocking ở trên không liên quan tới correctness/security/data-lineage của thay đổi đang
+  release, không ảnh hưởng khả năng rollback.
+
+**Không tính vào giới hạn Protocol 3** (đây là review paperwork/config release, không phải vòng sửa
+lỗi Dev↔Reviewer).
+
+---

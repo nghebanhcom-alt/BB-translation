@@ -1784,3 +1784,151 @@ là thứ duy nhất phát hiện ra Bug #6, một bug mà review code tĩnh (Re
 cách nào thấy được vì nó nằm ở giá trị dữ liệu runtime cụ thể (`dir=(1.0,0.0)` trong 1 file
 trung gian), không phải ở cấu trúc code.
 
+## QA Vòng 8 — Bug #7 Ca C (TOC-1 v2) — Release Readiness (R5-03, không tin lại số Dev/Reviewer)
+
+**Phạm vi**: verify tính năng TOC-1 v2 (tách mục lục bị babeldoc gộp nhiều mục vào 1 paragraph),
+đã qua spike PASS gate AA9 (`0aea37b`) + implement đầy đủ 7.4-b→e (`2c47a03`, HEAD) + Reviewer
+APPROVE 2 lần liên tiếp (spike + implement). Đọc trước khi test: `docs/Architecture.md` AA0–AA12
+(dòng 7379–7764), `docs/CHANGELOG.md` 3 entry cuối, `docs/review-report.md` 2 section cuối,
+`src/core/config.py`. Không tin lại số liệu đã báo — tự chạy lại từ đầu theo Protocol 5 R5-03 +
+Protocol 6 R6-03.
+
+### 1. Xác nhận tĩnh trước khi chạy
+
+- `src/core/config.py:235` — `Settings.babeldoc_toc_split_enabled: bool = False`. **Xác nhận
+  default đúng TẮT**, khớp AA5.
+- `src/core/job_orchestrator.py:233-249` (`_translator_runner`) — tự đọc trực tiếp (không tin lại
+  Reviewer): khi `pdf_translate_engine == "babeldoc"` (default), orchestrator xây `BabeldocRunner(
+  ..., toc_split_enabled=self._settings.babeldoc_toc_split_enabled)` lấy thẳng từ `Settings` —
+  **xác nhận độc lập claim wiring của Reviewer, đúng, không có tầng `if` nào làm lệch cờ**.
+  `git log -1` xác nhận HEAD = `2c47a03`, đúng commit brief PM mô tả.
+- **Phát hiện phụ quan trọng — Reviewer đã lỗi thời trên chính issue non-blocking #1 của mình**:
+  `review-report.md` (section review 7.4-b→e) báo "Z8-2(iv) logging **chưa** implement ở tầng
+  production, `grep logging/logger.` trong `toc_split.py` = 0 hit". Tự `grep -n "logger\."
+  src/babeldoc_shim/sitecustomize.py` hôm nay ra **5 hit**, trong đó có đúng khối
+  `logger.warning(...)` tại dòng 383-391 xử lý chính xác `REASON_LOW_FRACTION`/
+  `REASON_NOT_MONOTONIC` khi `tail_marks >= 2` — đúng đặc tả Z8-2(iv). Đối chiếu `git show 2c47a03
+  -- src/babeldoc_shim/sitecustomize.py`: khối log này nằm **trong chính commit `2c47a03`** (dòng
+  174-185 của diff), tức Dev đã tự sửa issue #1 của Reviewer **trong cùng commit** — commit message
+  `2c47a03` cũng ghi rõ "đã xử lý 2/3 [issue non-blocking]: thêm log cảnh báo...". Kết luận: đây
+  KHÔNG phải review-report nói sai, mà là review-report được viết TRƯỚC khi Dev áp fix cuối vào
+  cùng commit — nhưng hệ quả là **issue non-blocking #1 của Reviewer nay đã ĐÓNG**, không còn gap
+  giữa spec CHỐT và code production. Ghi lại ở đây để PM không hiểu nhầm là còn nợ.
+
+### 2. Hồi quy job KHÔNG dính mục lục — qua ĐÚNG `JobOrchestrator` (không gọi thẳng `BabeldocRunner`)
+
+Dev trước đó chỉ đo hồi quy bằng cách so `paragraph_finder.json` (gọi `babeldoc --debug` trực
+tiếp, không qua app). QA vòng này chạy **qua đúng `JobOrchestrator.run_job()`** — DB thật (SQLite
+in-memory, `SQLModel.metadata.create_all`), `Settings()` mặc định (không override gì,
+`babeldoc_toc_split_enabled=False` như production thật sẽ chạy), **không mock `BabeldocRunner`**
+(để `_translator_runner` tự xây runner thật, bắt đúng lớp lỗi wiring mà Bug #5 từng gây ra) — trên
+1 trang văn xuôi thật KHÔNG phải mục lục (Figoni idx 30-31, "CHAPTER 2 HEAT TRANSFER"), dịch thật
+qua DeepSeek:
+
+```
+STATUS completed
+job.status completed job.error_message None
+page_count 2
+```
+
+Output PDF (`translated_vi.pdf`) đọc bằng PyMuPDF: nội dung dịch đầy đủ, tiếng Việt tự nhiên, đúng
+2 trang, không văng lỗi, không rớt job. Script: `run_orchestrator_regression.py` (scratchpad
+phiên này). **Kết luận: default TẮT không phá vỡ flow thật qua đúng tầng orchestrator** — bắt được
+đúng loại lỗi wiring (nếu `toc_split_enabled` bị truyền sai chỗ, positional lệch tham số, hay
+`_translator_runner` build sai runner) mà việc Dev tự gọi `BabeldocRunner` trực tiếp không có khả
+năng phát hiện.
+
+Quan sát phụ (KHÔNG liên quan Ca C, không phải regression mới): thứ tự văn bản "CHAPTER OBJECTIVES"
+1/2/3 trong output bị xáo (mục 2,3 trôi xuống giữa đoạn văn) — đây là dấu hiệu bug reading-order đã
+biết và đang track riêng ở "Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order"
+(Architecture.md, 2026-09-07), không phải do TOC-1 v2 (trang này 0 kích hoạt TOC-1, xác nhận qua
+log `sitecustomize` không thấy paragraph nào bị tách). Không escalate lại ở đây, chỉ ghi nhận để
+không nhầm lẫn với Ca C khi đọc report này sau này.
+
+### 3. Tính năng khi BẬT tường minh — `BabeldocRunner.translate_pages()` trực tiếp (theo phương án dự phòng của brief)
+
+Trích **đúng 2 trang Contents thật** của Figoni (`data/uploads/937b1d1c-...pdf`, PyMuPDF idx 6-7 —
+xác nhận qua `get_text()` là trang "CONTENTS" thật, không phải suy đoán) — **chính là nguồn gốc của
+2 fixture đã commit** `toc_figoni_contents_p7/p8_dump.json.gz`. Chạy `BabeldocRunner.translate_pages(
+toc_split_enabled=True, split_short_lines=True, short_line_split_factor=0.8)` (đúng flag production
+theo `Settings` mặc định) qua DeepSeek thật (`ignore_cache=True`). `stderr` xác nhận patch đang
+chạy: `"...process_independent_paragraphs (buoc 7.4-b — tach muc luc Ca C, bat)..."`.
+
+**So sánh trực tiếp BẬT vs TẮT trên CÙNG 1 cặp trang, CÙNG 1 lần setup** (khác 2 lần chạy độc lập
+rời rạc của 2 entry CHANGELOG trước — đúng điều Reviewer phàn nàn ở issue non-blocking #2):
+
+- **TẮT** (`toc_split_enabled=False`, mặc định): mở `translated_vi.pdf` bằng PyMuPDF — xác nhận lại
+  ĐÚNG triệu chứng Bug #7 Ca C: nhiều mục lục bị dính thành 1 đoạn chạy dài, ví dụ nguyên văn đọc
+  được: `"Giai đoạn III: Làm nguội 38 Câu hỏi Ôn tập 39 Câu hỏi Thảo luận 40 Bài tập và Thí nghiệm
+  40"` (4 mục dính 1 dòng) và `"Tầm Quan Trọng của Độ Chính Xác trong Lò Bánh 2 Cân và Thước Cân 2
+  Đơn Vị Đo Lường 3"` (3 mục dính 1 dòng) — khớp đúng mô tả bug gốc.
+- **BẬT** (`toc_split_enabled=True`): CÙNG các cụm trên tách đúng thành dòng riêng:
+  `"Giai đoạn III: Làm nguội 38"`, `"Câu hỏi Ôn tập 39"`, `"Câu hỏi Thảo luận 40"`, `"Bài tập và Thí
+  nghiệm 40"` và `"Tầm Quan Trọng của Độ Chính Xác trong Lò Bánh 2"`, `"Cân và Cân Điện Tử 2"`,
+  `"Đơn Vị Đo Lường 3"` — đọc toàn bộ text 2 trang bằng mắt, xác nhận **mọi cụm dính đã quan sát
+  được ở bản TẮT đều được tách đúng ở bản BẬT**, không còn đoạn nào chạy dài bất thường.
+- **Không mất nội dung (đếm token số-trang, proxy cho số mục)**: regex đếm số "page-number-like
+  token" (`[0-9]{1,4}` đứng trước 1 chữ hoa hoặc cuối dòng) trên văn bản gốc tiếng Anh = 133 (bao
+  gồm vài false-positive là số chương), trên bản dịch TẮT = 129, trên bản dịch BẬT = **129 — bằng
+  hệt bản TẮT**. Không có bằng chứng nào cho thấy BẬT làm rớt mục lục nào so với TẮT.
+- **Z6 (`unicode=""` khiến mục không được dịch) — xác nhận KHÔNG tái diễn**: quét toàn bộ dòng
+  trong output BẬT bằng regex tìm cụm tiếng Anh còn nguyên (`the/of/and/for/with/questions/review/
+  discussion/exercises`, không phân biệt hoa thường) — **0 kết quả**. Toàn bộ 2 trang mục lục đã
+  dịch hết sang tiếng Việt, không có mục nào còn sót nguyên văn tiếng Anh.
+
+Script: `run_toc_on.py` / `run_toc_off.py` (scratchpad phiên này, cùng thư mục `qa_toc_c/`).
+
+### 4. `uv run pytest -q` / `ruff check` / `ruff format --check` — tự chạy lại
+
+```
+uv run pytest -q                                                → 435 passed, 422 warnings (~94s)
+uv run ruff check .                                              → All checks passed!
+uv run ruff format --check <7 file Ca C: toc_split.py,
+  sitecustomize.py, config.py, babeldoc_runner.py,
+  job_orchestrator.py, 2 file test>                              → 7 files already formatted
+```
+
+435 passed (CHANGELOG/review-report trước đó báo 434 — lệch +1, không tìm thấy dấu hiệu bất
+thường khi rà lại danh sách test theo tên file, nhiều khả năng khác biệt do 1 test được thêm ở 1
+task khác không liên quan Ca C chạy xen giữa — không ảnh hưởng kết luận PASS/FAIL của Ca C, tất cả
+33 test `test_babeldoc_toc_split.py` đều nằm trong 435 pass này). `ruff` sạch tuyệt đối.
+
+### 5. R5-03 gate
+
+Đã có **live call thật** tới cả babeldoc lẫn DeepSeek (không mock) ở cả 2 nhánh BẬT/TẮT, cả ở tầng
+`BabeldocRunner` trực tiếp lẫn tầng `JobOrchestrator` đầy đủ — **R5-03 ĐÃ ĐÓNG**, không cần đánh
+dấu "release blocked pending live verification".
+
+### 6. Đối chiếu AA10(c) — ràng buộc thứ tự với Bug #8 (mode-scale)
+
+Architecture.md AA10(c) ghi rõ: TOC-1 tăng `unit_count` ⇒ đổi mode-scale xuyên trang, "7.4 phải
+xong trước 8.1". Bug #8 (mode-scale) **chưa thấy có commit implement nào trong `git log`** tính
+đến thời điểm QA vòng này (kiểm tra bằng `git log --oneline` — không có commit nào sau `2c47a03`
+nhắc tới mode-scale/8.1) — tức ràng buộc thứ tự này **chưa bị vi phạm**, chỉ là điều PM cần nhớ khi
+lên lịch task tiếp theo, không phải vấn đề của riêng release Ca C này.
+
+### 7. Bug list
+
+Không phát hiện bug mới. 1 phát hiện phụ (mục 1) là review-report lỗi thời (đã tự sửa trong cùng
+commit), không phải bug code.
+
+### Kết luận Vòng 8 — PASS, khuyến nghị BẬT default
+
+**PASS.** Tự chạy lại độc lập toàn bộ (test suite, ruff, live E2E cả 2 chiều BẬT/TẮT, qua cả
+`BabeldocRunner` trực tiếp lẫn `JobOrchestrator` đầy đủ) đều khớp hoặc củng cố thêm kết luận của
+Dev/Reviewer, không phát sinh false-positive/false-negative/regression mới nào trong phạm vi đã
+test. Không có yếu tố rủi ro thật sự mới nào cần Tech Lead/Domain Expert quyết định thêm — 2 hạng
+mục còn "mở" trong Architecture.md (nợ `render_order` AA10-b, `fix_overlapping_paragraphs` trên
+sách leading chặt AA12) là rủi ro đã biết từ trước, thấp, và KHÔNG liên quan tới quyết định
+bật/tắt default của riêng Ca C.
+
+**Khuyến nghị: đổi `Settings.babeldoc_toc_split_enabled` default sang `True`** trong bản release
+tới, theo đúng điều kiện AA5 ("bật sau khi QA live xanh") — điều kiện đó nay đã thoả bằng chính
+Vòng 8 này. Giữ nguyên biến `BABELDOC_SHIM_TOC_SPLIT`/`babeldoc_toc_split_enabled` như 1 kill-switch
+độc lập (đã có sẵn, không cần thêm) để rollback tức thời nếu phát sinh false-positive thật trên
+sách/layout chưa từng gặp trong 12 dump đã đo.
+
+**Lưu ý duy nhất cho PM** (không phải blocker, chỉ để không quên): AA10(c) — không bắt đầu Bug #8
+(mode-scale) tới khi chắc chắn Ca C đã ổn định trên dữ liệu production thật sau khi bật default,
+vì TOC-1 sẽ đổi `unit_count` xuyên trang và làm hết hạn mọi số đo mode-scale đo trước đó.
+
