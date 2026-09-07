@@ -6634,7 +6634,7 @@ quy thật với dòng 1 ký tự trong bảng số.
 | **7.0** | Spike: shim V1 patch được thật, `--debug` trên p74–77 sinh IL mới | Số `pdf_line` trong IL mới khớp ground truth **≥ 161/163**; job chạy xanh; shim tắt được bằng env |
 | **7.1** | Ship fix tầng dòng (D7-1) | Chạy lại **cả 4 trang lần này VÀ 7 trang của nghiên cứu Q2**; đọc **nội dung** PDF output (R6-03), không tin `status` |
 | **7.2** | Ca A — tách numbered-list theo marker tăng dần (B-2b) | **Chỉ bắt đầu sau khi 7.1 xanh.** Wrapper tự sort theo x (X4-4). Phải loại được false-positive kiểu `"2 cups"` trong công thức |
-| **7.3** | Ca C — mục lục: **chưa code gì**, chỉ **đo lại** sau 7.1 | Đọc nội dung thật trang Contents; đo **cả 2 chiều**: cấu trúc tốt lên **và** tỷ lệ cắt nhầm caption (RC-1) |
+| **7.3** | Ca C — mục lục: **chưa code gì**, chỉ **đo lại** sau 7.1 | Đọc nội dung thật trang Contents; đo **cả 2 chiều**: cấu trúc tốt lên **và** tỷ lệ cắt nhầm caption (RC-1) — ✅ **Đã đo (2026-09-07)**, xem CHANGELOG.md "bước 7.3 (Ca C, mục lục)". Kết quả: (1) cấu trúc **KHÔNG cải thiện** — Ca C vẫn còn nguyên (7.1/7.2 không chạm tới, marker của B-2b ở đầu dòng, TOC có số trang ở cuối dòng); verify sống qua dịch thật cho thấy tác hại rõ (nhiều mục TOC bị trộn lẫn thành 1 câu chạy dài). (2) RC-1: **không hồi quy**, có 1 phát hiện MỚI ngoài Ca A/B/C — 7.1 vô tình sửa luôn lỗi heading 2 dòng bị đảo lộn ký tự chéo nhau (cùng root cause X3). **Ca C cần thiết kế fix riêng (heuristic theo marker cuối dòng, không phải B-2b) — chưa làm, chờ PM/user quyết định.** |
 
 **D7-4. Effort ước lượng**: 7.0 + 7.1 ≈ **0.5–1 ngày** (logic lõi ~15 dòng; phần lớn công là shim
 + test lineage + đo 11 trang). 7.2 ≈ **1–1.5 ngày** (heuristic marker + chống false-positive).
@@ -6742,3 +6742,5 @@ numpy. Nó **chính là** oracle cho test ở D7-5.
 
 **Trạng thái**: quyết định đã chốt, **vẫn chưa có dòng code nào được viết**. Việc tiếp theo là
 **spike 7.0** (shim V1) — cần PM/user duyệt trước khi giao Dev (Protocol 2).
+
+---

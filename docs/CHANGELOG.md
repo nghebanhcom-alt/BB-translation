@@ -3969,3 +3969,88 @@ uv run ruff format --check  → tat ca file da sua deu da dung format
 `babeldoc` có numbered-list (mặc định production). Theo Protocol 7 (R7-01/R7-02), **CHƯA qua
 Reviewer thật** — PM sẽ tự spawn Reviewer riêng trước khi coi task này là "xong". **KHÔNG làm 7.3
 (đo lại mục lục, Ca C)** — đúng phạm vi PM giao lần này.
+
+## Bug #7 fix — bước 7.3 (Ca C, mục lục) — CHỈ ĐO LẠI, KHÔNG code gì (2026-09-07)
+
+Theo `docs/Architecture.md` X5 D7-3 (bảng "7.3"): "chưa code gì, chỉ đo lại" sau khi 7.1+7.2 đã
+ship, đo cả 2 chiều bắt buộc — (1) cấu trúc mục lục có tốt lên không, (2) tỷ lệ cắt nhầm caption
+(RC-1) có xấu đi không. **Không viết code fix nào trong task này** — đúng phạm vi PM giao
+("tiếp tục với bước 7.3 (mục lục)").
+
+### (1) Cấu trúc mục lục — KẾT LUẬN: 7.1+7.2 KHÔNG cải thiện gì, Ca C vẫn còn nguyên
+
+Trích 2 trang Contents thật của chính file production `data/uploads/937b1d1c-…Figoni….pdf`
+(trang sách 7 và trang sách 8, đúng trang đã dùng ở phân tích Ca C gốc — mapping "trang sách N
+↔ PyMuPDF index N-1"). Chạy `babeldoc` 0.6.4 thật, `--debug`, cổng LLM chết (0 token), 2 lần —
+1 lần KHÔNG có `PYTHONPATH` shim (baseline, hành vi gốc), 1 lần CÓ shim 7.1+7.2 đang bật — rồi so
+sánh `paragraph_finder.json` (IL cấu trúc thật, không phải suy đoán):
+
+- **Trang sách 7**: 34 paragraph nội dung thật / 66 dòng ở CẢ 2 lần chạy — **byte-for-byte giống
+  hệt nhau**, không đổi 1 ký tự. 12 paragraph vẫn còn gộp chung nhiều mục TOC (vd 1 paragraph gộp
+  8 dòng: `"Commercial Grades of White Flours 77"` → `"Exercises and Experiments 89"`).
+- **Trang sách 8**: 44 paragraph / 89 dòng ở CẢ 2 lần — cũng byte-for-byte giống hệt. Ca nặng
+  nhất: 1 paragraph gộp **8 mục TOC liên tiếp** (`"The Importance of Gluten 117"` →
+  `"Exercises and Experiments 133"`).
+
+**Nguyên nhân đúng như Architecture.md đã dự đoán trước khi làm 7.1/7.2**: 7.1 sửa lỗi ở TẦNG
+TÁCH DÒNG (ký tự trắng lấp khe giữa 2 dòng) — không liên quan gì tới việc TOC gộp nhiều DÒNG đã
+tách đúng vào 1 PARAGRAPH. 7.2 (B-2b) chỉ tách khi dòng có marker số ở ĐẦU dòng (`"1. "`, `"2. "`)
+— mục TOC có số trang ở CUỐI dòng (`"...Exercises and Experiments 61"`), không khớp anchor nào
+của B-2b, nên không bao giờ kích hoạt trên trang này (giải thích vì sao kết quả giống hệt 100%).
+
+**Verify sống (R6-03, đọc nội dung PDF output thật, không tin cấu trúc IL không)** — dịch thật
+qua đúng `BabeldocRunner.translate_pages()` với DeepSeek, trang sách 7: dry-run (0 token, giữ
+nguyên văn gốc) ra 55 block sạch (không lộ bug vì text gốc không đổi khi fallback), nhưng **dịch
+thật lộ rõ tác hại**: chỉ còn **26 block**, nhiều mục TOC bị **trộn lẫn thành 1 câu chạy dài**
+khi LLM dịch chung 1 đoạn — ví dụ 4 mục thật bị dịch dính thành:
+`"Giai đoạn III: Làm nguội 38 Câu hỏi Ôn tập 39 Câu hỏi Thảo luận 40 Bài tập và Thí nghiệm 40"`
+(4 tên mục + 4 số trang lẫn vào nhau, không còn ranh giới rõ giữa các mục — người dùng không thể
+phân biệt mục nào ứng với trang nào).
+
+**Kết luận (1)**: **Ca C (mục lục) là bug THẬT, còn nguyên, KHÔNG được 7.1/7.2 chạm tới.** Cần
+thiết kế fix riêng (heuristic khác B-2b — phải tách theo marker SỐ TRANG Ở CUỐI dòng, không phải
+marker ở đầu dòng) — **ngoài phạm vi 7.1/7.2/7.3**, cần Tech Lead thiết kế lại nếu PM/user muốn
+làm tiếp (tạm gọi "7.4" nếu có).
+
+### (2) Tỷ lệ cắt nhầm caption (RC-1) — KẾT LUẬN: KHÔNG hồi quy, có 1 phát hiện MỚI ngoài dự kiến
+
+Đo lại đúng 2 trang đã dùng làm bằng chứng RC-1 gốc trong "Đo lại F1 trên nhiều trang" (Q3/Q4) —
+trang sách 20 (bảng hẹp + caption) và trang sách 22 (mix). So `paragraph_finder.json` baseline
+vs shim 7.1+7.2, dùng diff theo tập hợp (không phụ thuộc thứ tự) để không bị nhiễu bởi việc số
+paragraph tăng/giảm do chỗ khác:
+
+- **Trang 20**: chỉ có ĐÚNG 1 khác biệt — heading gốc `"WEIGHT AND VOLUME MEASUREMENTS"` (2
+  dòng) ở baseline bị GÁN KÝ TỰ SAI HOÀN TOÀN giữa 2 dòng thành 1 chuỗi vô nghĩa
+  `"WVOELIGUHMTE  AMNEDA SUREMENTS"` (không phải chỉ "dính chữ" — mà đảo lộn thứ tự ký tự giữa
+  2 dòng, do cùng root cause X3 + việc 3 lời gọi sort theo x bị comment trong babeldoc gốc). Sau
+  shim: tách đúng thành 2 paragraph riêng `"WEIGHT AND"` / `"VOLUME MEASUREMENTS"` — same set ký
+  tự (đã verify bằng `sorted()`), không mất/thêm chữ nào.
+- **Trang 22**: tương tự — `"THE DIFFERENCE BETWEEN WEIGHT OUNCES AND FLUID OUNCES"` bị đảo lộn
+  thành `"TOHUEN DCIEFSF EARNEDN CFLEU BIDE TOWUENECNE SWEIGHT"` ở baseline; sau shim tách đúng
+  thành 2 dòng đọc được.
+- **Không tìm thấy caption nào bị CẮT XẤU ĐI** (mất nghĩa, mất chữ) do 7.1/7.2 trên 2 trang này —
+  văn xuôi xung quanh giữ nguyên, không có regression.
+
+**Phát hiện MỚI, chưa từng ghi trong Architecture.md trước đây** (không thuộc Ca A/B/C đã biết):
+heading 2 dòng ngắn nằm cạnh nhau có thể bị babeldoc gán SAI ký tự chéo giữa 2 dòng (không chỉ
+gộp — mà XÁO TRỘN), cùng root cause X3 (space bít khe + sort theo x bị comment). 7.1 vô tình sửa
+luôn ca này vì cùng cơ chế gốc. Đáng ghi nhận nhưng **không mở rộng thêm code** trong task này —
+đúng phạm vi "chỉ đo".
+
+**Verify sống trên trang 20 qua dịch thật (DeepSeek)**: cả 2 arm (có/không shim) đều ra heading
+tiếng Việt ĐỌC ĐƯỢC (khác câu chữ, cùng nghĩa: `"KHỐI LƯỢNG VÀ ĐO THỂ TÍCH"` vs
+`"ĐO LƯỜNG TRỌNG LƯỢNG VÀ THỂ TÍCH"`) — **LLM tự "đoán đúng" nghĩa dù input tiếng Anh bị xáo trộn**
+trong đúng lần chạy này, nên KHÔNG dùng được live-run này để chứng minh lợi ích cho end-user một
+cách chắc chắn (phụ thuộc khả năng đoán ngẫu nhiên của 1 LLM cụ thể, không đáng tin cậy). Cấu
+trúc IL đúng vẫn là cải thiện thật về độ ổn định (không phụ thuộc LLM có "đoán" ra hay không) —
+ghi rõ giới hạn của bằng chứng này, không phóng đại thành "user sẽ luôn thấy tốt hơn".
+
+**File dùng để đo** (không commit, script/PDF trích tạm tại scratchpad phiên này — tái tạo được
+bằng đúng lệnh `babeldoc --debug` + `fitz.insert_pdf` ghi ở trên, theo tinh thần Protocol 5 mục 3
+áp dụng cho việc ĐO, không phải cho code production):
+`/tmp/bdprobe/figoni_p7_toc.pdf`, `figoni_p8_toc.pdf`, `figoni_p20.pdf`, `figoni_p22.pdf` (trích
+từ `data/uploads/937b1d1c-…Figoni….pdf`).
+
+**Trạng thái**: Đo xong theo đúng gate D7-3 cho 7.3. **Không có code nào được viết/sửa trong task
+này** — chỉ 1 entry docs này. Ca C (mục lục) cần PM/user quyết định có làm tiếp không (thiết kế
+mới, không phải mở rộng B-2b) — chưa tự ý code thêm.
