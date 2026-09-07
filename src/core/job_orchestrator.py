@@ -40,7 +40,11 @@ from src.core.file_router import FileType
 from src.core.glossary_manager import GlossaryManager
 from src.core.ocr_warning import build_ocr_warning
 from src.core.progress_tracker import BroadcastFn, ProgressTracker
-from src.core.prompt_builder import write_babeldoc_prompt_file, write_prompt_file
+from src.core.prompt_builder import (
+    build_system_prompt,
+    write_babeldoc_prompt_file,
+    write_prompt_file,
+)
 from src.models.batch import Batch
 from src.models.chunk import Chunk
 from src.models.concurrency_state import ConcurrencyState
@@ -50,8 +54,10 @@ from src.postprocess.bilingual_merge import create_bilingual_pdf
 from src.postprocess.chunk_merge import merge_chunk_pdfs
 from src.postprocess.font_shrink import OverflowEntry, font_shrink_page
 from src.postprocess.image_compress import compress_pdf_images
+from src.postprocess.rotated_text_overlay import overlay_rotated_text
 from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
+from src.services.layout_qa import persist_findings
 from src.services.mineru_runner import MinerUError, MinerURunner, MinerUUnavailableError
 from src.services.pdf2zh_runner import Pdf2zhError, Pdf2zhRunner, Pdf2zhTimeoutError
 from src.services.pdf2zh_service_map import (
@@ -489,6 +495,71 @@ class JobOrchestrator:
                         f"'{self._settings.pdf_translate_engine}' khong tim thay text de dich. "
                         "Job that bai thay vi tra ve file trong."
                     )
+
+            # U3/U4 P1.1 (G1e) + U6/RK-3: babeldoc silently drops rotated text
+            # (V-1, verified — backend has no rotation field). This overlay
+            # re-draws it back using the app's OWN LLM provider (pricing_provider,
+            # NEVER babeldoc/pdf2zh — R6-01 data lineage), reading
+            # `translation_source_path` (SAME variable Step 7 uses to feed the
+            # engine — Bug #5's exact mistake was reading `file_path`, the
+            # scan with no text layer, instead of this bridge; R6-04 review
+            # vòng 1 caught this exact regression here) for the rotated
+            # blocks. Order is
+            # load-bearing per U6/RK-3: MUST run on `merged_path` AFTER
+            # merge_chunk_pdfs() (so page numbers match final output) and BEFORE
+            # compress_pdf_images() below (so the compress step's image re-encode
+            # never has to reconcile with text this step is still about to add).
+            # Only babeldoc gets this — pdf2zh doesn't drop rotated text (V-2).
+            # Chosen assumption (Giả định tự chọn, no spec covers this):
+            # best-effort — a bug in this new overlay step is logged and
+            # swallowed rather than failing an otherwise-successful job, matching
+            # the rollback-by-feature-flag intent of `babeldoc_rotated_text_overlay`.
+            if (
+                self._settings.pdf_translate_engine == "babeldoc"
+                and self._settings.babeldoc_rotated_text_overlay
+            ):
+                overlay_result = None
+                try:
+                    overlay_font_path = Path(self._noto_font_path or self._settings.noto_font_path)
+                    overlay_result = await overlay_rotated_text(
+                        source_pdf_path=translation_source_path,
+                        output_pdf_path=merged_path,
+                        provider=pricing_provider,
+                        glossary_prompt=await build_system_prompt(
+                            glossary_manager, project_id=job.batch_id
+                        ),
+                        font_path=overlay_font_path,
+                    )
+                except Exception:
+                    logger.warning(
+                        "overlay_rotated_text that bai cho job %s — tiep tuc "
+                        "khong co overlay chu xoay (best-effort, khong lam fail job)",
+                        job.id,
+                        exc_info=True,
+                    )
+
+                # Non-blocking #1 (review-report.md, R6-04 vong 1): log
+                # persist_findings() that bai RIENG voi overlay_rotated_text()
+                # that bai — gop chung 1 except lam finding FLAG hop le (overlay
+                # da chay dung) bien mat im lang, QA se khong bao gio thay trang
+                # can soi tay (U7-E3 doi hoi soi 100% trang co flag).
+                if overlay_result is not None and overlay_result.findings:
+                    try:
+                        await persist_findings(
+                            db_session,
+                            overlay_result.findings,
+                            job_id=job.id,
+                            source_file=file_path.name,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "persist_findings that bai cho job %s sau khi overlay_rotated_text "
+                            "da tra ve %d finding — cac finding nay se KHONG duoc QA thay "
+                            "(best-effort, khong lam fail job)",
+                            job.id,
+                            len(overlay_result.findings),
+                            exc_info=True,
+                        )
 
             # US-16/BR-IMGCOMP-01: only babeldoc jobs get the raw-image ->
             # JPEG re-encode (Architecture.md S5 data lineage — this must run

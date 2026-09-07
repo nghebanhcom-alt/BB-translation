@@ -59,12 +59,19 @@ ROTATION_TOLERANCE_DEG = 0.1
 #: khop hinh hoc.
 _ENTITY_MATCH_MIN_IOU = 0.05
 
+#: check_type dung boi `src/postprocess/rotated_text_overlay.py` (Architecture.md
+#: U4/P1.1, U5/U7-E1) khi 1 khoi chu xoay khong vua bbox du da bop toi
+#: `MIN_FONT_SCALE` — tai su dung CHINH co che `layout_qa_findings` nay
+#: (khong tao bang moi) de QA soi tay, dung nhu (d)/(e) o tren.
+ROTATED_OVERLAY_FLAG_CHECK = "rotated_text_overlay_flag"
+
 _SEVERITY_BY_CHECK: dict[str, str] = {
     "overlap": "critical",
     "text_over_drawing": "critical",
     "text_over_image": "critical",
     "rotated_text_prescan": "blocker",
     "entity_loss": "blocker",
+    ROTATED_OVERLAY_FLAG_CHECK: "blocker",
 }
 
 _SEVERITY_WEIGHT: dict[str, int] = {"blocker": 3, "critical": 2, "major": 1, "minor": 0}
@@ -236,18 +243,27 @@ def _check_text_over_images(page: "fitz.Page", page_number: int) -> list[LayoutQ
     return findings
 
 
-def _line_angle_deg(direction: tuple[float, float]) -> float:
+def line_angle_deg(direction: tuple[float, float]) -> float:
+    """Goc (deg) cua 1 `line["dir"]` PyMuPDF. Public — tai su dung boi
+    `src/postprocess/rotated_text_overlay.py` (Architecture.md U4/P1.1, R6-01:
+    "TAI SU DUNG logic detect da co o check (d), KHONG viet lai tu dau")."""
     dx, dy = direction
     return math.degrees(math.atan2(dy, dx))
 
 
-def _is_rotated(angle_deg: float, tolerance_deg: float = ROTATION_TOLERANCE_DEG) -> bool:
+def is_rotated(angle_deg: float, tolerance_deg: float = ROTATION_TOLERANCE_DEG) -> bool:
     """True neu goc lech ca 0 deg lan 90 deg qua `tolerance_deg` — dung dung
-    dieu kien babeldoc dung de vut ky tu (Architecture.md T-01)."""
+    dieu kien babeldoc dung de vut ky tu (Architecture.md T-01). Public — tai
+    su dung boi `src/postprocess/rotated_text_overlay.py` (U4/P1.1)."""
     normalized = angle_deg % 180
     dist_to_0 = min(normalized, 180 - normalized)
     dist_to_90 = abs(normalized - 90)
     return dist_to_0 > tolerance_deg and dist_to_90 > tolerance_deg
+
+
+# Aliases nguyen ten cu cho code noi bo module nay (khong doi loi goi ben duoi).
+_line_angle_deg = line_angle_deg
+_is_rotated = is_rotated
 
 
 def _check_rotated_text_prescan(

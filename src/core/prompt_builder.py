@@ -4,9 +4,16 @@ Three distinct outputs live here, matching the "out-of-band vs render path"
 split from Architecture.md 6.6.2 R1/R3:
 
 - `build_system_prompt()` — a single string, passed as `system_prompt=` to
-  `TranslationProvider.translate()` for the OUT-OF-BAND uses that remain
-  after Increment 4's fix (cost estimation, Settings "test connection",
-  sample preview — never the real PDF render path).
+  `TranslationProvider.translate()`. Originally written for the OUT-OF-BAND
+  uses only (cost estimation, Settings "test connection", sample preview) —
+  but as of P1.1 (G1e), `job_orchestrator.py` also calls this SAME function
+  to build `glossary_prompt` for `overlay_rotated_text()`'s per-block LLM
+  calls, and THAT result is drawn straight into `translated_vi.pdf`, the
+  file handed to the user. So "never the real PDF render path" is no longer
+  literally true for every caller of this function — read it as "the shape
+  this function returns matches a single `translate()` system_prompt call,
+  not pdf2zh/babeldoc's own file-template contract", not as "safe to change
+  without affecting what the user sees".
 - `write_prompt_file()` — writes the `--prompt <path>` FILE pdf2zh reads and
   re-substitutes (`${lang_in}`/`${lang_out}`/`${text}` via `string.Template`)
   for every segment of the real render. This is the ONLY place glossary/unit
@@ -40,10 +47,20 @@ _GLOSSARY_INSTRUCTION = (
     "GIU NGUYEN tieng Anh:"
 )
 
+#: BR-FONT-03 (Architecture.md U4/P1.2, chot lai sau khi Tech Lead tu nhan ban cu SAI):
+#: ban cu ghi "<=130% do dai ban goc" — dau da ghi ro "khong phai gioi han cung", con so
+#: phan tram trong prompt van du de LLM tu suy dien thanh gioi han cung va LUOC BO dinh
+#: luong (bug thuc te da xay ra, xem CHANGELOG "Increment 2026-09-05"). Ban chot KHONG
+#: dua BAT KY con so phan tram/ky tu gioi han do dai nao vao prompt nua — ty le do dai chi
+#: la METRIC DO SAU (cost_estimator.py), khong phai chi thi cho LLM. Chot chan chat luong
+#: thuc su la gate P0.1-e (`src/services/layout_qa.py`), khong phai loi hua cua prompt nay.
+#: Ngan gon co chu dich (xem ghi chu ben tren + CHANGELOG "Increment 2026-09-05"
+#: ve rui ro `prompt_overhead_chars` nhan voi segment_count trong cost_estimator.py
+#: day cost estimate vuot cost cap — moi lan sua rule nay PHAI kiem tra lai do dai).
 _CONCISENESS_RULE = (
-    "2. Dich suc tich, MUC TIEU la <=130% do dai ban goc tieng Anh (khong phai gioi han "
-    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
-    "muc nao chi de dat muc tieu do dai."
+    "2. BAT BIEN NOI DUNG: giu du so, don vi, nhiet do, thoi gian, ten nguyen lieu, so buoc — "
+    "TUYET DOI KHONG bo/gop/lam tron dinh luong. Con lai uu tien van phong CO DONG. Danh sach "
+    "nhieu muc: dich DAY DU, KHONG duoc bo sot muc nao."
 )
 
 _TYPOGRAPHY_RULES = (
@@ -101,10 +118,14 @@ _FILE_GLOSSARY_INSTRUCTION = (
 
 _FILE_NO_GLOSSARY = "(Khong co glossary entry nao ap dung cho tai lieu nay.)"
 
+#: Cung quyet dinh U4/P1.2 nhu `_CONCISENESS_RULE` o tren — KHONG con con so phan tram
+#: nao trong noi dung file nay (day la file pdf2zh THUC SU doc + gui lai MOI segment,
+#: nen cang phai ngan gon — `prompt_overhead_chars` trong cost_estimator.py nhan voi
+#: segment_count, xem CHANGELOG "Increment 2026-09-05").
 _FILE_CONCISENESS_RULE = (
-    "Dich suc tich, MUC TIEU la <=130% do dai ban goc ${lang_in} (khong phai gioi han "
-    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
-    "muc nao chi de dat muc tieu do dai."
+    "BAT BIEN NOI DUNG: giu du so, don vi, nhiet do, thoi gian, ten nguyen lieu, so buoc — "
+    "TUYET DOI KHONG bo/gop/lam tron dinh luong. Con lai uu tien van phong CO DONG. Danh sach "
+    "nhieu muc: dich DAY DU, KHONG duoc bo sot muc nao."
 )
 
 _FILE_TYPOGRAPHY_RULES = (
@@ -237,10 +258,14 @@ _BABELDOC_GLOSSARY_INSTRUCTION = (
 
 _BABELDOC_NO_GLOSSARY = "(Khong co glossary entry nao ap dung cho tai lieu nay.)"
 
+#: Cung quyet dinh U4/P1.2 — KHONG con con so phan tram nao (day la noi dung babeldoc
+#: gui thang cho LLM lam system prompt, khong qua string.Template). Ngan gon co chu dich
+#: nhu 2 bien the tren — `prompt_overhead_chars` (cost_estimator.py) dung DUNG do dai
+#: chuoi nay cho engine babeldoc, nhan voi segment_count.
 _BABELDOC_CONCISENESS_RULE = (
-    "Dich suc tich, MUC TIEU la <=130% do dai ban goc tieng Anh (khong phai gioi han "
-    "cung). Doan nhieu y (vd danh sach nhieu muc): uu tien dich DAY DU, KHONG duoc bo sot "
-    "muc nao chi de dat muc tieu do dai."
+    "BAT BIEN NOI DUNG: giu du so, don vi, nhiet do, thoi gian, ten nguyen lieu, so buoc — "
+    "TUYET DOI KHONG bo/gop/lam tron dinh luong. Con lai uu tien van phong CO DONG. Danh sach "
+    "nhieu muc: dich DAY DU, KHONG duoc bo sot muc nao."
 )
 
 #: F4 (Architecture.md "Root Cause Analysis: Line-break/List Regression",

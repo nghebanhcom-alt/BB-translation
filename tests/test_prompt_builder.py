@@ -50,12 +50,17 @@ async def test_system_prompt_contains_all_required_sections(session: AsyncSessio
     assert "°F" in prompt
     assert "Bot mi (flour)" in prompt
 
-    # Conciseness rule (BR-FONT-03): a target, not a hard cap that licenses
-    # dropping content — regression for the v1.2.2 bug where a dense
-    # numbered list got silently truncated by the model to satisfy a
-    # conciseness rule phrased as an absolute constraint.
-    assert "130%" in prompt
-    assert "MUC TIEU" in prompt
+    # Content-invariance rule (BR-FONT-03, Architecture.md U4/P1.2): explicit
+    # numeric/unit/entity preservation instruction, and NO length-limit
+    # percentage anywhere in the prompt — regression for BOTH the v1.2.2 bug
+    # (dense list silently truncated to satisfy a length rule) AND the
+    # follow-up fix Tech Lead had to self-correct (a "target, not hard cap"
+    # percentage still let the LLM infer a hard cap and drop quantities).
+    assert not re.search(r"\d+%", prompt)
+    assert "BAT BIEN NOI DUNG" in prompt
+    assert "nhiet do" in prompt
+    assert "don vi" in prompt
+    assert "so buoc" in prompt
     assert "KHONG duoc bo sot" in prompt
 
     # Typography/structure preservation (BR-TYPO-01..04).
@@ -70,7 +75,8 @@ async def test_system_prompt_handles_empty_glossary(session: AsyncSession) -> No
     manager = GlossaryManager(session)
     prompt = await build_system_prompt(manager)
     assert "Khong co glossary entry" in prompt
-    assert "130%" in prompt
+    assert not re.search(r"\d+%", prompt)
+    assert "BAT BIEN NOI DUNG" in prompt
 
 
 @pytest.mark.asyncio
@@ -98,9 +104,11 @@ async def test_write_prompt_file_contains_template_tokens(
     assert "${lang_out}" in content
     assert content.endswith("Source Text: ${text}\nTranslated Text:")
     assert "ganache" in content
-    # Same v1.2.2 regression guard as the out-of-band system prompt above,
-    # but for the FILE contract pdf2zh/babeldoc actually read per segment.
-    assert "MUC TIEU" in content
+    # Same content-invariance regression guard as the out-of-band system
+    # prompt above, but for the FILE contract pdf2zh actually reads per
+    # segment — must have no length-limit percentage anywhere.
+    assert not re.search(r"\d+%", content)
+    assert "BAT BIEN NOI DUNG" in content
     assert "KHONG duoc bo sot" in content
 
 
@@ -185,7 +193,8 @@ async def test_write_babeldoc_prompt_file_has_no_pdf2zh_template_contract(
     assert "chi in ra ban dich" not in content.lower()
     assert "{{v0}}" not in content
     assert "ganache" in content
-    assert "MUC TIEU" in content
+    assert not re.search(r"\d+%", content)
+    assert "BAT BIEN NOI DUNG" in content
     assert "KHONG duoc bo sot" in content
 
 

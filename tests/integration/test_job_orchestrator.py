@@ -14,6 +14,7 @@ from src.core.job_orchestrator import JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
 from src.postprocess.image_compress import ImageCompressStats
+from src.postprocess.rotated_text_overlay import OverlayResult
 from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
 from src.services.mineru_runner import (
     MinerUResult,
@@ -677,6 +678,54 @@ async def test_pdf_scan_babeldoc_engine_translates_bridge_not_original(
 
     await session.refresh(job)
     assert job.ocr_bridge_path == str(expected_bridge)
+
+
+@pytest.mark.asyncio
+async def test_pdf_scan_babeldoc_overlay_uses_bridge_not_original(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """R6-04 (review-report.md, vong 1 REJECT): `pdf_translate_engine=babeldoc`
+    is independent of `job.file_type` — a PDF_SCAN job with the babeldoc
+    engine is a valid, common production combination, and
+    `overlay_rotated_text()` must read the SAME OCR searchable-PDF bridge
+    Step 7 feeds `babeldoc_runner.translate_pages()`, never the raw scan
+    (`job.file_path`/`file_path`) which has no text layer for
+    `scan_rotated_lines()` to find anything in. Reading the raw scan doesn't
+    raise — it silently returns zero rotated lines every time, so this bug
+    has the exact Bug #5 shape (status="completed", feature silently never
+    runs). Companion to `test_pdf_scan_babeldoc_engine_translates_bridge_not_original`
+    above, same lineage guarantee, one step later in the pipeline."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 5)
+    job = await _create_job(session, source_pdf, file_type="pdf_scan")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    settings = Settings(pdf_translate_engine="babeldoc", babeldoc_rotated_text_overlay=True)
+
+    overlay_spy = mocker.patch(
+        "src.core.job_orchestrator.overlay_rotated_text",
+        new=AsyncMock(
+            return_value=OverlayResult(findings=[], overlaid_block_count=0, flagged_block_count=0)
+        ),
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=settings,
+        babeldoc_runner=babeldoc_runner,
+        mineru_runner=_fake_mineru_runner(tmp_path),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    expected_bridge = tmp_path / "processing" / job.id / "ocr_bridge" / "searchable.pdf"
+    overlay_spy.assert_awaited_once()
+    called_source = overlay_spy.await_args.kwargs["source_pdf_path"]
+    assert Path(called_source) == expected_bridge
+    assert Path(called_source) != Path(job.file_path)
 
 
 @pytest.mark.asyncio

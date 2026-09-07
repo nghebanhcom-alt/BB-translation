@@ -3481,3 +3481,143 @@ sau, ghi nhận nhưng không sửa trong task này.
 Artifact thô của thí nghiệm (script + JSON debug + PDF output của 11 lần chạy) lưu ngoài repo
 tại thư mục scratchpad của session Dev — chưa export vào `tests/fixtures/babeldoc/` (Protocol
 5 mục 3), vì đây là dữ liệu spike 1 lần chưa chốt làm golden fixture lâu dài.
+
+## Increment (2026-09-07) — P1.1 (G1e overlay chữ xoay) + P1.2 (prompt bất biến nội dung), Dev
+
+Theo đúng `docs/Architecture.md` "Final Decision: Babeldoc Layout Bug Fix Roadmap" U3/U4 (P1.1,
+P1.2) — **KHÔNG làm P1.3** (đã loại bỏ ở P0.2, `--max-pages-per-part` không cải thiện đo được).
+
+**P1.2 — viết lại rule "súc tích" trong `src/core/prompt_builder.py` (cả 3 biến thể:
+`_CONCISENESS_RULE`/`_FILE_CONCISENESS_RULE`/`_BABELDOC_CONCISENESS_RULE`)**:
+- Bỏ HOÀN TOÀN con số phần trăm/giới hạn độ dài khỏi cả 3 prompt (kể cả dạng "≤130%... không
+  phải giới hạn cứng" — bản thân con số đó đã đủ để lần trước LLM tự suy diễn thành hard cap và
+  lược bỏ định lượng, xem increment "2026-09-05" ở trên).
+- Thêm yêu cầu bất biến nội dung tường minh: số, đơn vị, nhiệt độ, thời gian, tên nguyên liệu,
+  số bước phải đủ trong bản dịch, tuyệt đối không bỏ/gộp/làm tròn.
+- Khuyến khích văn phong cô đọng ở phần KHÔNG ảnh hưởng định lượng — không kèm con số nào.
+- Chốt chặn chất lượng vẫn là gate P0.1-e (`src/services/layout_qa.py`, đã có sẵn từ P0.1) —
+  không sửa gate này ở increment này.
+- **Bẫy đã gặp lại và tự sửa trong lúc làm**: bản đầu tiên của rule mới dài hơn ~2.4x bản cũ,
+  làm 4 test tích hợp (`test_job_orchestrator.py`, `test_job_cancel.py`) chuyển từ
+  `status=="completed"` sang `status=="cost_capped"` — CHÍNH XÁC cái bẫy đã ghi trong increment
+  "2026-09-05" (`prompt_overhead_chars` nhân với `segment_count` trong `cost_estimator.py`).
+  Đã rút gọn lại cả 3 rule (giữ đúng ý, bỏ diễn giải dư) để độ dài chỉ dài hơn bản cũ ~24 ký tự
+  thay vì ~285 — 4 test trên xanh trở lại.
+- Test: viết lại `tests/test_prompt_builder.py` — assert KHÔNG có `\d+%` nào trong prompt (cả
+  3 đường `build_system_prompt`/`write_prompt_file`/`write_babeldoc_prompt_file`) + assert có
+  đủ các từ khoá bất biến nội dung (`BAT BIEN NOI DUNG`, `nhiet do`, `don vi`, `so buoc`,
+  `KHONG duoc bo sot`).
+
+**P1.1 — overlay chữ xoay bằng PyMuPDF `insert_text(morph=...)` (G1e), module mới
+`src/postprocess/rotated_text_overlay.py`**:
+- Data lineage đúng U4/P1.1 (R6-01): `rotated_blocks` quét từ `source.pdf` (TÁI SỬ DỤNG logic
+  detect ở check (d) của `src/services/layout_qa.py` — refactor `_line_angle_deg`/`_is_rotated`
+  thành `line_angle_deg`/`is_rotated` PUBLIC, giữ alias tên cũ để không đổi lời gọi nội bộ module
+  đó) → `translated_blocks` từ LLM provider THẬT của app (`TranslationProvider.translate()`,
+  tham số hoá qua `pricing_provider` mà `JobOrchestrator` đã tạo sẵn cho job đó — KHÔNG bao giờ
+  gọi lại babeldoc/pdf2zh CLI cho bước này) → overlay lên `merged_path` (file babeldoc đã merge).
+- Chính sách fit (U5/U7-E1): bóp font tối đa tới 70% (`MIN_FONT_SCALE`), KHÔNG bao giờ thấp hơn.
+  Không vừa dù đã bóp 70% → KHÔNG overlay đè (giữ nguyên chỗ trống babeldoc để lại) + FLAG bằng
+  CHÍNH cơ chế `layout_qa_findings` đã có từ P0.1 (`check_type="rotated_text_overlay_flag"`,
+  hằng số `ROTATED_OVERLAY_FLAG_CHECK` mới thêm vào `src/services/layout_qa.py`, severity
+  `blocker`) — không tạo bảng mới, dùng lại `persist_findings()`.
+- Nối vào pipeline: `src/core/job_orchestrator.py` gọi `overlay_rotated_text()` ngay SAU
+  `merge_chunk_pdfs()` và TRƯỚC `compress_pdf_images()` (đúng U6/RK-3), chỉ khi
+  `pdf_translate_engine=="babeldoc"` VÀ feature flag mới `Settings.babeldoc_rotated_text_overlay`
+  (mặc định `True`, `.env`-only giống `pdf_translate_engine`, dùng để rollback tức thời).
+- Feature flag mới: `babeldoc_rotated_text_overlay: bool = True` trong `src/core/config.py` —
+  KHÔNG thêm vào `SETTINGS_DB_OVERRIDABLE_FIELDS` (cùng lý do `pdf_translate_engine`: đổi engine
+  behaviour không phải thao tác UI thường ngày).
+- Best-effort: lỗi trong `overlay_rotated_text()` được log + nuốt (không làm fail job) — job vẫn
+  hoàn thành với bản dịch chính đã đúng, chỉ thiếu phần overlay chữ xoay.
+
+**Giả định tự chọn (chưa có spec chính thức, ghi rõ theo yêu cầu brief thay vì âm thầm đoán)**:
+1. **Gộp nhóm dòng xoay thành đoạn văn**: babeldoc/PyMuPDF tách 1 đoạn văn xoay nhiều dòng (vd
+   "16 dòng nghiêng -11° ở trang 67") thành nhiều block PyMuPDF riêng (mỗi block ~1 dòng). Không
+   có spec nào định nghĩa cách gộp lại — đã tự chọn heuristic `group_rotated_lines()`: cluster
+   theo góc (bucket 1°), sort theo trục vuông góc với hướng chữ, gộp các dòng liên tiếp nếu
+   khoảng cách chiếu ≤ `1.8×` cỡ chữ lớn hơn (`_PARAGRAPH_GAP_FONT_MULTIPLE`). Verify thật trên
+   2 fixture: trang 67 (đoạn văn liền mạch) gộp đúng thành 1 khối 17 dòng; trang 15 (bảng quy
+   đổi xoay, nhãn rời rạc) tách đúng thành 6 khối riêng thay vì gộp cả trang thành 1 đoạn vô
+   nghĩa. Chưa test trên tập lớn hơn — cần theo dõi khi có dữ liệu QA thật.
+2. **Kích thước khung gốc để fit chữ**: không có field "bbox khung gốc" tường minh cho 1 đoạn
+   văn xoay nhiều dòng — đã tự tính bằng cách chiếu 4 góc bbox mỗi dòng lên trục dọc theo hướng
+   chữ (độ rộng 1 dòng) và trục vuông góc (tổng chiều cao cả khối), verify bằng spike thật cho
+   ra width/height hợp lý so với hình dạng trực quan của khối (xem `_block_extents()`).
+3. **Lỗi overlay là best-effort, không fail job**: không có spec nào nói rõ hành vi khi bước
+   overlay lỗi — chọn nuốt lỗi + log, vì đây là tính năng UX bổ sung lên trên 1 pipeline dịch đã
+   hoạt động đúng, và khớp tinh thần "feature flag để rollback tức thời" mà brief đề xuất.
+
+**Test mới**: `tests/test_rotated_text_overlay.py` (10 test, PyMuPDF thật, không mock hình học —
+Protocol 5 R5-03) dùng 2 fixture có sẵn `tests/fixtures/babeldoc/rotated_text_p67_source.pdf` /
+`rotated_chart_p15_source.pdf`. Điểm đáng chú ý:
+- `FakeTranslationProvider` là 1 implementation THẬT của `TranslationProvider` (không phải
+  `AsyncMock` bọc `assert_called()`) — mọi test overlay assert GIÁ TRỊ CỤ THỂ được vẽ lên PDF
+  output khớp ĐÚNG những gì fake provider trả về (không phải text tiếng Anh gốc) — đúng kỷ luật
+  R6-02.
+- Nhánh FLAG (không vừa dù đã bóp tới 70%) có test riêng: assert `overlaid_block_count==0`,
+  `flagged_block_count==1`, finding đúng `check_type`/`severity`, và text KHÔNG xuất hiện trong
+  PDF output (không đè chữ vỡ lên trang).
+- "babeldoc output đã mất chữ xoay" được mô phỏng bằng redaction PyMuPDF THẬT (`add_redact_annot`
+  + `apply_redactions`) trên bản copy của file gốc — một thao tác PyMuPDF hợp lệ, không phải nội
+  dung babeldoc tự bịa ra (Protocol 5 mục 3: không viết mock tay theo giả định).
+
+**Trạng thái**: `uv run pytest -q` → 336/336 pass (14 test mới: 10 ở
+`test_rotated_text_overlay.py`, 4 test cũ trong `test_prompt_builder.py` được viết lại — không
+tăng net count vì thay thế assertion cũ). `ruff check`/`ruff format --check` sạch trên mọi file
+đã sửa/tạo. Đây là code thay đổi hành vi runtime quan trọng (đụng `JobOrchestrator`, engine
+babeldoc) — **CHƯA qua Reviewer thật** (Protocol 7 R7-01) — PM sẽ tự spawn Reviewer riêng trước
+khi coi P1.1/P1.2 là "xong".
+
+**File đã thay đổi/tạo mới**:
+- Mới: `src/postprocess/rotated_text_overlay.py`, `tests/test_rotated_text_overlay.py`
+- Sửa: `src/core/prompt_builder.py`, `tests/test_prompt_builder.py`, `src/core/job_orchestrator.py`,
+  `src/core/config.py`, `src/services/layout_qa.py`
+
+## Fix Reviewer REJECT vòng 1/3 (Dev↔Reviewer, P1.1 overlay chữ xoay) — R6-04
+
+Reviewer vòng 1 REJECT 1 blocking issue: `job_orchestrator.py:520` gọi
+`overlay_rotated_text(source_pdf_path=file_path, ...)` — dùng `file_path` (file scan gốc, KHÔNG
+có text layer) thay vì `translation_source_path` (biến cầu nối OCR mà Step 7 đã dùng đúng cho
+babeldoc/pdf2zh). Vì `pdf_translate_engine=babeldoc` độc lập với `job.file_type`, tổ hợp
+`PDF_SCAN + babeldoc` là hợp lệ trong production — khi đó `scan_rotated_lines()` chạy trên ảnh
+scan không chữ, luôn trả `[]`, khiến toàn bộ overlay P1.1 âm thầm không bao giờ chạy cho sách
+scan, đúng hình dạng Bug #5 (silent failure, không log lỗi nào).
+
+**Đã sửa**:
+1. `job_orchestrator.py:524` — đổi `source_pdf_path=file_path` → `source_pdf_path=
+   translation_source_path`. Cập nhật lại comment phía trên (dòng ~499-508) để nêu rõ đây là
+   CÙNG biến Step 7 dùng, tránh tái phạm.
+2. Tách `try/except` quanh `overlay_rotated_text()` và `persist_findings()` thành 2 khối riêng
+   (non-blocking #1 của Reviewer) — trước đây gộp chung 1 `except Exception`, nếu
+   `persist_findings()` lỗi (vd DB constraint) SAU KHI overlay đã chạy đúng và trả về finding
+   FLAG hợp lệ, finding đó biến mất im lặng, QA không bao giờ biết trang nào cần soi tay
+   (U7-E3). Giờ log message phân biệt rõ lỗi overlay vs lỗi persist, kèm số finding bị mất nếu
+   persist lỗi.
+3. Cập nhật docstring module `prompt_builder.py:1-14` (non-blocking #2) — câu "never the real
+   PDF render path" không còn đúng 100% vì `overlay_rotated_text()` giờ dùng `build_system_prompt()`
+   làm `glossary_prompt`, và kết quả dịch từ đó được vẽ thẳng vào `translated_vi.pdf` giao cho
+   user.
+4. Ghi chú rủi ro bucket góc 1° (non-blocking #3) trực tiếp tại định nghĩa
+   `_ANGLE_GROUP_TOLERANCE_DEG` trong `rotated_text_overlay.py` — không sửa logic (Reviewer không
+   yêu cầu), chỉ ghi rõ để người sau biết đây là rủi ro đã cân nhắc, chưa gặp trên fixture hiện có.
+
+**Test mới** (R6-02 — assert giá trị lineage cụ thể, không chỉ `assert_called()`):
+`tests/integration/test_job_orchestrator.py::test_pdf_scan_babeldoc_overlay_uses_bridge_not_original`
+— dựng job `file_type=pdf_scan` + `pdf_translate_engine=babeldoc`, mock `overlay_rotated_text`
+tại `src.core.job_orchestrator.overlay_rotated_text`, assert
+`overlay_spy.await_args.kwargs["source_pdf_path"] == expected_bridge` (đường dẫn OCR bridge thật,
+`processing/<job_id>/ocr_bridge/searchable.pdf`) VÀ `!= Path(job.file_path)` — đúng loại lineage
+guarantee mà `test_pdf_scan_babeldoc_engine_translates_bridge_not_original` đã verify cho bước
+dịch chính, giờ verify thêm cho bước overlay.
+
+**Kết quả cuối**:
+```
+uv run pytest -q            → 337 passed (336 + 1 test mới), 420 warnings
+uv run ruff check           → All checks passed! (job_orchestrator.py, prompt_builder.py,
+                               rotated_text_overlay.py, tests/integration/test_job_orchestrator.py)
+uv run ruff format --check  → 4 files already formatted
+```
+
+**Trạng thái**: Vòng 1/3 (Dev↔Reviewer) đã dùng. Gửi lại Reviewer vòng 2 — KHÔNG tự báo cáo "xong",
+PM sẽ tự spawn Reviewer.

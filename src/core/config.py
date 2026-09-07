@@ -172,6 +172,19 @@ class Settings(BaseSettings):
     # SAI vi chua do truoc khi chon).
     babeldoc_short_line_split_factor: float = 0.8
 
+    # Architecture.md "Final Decision: Babeldoc Layout Bug Fix Roadmap", U3/U4
+    # P1.1 (G1e): babeldoc 0.6.4 silently drops any character whose line angle
+    # falls outside 0/90 deg +-0.1 deg (`il_creater.py:968-974`, V-1 verified —
+    # backend has no rotation field at all, so this is UX-C content-loss, not
+    # a cosmetic issue). This flag gates the PyMuPDF `insert_text(morph=...)`
+    # overlay step that re-draws that lost rotated text back onto the merged
+    # babeldoc output (only ever runs when `pdf_translate_engine == "babeldoc"`
+    # — pdf2zh does not drop rotated text, V-2 verified). `.env`-only like
+    # `pdf_translate_engine` above, same rationale: an immediate rollback path
+    # if the overlay step itself misbehaves on some future document, without
+    # needing a UI round-trip.
+    babeldoc_rotated_text_overlay: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:
