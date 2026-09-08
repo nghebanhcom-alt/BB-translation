@@ -4545,3 +4545,128 @@ release). `uv run pytest -q` → 435 passed, `ruff check`/`ruff format --check` 
 phát sinh mới): Bug #6 (nhánh `pdf_scan` của tính năng overlay chữ xoay P1.1) vẫn đang BLOCKED ở
 circuit breaker Dev↔QA 5/5, cần PM/Tech Lead quyết định hướng thiết kế lại riêng — không liên quan
 và không bị ảnh hưởng bởi release Bug #7 này (2 tính năng độc lập).
+
+## US-16 v2 — Mở rộng nén ảnh sang `/FlateDecode` + sửa `bilingual_merge.py` (2026-09-08)
+
+Implement theo thiết kế đã chốt và được user duyệt (Protocol 2) tại `docs/Architecture.md` mục
+"US-16 v2 — Final Decision sau phản biện Domain Expert (2026-09-08)" (section W6 — thuật toán hợp
+nhất 13 bước, W7 — chữ ký hàm, W8 — bảng test bắt buộc). Đây là bản implement sau 2 vòng phản biện
+(Tech Lead → Domain Expert (Fable) → Tech Lead chốt lại), không phải mục "US-16 v2" gốc (V1-V11) —
+W6 SUPERSEDE 4 bước (4a/4b/4d/7) của V5 và toàn bộ V9.1.
+
+### 2 quyết định user đã duyệt — implement cả hai (W10)
+
+- **(a)** Mở rộng `BR-IMGCOMP-02` → `BR-IMGCOMP-02b`: cho phép re-encode cả ảnh `/FlateDecode`
+  (zlib lossless), không chỉ `Filter: null` như v1. Lý do: Flate là lossless nên với ảnh chụp gần
+  như không giảm dung lượng gì — coi nó "tương đương đã nén" là suy diễn sai của code v1.
+- **(b)** Sửa `src/postprocess/bilingual_merge.py:22`: `output_doc.save(output_path)` trần →
+  `output_doc.save(output_path, garbage=4, deflate=True)`. Cơ chế đúng (đã sửa lại từ chẩn đoán sai
+  ban đầu của Tech Lead ở V9.1, xem X6/W4): `create_bilingual_pdf()` gọi `insert_pdf` **từng trang
+  một** nên nhân bản font nhúng của bản VI — đo thật 9 font gốc → 592 bản sao trên job 596 trang.
+  `garbage=4` (dedupe object trùng) mới là tham số làm việc; `deflate=True` một mình cho **0 byte**
+  lợi ích ở đây (mọi stream đã Flate sẵn) — vì vậy test mới assert trực tiếp SỐ LƯỢNG font stream
+  (`/Length1`) chứ không chỉ kích thước file, đúng yêu cầu W4 (một test chỉ theo kích thước sẽ
+  không bắt được nếu sau này ai đó "tối giản" nhầm thành chỉ `deflate=True`).
+
+### 3 sửa lỗi có sẵn của v1 — độc lập với (a)/(b), áp dụng trong mọi kịch bản (W1-W3)
+
+1. **Guard colorspace đọc `info[5]`** (từ `get_page_images(pno, full=True)`), KHÔNG dùng
+   `Pixmap.colorspace.name` — field đó bị PyMuPDF "expand" Indexed sang base colorspace ngay khi
+   dựng `Pixmap` nên không bao giờ thấy `Indexed(...)`; đây chính là bug Domain Expert bắt được
+   (đo thật: 2 ảnh Indexed lọt guard cũ). Allowlist mới:
+   `{DeviceGray, DeviceRGB, DeviceCMYK, ICCBased}`, chạy TRƯỚC khi dựng Pixmap (rẻ hơn). Lớp hai:
+   kiểm tra `pix.n` khớp bảng kỳ vọng theo `cs_family` (không dùng `pix.colorspace.name` — chính
+   field từng gây bug lúc spike, giữ lại làm "lớp hai" là thêm rủi ro chứ không thêm an toàn).
+2. **KHÔNG ghi đè `/ColorSpace` nữa** — xoá `_COLORSPACE_BY_CHANNELS` và dòng `xref_set_key(xref,
+   "ColorSpace", ...)`. Ghi đè `ICCBased` → `/DeviceCMYK` vứt ICC profile gốc: vô hại trên MuPDF
+   (nó tự thay bằng profile mặc định của chính nó, nên MuPDF-vs-MuPDF pixel-diff đọc 0.00) nhưng
+   lệch màu thật 4.4–7.0/255 trên macOS Preview/Quartz — Tech Lead **không tự đo** loại lỗi này
+   (đo bằng MuPDF chỉ chứng minh nhất quán với chính nó), Domain Expert phát hiện bằng renderer
+   độc lập (Quartz qua `sips`). **Ràng buộc bắt buộc (W2.2)**: sửa #1 và #2 PHẢI đi cùng 1 commit —
+   nếu chỉ làm #2 mà thiếu #1, ảnh Indexed lọt guard sẽ bị JPEG hoá trong khi `/ColorSpace` vẫn ghi
+   `[/Indexed ...]` → PDF hỏng nặng hơn hiện trạng (mỗi byte JPEG bị đọc nhầm thành index bảng màu).
+3. **Guard `/Mask`** (color-key array hoặc ref stencil mask) — cùng nhóm với `/SMask`/`/ImageMask`
+   đã có, skip thay vì recompress. Đổi luôn `if pix.alpha: pix = Pixmap(pix, 0)` (drop alpha) thành
+   **skip** — nếu vẫn còn alpha sau khi đã guard SMask/Mask thì nghĩa là nguồn chưa biết, drop âm
+   thầm vừa mất thông tin vừa để lại key gây ra nó trong PDF dict.
+4. **Dọn `/Decode`** sau khi re-encode (chỉ khi key tồn tại và khác `null`): `Pixmap(doc, xref)` ÁP
+   DỤNG `/Decode` lúc decode, nhưng `update_stream()` KHÔNG xoá key này — để nguyên sẽ áp transform
+   lần thứ 2 ở mọi lần render sau → ảnh âm bản. Lỗi có sẵn trong v1 cho mọi ảnh `Filter: null` có
+   `/Decode` không phải identity, chưa từng phát tác (mọi `/Decode` khảo sát được đều identity).
+
+### File đã sửa
+
+- `src/postprocess/image_compress.py`: implement lại toàn bộ theo W6 (13 bước) — eligibility filter
+  mở rộng Flate, guard mask/alpha/`Mask`/kích thước/bpc/colorspace theo đúng thứ tự rẻ→đắt, không
+  ghi `/ColorSpace`, dọn `/Decode`. `ImageCompressStats` thêm 2 field: `images_skipped_small`,
+  `images_skipped_colorspace`. Chữ ký hàm thêm `min_recompress_bytes: int = 4096` (keyword-only,
+  chỉ để test tham số hoá được — không phải điểm cấu hình `.env`/UI, BR-IMGCOMP-03 giữ nguyên).
+- `src/postprocess/bilingual_merge.py`: 1 dòng, `save(output_path)` → `save(output_path, garbage=4,
+  deflate=True)`.
+- `tests/fixtures/babeldoc/job78674af9_flate_sample.pdf` (fixture vàng mới, 1.75 MB, trích trang
+  22+25 0-based từ `data/outputs/78674af9-.../translated_vi.pdf` bằng `insert_pdf` +
+  `save(garbage=4, deflate=True)`): 2 ảnh `/FlateDecode` `ICCBased` (1 Gray, 1 CMYK) + 1 ảnh
+  `/DCTDecode` đã nén sẵn.
+- `tests/fixtures/babeldoc/job136645f9_indexed_sample.pdf` (fixture vàng mới, 1.15 MB, trích trang
+  168 0-based từ `data/outputs/136645f9-.../translated_vi.pdf`): 5 ảnh `/FlateDecode` `Indexed` + 6
+  ảnh `/DCTDecode` — bằng chứng dữ liệu thật DUY NHẤT cho điều kiện tiên quyết của W2.2 (Tech Lead
+  nâng lên **blocking** so với đề xuất non-blocking ban đầu của Domain Expert).
+- `tests/fixtures/babeldoc/README.md`: append xuất xứ 2 fixture trên (job id, trang gốc, ngày
+  trích, lệnh trích, nội dung xác nhận).
+- `tests/test_image_compress.py`: thêm 5 test mới theo bảng W8 (giữ nguyên 3 test cũ, không sửa
+  assertion — đúng yêu cầu hồi quy V7 "v2 phải cho kết quả y hệt v1 trên fixture cũ"):
+  1. Fixture Flate mới: `images_recompressed == 2`, text/số trang giữ nguyên, ảnh DCT giữ byte
+     nguyên vẹn.
+  2. Guard Indexed (**blocking**, W8 #9): chạy `min_recompress_bytes=0` trên fixture Indexed →
+     `images_skipped_colorspace == 5` (đúng số ảnh Indexed thật), `images_recompressed == 0`,
+     `/ColorSpace` không đổi.
+  3. `/ColorSpace` giữ nguyên (W8 #10): ảnh ICCBased sau re-encode vẫn `info[5] == 'ICCBased'`,
+     `ColorSpace` key y hệt trước.
+  4. `/Decode` mức pixel (**blocking**, nâng cấp W8 #12 theo X7.1): không chỉ assert
+     `xref_get_key == ('null','null')` mà còn render trang trước/sau và so pixel — đo được
+     0.21/255 (Domain Expert đo case đúng: 0.46/255; case sai/double-apply: 42.28/255).
+  5. Guard `/Mask` (**blocking**, W8 #11): inject `/Mask [200 255]`, assert ảnh bị skip
+     (`images_skipped_unsupported += 1`), stream giữ byte nguyên vẹn.
+- `tests/test_bilingual_merge.py`: thêm 1 test dùng font TTF nhúng thật (`fonts/NotoSerif-
+  Regular.ttf`, base14 không nhúng nên không tái hiện được bug) — xác nhận số `/Length1` font
+  stream sau merge KHÔNG tăng so với 1 bản gốc (đo thủ công lúc implement: không có `garbage=4` →
+  40 stream trên 20 trang x 2 tài liệu; có `garbage=4` → 1 stream).
+- `docs/CHANGELOG.md`: mục này.
+
+### Kết quả chạy test
+
+`.venv/bin/python -m pytest tests/test_image_compress.py tests/test_bilingual_merge.py
+tests/integration/test_job_orchestrator.py -q` → **34 passed**. `uv run pytest -q` (toàn bộ repo)
+→ **441 passed** (435 trước đó + 6 test mới), không có test nào fail/skip. `ruff check`/`ruff
+format --check` sạch trên toàn bộ file đã sửa.
+
+### R5-03/R6-03 — chạy thật trên chính file lỗi (không mock)
+
+Copy `data/outputs/78674af9-ce15-4d39-bba5-7f8d1e2804fe/translated_vi.pdf` ra thư mục tạm ngoài
+`data/outputs/` (file gốc không bị đụng — xác nhận lại bằng MD5 + timestamp sau khi chạy), chạy
+`compress_pdf_images()` thật:
+
+| Chỉ số | Kết quả đo | Số Tech Lead đo (Architecture.md V7/W9) |
+|---|---|---|
+| Kích thước | 46.87 MB → **25.19 MB (−46.3%)** | 46.87 MB → 25.19 MB (−46.3%) — khớp |
+| Số trang | 30 → **30** | 30 → 30 — khớp |
+| Text từng trang | **giống hệt** (so trực tiếp `get_text()` từng trang) | giống hệt — khớp |
+| Thời gian | **1.41 giây** | 1.4–1.5 giây — khớp |
+| Ảnh xử lý | `images_recompressed=19, images_skipped_already_compressed=42, images_skipped_small=38, images_skipped_colorspace=0, images_skipped_larger=0, images_skipped_unsupported=0` | 19 re-encode / 42 skip đã nén / 38 skip nhỏ / 0 lỗi / 0 nở file — khớp |
+
+Kết quả implement khớp chính xác số liệu thiết kế đã verify 2 lần độc lập (Tech Lead + Domain
+Expert). Không phát sinh sai lệch nào cần escalate Tech Lead.
+
+### Khác biệt so với thiết kế
+
+Không có khác biệt về logic. 1 điểm khác biệt số liệu KHÔNG đáng kể: fixture
+`job78674af9_flate_sample.pdf` khi Dev tự trích lại (đúng quy trình `insert_pdf` +
+`save(garbage=4, deflate=True)` như Architecture.md chỉ định) cho 1.75 MB / nén còn ~1.03 MB, khác
+với số đo tham khảo trong Architecture.md (1.66 MB / 0.85 MB — kết quả trích thử của Tech Lead lúc
+viết thiết kế). Số lượng ảnh re-encode và guard đều khớp tuyệt đối (`recompressed=2,
+skip_filter=1`); chênh byte tuyệt đối chỉ là do 2 lần trích độc lập không tất định 100% ở tầng nén
+Flate nội bộ của PyMuPDF, không ảnh hưởng bất kỳ assertion hay guard nào.
+
+**Chưa spawn Reviewer** (Protocol 7 R7-01) — PM sẽ tổ chức Reviewer thật trước khi coi US-16 v2 là
+"xong" và trước khi commit (pre-commit hook cũng sẽ chặn commit nếu thiếu `docs/review-report.md`
+trong cùng commit).

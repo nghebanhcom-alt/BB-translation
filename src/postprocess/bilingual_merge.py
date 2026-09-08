@@ -19,6 +19,14 @@ async def create_bilingual_pdf(
                 output_doc.insert_pdf(vi_doc, from_page=i, to_page=i)
                 if i < len(en_doc):
                     output_doc.insert_pdf(en_doc, from_page=i, to_page=i)
-            output_doc.save(output_path)
+            # US-16 v2 W4 (Architecture.md, decision W10-b): per-page
+            # insert_pdf duplicates the VI doc's embedded fonts once per
+            # page (measured: 9 real font streams -> 592 copies on a
+            # 596-page job). `garbage=4` is the parameter that dedupes them
+            # (86.97 MiB -> 7.40 MiB measured); `deflate=True` alone gives 0
+            # byte benefit here since every stream is already Flate — kept
+            # anyway, it's free and matches the save call `compress_pdf_images`
+            # uses elsewhere in this pipeline.
+            output_doc.save(output_path, garbage=4, deflate=True)
         finally:
             output_doc.close()

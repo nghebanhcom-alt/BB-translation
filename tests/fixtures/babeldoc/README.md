@@ -77,3 +77,59 @@ không viết tay mock nội dung** (Protocol 5 mục 3) — dump JSON phải l�
 
 Dùng bởi `scripts/toc_split_spike_measure.py` (script đo, không phải test chính thức — 7.4-c
 sẽ có `tests/test_babeldoc_toc_split.py` viết trên đúng các fixture này sau khi spike PASS).
+
+## Fixtures cho US-16 v2 (2026-09-08)
+
+`docs/Architecture.md` mục "US-16 v2 — Final Decision sau phản biện Domain Expert" (W8) yêu cầu
+2 fixture vàng mới trích trực tiếp từ output job thật (Protocol 5 R5-03 / Protocol 6 R6-02),
+dùng bởi `tests/test_image_compress.py`.
+
+### `job78674af9_flate_sample.pdf`
+
+- **Job**: `78674af9-ce15-4d39-bba5-7f8d1e2804fe` (30 trang, 46.87 MB, `status=completed`) —
+  chính job motivate US-16 v2 (Architecture.md V1: chạy `compress_pdf_images()` v1 trên job này
+  cho `recompressed=0` vì 85% dung lượng nằm ở ảnh `/FlateDecode`, filter mà v1 coi là "đã nén,
+  bỏ qua").
+- **Nguồn**: `data/outputs/78674af9-ce15-4d39-bba5-7f8d1e2804fe/translated_vi.pdf`.
+- **Trang gốc (0-based)**: 22 và 25.
+- **Ngày trích**: 2026-09-08.
+- **Lệnh trích** (PyMuPDF, không chỉnh sửa tay):
+  ```python
+  import fitz
+  doc = fitz.open("data/outputs/78674af9-ce15-4d39-bba5-7f8d1e2804fe/translated_vi.pdf")
+  out = fitz.open()
+  out.insert_pdf(doc, from_page=22, to_page=22)
+  out.insert_pdf(doc, from_page=25, to_page=25)
+  out.save("tests/fixtures/babeldoc/job78674af9_flate_sample.pdf", garbage=4, deflate=True)
+  ```
+- **Nội dung xác nhận sau khi trích** (đọc trực tiếp bằng `get_page_images(..., full=True)` +
+  `xref_get_key`): 1.75 MB, 2 trang, 3 ảnh — xref 10 `/FlateDecode` `ICCBased` (Gray, ~122 KB,
+  khắc nét/engraving), xref 51 `/FlateDecode` `ICCBased` (CMYK, ~835 KB, ảnh chụp), xref 13
+  `/DCTDecode` `DeviceGray` (đã nén sẵn, phải giữ nguyên byte). Đúng như mô tả tại
+  Architecture.md V10.1 (chênh lệch byte nhỏ so với số đo gốc của Tech Lead là do 2 lần trích
+  độc lập, không ảnh hưởng tới nội dung/guard được test).
+- **Dùng để test**: eligibility filter mở rộng sang `/FlateDecode`, guard colorspace giữ
+  `ICCBased`, không ghi đè `/ColorSpace`, dọn `/Decode`, guard `/Mask` (qua inject).
+
+### `job136645f9_indexed_sample.pdf`
+
+- **Job**: `136645f9-ffe8-4927-afb2-b725236ede44` (418 trang, 520.14 MB).
+- **Nguồn**: `data/outputs/136645f9-ffe8-4927-afb2-b725236ede44/translated_vi.pdf`.
+- **Trang gốc (0-based)**: 168.
+- **Ngày trích**: 2026-09-08.
+- **Lệnh trích**:
+  ```python
+  import fitz
+  doc = fitz.open("data/outputs/136645f9-ffe8-4927-afb2-b725236ede44/translated_vi.pdf")
+  out = fitz.open()
+  out.insert_pdf(doc, from_page=168, to_page=168)
+  out.save("tests/fixtures/babeldoc/job136645f9_indexed_sample.pdf", garbage=4, deflate=True)
+  ```
+- **Nội dung xác nhận sau khi trích**: 1.15 MB, 1 trang, 12 ảnh — 5 ảnh `/FlateDecode` colorspace
+  `Indexed` (373–432 byte raw) + 6 ảnh `/DCTDecode` `DeviceCMYK` + 1 ảnh `/FlateDecode`
+  `DeviceCMYK` (82 byte, bị guard nở file chặn ở `min_recompress_bytes=0`).
+- **Dùng để test (W8 #9 — BLOCKING)**: đây là bằng chứng dữ liệu thật DUY NHẤT rằng guard
+  colorspace allowlist đọc `info[5]` (không phải `Pixmap.colorspace.name`) thực sự chặn được ảnh
+  `Indexed` — `Pixmap.colorspace.name` không bao giờ trả `'Indexed(...)'` vì PyMuPDF tự expand
+  Indexed sang base colorspace ngay khi dựng `Pixmap` (Architecture.md W1/X2). Test gọi với
+  `min_recompress_bytes=0` để cô lập đúng guard colorspace, không lẫn với guard kích thước.

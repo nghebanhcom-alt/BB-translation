@@ -7788,3 +7788,1071 @@ tinh thần "section sau thắng khi mâu thuẫn"):
 - **Ràng buộc AA10-c vẫn còn hiệu lực**: chưa bắt đầu Bug #8 (đo histogram mode-scale, bước 8.1)
   cho tới khi Ca C ổn định trên production thật với default mới — TOC-1 đổi `unit_count` sẽ làm
   hết hạn mọi số đo mode-scale đo trước thời điểm này.
+
+---
+
+## US-16 v2 — Mở rộng phạm vi sang ảnh `/FlateDecode` (2026-09-08)
+
+**Tác giả**: Tech Lead — thiết kế, KHÔNG implement.
+**Trạng thái**: ⏸ **Chờ user duyệt (Protocol 2)** — đây là thay đổi phạm vi của business rule đã
+chốt (BR-IMGCOMP-02), cùng loại tình huống với S8 của US-16 v1. Không giao Dev trước khi duyệt.
+**Quan hệ với US-16 v1 (S1–S10)**: v1 **vẫn còn hiệu lực toàn bộ**, v2 chỉ **mở rộng bước 3 của
+S6** (điều kiện lọc filter) và **sửa 1 lỗi tiềm ẩn của S6 bước 8** (`/Decode`, xem V4.4). Mọi
+guard, data lineage, vị trí gắn code, cách save của v1 **giữ nguyên không đổi**.
+
+### V1. Kết luận ngắn
+
+Job thật `78674af9-ce15-4d39-bba5-7f8d1e2804fe` (30 trang, 46.87 MB, `status=completed`) chạy
+`compress_pdf_images()` **thành công nhưng re-encode 0 ảnh**. Nguyên nhân: file này có **0 xref
+`Filter: null`** — 85% dung lượng nằm ở **57 ảnh `/FlateDecode`**, và
+`src/postprocess/image_compress.py:81-84` coi *mọi* filter khác `null` là "đã nén rồi, bỏ qua".
+
+`/FlateDecode` là zlib **lossless** — với ảnh chụp nó gần như không nén được gì (đo được: có ảnh
+Flate còn **to hơn** kích thước bitmap thô, xref 1144: 10,074,126 bytes cho 1681×1800×4 =
+12,103,200 pixel bytes). Coi nó "tương đương đã nén như JPEG" là một suy diễn sai, và là suy diễn
+**do code tự mở rộng ra**, không có trong câu chữ của BR-IMGCOMP-02.
+
+Sửa: cho phép re-encode cả `/FlateDecode`, giữ nguyên mọi guard cũ + thêm 3 guard mới.
+**Đo thật trên chính file đó: 46.87 MB → 25.19 MB (−46.3%), 1.5 giây, text giống hệt từng trang,
+sai khác pixel trung bình 0.0613/255.**
+
+### V2. Nguồn xác thực (Protocol 5 R5-01 / Protocol 1 mở rộng)
+
+Toàn bộ số liệu trong section này do Tech Lead **tự chạy lại từ đầu**, không kế thừa từ brief của
+PM — kể cả những con số PM đã báo là đã verify (đúng theo kỷ luật "không nhận claim về hành vi tool
+bên ngoài mà không tự chạy"). Kết quả trùng khớp với PM ở mọi chỉ số PM đã đo, và **phát hiện thêm
+4 contract mà brief chưa có** (V2.2) — trong đó 2 cái sẽ làm implementation sai nếu không biết.
+
+**Môi trường**: `.venv/bin/python` (Python 3.14, darwin), PyMuPDF **1.28.2**
+(`1.28.2 ('1.28.2', '1.28.2', None)`) — cùng version với US-16 v1, nên bảng signature ở S1 vẫn
+còn hiệu lực, không verify lại.
+
+**Dữ liệu đo**: `data/outputs/78674af9-ce15-4d39-bba5-7f8d1e2804fe/translated_vi.pdf`
+(49,146,122 bytes = 46.87 MB, 30 trang) + 5 job output thật khác (V3.3) + fixture hiện có
+`tests/fixtures/babeldoc/job3594a7a3_chunk0_sample_mono.pdf`. Không dùng file dựng tay.
+
+#### V2.1. Xác nhận lại hiện trạng (không chỉ đọc code)
+
+Chạy **đúng logic đang ship** (`Filter != "null"` → skip) trên bản copy của file thật:
+
+```
+variant=cur counts={'scanned': 99, 'recompressed': 0, 'skip_filter': 99, ...}
+size: 46.87 MB -> 46.87 MB
+```
+
+`recompressed=0` — xác nhận bằng chạy thật, không phải suy luận từ đọc code.
+
+#### V2.2. Contract PyMuPDF mới verify được (4 cái, đều ảnh hưởng trực tiếp tới code)
+
+| # | Contract | Bằng chứng chạy thật | Hệ quả thiết kế |
+|---|---|---|---|
+| C1 | `Pixmap.colorspace.name` **KHÔNG** trả `"DeviceCMYK"` cho ảnh ICCBased — trả chuỗi mô tả: `'ICCBased(CMYK,Artifex CMYK SWOP Profile)'`, `'ICCBased(Gray,Artifex Software sGray ICC Profile)'`, `'Separation(DeviceCMYK,Black)'` | in trực tiếp `pix.colorspace` của xref 1144/1062/889 | Guard dạng `name in {DeviceGray,DeviceRGB,DeviceCMYK}` **loại nhầm 19/19 ảnh cần nén**. Đây **là lỗi đã thực sự mắc phải** trong lúc spike: lần chạy đầu ra `recompressed=0, skip_cs=19`. Phải chấp nhận thêm tiền tố `ICCBased(` |
+| C2 | `Pixmap.tobytes("jpeg")` **raise** `FzErrorArgument: code=4: pixmap must be Grayscale, RGB, or CMYK to save as JPEG` với colorspace `Separation` (dù `pix.n == 1`) | 29 xref 1×1 trong chính file thật đều raise | Không có guard colorspace thì 29 xref này rơi vào `except Exception` chung → **29 stack trace `logger.warning(exc_info=True)` cho 1 job 30 trang**, trông như lỗi thật. Cần guard tường minh + đếm riêng |
+| C3 | `update_stream(xref, jb, new=1, compress=0)` **tự xoá `/Filter` VÀ `/DecodeParms`** khỏi object dict | in `xref_object()` trước/sau: trước có `/Filter /FlateDecode`, sau **không còn**; inject `/DecodeParms <</Predictor 15…>>` rồi gọi update_stream → `xref_get_key` trả `('null','null')` | **Không cần** thêm bước xoá `/DecodeParms` — PyMuPDF đã lo. Ghi lại để Dev/Reviewer khỏi "sửa cho chắc" |
+| C4 | `update_stream` **KHÔNG** xoá `/Decode`; và `Pixmap(doc, xref)` **CÓ áp dụng** `/Decode` | inject `/Decode [1 0]` → samples đổi từ `ffff…` sang `0000…` (`Pixmap APPLIES /Decode: True`); sau `update_stream` key `/Decode [1 0]` vẫn còn nguyên | **Bắt buộc xoá `/Decode`** khi ghi đè: pixel đã được áp dụng Decode 1 lần rồi, để lại key sẽ áp dụng **lần thứ hai** → ảnh âm bản. Xem V4.4 — đây là **lỗi tiềm ẩn có sẵn trong code đang ship**, không phải lỗi do v2 tạo ra |
+
+Contract phụ (verify kèm, dùng để viết guard):
+
+- `xref_set_key(xref, key, "null")` = **xoá key theo ngữ nghĩa PDF**: object dict vẫn hiển thị
+  `/DecodeParms null` nhưng `xref_get_key` trả `('null','null')`, và null object ≡ vắng mặt theo
+  spec PDF. Đây là cách xoá key duy nhất verify được ở 1.28.2.
+- Trên 99 xref ảnh của file thật: `/Decode` xuất hiện ở **62 xref** nhưng **đều là identity**
+  (`[0 1]` ×46, `[0 1 0 1 0 1 0 1]` ×16); `/DecodeParms <</ColorTransform 0>>` ở 41 xref DCT.
+  Nghĩa là bug C4 **hiện chưa phát tác trên dữ liệu đã có** — nhưng chỉ vì may, không vì code đúng.
+
+### V3. Số liệu đo trên dữ liệu thật
+
+#### V3.1. Phân bố filter của file sự cố (30 trang, 46.87 MB)
+
+| Filter | Số xref | Stream bytes |
+|---|---|---|
+| `/FlateDecode` | **57** | **28.72 MB** |
+| `/DCTDecode` | 42 | 11.12 MB |
+| `null` (raw) | **0** | 0 |
+| **Tổng ảnh** | 99 | 39.84 MB (**85%** của 46.87 MB) |
+
+#### V3.2. Bên trong 57 ảnh `/FlateDecode`
+
+| Nhóm | Số xref | Bytes | Đặc điểm (đã đo) |
+|---|---|---|---|
+| ≥ 1 MB | 5 | 23.53 MB | ảnh chụp CMYK, `ICCBased`, bpc=8 |
+| 100 KB – 1 MB | 12 | 5.05 MB | ảnh chụp CMYK + 3 ảnh xám `ICCBased(Gray)` |
+| 4 KB – 100 KB | 2 | 0.14 MB | — |
+| 100 B – 4 KB | **0** | 0 | **không có ảnh nào rơi vào vùng này** |
+| < 100 B | 38 | ~0.0004 MB | 1×1 px: 29 `Separation(DeviceCMYK,Black)` (9–11 B) + 9 `DeviceCMYK` (14–55 B) |
+
+Toàn bộ 57 ảnh: `BitsPerComponent = 8`, `/SMask` = 0 (không có), `/ImageMask` vắng mặt.
+**Khoảng trống 100 B – 4 KB rỗng hoàn toàn** — đây là căn cứ chọn ngưỡng ở V5 (ngưỡng đặt ở đâu
+trong khoảng 100 B–40 KB cũng cho **cùng một kết quả** trên file này, tức kết quả không nhạy cảm
+với việc chọn con số).
+
+#### V3.3. Khảo sát rộng — 6 job output thật (chống kết luận từ 1 mẫu, đúng bài học S3)
+
+| Job | Trang | Size | `null` | `/FlateDecode` | `/DCTDecode` | `/CCITTFax` |
+|---|---|---|---|---|---|---|
+| `78674af9` (sự cố) | 30 | 46.87 MB | 0 | **57 — 28.72 MB** | 42 — 11.12 MB | 0 |
+| `136645f9` | 418 | **520.14 MB** | 0 | 393 — 0.08 MB | **1110 — 437.69 MB** | 0 |
+| `40cb4746` (đã qua US-16 v1) | 415 | 18.44 MB | 0 | 0 | 454 — 7.56 MB | 6 |
+| `4c9834bf` | 298 | 6.19 MB | 0 | 13 — 1.32 MB | 0 | 1 |
+| `803fce52` | 25 | 28.06 MB | **9 — 20.93 MB** | 0 | 13 — 0.11 MB | 1 |
+| `f18f796c` | 1040 | 35.97 MB | 0 | 3 — 0.28 MB | 288 — 6.00 MB | 357 |
+
+Ba kết luận rút ra, đều quan trọng cho phạm vi thiết kế:
+
+1. **Cả `null` lẫn `/FlateDecode` đều xuất hiện thật** (`803fce52` có `null`, `78674af9` có Flate)
+   → v2 phải xử lý **cả hai**, không được thay `null` bằng `Flate`.
+2. **`/FlateDecode` không phải hiện tượng cá biệt của 1 file**: 4/6 job có, nhưng chỉ 1 job có ở
+   mức gây hại (28.72 MB) — nên lợi ích của v2 **phụ thuộc tài liệu nguồn**, không phải cải thiện
+   đều cho mọi job. Không được hứa với user rằng mọi file sẽ nhỏ đi ~46%.
+3. **v2 KHÔNG cứu được job lớn nhất trong kho** (`136645f9`, 520 MB): 437 MB ở đó **đã là JPEG
+   sẵn**, đúng nhóm mà BR-IMGCOMP-02 cố ý không đụng để tránh nén chồng. Xem V9.2 — việc đó là
+   một bài toán khác (downsample), **không** thiết kế trong v2.
+
+### V4. Vì sao phải sửa business rule, không chỉ sửa code
+
+#### V4.1. Câu chữ gốc vs. code
+
+BR-IMGCOMP-02 (`docs/PRD.md:242`) viết: *"Chỉ re-encode ảnh đang ở dạng raw/uncompressed
+(`Filter: null`); ảnh đã là JPEG (`DCTDecode`) giữ nguyên, không nén chồng lần 2."*
+
+Business rule **chỉ nói về 2 trạng thái**: raw và JPEG. Code (và S6 bước 3 của v1) diễn giải thành
+**"mọi filter ≠ null đều bỏ qua"** — một tập rộng hơn hẳn, bao gồm `/FlateDecode`, thứ **không
+phải JPEG và không được bảo vệ bởi lý do "không nén chồng"** (Flate là lossless, re-encode sang
+JPEG lần đầu không phải nén chồng).
+
+#### V4.2. Vì sao lỗ hổng này không bị phát hiện ở v1
+
+Spike v1 (S2) đo trên `3594a7a3` — file đó có **đúng 3 loại**: `null` (357), `DCTDecode` (156),
+`CCITTFaxDecode` (25) — tổng 538, khớp 100% số xref. **Không có một xref `/FlateDecode` nào.**
+Nên nhánh `Flate → skip` chưa từng được kiểm chứng trên dữ liệu thật; nó đúng theo câu chữ code
+nhưng chưa bao giờ được đối chiếu với thực tế. Đây là biến thể của cùng một bài học: *test/spike
+chỉ chứng minh code khớp với dữ liệu đã có, không chứng minh giả định đúng cho dữ liệu chưa gặp*.
+
+#### V4.3. Bằng chứng "Flate ≠ đã nén hiệu quả"
+
+Re-encode thật 19 ảnh Flate ≥ 4 KB sang JPEG q85:
+
+| xref | Flate bytes | JPEG q85 | Còn lại | Kích thước |
+|---|---|---|---|---|
+| 1144 | 10,074,126 | 2,212,526 | 22% | 1681×1800 CMYK |
+| 983 | 10,067,072 | 2,206,540 | 22% | 1681×1800 CMYK |
+| 882 | 2,456,262 | 1,184,711 | 48% | 1039×1245 CMYK |
+| 986 | 1,075,212 | 158,001 | **15%** | 233×1711 CMYK |
+| 155 | 606,195 | 266,739 | 44% | 455×545 CMYK |
+| 1062 | 122,668 | 47,682 | 39% | 702×403 **Gray** |
+| … (19 ảnh) | **28.72 MB** | **7.04 MB** | **24.5%** | — |
+
+Không ảnh nào bị guard nở file (`len(jpeg) >= raw`) chặn — tức **không ảnh nào trong nhóm này là
+đồ hoạ phẳng mà JPEG sẽ làm to ra**.
+
+#### V4.4. Lỗi tiềm ẩn `/Decode` — có sẵn trong code đang ship
+
+Theo C4 (V2.2): `Pixmap(doc, xref)` áp dụng `/Decode`, còn `update_stream` không xoá nó. Với ảnh
+`Filter: null` **có `/Decode` không phải identity** (ví dụ `[1 0]`), code **hiện tại** sẽ ghi JPEG
+đã-áp-Decode rồi để nguyên key `/Decode [1 0]` → viewer áp lần hai → **ảnh âm bản**. Chưa phát tác
+vì cả 2 file production đã đo đều chỉ có `/Decode` identity. v2 sửa luôn (V5 bước 9) — sửa này
+**độc lập với việc user có duyệt mở rộng phạm vi Flate hay không**, và nên làm kể cả khi user chọn
+giữ nguyên scope cũ.
+
+### V5. Thuật toán v2 (spec cho Dev — KHÔNG phải code để copy)
+
+Thay đổi so với S6 nằm ở **bước 3** (điều kiện lọc), **bước 4b/4c/4d** (3 guard mới) và **bước 9**
+(xoá `/Decode`). Các bước còn lại giữ nguyên y hệt v1.
+
+Thứ tự guard được sắp **rẻ → đắt** có chủ đích: mọi phép loại trừ đọc key đều chạy **trước** khi
+dựng `Pixmap` (thao tác tốn RAM/CPU nhất — với ảnh 1681×1800 CMYK là ~12 MB bộ nhớ mỗi ảnh).
+
+1. Mở `pdf_path`, ghi `size_before`. (như v1)
+2. Gom xref duy nhất qua `get_page_images(pno, full=True)`; `info[0]`=xref, `info[1]`=smask. (như v1)
+3. **[ĐỔI] Điều kiện được phép re-encode**: `Filter` là `null` **HOẶC** chứa `FlateDecode`.
+   - Đọc `doc.xref_get_key(xref, "Filter")` → `(type, value)`.
+   - `type == "null"` → eligible (ảnh raw, đúng như v1).
+   - `type == "name"` và `value == "/FlateDecode"` → eligible.
+   - `type == "array"` (ví dụ `[ /ASCII85Decode /FlateDecode ]`) → eligible **nếu** `"FlateDecode"`
+     xuất hiện trong chuỗi value **và** không xuất hiện filter nén ảnh nào khác
+     (`DCTDecode`, `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode`). Ghi chú: dạng array **chưa có mẫu
+     thật** trong 6 job đã khảo sát (Reviewer US-16 v1 cũng đã nêu điểm này) → nhánh này là
+     ⚠️ **`[UNVERIFIED]` — không chặn Dev** vì hành vi mặc định khi không match là *bỏ qua* (an toàn).
+   - Mọi thứ khác (`/DCTDecode`, `/CCITTFaxDecode`, `/JPXDecode`, `/JBIG2Decode`, `/RunLengthDecode`…)
+     → `images_skipped_already_compressed += 1`, bỏ qua. **BR-IMGCOMP-02 phần "không nén chồng JPEG"
+     giữ nguyên 100%.**
+4. **Guard** (thứ tự bắt buộc):
+   - **4a (như v1)** `/ImageMask == true` → skip `unsupported`; `info[1] != 0` (có `/SMask`) →
+     skip `unsupported`. *Lưu ý: bản thân object smask không nằm trong `get_page_images()` nên
+     không bao giờ bị hàm này chạm tới — đã kiểm chứng ở v1, nhắc lại để Reviewer khỏi nghi.*
+   - **4b [MỚI] Ngưỡng kích thước**: `len(doc.xref_stream_raw(xref)) < min_recompress_bytes`
+     (mặc định **4096**) → skip, đếm vào **`images_skipped_small`** (field mới).
+     *Lý do*: JPEG có sàn ~700 byte (đo thật: ảnh 1×1 → 698–763 byte), nên dưới vài KB không thể
+     có lợi ích thật; guard này **không phải guard đúng-sai** (guard nở file ở bước 8 mới là guard
+     đúng-sai) mà là guard **chi phí + nhiễu log**: nó loại 38/57 xref trước khi dựng Pixmap và
+     nhờ đó tránh luôn 29 exception của C2. Đo: khoảng 100 B–4 KB rỗng hoàn toàn (V3.2) nên ngưỡng
+     này không cắt nhầm ảnh thật nào.
+   - **4c [MỚI] Bit depth**: `BitsPerComponent != 8` → skip `unsupported`.
+     *Lý do*: ảnh 1-bit (bilevel — bản scan đen trắng, line art) là nhóm mà JPEG **vừa hỏng chất
+     lượng vừa thường làm file to ra**; Flate/CCITT/JBIG2 mới là codec đúng cho chúng. Đây là guard
+     bảo vệ chính cho đường `pdf_scan` (V8.2).
+   - **4d [MỚI] Colorspace**: dựng `pix = Pixmap(doc, xref)` (và `Pixmap(pix, 0)` nếu `pix.alpha`),
+     rồi chấp nhận **chỉ khi** `pix.n ∈ {1, 3, 4}` **và** `pix.colorspace.name` thuộc
+     `{"DeviceGray", "DeviceRGB", "DeviceCMYK"}` **hoặc** bắt đầu bằng `"ICCBased("`.
+     Ngược lại (`Separation(...)`, `Indexed(...)`, `DeviceN(...)`, `Lab`, `None`) → skip, đếm vào
+     **`images_skipped_colorspace`** (field mới), log mức **`debug`** chứ không `warning` — đây là
+     đường đi bình thường, không phải sự cố.
+     ⚠️ **Không được viết guard là `name in {DeviceGray, DeviceRGB, DeviceCMYK}` cho gọn** — xem C1:
+     làm vậy loại nhầm 19/19 ảnh cần nén và hàm lại im lặng không làm gì, đúng bằng bug đang sửa.
+5. `jb = pix.tobytes("jpeg", jpg_quality=jpeg_quality)`. (như v1)
+6. **Guard nở file (như v1)**: `len(jb) >= raw_size` → skip, `images_skipped_larger += 1`.
+   Đây vẫn là **guard đúng-sai duy nhất cần thiết** cho câu hỏi "ảnh này có phải ảnh chụp không" —
+   PM nói đúng ở điểm này: không cần heuristic "photographic hay không", vì icon/đồ hoạ phẳng mà
+   JPEG làm to ra sẽ tự bị loại ở đây. Đo thật: 0/19 ảnh bị guard này chặn trên file sự cố.
+7. Ghi đè stream + key (như v1): `update_stream(xref, jb, new=1, compress=0)`;
+   `Filter → /DCTDecode`; `BitsPerComponent → 8`;
+   `ColorSpace →` `/DeviceCMYK` | `/DeviceRGB` | `/DeviceGray` theo `pix.n`; `Width`/`Height`.
+8. **[MỚI] Dọn `/Decode`**: nếu `doc.xref_get_key(xref, "Decode")[0] != "null"` →
+   `doc.xref_set_key(xref, "Decode", "null")`. **Chỉ set khi key tồn tại** — set vô điều kiện sẽ
+   thêm `/Decode null` vào mọi object và làm fixture hiện có lệch 12 byte không cần thiết (đã đo:
+   606,629 → 606,641 byte trên `job3594a7a3_chunk0_sample_mono.pdf`).
+   Không cần đụng `/DecodeParms` (C3 — `update_stream` đã xoá).
+9. `doc.save(tmp, garbage=4, deflate=True)` → `close()` → `os.replace(tmp, pdf_path)`. (như v1)
+
+**Chữ ký hàm** (mở rộng tối thiểu, giữ nguyên tinh thần S5 — tham số chỉ để test tham số hoá được,
+**không** phải điểm cấu hình `.env`/UI, BR-IMGCOMP-03 giữ nguyên):
+
+```python
+async def compress_pdf_images(
+    pdf_path: str | Path, *, jpeg_quality: int = 85, min_recompress_bytes: int = 4096
+) -> ImageCompressStats
+```
+
+`ImageCompressStats` thêm 2 field: `images_skipped_small`, `images_skipped_colorspace`
+(giữ nguyên toàn bộ field cũ — đây là dataclass chỉ dùng cho log/test, không ghi DB, không lên UI).
+
+### V6. Data lineage (Protocol 6 R6-01) — **không đổi so với S5**
+
+Nhắc lại tường minh để Reviewer trace tay được mà không phải mở lại v1:
+
+| | |
+|---|---|
+| **Artifact vào** | `merged_path` = `self._output_dir / job.id / "translated_vi.pdf"` (`src/core/job_orchestrator.py:488`), chính biến vừa truyền cho `merge_chunk_pdfs(chunks, merged_path)` (`:490`) và có thể đã được `overlay_rotated_text(output_pdf_path=merged_path)` sửa tại chỗ (`:528-537`). **KHÔNG** phải `job.file_path`, **KHÔNG** phải `chunk.output_path`. |
+| **Artifact ra** | Ghi đè in-place chính `merged_path` (tmp + `os.replace`). |
+| **Ai gọi / thứ tự** | `run_job()` `:573-574`, trong cùng khối `try`, **sau** guard BR-OCR-03 (`:495-499`), **sau** overlay chữ xoay (RK-3), **trước** `job.output_path = str(merged_path)` (`:592`) và **trước** `create_bilingual_pdf(merged_path, file_path, bilingual_path)` (`:597`). |
+| **Điều kiện gọi** | `if self._settings.pdf_translate_engine == "babeldoc":` — BR-IMGCOMP-01 **giữ nguyên**, nhánh `pdf2zh` không đổi một dòng hành vi nào. |
+
+### V7. Kết quả verify chạy thật (đúng khuôn S7 — R6-03: kiểm tra nội dung, không tin status)
+
+Chạy thuật toán V5 đầy đủ trên **bản copy** của file production 46.87 MB (file gốc không bị đụng):
+
+| Chỉ số | Trước | Sau |
+|---|---|---|
+| Kích thước | 46.87 MB | **25.19 MB (−46.3%)** |
+| Stream bytes của 19 ảnh Flate | 28.72 MB | **7.04 MB** |
+| Số trang | 30 | **30** |
+| Tổng ký tự text | 59,193 | **59,193 — giống hệt từng trang (30/30)** |
+| Ảnh xử lý | — | 19 re-encode, 42 skip (đã nén), 38 skip (nhỏ), **0 lỗi**, 0 bị guard nở file |
+| Thời gian chạy | — | **1.5 giây** |
+
+**Kiểm chứng thị giác bằng pixel** (render trước/sau toàn bộ 30 trang, so từng pixel):
+
+```
+worst pages by mean abs pixel diff: (0.720, p17), (0.579, p29), (0.214, p22), (0.101, p26)
+mean over all 30 pages: 0.0613 / 255      max single-pixel diff: 46 (p22)
+```
+
+**Không có hiện tượng đảo màu CMYK** (nếu có, mean diff sẽ ở mức ~130–250/255 — đây chính là mức
+tôi đo được khi decode JPEG CMYK *đứng riêng ngoài PDF*, một cái bẫy đo lường: phải so **trang đã
+render**, không so pixmap giải mã trực tiếp).
+
+**Xem tận mắt** (R6-03): trang 22 chứa ảnh khắc nét (engraving) **xám, nhiều nét gạch mảnh** —
+đúng nhóm nhạy cảm nhất với ringing của JPEG. Render 200 dpi trước/sau và nhìn trực tiếp:
+**không phân biệt được bằng mắt**; sai khác tập trung ở rìa nét gạch, đỉnh 46/255.
+
+**Hồi quy trên fixture đang có** (`job3594a7a3_chunk0_sample_mono.pdf`, 5 ảnh: 1 `null` + 3 DCT +
+1 CCITT): thuật toán v2 cho **kết quả y hệt v1** — `recompressed=1, skip_filter=4`, 7.08 MB →
+0.58 MB. Tức **v2 không làm đổi hành vi trên dữ liệu mà v1 đã xử lý đúng**; test hiện có phải vẫn
+xanh không sửa gì (trừ khi test assert kích thước file theo byte tuyệt đối).
+
+### V8. Các quyết định thiết kế đã cân nhắc (và phương án bị loại)
+
+#### V8.1. Có cần heuristic "ảnh chụp hay đồ hoạ phẳng" không? → **KHÔNG**
+
+Đã thử đo thống kê số màu duy nhất / tỉ lệ màu áp đảo cho từng ảnh để phân loại. Kết luận: **không
+cần** — guard nở file (bước 6) đã xử lý đúng lớp rủi ro đó bằng *kết quả thật* thay vì bằng *dự
+đoán*, và đo được 0/19 ảnh bị nó chặn. Thêm heuristic = thêm ngưỡng phải tune, thêm đường code
+không test được bằng dữ liệu thật. PM đề xuất hướng này và tôi xác nhận: giữ nguyên guard cũ.
+
+#### V8.2. Có nên loại trừ ảnh xám (grayscale) để bảo vệ bản scan văn bản? → **KHÔNG, nhưng có phương án lùi**
+
+Đã đo cả 2 biến thể trên cùng file thật:
+
+| Biến thể | Kết quả | Sai khác pixel |
+|---|---|---|
+| **(A)** re-encode cả Gray/RGB/CMYK (khuyến nghị) | 46.87 → **25.19 MB** | mean 0.0613/255 |
+| **(B)** bỏ qua ảnh 1 kênh (grayscale) | 46.87 → 25.34 MB | mean 0.0486/255 |
+
+Chênh lệch chỉ **0.15 MB (0.3%)** — nghĩa là cả hai đều chấp nhận được về dung lượng. Chọn (A) vì:
+
+- Rủi ro thật của grayscale không nằm ở "ảnh xám" mà ở **ảnh 1-bit bilevel** (scan đen trắng) —
+  nhóm đó đã bị guard 4c (`BitsPerComponent != 8`) chặn tuyệt đối, không phụ thuộc quyết định này.
+- Với ảnh xám 8-bit thật (engraving nhiều nét mảnh — trường hợp xấu nhất có trong dữ liệu), đã
+  **nhìn tận mắt ở 200 dpi**: không phân biệt được (V7).
+- Đường `pdf_scan` **hưởng lợi nhiều hơn chứ không thiệt**: OCR bridge (`src/preprocess/searchable_pdf.py`)
+  **không chèn ảnh mới** — nó vẽ whiteout + text vô hình lên chính trang scan gốc, nên ảnh trang
+  giữ nguyên codec của file nguồn. Scan 8-bit lưu Flate là đúng nhóm phình to nhất mà v2 cứu được.
+- Nếu sau này gặp job scan bị giảm chất lượng thật: lùi về (B) chỉ là **thêm 1 điều kiện `pix.n == 1`
+  vào guard 4d** — không phải viết lại thiết kế. Ghi sẵn ở đây để khỏi phải điều tra lại.
+
+#### V8.3. Vì sao không nâng `jpeg_quality` cho ảnh xám? → giữ **q85 cố định**
+
+BR-IMGCOMP-03 chốt q85 cố định. Chất lượng đo được ở q85 đã đạt (V7), nên thêm một hằng số thứ hai
+theo kênh màu là độ phức tạp **không có số liệu nào biện minh**. Không làm.
+
+### V9. Phát hiện phụ (ngoài phạm vi v2 — cần PM/user quyết định riêng)
+
+#### V9.1. `create_bilingual_pdf()` đang save KHÔNG nén — **đúng lỗi S8, ở một file khác**
+
+`src/postprocess/bilingual_merge.py:22` gọi `output_doc.save(output_path)` **trần** —
+`deflate=False, garbage=0` mặc định. Bước này chạy **sau** `compress_pdf_images()` nên nó **thổi
+phồng lại** chính file vừa được nén.
+
+Đo thật trên output song ngữ có sẵn (`4c9834bf`, 596 trang):
+
+| Xử lý | Kích thước |
+|---|---|
+| Hiện tại (`save()` trần) | **86.97 MB** |
+| Chỉ đổi thành `save(garbage=4, deflate=True)` | **7.40 MB (−91.5%)**, mất 1.0 giây |
+
+Đáng chú ý: file này chỉ có 2.65 MB là ảnh — tức ~84 MB là **content stream/font không nén**, không
+phải vấn đề ảnh. Bản dịch đơn ngữ của cùng job chỉ 6.19 MB, nghĩa là bước song ngữ **một mình** làm
+file to gấp 14 lần. Job `f18f796c` còn cực đoan hơn: đơn ngữ 35.97 MB → song ngữ **433.86 MB**.
+
+**Điểm cần PM/user quyết định** (Tech Lead **không tự quyết**, đúng tiền lệ S8 — đây là sửa hành vi
+nằm ngoài US-16, chạm code path dùng chung cho **cả `pdf2zh` lẫn `babeldoc`**):
+
+- **(A) Ngoài scope lần này**: giữ nguyên, ghi backlog. File song ngữ tiếp tục lớn bất thường.
+- **(B) Sửa kèm v2** (khuyến nghị của tôi nếu user quan tâm dung lượng — mà theo bối cảnh thì đúng
+  là đang quan tâm): đổi 1 dòng `bilingual_merge.py:22` → `save(output_path, garbage=4, deflate=True)`.
+  Rủi ro thấp hơn hẳn trường hợp `chunk_merge.py` ở S8 (file này **không** dính Bug #7/#8, không có
+  golden test bám sát), nhưng vẫn là thay đổi ảnh hưởng **cả 2 engine** nên vẫn cần user duyệt.
+
+#### V9.2. Job 520 MB toàn ảnh JPEG — **v2 không cứu được**, backlog riêng
+
+`136645f9`: 520.14 MB, trong đó **437.69 MB là 1110 ảnh `/DCTDecode`** (đã là JPEG, trung bình
+394 KB/ảnh). BR-IMGCOMP-02 cố ý không đụng nhóm này. Muốn giảm phải **downsample theo kích thước
+hiển thị thật trên trang** (ảnh 300+ dpi đặt vào khung nhỏ) hoặc re-encode JPEG→JPEG chấp nhận nén
+chồng — cả hai đều là bài toán mới, cần spike đo riêng. **Chưa thiết kế, chỉ ghi nhận.** Cần nói rõ
+với user: sau v2, những job dạng này **vẫn sẽ lớn**.
+
+### V10. Yêu cầu test + fixture (Protocol 5 R5-03 / Protocol 6 R6-02, R6-03)
+
+#### V10.1. Fixture vàng mới — **CÓ, cần thiết**
+
+Fixture hiện có (`job3594a7a3_chunk0_sample_mono.pdf`) **không có ảnh `/FlateDecode` nào** (1 null
++ 3 DCT + 1 CCITT) → không thể test đường mới. Nếu Dev/QA viết fixture tay theo mô tả này, đó đúng
+là loại "mock tự nhất quán với giả định" mà Protocol 5 cấm.
+
+**Cách tạo (đã tự chạy thử để chắc chắn khả thi — Dev chỉ việc lặp lại):**
+
+```
+Nguồn: data/outputs/78674af9-ce15-4d39-bba5-7f8d1e2804fe/translated_vi.pdf
+Trích trang 22 và 25 (0-based) bằng insert_pdf, save(garbage=4, deflate=True)
+Đích:  tests/fixtures/babeldoc/job78674af9_flate_sample.pdf
+```
+
+Đã kiểm chứng kết quả của cách trích này:
+
+| Chỉ số | Giá trị đo |
+|---|---|
+| Kích thước fixture | **1.66 MB** |
+| Thành phần | 1 ảnh `FlateDecode` **Gray** ICC (122 KB, engraving), 1 ảnh `FlateDecode` **CMYK** ICC (835 KB, ảnh chụp), 1 ảnh `DCTDecode` Gray (phải giữ nguyên byte) |
+| Chạy thuật toán v2 | 1.66 MB → **0.85 MB**, `recompressed=2, skip_filter=1`, 0 lỗi |
+| Chạy thuật toán v1 (hiện tại) | **0 ảnh re-encode** — tức fixture này *thất bại* với code cũ và *pass* với code mới, đúng yêu cầu của một regression fixture |
+| Ảnh trong fixture có byte y hệt file gốc? | **có** — `save(deflate=True)` không đụng stream ảnh đã có filter (đã hash SHA-256 đối chiếu 60/60 xref) |
+
+Bắt buộc ghi xuất xứ vào `tests/fixtures/babeldoc/README.md` (job id, số trang gốc, ngày trích,
+lệnh trích) theo đúng nếp các fixture hiện có.
+
+**Tuỳ chọn (PM quyết theo khẩu vị dung lượng repo)**: thêm **trang 13** vào fixture sẽ phủ thêm 29
+ảnh `Separation(DeviceCMYK,Black)` 1×1 + 17 DCT Separation — tức dữ liệu thật cho **guard 4d** và
+**guard 4b**. Giá phải trả: fixture tăng **1.66 MB → 8.70 MB** (font subsetting chỉ giảm được
+0.24 MB, đã thử). **Khuyến nghị: KHÔNG thêm** — thay vào đó test guard 4d/4b bằng cách gọi hàm với
+`min_recompress_bytes=0` trên fixture nhỏ (xem V10.2 mục 5), và ghi nhận rằng nhánh
+`images_skipped_colorspace` với ảnh **lớn** không có mẫu thật (`[UNVERIFIED]`, hành vi mong đợi là
+"không làm gì" nên an toàn theo mặc định).
+
+#### V10.2. Danh sách test bắt buộc
+
+1. **Đường mới, nội dung không chỉ status (R6-03)**: chạy `compress_pdf_images` thật trên fixture
+   mới → `page_count` không đổi (2), **text từng trang giống hệt trước/sau**, file nhỏ đi, và
+   `stats.images_recompressed == 2`. Assert **giá trị cụ thể**, không chỉ "chạy không lỗi".
+2. **Guard không nén chồng (giữ từ v1)**: ảnh `DCTDecode` trong fixture mới phải có stream
+   **byte-identical** trước/sau (SHA-256).
+3. **Hồi quy v1**: giữ nguyên toàn bộ test hiện có trên
+   `job3594a7a3_chunk0_sample_mono.pdf` — phải xanh **không sửa assertion** (đã đo: kết quả v2
+   trùng v1 trên fixture đó, xem V7).
+4. **`/Decode` (V4.4)**: lấy fixture mới, inject `/Decode [1 0]` vào 1 xref Flate rồi chạy hàm →
+   sau khi chạy `xref_get_key(xref, "Decode")` phải trả `('null','null')`. Đây là test cho một lỗi
+   **chưa từng phát tác**, nên bắt buộc phải có test mới giữ được nó đã sửa.
+5. **Guard ngưỡng nhỏ + colorspace**: gọi `compress_pdf_images(..., min_recompress_bytes=0)` trên
+   fixture mới → không được raise, và số ảnh re-encode không tăng thêm ngoài dự kiến. (Nếu PM chọn
+   thêm trang 13 vào fixture thì test này assert luôn `images_skipped_colorspace == 29`.)
+6. **Data lineage (R6-02, giữ từ S9)**: `compress_pdf_images.assert_called_with(merged_path, ...)`
+   đúng path mà `merge_chunk_pdfs` vừa ghi; và nhánh `pdf2zh` khẳng định **không** được gọi.
+7. **Thứ tự (giữ từ S9)**: job có output rỗng chữ phải `failed` bằng thông báo của guard BR-OCR-03,
+   không phải lỗi nén.
+8. **R5-03 / R6-03 gate**: QA phải chạy **1 job thật xuyên suốt** (babeldoc, file có ảnh Flate) và
+   **mở file output kiểm tra nội dung** — không chấp nhận chỉ đọc `status=completed`. Có thể tái sử
+   dụng chính file 46.87 MB làm đối chứng "trước".
+
+### V11. Trạng thái verify
+
+| Hạng mục | Trạng thái |
+|---|---|
+| Hiện trạng "re-encode 0 ảnh" trên job sự cố | ✅ Verified — chạy lại logic đang ship, `recompressed=0` |
+| Phân bố filter 6 job output thật | ✅ Verified — đo trực tiếp từng file |
+| Flate ảnh chụp nén được 12–48% | ✅ Verified — re-encode thật 19/19 ảnh |
+| Kết quả cuối 46.87 → 25.19 MB | ✅ Verified end-to-end trên bản copy file thật |
+| Bảo toàn text / số trang | ✅ Verified — 59,193 ký tự giống hệt, 30/30 trang |
+| Bảo toàn màu (không đảo CMYK) | ✅ Verified — pixel-diff 0.0613/255 + xem ảnh render thật |
+| C1 `colorspace.name` của ICCBased | ✅ Verified — và đã thực sự mắc bẫy này 1 lần khi spike |
+| C2 `tobytes("jpeg")` raise với Separation | ✅ Verified — 29 xref thật |
+| C3 `update_stream` xoá `/Filter` + `/DecodeParms` | ✅ Verified — in object dict trước/sau |
+| C4 `Pixmap` áp dụng `/Decode`, `update_stream` không xoá | ✅ Verified — samples `ffff…` vs `0000…` |
+| Hồi quy trên fixture v1 | ✅ Verified — kết quả trùng v1 |
+| Fixture mới khả thi ở 1.66 MB | ✅ Verified — đã trích thử và chạy cả v1 lẫn v2 lên nó |
+| `Filter` dạng **array** (`[/ASCII85Decode /FlateDecode]`) | ⚠️ **`[UNVERIFIED]`** — 0 mẫu thật trong 6 job. Không chặn Dev (không match ⇒ bỏ qua ⇒ an toàn) |
+| Guard 4d với ảnh **lớn** colorspace lạ (Indexed/DeviceN/Lab) | ⚠️ **`[UNVERIFIED]`** — chỉ có mẫu 1×1. Hành vi mong đợi: bỏ qua |
+| Ảnh có `/SMask` hoặc `/ImageMask` | ⚠️ **`[UNVERIFIED]`** (kế thừa S10) — vẫn 0 mẫu thật sau khi khảo sát thêm 5 job |
+| **Sửa BR-IMGCOMP-02 (mở rộng phạm vi)** | ⏸ **Chờ user duyệt — Protocol 2** |
+| **V9.1 `bilingual_merge.py` save không nén** | ⏸ **Chờ PM/user quyết định (A)/(B)** — không chặn phần còn lại của v2 |
+| V9.2 job 520 MB toàn DCT | ⏸ Backlog, chưa thiết kế |
+
+## US-16 v2 — Phản biện của Domain Expert (2026-09-08)
+
+**Người viết**: Domain Expert (Fable) — chuyên PDF internals / image compression / color management.
+**Vai trò**: CHỈ phản biện độc lập thiết kế "US-16 v2" của Tech Lead ở trên. **Không sửa code trong
+`src/`, không quyết định thay PM/user** ở các điểm Protocol 2.
+**Kỷ luật**: mọi số liệu của Tech Lead đều được **tự chạy lại từ đầu** trên bản copy của dữ liệu
+thật (không đụng file production), bằng script tạm viết riêng (không kế thừa script của Tech Lead).
+Không có claim nào dưới đây là "tôi nghĩ" — mỗi kết luận đi kèm số đo tự chạy hoặc nguồn tự đọc.
+
+**Môi trường**: `.venv/bin/python` (Python 3.14), PyMuPDF **1.28.2** (cùng bản Tech Lead dùng).
+Renderer độc lập: **macOS Quartz** qua `/usr/bin/sips` (150 dpi) — đây là engine của Preview.app,
+hoàn toàn không dùng MuPDF. Chrome/pdfium: **không thử được** (Browser pane từ chối mở PDF local),
+đánh dấu `[UNVERIFIED]` ở X8. `numpy` không có trong venv → pixel-diff tính bằng pure Python trên
+`Pixmap.samples` (chậm hơn nhưng cùng kết quả). Dữ liệu: đúng 6 job output Tech Lead đã khảo sát
+(V3.3) + file sự cố `78674af9` + fixture `job3594a7a3_chunk0_sample_mono.pdf`.
+
+### X0. Kết luận ngắn
+
+**Số liệu của Tech Lead đúng toàn bộ** (X1 — 100% tái hiện được, kể cả thứ tự 4 trang lệch pixel
+nhiều nhất). **Nhưng thiết kế V5 chưa đủ chín để trình user** vì 3 lỗi mà cách đo của Tech Lead
+**không thể nhìn thấy** — hai trong số đó là lỗi có sẵn trong code v1 đang ship, cùng loại với
+lỗi `/Decode` (C4) mà chính Tech Lead đã tìm ra:
+
+1. **Guard 4d không bắt được `Indexed`** (X2): `Pixmap(doc, xref)` **tự expand** Indexed sang base
+   colorspace, nên `pix.colorspace.name` trả `'DeviceCMYK'`, không bao giờ trả `'Indexed(...)'`.
+   Chạy thật: 2 ảnh Indexed lọt qua guard và bị JPEG hoá. BR-IMGCOMP-02c hứa "Indexed giữ nguyên"
+   nhưng V5 không thực hiện được lời hứa đó.
+2. **Ghi đè `/ColorSpace` làm mất ICC profile → lệch màu thật trên macOS Preview** (X3): đo bằng
+   Quartz, trang 17 lệch **6.98/255**, trang 29 lệch **5.55/255**; giữ nguyên `/ColorSpace` → còn
+   **0.97 / 0.76**. MuPDF cho **0.00** với cùng thay đổi — tức phép đo "0.0613/255" ở V7 mù hoàn
+   toàn với lỗi này. Lỗi có sẵn trong v1 (`image_compress.py:120-122`).
+3. **`/Mask` color-key không có guard** (X4): `Pixmap` trả `alpha=1`, code drop alpha, `update_stream`
+   **giữ nguyên** key `/Mask` → mask áp lên sample JPEG đã đổi. Guard 4a (`info[1]`) không thấy
+   `/Mask`. Lỗi có sẵn trong v1; 0 mẫu thật trong kho — `[UNVERIFIED]` trên production, nhưng cơ chế
+   đã chứng minh bằng inject.
+
+Ngoài ra 2 chỗ **kết luận đúng nhưng lý do sai**, cần sửa câu chữ trước khi Dev đọc: ngưỡng 4 KB
+(X5) và cơ chế phình file song ngữ V9.1 (X6 — là **font bị nhân bản 65 lần**, không phải "không
+nén"; `deflate=True` đơn thuần cho **0 byte** lợi ích, `garbage=4` mới là tham số quyết định).
+
+**Khuyến nghị cuối (X9)**: Tech Lead sửa V5 ở 3 điểm blocking (4d, bước 7, thêm guard `/Mask`) + sửa
+câu chữ 4b và V9.1, rồi mới trình user. Không cần đo lại từ đầu — mọi số đo còn lại đứng vững.
+
+### X1. Đối chiếu số liệu Tech Lead — tất cả tái hiện được
+
+| Claim Tech Lead | Tự chạy lại | Trạng thái |
+|---|---|---|
+| V2.1 logic đang ship → `recompressed=0` trên file sự cố | Đọc code `image_compress.py:81-84` + khảo sát: file có **0** xref `Filter: null` → đúng 0 | ✅ |
+| V3.1 57 Flate / 42 DCT / 0 null; 28.72 MB / 11.12 MB | 57 / 42 / 0; 30.12 MB (= 28.72 **MiB**) / 11.66 MB (= 11.12 MiB). *Tech Lead ghi "MB" nhưng là MiB — nhất quán trong toàn section, không ảnh hưởng kết luận* | ✅ |
+| V3.2 phân bố kích thước 57 ảnh Flate; 100 B–4 KB rỗng **trên file này** | 4 ≥1M + 13 100K–1M + 1 50–100K + 1 4–50K + 38 <100 B; đúng, khoảng 100 B–4 KB rỗng *trên file này* (nhưng xem X5) | ✅ (file này) |
+| V3.3 bảng 6 job | Đo lại từng file: khớp **toàn bộ** số xref và bytes (sau quy đổi MiB) | ✅ |
+| V4.3 JPEG q85 của 19 ảnh: 28.72 → 7.04 MiB, từng dòng 1144/983/882/986/155/1062 | Khớp **từng byte** (vd 1144: 10,074,126 → 2,212,526) | ✅ |
+| C1 `colorspace.name` = `'ICCBased(CMYK,Artifex CMYK SWOP Profile)'` | Tái hiện đúng chuỗi; xref 889 = `'Separation(DeviceCMYK,Black)'` | ✅ |
+| C2 `tobytes("jpeg")` raise `FzErrorArgument code=4` với Separation | Tái hiện | ✅ |
+| C3 `update_stream` xoá `/Filter` + `/DecodeParms` | Inject `/DecodeParms` → sau update_stream: `('null','null')`, object dict không còn key | ✅ |
+| C4 `Pixmap` áp `/Decode`; `update_stream` giữ `/Decode` | Inject `[1 0 1 0 1 0 1 0]` → 64 sample đầu đảo đúng (`a+b==255`); sau update_stream key vẫn còn | ✅ |
+| `xref_set_key(x, "Decode", "null")` = xoá theo ngữ nghĩa PDF | `xref_get_key` → `('null','null')`; sau `save(garbage=4)` + reload object vẫn ghi `/Decode null` nhưng vẫn `('null','null')`; Quartz render đúng (X7.1) | ✅ |
+| V7 46.87 → 25.19 MiB, 1.5 s, 19/42/38/0, 59,193 ký tự, 30/30 trang | 46.87 → 25.19 MiB, **1.4 s**, 19 re-encode / 42 skip filter / 38 skip nhỏ / 0 lỗi / 0 nở file; 59,193 = 59,193, 30/30 trang text giống hệt | ✅ |
+| V7 pixel-diff MuPDF, 4 trang xấu nhất p17 > p29 > p22 > p26 | 100 dpi: mean 0.0409 (Tech Lead 0.0613 — khác dpi), thứ tự **đúng y hệt** p17 (0.53) > p29 (0.45) > p22 (0.07) > p26 (0.04) | ✅ |
+| V7 DCT giữ nguyên byte | SHA-256 theo **nội dung** (xref bị `garbage=4` đánh số lại — không so theo xref được): 42 hash gốc ⊆ 61 hash sau | ✅ |
+| V8.2 biến thể (B) bỏ ảnh xám → 25.34 MiB | 25.34 MiB, 16 re-encode, 3 skip | ✅ |
+| V9.1 song ngữ 86.97 → 7.40 MiB, 1.0 s | 86.97 → 7.40 MiB, 1.0 s; f18f796c 413.76 → **42.31 MiB**; text 596/596 giống; pixel-diff 6 trang ngẫu nhiên = **0.0** | ✅ số — ❌ **cơ chế** (X6) |
+| V10.1 fixture trang 22+25 = 1.66 MiB, 3 ảnh, v2 → 0.85 MiB `recompressed=2, skip_filter=1` | 1.66 MiB; Flate ICC CMYK 656×659 (835 KB) + Flate ICC Gray 702×403 (122 KB) + DCT Gray 316×82; v2 → 0.85 MiB, 2/1/0 lỗi | ✅ |
+| V10.1 thêm trang 13 → ~8.7 MB | 9.91 MiB (không subset font) — cùng kết luận: quá to | ✅ |
+| Filter dạng array `[UNVERIFIED]` | Inject thử: `xref_get_key` trả `('array', '[/FlateDecode]')` và `('array', '[/ASCIIHexDecode/FlateDecode]')` — **không có khoảng trắng giữa các name**. Substring check như V5 bước 3 hoạt động; `value.split()` sẽ sai. `Pixmap(doc, xref)` decode được `[/FlateDecode]` | ✅ hành vi API (vẫn 0 mẫu thật) |
+
+### X2. KHÔNG ĐỒNG Ý #1 — Guard 4d (colorspace) không bắt được `Indexed`
+
+**Claim V5 bước 4d**: skip khi `pix.colorspace.name` là `Separation(...)`, `Indexed(...)`,
+`DeviceN(...)`, `Lab`, `None`.
+
+**Phản chứng (chạy thật)**: job `136645f9` (Tech Lead có khảo sát ở V3.3 nhưng chỉ đếm filter, không
+đếm colorspace) có **277 ảnh `/FlateDecode` colorspace `[/Indexed /DeviceCMYK hival …]`** — mẫu
+thật cho đúng cái Tech Lead ghi `[UNVERIFIED] chỉ có mẫu 1×1`. Với 3 xref Indexed điển hình
+(3691 209×188, 3071 80×112, 3132 46×56):
+
+```
+Pixmap(doc, 3691): n=4 alpha=0 colorspace.name='DeviceCMYK'   ← KHÔNG phải 'Indexed(...)'
+tobytes("jpeg") → OK, 4267 byte
+```
+
+MuPDF **expand Indexed sang base colorspace ngay khi dựng Pixmap** (`fz_get_pixmap_from_image` →
+`fz_convert_indexed_pixmap_to_base`), khác với Separation (giữ nguyên, n=1). Hệ quả: nhánh
+`Indexed(...)` trong guard 4d là **dead code** — không bao giờ match.
+
+Chạy thuật toán V5 với `min_recompress_bytes=0` trên `136645f9` để bóc riêng guard 4d:
+
+```
+scanned=1503 recompressed=2 skip_filter=1110 skip_larger=347 skip_cs=44 errors=0
+→ 2 ảnh được re-encode: CẢ HAI đều là Indexed (1079 B và 1291 B), lọt guard với tên 'DeviceCMYK'
+→ skip_cs=44: toàn bộ là Separation — guard chỉ bắt được đúng cái Tech Lead đã thấy trong file sự cố
+```
+
+Trên dữ liệu hiện có hậu quả = 0 (cả 277 ảnh đều < 4 KB nên guard 4b chặn trước). Nhưng **BR-IMGCOMP-02c
+hứa với user "ảnh `Indexed` giữ nguyên"** và V5 không giữ được lời hứa đó với ảnh Indexed ≥ 4 KB —
+đúng nhóm biểu đồ/bảng dạng palette ≤ 256 màu mà JPEG làm hỏng (viền màu bết, chữ nhỏ nhoè), và
+guard nở file **không** bảo vệ được vì JPEG của ảnh palette thường vẫn nhỏ hơn Flate.
+
+**Cách sửa (đã verify công cụ)**: `get_page_images(pno, full=True)` trả **`info[4]` = bpc (int, đã
+resolve indirect ref)** và **`info[5]` = tên họ colorspace lấy từ PDF dict**, đo trên 2 file thật:
+
+| `info[5]` quan sát được | Ở file | Ghi chú |
+|---|---|---|
+| `'DeviceGray'`, `'DeviceRGB'`, `'DeviceCMYK'` | cả 2 | |
+| `'ICCBased'` | cả 2 | không kèm N — vẫn cần `pix.n ∈ {1,3,4}` sau khi dựng Pixmap |
+| `'Indexed'` | `136645f9` (277 Flate) | **đây là cái cần bắt** |
+| `'Separation'` (alt `'DeviceCMYK'` ở `info[6]`) | cả 2 | |
+| `'DeviceN'` (alt `'DeviceCMYK'`) | cả 2 (chỉ trên DCT) | |
+
+⇒ Guard 4d nên là **allowlist trên `info[5]` ∈ {DeviceGray, DeviceRGB, DeviceCMYK, ICCBased}, chạy
+TRƯỚC khi dựng Pixmap** (rẻ hơn, đúng tinh thần "rẻ → đắt" của V5), rồi giữ kiểm tra
+`pix.n ∈ {1,3,4}` + `pix.colorspace.name` như lớp thứ hai. Cách này cũng loại luôn 29+44 ảnh
+Separation **trước** Pixmap thay vì sau. `CalRGB`/`CalGray`/`Lab`/`Pattern`: `[UNVERIFIED]` (0 mẫu),
+allowlist mặc định bỏ qua = an toàn. Tương tự nên đọc bpc từ `info[4]` thay vì
+`xref_get_key(xref, "BitsPerComponent")[1] != "8"` — cái sau trả `('xref', 'N 0 R')` nếu key là
+indirect ref và sẽ skip nhầm trong im lặng (hiếm, nhưng miễn phí để tránh).
+
+### X3. PHÁT HIỆN MỚI #1 — Ghi đè `/ColorSpace` làm mất ICC profile → lệch màu trên macOS Preview
+
+**Vấn đề**: V5 bước 7 (kế thừa v1 `image_compress.py:120-122`) ghi
+`ColorSpace → /DeviceCMYK | /DeviceRGB | /DeviceGray theo pix.n`. Với ảnh gốc `[/ICCBased …]`
+(19/19 ảnh cần nén của file sự cố, 3/3 của `f18f796c`), thao tác này **vứt ICC profile**. Với MuPDF
+điều đó vô hại vì DeviceCMYK mặc định của MuPDF *chính là* profile "Artifex CMYK SWOP" đang nhúng
+trong file (đã đọc tag `desc` của ICC stream 157: `Artifex CMYK SWOP Profile`, 1064: `Artifex
+Software sGray ICC Profile`). Nhưng viewer khác map `DeviceCMYK` sang profile mặc định của **họ**
+(Quartz: "Generic CMYK Profile") → màu đổi.
+
+**Đo bằng Quartz (`sips`, 150 dpi, cùng trang render 2 lần, so từng pixel)**:
+
+| So sánh (Quartz) | Trang 17 (2 ảnh CMYK lớn) | Trang 29 (ảnh táo/gỗ) | Cùng phép so bằng MuPDF |
+|---|---|---|---|
+| Gốc vs v2 như V5 (ghi `/DeviceCMYK`) | **6.98/255**, max 102 | **5.55/255**, max 56 | 0.53 / 0.45 |
+| Gốc vs v2 **giữ nguyên `/ColorSpace`** (ICCBased) | **0.97/255**, max 88 | **0.76/255**, max 45 | 0.53 / 0.45 (**y hệt**) |
+| **Control**: chỉ đổi ICC→`/DeviceCMYK`, giữ Flate, **không JPEG** | — | **4.38/255**, max 25 | **0.00 / 0** |
+
+Hàng control là bằng chứng quyết định: **JPEG không phải nguyên nhân**, riêng việc đổi
+`/ColorSpace` đã gây 4.38/255 trên Quartz và **0.00 trên MuPDF**. Tức mọi số "pixel-diff" ở V7 và
+V8.2, dù đúng, **không có năng lực phát hiện** loại lỗi này — cùng bản chất với bài học C4: đo bằng
+chính thư viện tạo ra kết quả thì chỉ chứng minh nhất quán với chính nó.
+
+Về mức độ: 5–7/255 là lệch tông/độ bão hoà **thấy được khi đặt cạnh nhau nhưng không "sai màu" rõ
+rệt** (đã crop vùng táo xanh/gỗ nâu render Quartz 3 biến thể và nhìn: khác biệt tinh tế). Không phải
+lỗi đảo màu. Nhưng sửa **hoàn toàn miễn phí**: với allowlist ở X2, `Pixmap(doc, xref)` luôn ở đúng
+colorspace gốc với cùng số kênh, nên **không cần ghi `/ColorSpace` nữa** — chỉ bỏ dòng đó. Biến thể
+giữ ICC: 25.19 MiB (**bằng hệt**), 19 re-encode, 0 lỗi. `[/ICCBased N]` + `/DCTDecode` là tổ hợp
+chuẩn (Adobe vẫn xuất như vậy).
+
+Lưu ý thêm: (i) `f18f796c` nhúng **`sRGB IEC61966-2.1` thật** (không phải profile Artifex mặc định)
+— nên vấn đề không chỉ giới hạn ở "profile mặc định của MuPDF"; (ii) đây là lỗi **có sẵn trong v1**
+với mọi ảnh `Filter: null` gốc ICCBased, độc lập với việc duyệt mở rộng Flate — cùng trạng thái với
+`/Decode` ở V4.4; (iii) v1 trước đây cũng chỉ kiểm CMYK bằng MuPDF (Architecture.md dòng 241, 272 —
+"render ra PNG và xem tận mắt" bằng PyMuPDF), tức **đây là lần đầu output CMYK JPEG của
+`compress_pdf_images` được render bằng viewer không phải MuPDF**. Kết quả tốt: Quartz **không đảo
+màu** (nếu đảo, mean đã ở mức 100+), APP14 `transform=0` được hiểu đúng.
+
+### X4. PHÁT HIỆN MỚI #2 — Ảnh có `/Mask` (color-key) không có guard, v1 lẫn v2
+
+Guard 4a chỉ nhìn `/SMask` (qua `info[1]`) và `/ImageMask`. Key **`/Mask`** có 2 dạng: array
+color-key (`/Mask [min max …]` — sample trong dải này trong suốt) và ref tới stencil mask. Inject
+`/Mask [200 255]` vào xref 1062 (Gray 702×403) trên bản copy:
+
+```
+Pixmap(doc, 1062): n=2 alpha=1                 ← MuPDF áp color-key thành alpha
+get_page_images(...)[1] (smask) = 0            ← guard 4a KHÔNG thấy
+sau Pixmap(pix, 0) + update_stream(...):  dict còn nguyên  /Mask[200 255]  (và /Interpolate true)
+```
+
+Hệ quả nếu xảy ra thật: alpha bị vứt, JPEG ghi đè, nhưng `/Mask [200 255]` vẫn áp lên **sample JPEG
+đã đổi giá trị** → vùng trong suốt bị lốm đốm/mất, hoặc vùng không trong suốt bị trong suốt. Khảo
+sát 6 job: **0 xref có `/Mask`** → `[UNVERIFIED]` trên production, cùng hạng với `/SMask` ở S10.
+Sửa rẻ: thêm vào 4a `if doc.xref_get_key(xref, "Mask")[0] != "null" → skip unsupported` (bắt cả
+array lẫn ref), và đổi `if pix.alpha: pix = Pixmap(pix, 0)` thành **skip** — trong luồng này alpha
+chỉ có thể đến từ SMask/color-key, drop alpha luôn là mất thông tin.
+
+### X5. KHÔNG ĐỒNG Ý #2 — Lý do của ngưỡng 4 KB sai, con số vẫn đúng
+
+V5 4b: *"Đo: khoảng 100 B–4 KB rỗng hoàn toàn (V3.2) nên ngưỡng này không cắt nhầm ảnh thật nào."*
+Đó là tính chất của **1 file**. Khảo sát lại 6 job theo bucket:
+
+| Job | Flate < 100 B | **100 B–4 KB** | 4–50 KB | 50–100 KB | 100 KB–1 MB | ≥ 1 MB |
+|---|---|---|---|---|---|---|
+| `78674af9` | 38 | **0** | 1 | 1 | 13 | 4 |
+| `136645f9` | 207 | **186** | 0 | 0 | 0 | 0 |
+| `4c9834bf` | 0 | 0 | 1 (4,678 B RGB 274×24) | 5 | 7 | 0 |
+| `f18f796c` | 0 | 0 | 1 | 1 | 1 | 0 |
+
+Khoảng 100 B–4 KB **không rỗng** trong kho (186 icon Indexed 46×56 … 209×188). Lý do đúng để giữ
+4096 là số đo khác: tổng bytes Flate < 4 KB toàn kho = **0.08 MiB** (431 ảnh); chạy `136645f9` với
+ngưỡng 0 → 347 ảnh bị guard nở file chặn, 44 skip colorspace, **chỉ 2 ảnh qua được, tiết kiệm 194
+byte** — đổi lấy 393 lần dựng Pixmap. Ngưỡng 4096 đúng chỗ, nhưng câu lý giải trong V5 cần thay bằng
+số này để Dev/Reviewer sau không tin nhầm rằng "không có ảnh nào ở đó".
+
+### X6. KHÔNG ĐỒNG Ý #3 — V9.1 chẩn đoán sai cơ chế; cách sửa vẫn đúng nhưng phải ghi đúng lý do
+
+V9.1 viết: *"~84 MB là content stream/font không nén"* và đề xuất `save(garbage=4, deflate=True)`.
+Kiểm kê stream của `bilingual_vi_en.pdf` (`4c9834bf`, 596 trang, 86.97 MiB):
+
+| Loại stream | Filter | Số stream | Bytes |
+|---|---|---|---|
+| font (`/Length1`) | **`/FlateDecode`** (đã nén) | **592** | **71.08 MiB** |
+| content/khác | `/FlateDecode` | 2,598 | 7.96 MiB |
+| image | `/FlateDecode` | 26 | 2.65 MiB |
+
+Toàn bộ đã Flate. Đếm hash nội dung 592 font stream → **chỉ 9 nội dung duy nhất** (0.31 MiB); bản
+đơn ngữ `translated_vi.pdf` của cùng job có đúng **9** font stream. Tức `create_bilingual_pdf()` gọi
+`insert_pdf` **từng trang một** (`bilingual_merge.py:18-20`) và mỗi lần gọi chép lại 9 font của
+bản VI → 9 × ~65 = 592 bản sao. (File EN nguồn 2.64 MiB không có font nhúng `/Length1` nào — toàn bộ
+nhân bản đến từ phía VI.)
+
+Bằng chứng tách 2 tham số:
+
+| Cách save | Kết quả |
+|---|---|
+| `save(output, deflate=True)` — **chỉ deflate** | **86.97 MiB — 0 byte lợi ích** |
+| `save(output, garbage=4, deflate=True)` | 7.40 MiB (font stream còn lại: 9) |
+
+⇒ **`garbage=4` (dedupe stream trùng) là tham số làm việc; `deflate=True` vô nghĩa ở đây.** Đề xuất
+(B) của Tech Lead vẫn cho đúng kết quả, nhưng nếu Architecture.md ghi lý do "không nén" thì một
+Dev/Reviewer "tối giản" thành `deflate=True` sẽ mất **toàn bộ** lợi ích mà test kích thước tương đối
+vẫn có thể pass (file không to *hơn*). Cần sửa câu chữ V9.1 trước khi giao.
+
+Về rủi ro của (B): cùng pattern đã verify ở S8; tự đo thêm: text 596/596 trang giống hệt, pixel-diff
+72 dpi trên 6 trang ngẫu nhiên = **0.0/255 tuyệt đối** (dedupe stream byte-identical không thể đổi
+glyph); `f18f796c` 413.76 → 42.31 MiB. Tôi **không quyết định (A)/(B)** — chỉ xác nhận (B) an toàn
+về mặt kỹ thuật và nêu rõ tham số nào mới là thứ cần giữ. Vẫn là Protocol 2 vì chạm cả 2 engine.
+
+### X7. ĐỒNG Ý — có bổ sung cách verify
+
+**X7.1 Sửa `/Decode` (V4.4, V5 bước 8) — ĐỒNG Ý, đã chứng minh bằng số.** Inject `/Decode
+[1 0 1 0 1 0 1 0]` vào xref 1144 (trang 29) trên bản copy, tạo 3 file: *inj* (gốc đã inject — đây là
+"sự thật" viewer phải hiển thị), *v2-fixed* (V5 đầy đủ), *v1-nofix* (re-encode nhưng giữ `/Decode`
+như code đang ship):
+
+| So với *inj* | MuPDF (72 dpi) | Quartz (100 dpi) | Nhìn tận mắt (Quartz) |
+|---|---|---|---|
+| *v2-fixed* | **0.46/255**, max 18 | 10.23/255 (gồm phần lệch ICC ở X3) | ảnh tối/đảo **giống inj** |
+| *v1-nofix* | **42.28/255**, max 193 | 25.10/255, max 140 | ảnh **sáng bình thường** = đảo 2 lần |
+
+Cả 2 renderer cùng kết luận. Quartz hiểu `/Decode null` là "không có" (nếu không, ảnh đã mất hoặc
+lệch ~40). Đề nghị test V10.2 #4 assert thêm **mức pixel** (render trang sau khi sửa ≈ render gốc
+đã inject, trong ngưỡng nhiễu JPEG) chứ không chỉ `xref_get_key == ('null','null')` — vì lỗi này
+chưa từng phát tác, assertion ở tầng key không đủ chứng minh viewer hiển thị đúng.
+
+**X7.2 Mở rộng phạm vi sang `/FlateDecode` — ĐỒNG Ý.** Lập luận V4.1 đúng: Flate là lossless, không
+thuộc lý do "không nén chồng". Số liệu X1. Lợi ích phụ thuộc tài liệu (V3.3 kết luận 2) — tự đo thêm
+2 job Tech Lead chưa chạy V5 lên: `4c9834bf` 6.19 → **5.16 MiB** (13 ảnh DeviceGray/RGB), `f18f796c`
+35.97 → **35.73 MiB** (3 ảnh sRGB); text 298/298 và 1040/1040 trang giống hệt.
+
+**X7.3 V8.1 không cần heuristic "ảnh chụp hay đồ hoạ" — ĐỒNG Ý, kèm cảnh báo phạm vi.** Tôi tìm
+phản ví dụ bằng tỉ lệ nén Flate (`bytes_flate / (w×h×n)` — đồ hoạ phẳng thường < 0.1): xref 985
+(**0.063**), 1146 (0.107), 172/197/206 (~0.3), 3 ảnh `f18f796c` (0.17–0.22). Render 400 dpi
+trước/sau và nhìn từng cái: **đều là ảnh chụp** có nền trắng/giấy lớn (collage mở chương, phác thảo
+bút chì trên giấy, ảnh phới lồng) — không phân biệt được. Guard nở file đủ **cho 35 ảnh đã gặp**.
+Không có mẫu đồ hoạ phẳng > 4 KB nào trong kho → khả năng "biểu đồ/bảng dinh dưỡng dạng ảnh bị
+JPEG hoá nhưng vẫn nhỏ hơn Flate" vẫn là `[UNVERIFIED]`, không phải đã loại trừ. Đề nghị **rẻ**: log
+`debug` tỉ lệ này cho mỗi ảnh re-encode để QA/Reviewer soi được outlier ở job thật, không thêm
+ngưỡng.
+
+**X7.4 V8.2 giữ ảnh xám 8-bit — ĐỒNG Ý.** 12 ảnh DeviceGray của `4c9834bf` (ảnh SEM/ruột bánh, tỉ lệ
+Flate 0.3–0.63) nhìn 400 dpi không phân biệt; (B) tái hiện 25.34 MiB.
+
+**X7.5 Guard 4c bpc ≠ 8 — ĐỒNG Ý về logic**; kho không có ảnh Flate nào bpc ≠ 8 (cả 6 job đều 8) →
+`[UNVERIFIED]` trên dữ liệu thật, an toàn theo mặc định. Đọc từ `info[4]` (X2).
+
+**X7.6 Fixture 22+25 — ĐỒNG Ý là cần và đúng cỡ**, nhưng nó **chỉ phủ 1 job, 1 producer, 1 ICC
+profile**, không phủ DeviceGray thuần, không phủ Indexed. Đo 2 ứng viên bổ sung: trang 99 của
+`4c9834bf` = **0.48 MiB**, 1 ảnh Flate `DeviceGray` 800×523 (job khác, colorspace dạng name, v2 →
+0.31 MiB) — đáng thêm; trang 168 của `136645f9` = 1.15 MiB, 5 ảnh Indexed + Separation (mẫu thật
+cho guard 4d với `min_recompress_bytes=0`) — tuỳ PM cân dung lượng. Không thêm trang 13/17 (9.9 /
+14 MiB).
+
+### X8. Điểm nhỏ và `[UNVERIFIED]` còn lại
+
+- **`/LZWDecode`, `/RunLengthDecode`**: cũng lossless như Flate; V5 bước 3 gộp vào "đã nén, bỏ
+  qua" và đếm vào `images_skipped_already_compressed` — sai về ngữ nghĩa (không phải "nén chồng")
+  nhưng an toàn. 0 mẫu trong kho. Đề nghị ít nhất ghi rõ trong V5 là **cố ý loại, `[UNVERIFIED]`**,
+  thay vì im lặng; đưa vào eligibility là việc 1 dòng nếu sau này gặp.
+- **pdfium (Chrome) / Acrobat**: `[UNVERIFIED]` — không có công cụ trên máy này. Đề nghị QA (V10.2
+  #8) mở file output bằng **Chrome và Preview** ít nhất 1 lần, nhìn trang có ảnh CMYK lớn (p17/p29
+  của file sự cố) để loại trừ đảo màu — Quartz đã pass, pdfium chưa.
+- **Bẫy đo lường (đồng ý với V7)**: JPEG CMYK MuPDF ghi có APP14 `transform=0`, dữ liệu **thẳng**
+  (không theo quy ước Adobe đảo); `Pixmap(jpeg_bytes)` standalone của chính MuPDF đọc lại ra
+  `ffff…` từ `0000…` (tự đảo). Ai dùng `extract_image`/`pdfimages` rồi mở file JPEG rời sẽ thấy âm
+  bản và báo bug giả. Ghi vào docstring để khỏi điều tra lại.
+- Kết quả 4 trang lệch nhiều nhất giống hệt Tech Lead → phép đo pixel-diff của Tech Lead làm đúng,
+  chỉ thiếu renderer thứ hai.
+
+### X9. Khuyến nghị cuối — CHƯA sẵn sàng trình user; cần Tech Lead sửa 5 điểm (không cần đo lại)
+
+**Blocking (sửa V5 rồi mới trình — mỗi điểm ≤ 5 dòng code, đều đã verify công cụ ở trên):**
+
+1. **4d**: allowlist `info[5] ∈ {DeviceGray, DeviceRGB, DeviceCMYK, ICCBased}` chạy **trước**
+   Pixmap; giữ `pix.n ∈ {1,3,4}` làm lớp hai. Bỏ nhánh `Indexed(...)` chết. (X2)
+2. **Bước 7**: **không ghi `/ColorSpace`** (bỏ `_COLORSPACE_BY_CHANNELS`), giữ ICC profile gốc. Ghi rõ
+   đây là sửa lỗi có sẵn của v1, độc lập với duyệt scope — cùng hạng với `/Decode`. (X3)
+3. **4a**: thêm guard `/Mask` (array hoặc ref) và đổi drop-alpha thành skip. (X4)
+4. **V9.1**: viết lại cơ chế = font nhân bản do `insert_pdf` từng trang; `garbage=4` là tham số quyết
+   định, `deflate=True` đơn thuần = 0 lợi ích. (X6) — vẫn để PM/user chọn (A)/(B).
+5. **4b**: thay câu lý giải "khoảng 100 B–4 KB rỗng" bằng số đo toàn kho (0.08 MiB, 194 byte). (X5)
+
+**Non-blocking (đề nghị, PM quyết):** đọc bpc từ `info[4]`; test `/Decode` assert mức pixel; test
+mới cho ICC (`info[5]` của ảnh re-encode vẫn `'ICCBased'`), `/Mask` (inject → ảnh vẫn Flate,
+đếm `unsupported`), Indexed (`min_recompress_bytes=0` → `images_skipped_colorspace` tăng đúng số);
+fixture bổ sung `4c9834bf` p99 (0.48 MiB); QA mở Chrome + Preview; log tỉ lệ Flate; ghi chú LZW.
+
+**Sau 5 sửa trên**, tôi đánh giá thiết kế **đủ chín** để trình user theo Protocol 2 — số liệu lợi
+ích (−46.3% trên file sự cố, lợi ích phụ thuộc tài liệu) và các guard còn lại đều đứng vững qua
+verify độc lập, và cả 3 lỗi mới đều là lỗi có sẵn của v1 mà v2 là dịp sửa rẻ nhất.
+
+### X10. Cách tái lập (script tạm ở scratchpad phiên làm việc, không lưu vào repo)
+
+Mọi phép đo dùng bản **copy** trong scratchpad; file production không bị mở ở chế độ ghi. Các bước
+tái lập chính (đủ để Tech Lead/QA lặp lại, không cần script của tôi):
+
+1. *Khảo sát*: với mỗi `data/outputs/*/translated_vi.pdf`, gom xref qua `get_page_images(full=True)`,
+   đọc `Filter`/`BitsPerComponent`/`ColorSpace`/`Mask`/`Decode` bằng `xref_get_key`, bucket theo
+   `len(xref_stream_raw)`; `info[5]` cho họ colorspace.
+2. *Thuật toán V5* viết lại độc lập theo đúng text (có cờ `keep_icc`, `min_bytes`, biến thể B);
+   so DCT bằng **set SHA-256 nội dung** (không theo xref).
+3. *Render độc lập*: `insert_pdf` 1 trang → PDF riêng → `sips -s format png -s dpiWidth 150 -s
+   dpiHeight 150 in.pdf --out out.png`; so `Pixmap(png).samples` từng byte (mean/max |Δ|).
+4. *Control ICC*: chỉ `xref_set_key(x, "ColorSpace", "/DeviceCMYK")` trên 3 xref trang 29, không đổi
+   stream → render Quartz và MuPDF.
+5. *Inject*: `xref_set_key(x, "Decode", "[1 0 1 0 1 0 1 0]")` / `"Mask", "[200 255]"` /
+   `"Filter", "[/ASCIIHexDecode/FlateDecode]"` trên bản copy rồi quan sát `Pixmap`, `update_stream`.
+6. *Song ngữ*: kiểm kê stream theo `/Length1`, hash nội dung; `save(deflate=True)` và
+   `save(garbage=4, deflate=True)` riêng rẽ.
+
+## US-16 v2 — Final Decision sau phản biện Domain Expert (2026-09-08)
+
+**Tác giả**: Tech Lead — thiết kế, KHÔNG implement.
+**Trạng thái**: ⏸ **Chờ user duyệt (Protocol 2)** — xem W10 để biết chính xác 2 điều user cần quyết.
+**Quan hệ tài liệu (đọc kỹ trước khi implement)**: mục này **thay thế (supersede)** các phần sau của
+mục "US-16 v2" ở trên: **bước 4a, 4b, 4d, bước 7** của V5, và toàn bộ mục **V9.1**. Mọi phần khác
+của US-16 v1 (S1–S10) và US-16 v2 (V1–V4, V6, V7, V8, V10, V11) **giữ nguyên hiệu lực**. Khi 2 mục
+mâu thuẫn, **mục này thắng** — Dev đọc W6 (thuật toán hợp nhất) là đủ, không phải ghép tay V5 + sửa.
+
+**Phán quyết tổng**: **chấp nhận cả 5 điểm** Domain Expert nêu ở X9. Không có điểm nào tôi bác bỏ.
+Có **2 chỗ tôi làm khác cách Expert đề xuất** (W1 lớp hai, W8 mức độ bắt buộc của fixture Indexed) và
+**1 phát hiện bổ sung** (W2.2 — điểm 1 và điểm 2 **ràng buộc nhau**, tách ra implement riêng sẽ tạo
+lỗi nặng hơn hiện trạng). Cả 3 đều là "làm chặt hơn", không phải bất đồng về kết luận.
+
+### W0. Nguồn xác thực của riêng mục này (R5-01)
+
+Tôi **không đo lại** các số liệu lớn: Domain Expert đã tái hiện độc lập 100% bảng số của tôi (X1)
+bằng script riêng **và** renderer khác hẳn (macOS Quartz qua `sips`, không dùng MuPDF) — lặp lại
+lần thứ ba không tạo thêm thông tin, chỉ tốn thời gian. Cái tôi tự chạy hôm nay là **đúng phần
+contract PyMuPDF mà 3 điểm blocking dựa vào**, trên file nhỏ (46.87 MB):
+
+```
+PyMuPDF 1.28.2 / Python 3.14 — data/outputs/78674af9-.../translated_vi.pdf, quét cả 30 trang
+get_page_images(pno, full=True) -> tuple 10 phần tử
+info[4] = 8            (int, KHÔNG phải str — dùng trực tiếp, không cần xref_get_key)
+info[5] = 'DeviceRGB' | 'DeviceCMYK' | 'ICCBased' | 'Separation' | 'DeviceN' | 'DeviceGray'
+info[6] = ''  với DeviceX/ICCBased;  'DeviceCMYK'  với Separation/DeviceN (alternate space)
+Phân bố 99 xref: DeviceCMYK 24, ICCBased 22, Separation 46, DeviceN 3, DeviceGray 3, DeviceRGB 1
+xref_get_key(xref, "Mask") -> ('null','null') khi key vắng mặt   (5/5 xref thử)
+Pixmap(doc, 172).colorspace.name -> 'ICCBased(CMYK,Artifex CMYK SWOP Profile)'   (xác nhận lại C1)
+```
+
+Hai điều đáng ghi: (i) tổng **99 xref** khớp chính xác V3.1 → dữ liệu tôi đang đọc đúng là file
+Expert và tôi đã dùng; (ii) `info[5]` trả **tên trần** (`'ICCBased'`), **không** kèm dấu ngoặc như
+`Pixmap.colorspace.name` — nên guard mới **không dính bẫy C1** (không cần xử lý tiền tố `ICCBased(`).
+
+Ba claim tôi **không tự chạy lại**, kế thừa nguyên trạng từ phản biện đã verify của Expert, ghi rõ
+để Reviewer biết ranh giới: đo màu bằng Quartz (X3), 277 ảnh Indexed của `136645f9` (X2), kiểm kê
+592 font stream của file song ngữ (X6).
+
+### W1. Điểm 1 — Guard colorspace: allowlist trên `info[5]`, chạy TRƯỚC khi dựng Pixmap
+
+**Đồng ý với X2.** Nhánh `Indexed(...)` trong V5 bước 4d là **dead code** đúng như Expert chứng minh:
+MuPDF expand Indexed sang base colorspace ngay khi dựng Pixmap, nên `pix.colorspace.name` trả
+`'DeviceCMYK'` — không bao giờ trả `'Indexed(...)'`. Guard viết theo tên Pixmap **không thể** thực
+hiện lời hứa "Indexed giữ nguyên" của BR-IMGCOMP-02c.
+
+**Spec chốt**:
+
+- Vòng gom xref (V5 bước 2) không chỉ lưu smask nữa, mà lưu **bộ ba** lấy từ cùng một `info`:
+  `meta_by_xref[info[0]] = (smask=info[1], bpc=info[4], cs_family=info[5])`, **first sighting wins**
+  (cùng lý do đã ghi ở v1: `info` mô tả chính object xref, không phải chỗ đặt trên trang).
+- Hằng số mới: `_ELIGIBLE_CS_FAMILIES = {"DeviceGray", "DeviceRGB", "DeviceCMYK", "ICCBased"}`.
+- **Guard 4d (mới)**: `cs_family not in _ELIGIBLE_CS_FAMILIES` → `images_skipped_colorspace += 1`,
+  log `debug`, `continue` — **trước** mọi lời gọi `Pixmap`. Loại được `Indexed`, `Separation`,
+  `DeviceN`, `Lab`, `Pattern`, `CalRGB`, `CalGray`, và cả `''` (không có `/ColorSpace`).
+- **Guard 4c (mới, đổi nguồn dữ liệu)**: đọc bpc từ `meta.bpc` (int) thay vì
+  `xref_get_key(xref, "BitsPerComponent")`. Lý do Expert nêu (indirect ref trả `('xref','N 0 R')` →
+  skip nhầm trong im lặng) là đúng, và `info[4]` đã resolve sẵn — miễn phí, dùng luôn.
+
+**Chỗ tôi làm khác Expert (lớp hai)**: Expert đề xuất giữ `pix.n ∈ {1,3,4}` **và**
+`pix.colorspace.name` làm lớp hai. Tôi **bỏ hẳn `pix.colorspace.name` khỏi vai trò guard** và thay
+lớp hai bằng **kiểm tra nhất quán số kênh**:
+
+| `cs_family` | `pix.n` bắt buộc |
+|---|---|
+| `DeviceGray` | 1 |
+| `DeviceRGB` | 3 |
+| `DeviceCMYK` | 4 |
+| `ICCBased` | ∈ {1, 3, 4} (dict không ghi `N` trong `info[5]`) |
+
+Sai → `images_skipped_colorspace += 1`, log `debug`, không ghi gì. Lý do bỏ `colorspace.name`:
+(a) sau allowlist nó **không loại thêm được gì** — chính nó là thứ mù với Indexed (X2) nên không
+phải lớp phòng thủ thật; (b) giữ nó lại buộc phải viết đúng cái special-case tiền tố `"ICCBased("`
+đã **thực sự gây bug một lần** lúc spike (C1) — giữ một biểu thức đã từng sai làm "lớp hai" cho một
+guard đã đúng là thêm rủi ro chứ không thêm an toàn. Kiểm tra `pix.n` vs `cs_family` thì **chính
+xác** và là đúng bất biến mà bước ghi kết quả (W2) phụ thuộc vào.
+
+### W2. Điểm 2 — Không ghi đè `/ColorSpace` nữa
+
+**Đồng ý với X3.** Bằng chứng quyết định là hàng "control" của Expert: chỉ đổi `[/ICCBased …]` →
+`/DeviceCMYK`, **giữ nguyên Flate, không đụng JPEG** → Quartz lệch **4.38/255**, MuPDF lệch
+**0.00**. Nghĩa là toàn bộ phép đo pixel-diff của tôi ở V7/V8.2 — dù đúng — **không có năng lực
+nhìn thấy lỗi này**, đúng bản chất bài học C4 (đo bằng chính thư viện tạo ra kết quả).
+
+**W2.1. Spec chốt**: xoá hằng `_COLORSPACE_BY_CHANNELS` và xoá dòng
+`doc.xref_set_key(xref, "ColorSpace", ...)` (`image_compress.py:120-122`). **Không thay bằng gì cả.**
+`Pixmap(doc, xref)` luôn giải mã ở đúng colorspace gốc với đúng số kênh, JPEG ghi ra cũng đúng số
+kênh đó (đã ràng buộc bằng lớp hai ở W1) → `/ColorSpace` cũ tiếp tục mô tả đúng stream mới, và ICC
+profile gốc được giữ. `[/ICCBased N]` + `/DCTDecode` là tổ hợp chuẩn. Đo của Expert: biến thể giữ ICC
+cho **25.19 MiB — bằng hệt** biến thể ghi đè, tức sửa này **miễn phí về dung lượng**.
+
+Các key còn lại ở bước 7 **giữ nguyên**: `Filter → /DCTDecode`, `BitsPerComponent → 8`,
+`Width`/`Height` theo `pix`.
+
+**W2.2. [BỔ SUNG CỦA TECH LEAD — không có trong X9] Điểm 1 và điểm 2 ràng buộc nhau, phải vào cùng
+một commit.** Đây là điều tôi cho là rủi ro implement lớn nhất của cả đợt này:
+
+- **Hôm nay** (v1 đang ship): ảnh `Indexed` lọt guard → JPEG hoá → nhưng code **ghi đè**
+  `/ColorSpace = /DeviceCMYK` theo `pix.n=4`, nên object vẫn **tự nhất quán**. Hậu quả chỉ là "ảnh
+  palette bị JPEG hoá" — xấu, mất chất lượng, nhưng **hiển thị được**.
+- **Nếu Dev làm điểm 2 mà quên điểm 1**: stream thành JPEG CMYK 4 kênh trong khi `/ColorSpace` vẫn
+  là `[/Indexed /DeviceCMYK hival lookup]` — mỗi sample được viewer hiểu là **1 chỉ số bảng màu**.
+  Đây là **PDF hỏng**, nặng hơn hẳn hiện trạng.
+- Chiều ngược lại (điểm 1 mà không có điểm 2) thì vô hại, chỉ là chưa sửa lệch màu.
+
+⇒ **Ràng buộc bắt buộc cho Dev**: dòng ghi `/ColorSpace` **chỉ được xoá sau khi** allowlist `info[5]`
+đã có mặt trong cùng thay đổi, **và** test W8-#9 (mẫu Indexed thật) xanh. Reviewer kiểm tra đúng thứ
+tự này (R6-04 áp cho chuỗi guard→ghi trong cùng một hàm).
+⚠️ Cơ chế hỏng ở gạch đầu dòng thứ hai là **suy ra** từ số đo đã verify của Expert (X2:
+`Pixmap(doc, 3691)` → `n=4`, `colorspace.name='DeviceCMYK'` trên ảnh `[/Indexed /DeviceCMYK …]`) —
+**tôi không tự dựng file hỏng để chạy thử**. Không cần dựng: thiết kế cấm nhánh đó xảy ra, và test
+W8-#9 khẳng định điều cấm đó có hiệu lực.
+
+**W2.3. Phạm vi**: sửa này là **sửa lỗi có sẵn của v1**, **độc lập** với quyết định mở rộng scope
+sang Flate (W10-a) — v1 hôm nay đã vứt ICC profile với mọi ảnh `Filter: null` gốc ICCBased. Cùng
+hạng với sửa `/Decode` (V4.4): nên làm kể cả khi user từ chối mở rộng scope. Lưu ý W2.2 vẫn áp dụng
+nguyên vẹn trong kịch bản đó.
+
+### W3. Điểm 3 — Guard `/Mask`, và alpha thì skip chứ không drop
+
+**Đồng ý với X4.** Guard 4a hiện chỉ nhìn `/SMask` (qua `info[1]`) và `/ImageMask`; key **`/Mask`**
+(cả dạng array color-key lẫn ref tới stencil) không ai thấy, và `update_stream` giữ nguyên key đó →
+mask áp lên sample JPEG **đã đổi giá trị**. Cùng loại lỗi im lặng với `/Decode`.
+
+**Spec chốt — bổ sung vào nhóm guard 4a**:
+
+- `mask_type, _ = doc.xref_get_key(xref, "Mask")`; `mask_type != "null"` → `images_skipped_unsupported
+  += 1`, log `warning` (hiếm, đáng nhìn thấy), `continue`. Bắt cả `('array', '[200 255]')` lẫn
+  `('xref', 'N 0 R')` chỉ bằng việc so với `"null"` — cú pháp này tôi đã tự xác nhận hôm nay (W0).
+- Đổi `if pix.alpha: pix = fitz.Pixmap(pix, 0)` (`image_compress.py:108-109`) thành
+  **`if pix.alpha: → images_skipped_unsupported += 1, log warning, continue`**. Lý do: trong luồng
+  này alpha chỉ có thể đến từ `/SMask` (đã guard) hoặc `/Mask` color-key (vừa guard) — nếu vẫn còn
+  alpha thì nghĩa là có một nguồn ta **chưa hiểu**, và drop nó vừa mất thông tin vừa để lại key sinh
+  ra nó trong dict. Skip là lựa chọn duy nhất an toàn.
+- 3 guard mask này **không phụ thuộc** quyết định W10-a: chúng là sửa lỗi của v1.
+
+`[UNVERIFIED]` giữ nguyên: 0 mẫu `/Mask` và 0 mẫu `/SMask` thật trong cả 6 job. Hành vi mặc định khi
+không có mẫu là **bỏ qua** ⇒ an toàn.
+
+### W4. Điểm 4 — Viết lại cơ chế phình file song ngữ (thay thế V9.1)
+
+**Đồng ý với X6 — chẩn đoán cũ của tôi sai, kết luận cũ đúng vì lý do khác.** V9.1 viết "~84 MB là
+content stream/font **không nén**" là sai. Kiểm kê của Expert:
+
+| Loại stream trong `bilingual_vi_en.pdf` (`4c9834bf`, 596 trang, 86.97 MiB) | Filter | Số stream | Bytes |
+|---|---|---|---|
+| font (`/Length1`) | **`/FlateDecode` — đã nén sẵn** | **592** | **71.08 MiB** |
+| content/khác | `/FlateDecode` | 2,598 | 7.96 MiB |
+| image | `/FlateDecode` | 26 | 2.65 MiB |
+
+**Cơ chế đúng**: `create_bilingual_pdf()` gọi `insert_pdf` **từng trang một**
+(`src/postprocess/bilingual_merge.py:18-21`, vì phải xen kẽ VI/EN). Mỗi lời gọi chép lại bộ font của
+bản VI → 592 font stream nhưng chỉ **9 nội dung duy nhất** (0.31 MiB); bản đơn ngữ cùng job có đúng
+9. Không có gì "chưa nén" cả — có **9 font bị nhân bản ~65 lần**.
+
+**Hệ quả bắt buộc phải ghi rõ trước khi giao Dev**:
+
+| Cách save | Kết quả đo |
+|---|---|
+| `save(output_path, deflate=True)` — chỉ deflate | **86.97 MiB — 0 byte lợi ích** |
+| `save(output_path, garbage=4, deflate=True)` | **7.40 MiB** (font stream còn 9) |
+
+⇒ **`garbage=4` (garbage-collect object trùng) là tham số làm việc; `deflate=True` một mình vô
+nghĩa ở đây.** Nếu Architecture ghi lý do là "không nén", một Dev/Reviewer "tối giản hoá" thành
+`deflate=True` sẽ mất **toàn bộ** lợi ích mà một test kiểu "file không to hơn" vẫn pass. Vì vậy nếu
+user chọn (B), **test bắt buộc phải assert số font stream (`/Length1`) sau khi save ≤ 10**, không
+chỉ assert kích thước — assertion ở tầng kích thước không phân biệt được 2 tham số này.
+
+Rủi ro của (B): Expert đo độc lập — text 596/596 trang giống hệt, **pixel-diff 6 trang ngẫu nhiên =
+0.0/255 tuyệt đối** (dedupe stream byte-identical không thể đổi glyph), `f18f796c` 413.76 → 42.31
+MiB. Cùng pattern đã verify ở S8.
+
+Một phương án (C) — bỏ `insert_pdf` từng trang, chèn nguyên 2 tài liệu rồi `move_page()` để xen kẽ —
+sẽ chặn nhân bản **từ gốc** thay vì dọn sau. Tôi **không đề xuất**: nhiều code hơn, đụng đúng vòng
+lặp đang chạy đúng, và không có số đo nào cho thấy nó hơn (B) về kết quả cuối. Ghi lại để khỏi phải
+nghĩ lại. Quyết định (A)/(B) vẫn thuộc user (W10-b) vì chạm code path dùng chung cho **cả 2 engine**.
+
+### W5. Điểm 5 — Sửa câu lý giải ngưỡng 4 KB (con số 4096 giữ nguyên)
+
+**Đồng ý với X5.** Câu cũ ở V5 bước 4b — *"khoảng 100 B–4 KB rỗng hoàn toàn nên ngưỡng này không cắt
+nhầm ảnh thật nào"* — là tính chất của **đúng 1 file**, và **sai trên kho**: `136645f9` có **186 ảnh
+Flate** nằm trong khoảng đó (icon Indexed 46×56 … 209×188).
+
+**Câu thay thế (Dev/Reviewer đọc cái này, không đọc câu cũ)**: ngưỡng 4096 giữ nguyên vì
+**tổng dung lượng toàn bộ ảnh Flate < 4 KB trên cả 6 job chỉ ~0.08 MiB (431 ảnh)** — hạ ngưỡng
+không đáng công. Đo cụ thể: chạy `136645f9` với `min_recompress_bytes=0` → 347 ảnh bị guard nở file
+chặn, 44 skip colorspace, **chỉ 2 ảnh qua được và tiết kiệm tổng cộng 194 byte**, đổi lấy 393 lần
+dựng Pixmap. Đây là guard **chi phí + nhiễu log**, không phải guard đúng-sai (guard đúng-sai là guard
+nở file ở bước 8). Nó cũng là thứ tránh cho ta 29 exception của C2 trên file sự cố.
+
+### W6. Thuật toán V5-final (hợp nhất — Dev implement theo mục này, không ghép tay)
+
+Thứ tự vẫn là **rẻ → đắt**: mọi phép loại trừ đọc key/metadata chạy **trước** khi dựng `Pixmap`.
+Sau W1, **toàn bộ** guard trừ guard nở file đều nằm trước Pixmap.
+
+1. Mở `pdf_path`, ghi `size_before`. *(như v1)*
+2. Gom metadata theo xref qua `get_page_images(pno, full=True)`, first sighting wins:
+   `meta_by_xref[info[0]] = (smask=info[1], bpc=info[4], cs_family=info[5])`. **[ĐỔI — W1]**
+   `images_scanned = len(meta_by_xref)`.
+3. **Eligibility filter** *(như V5 bước 3, không đổi)*: `xref_get_key(xref, "Filter")` →
+   `type == "null"` **hoặc** `('name', '/FlateDecode')` → eligible; `type == "array"` chứa
+   `"FlateDecode"` và không chứa `DCTDecode`/`JPXDecode`/`JBIG2Decode`/`CCITTFaxDecode` → eligible
+   (⚠️ `[UNVERIFIED]`, 0 mẫu thật; Expert xác nhận value trả về **không có khoảng trắng giữa các
+   name** → phải dùng **substring check**, `value.split()` sẽ sai). Còn lại →
+   `images_skipped_already_compressed += 1`, `continue`.
+   *Ghi chú cố ý (X8)*: `/LZWDecode`, `/RunLengthDecode` cũng lossless như Flate nhưng **cố ý không
+   đưa vào eligibility** (0 mẫu trong kho, `[UNVERIFIED]`) — ghi comment trong code để lần sau khỏi
+   tưởng là bỏ sót; thêm vào là việc 1 dòng nếu gặp mẫu thật.
+4. **Guard mask/alpha** **[ĐỔI — W3]**: `/ImageMask == true` → skip `unsupported`;
+   `meta.smask != 0` → skip `unsupported`; **`xref_get_key(xref,"Mask")[0] != "null"` → skip
+   `unsupported`**. Cả 3 log `warning`.
+5. **Guard kích thước** *(giữ nguyên hành vi, sửa lý do — W5)*:
+   `len(doc.xref_stream_raw(xref)) < min_recompress_bytes` (mặc định 4096) →
+   `images_skipped_small += 1`, log `debug`.
+6. **Guard bit depth** **[ĐỔI nguồn — W1]**: `meta.bpc != 8` → skip `unsupported`.
+7. **Guard colorspace** **[ĐỔI — W1]**: `meta.cs_family not in _ELIGIBLE_CS_FAMILIES` →
+   `images_skipped_colorspace += 1`, log `debug`, `continue`. **Trước Pixmap.**
+8. Dựng `pix = fitz.Pixmap(doc, xref)`. **`if pix.alpha:` → skip `unsupported`** (không drop — W3).
+   **Lớp hai**: `pix.n` không khớp bảng W1 → `images_skipped_colorspace += 1`, log `debug`, `continue`.
+9. `jb = pix.tobytes("jpeg", jpg_quality=jpeg_quality)`. Log `debug` kèm **tỉ lệ nén Flate gốc**
+   `raw_size / (pix.width * pix.height * pix.n)` (đề nghị X7.3 — để QA soi outlier đồ hoạ phẳng ở
+   job thật mà không phải thêm ngưỡng nào).
+10. **Guard nở file** *(như v1 — guard đúng-sai duy nhất)*: `len(jb) >= raw_size` →
+    `images_skipped_larger += 1`, `continue`.
+11. Ghi kết quả **[ĐỔI — W2]**: `update_stream(xref, jb, new=1, compress=0)`;
+    `Filter → /DCTDecode`; `BitsPerComponent → 8`; `Width`/`Height` theo `pix`.
+    **KHÔNG ghi `/ColorSpace`** — giữ nguyên key gốc (ICC profile). Không cần đụng `/DecodeParms`
+    (C3: `update_stream` đã xoá).
+12. **Dọn `/Decode`** *(như V5 bước 8)*: **chỉ khi** `xref_get_key(xref,"Decode")[0] != "null"` →
+    `xref_set_key(xref, "Decode", "null")`. Set vô điều kiện làm fixture cũ lệch 12 byte vô ích.
+13. `doc.save(tmp, garbage=4, deflate=True)` → `close()` → `os.replace(tmp, pdf_path)`. *(như v1)*
+
+### W7. Chữ ký hàm và stats
+
+```python
+async def compress_pdf_images(
+    pdf_path: str | Path, *, jpeg_quality: int = 85, min_recompress_bytes: int = 4096
+) -> ImageCompressStats
+```
+
+Không đổi so với V5. `ImageCompressStats` thêm đúng **2 field**: `images_skipped_small`,
+`images_skipped_colorspace` (giữ toàn bộ field cũ). Dataclass này chỉ dùng cho log/test — **không**
+ghi DB, **không** lên UI. `min_recompress_bytes` là tham số để test tham số hoá được, **không** phải
+điểm cấu hình `.env`/UI (BR-IMGCOMP-03 giữ nguyên).
+
+### W8. Test bắt buộc — cập nhật so với V10.2
+
+Giữ nguyên **V10.2 #1–#8**. Bổ sung/nâng cấp:
+
+| # | Test | Mức |
+|---|---|---|
+| 9 | **Indexed thật bị skip**: fixture mới từ `136645f9` **trang 168** (1.15 MiB, 5 ảnh Indexed + Separation). Gọi với `min_recompress_bytes=0` → `images_skipped_colorspace` tăng đúng số ảnh Indexed+Separation, `images_recompressed == 0`, và `xref_get_key(xref,"ColorSpace")` của các ảnh đó **không đổi**. | **BẮT BUỘC — blocking** |
+| 10 | **ICC được giữ**: sau khi chạy trên fixture `78674af9` p22+p25, ảnh đã re-encode phải có `info[5] == 'ICCBased'` và `xref_get_key(xref,"ColorSpace")` **giống hệt trước khi chạy**; `xref_get_key(xref,"Filter") == ('name','/DCTDecode')`. | **BẮT BUỘC** |
+| 11 | **`/Mask` inject**: inject `/Mask [200 255]` vào 1 xref Flate → sau khi chạy, `Filter` vẫn `/FlateDecode` (không đụng), stream byte-identical, `images_skipped_unsupported` tăng 1. | **BẮT BUỘC** |
+| 12 | **`/Decode` mức pixel** (nâng cấp V10.2 #4 theo X7.1): ngoài assert `xref_get_key == ('null','null')`, render trang sau khi sửa và so với file gốc-đã-inject, sai khác trong ngưỡng nhiễu JPEG (Expert đo: 0.46/255 khi đúng vs **42.28/255** khi sai) — vì lỗi này chưa từng phát tác, assertion ở tầng key không chứng minh viewer hiển thị đúng. | **BẮT BUỘC** |
+| 13 | Fixture bổ sung `4c9834bf` **trang 99** (0.48 MiB, 1 ảnh Flate `DeviceGray` **name-form**, job khác, producer khác, ICC khác) — phủ nhánh `cs_family == 'DeviceGray'` mà fixture chính không có. | Nên có |
+
+**Chỗ tôi làm khác Expert**: Expert xếp fixture Indexed (trang 168) là *non-blocking, tuỳ PM cân
+dung lượng*. Tôi **nâng lên blocking**, vì sau W2.2 nó không còn là "test cho một guard phụ" — nó là
+**bằng chứng duy nhất bằng dữ liệu thật** rằng điều kiện tiên quyết của việc bỏ ghi `/ColorSpace` có
+hiệu lực. Nếu PM không chấp nhận thêm 1.15 MiB vào repo, thì phương án lùi **không phải** bỏ test mà
+là **giữ nguyên dòng ghi `/ColorSpace`** (tức bỏ luôn điểm 2) — hai thứ đi cùng nhau, không tách.
+
+Ràng buộc Protocol 5/6 giữ nguyên: fixture **phải trích từ file production thật** (không dựng tay),
+ghi xuất xứ vào `tests/fixtures/babeldoc/README.md` (job id, số trang gốc, ngày trích, lệnh trích).
+
+### W9. Trạng thái verify sau phản biện
+
+| Hạng mục | Trạng thái |
+|---|---|
+| Toàn bộ số liệu V1–V8 của Tech Lead | ✅ Verified **2 lần độc lập** (Tech Lead + Domain Expert, script riêng, dữ liệu thật) |
+| `info[4]`=bpc int, `info[5]`=họ colorspace trần, `xref_get_key("Mask")` khi vắng | ✅ Verified — Tech Lead tự chạy hôm nay trên file 46.87 MB (W0) |
+| Indexed lọt guard cũ (`Pixmap` expand sang base) | ✅ Verified — Expert, 277 ảnh thật ở `136645f9` |
+| Ghi đè `/ColorSpace` gây lệch màu trên viewer khác MuPDF | ✅ Verified — Quartz 4.38–6.98/255, control tách riêng khỏi JPEG |
+| `/Mask` không có guard, `Pixmap` trả alpha=1 | ✅ Verified cơ chế bằng inject — ⚠️ `[UNVERIFIED]` trên production (0 mẫu/6 job) |
+| `garbage=4` mới là tham số quyết định của V9.1, `deflate=True` = 0 byte | ✅ Verified — Expert đo tách 2 tham số |
+| Ngưỡng 4096: lý do đúng = 0.08 MiB toàn kho | ✅ Verified — bucket 6 job |
+| PDF hỏng nếu bỏ ghi `/ColorSpace` mà thiếu allowlist (W2.2) | ⚠️ **Suy ra** từ X2 đã verify — chặn bằng thiết kế + test W8-#9, không dựng file hỏng để chạy |
+| `Filter` dạng array; bpc ≠ 8; colorspace lạ cỡ lớn; `/SMask` | ⚠️ `[UNVERIFIED]` (kế thừa) — mặc định "bỏ qua" ⇒ an toàn |
+| pdfium (Chrome) / Acrobat render output CMYK | ⚠️ `[UNVERIFIED]` — QA mở bằng **Chrome + Preview** ít nhất 1 lần ở gate V10.2 #8 |
+| **Mở rộng BR-IMGCOMP-02 sang Flate** | ⏸ **Chờ user duyệt — Protocol 2 (W10-a)** |
+| **`bilingual_merge.py` (A)/(B)** | ⏸ **Chờ user quyết — Protocol 2 (W10-b)** |
+| Thiết kế đã đủ chín để trình user | ✅ Theo đánh giá X9 của Domain Expert, sau 5 sửa ở W1–W5 |
+
+### W10. Hai điều user cần quyết (Protocol 2) — và những gì KHÔNG phụ thuộc vào chúng
+
+**(a) Có duyệt mở rộng BR-IMGCOMP-02 sang ảnh `/FlateDecode` không?**
+Được gì: file sự cố 46.87 → 25.19 MB (−46.3%), text/số trang giữ nguyên 100%. Mất gì: ảnh Flate ≥ 4 KB
+trở thành JPEG q85 (lossy, **không đảo ngược được** trên file output). Lợi ích **phụ thuộc tài liệu
+nguồn**, không đều: `4c9834bf` 6.19 → 5.16 MB, `f18f796c` 35.97 → 35.73 MB (gần như không đổi).
+Job 520 MB (`136645f9`) **v2 không cứu được** — 437 MB ở đó đã là JPEG sẵn (V9.2, bài toán khác).
+
+**(b) `bilingual_merge.py`: (A) để backlog hay (B) sửa kèm lần này?**
+(B) = đổi `bilingual_merge.py:22` thành `save(output_path, garbage=4, deflate=True)`. Đo: 86.97 →
+7.40 MB (−91.5%), 1.0 s; `f18f796c` 413.76 → 42.31 MB. Expert xác nhận **an toàn**: text 596/596
+trang giống hệt, **pixel-diff 0.0/255 tuyệt đối**. Vẫn cần user duyệt vì chạm code path dùng chung
+cho **cả `pdf2zh` lẫn `babeldoc`** (đúng tiền lệ S8, nơi user đã cố ý từ chối mở rộng sang pdf2zh).
+
+**KHÔNG phụ thuộc (a) hay (b) — là sửa lỗi tiềm ẩn của code đang ship, nên làm trong mọi kịch bản**:
+xoá `/Decode` (V4.4), không ghi đè `/ColorSpace` + allowlist `info[5]` đi kèm (W2, **cặp không tách
+rời** — W2.2), guard `/Mask` và skip-khi-có-alpha (W3). Nếu user từ chối (a), 4 sửa này vẫn áp dụng
+cho nhánh `Filter: null` hiện hành, và W6 rút gọn về đúng bước 3 cũ (`type == "null"`).

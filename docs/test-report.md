@@ -1932,3 +1932,217 @@ sách/layout chưa từng gặp trong 12 dump đã đo.
 (mode-scale) tới khi chắc chắn Ca C đã ổn định trên dữ liệu production thật sau khi bật default,
 vì TOC-1 sẽ đổi `unit_count` xuyên trang và làm hết hạn mọi số đo mode-scale đo trước đó.
 
+---
+
+# QA — US-16 v2 (Mở rộng nén ảnh sang FlateDecode) — 2026-09-08
+
+**QA**: QA (Sonnet). **Phạm vi**: `src/postprocess/image_compress.py`,
+`src/postprocess/bilingual_merge.py`, wiring `src/core/job_orchestrator.py` (gate
+`pdf_translate_engine == "babeldoc"`), `tests/test_image_compress.py`,
+`tests/test_bilingual_merge.py`. Dev đã implement theo `docs/Architecture.md` mục "US-16 v2 —
+Final Decision sau phản biện Domain Expert (2026-09-08)" (W6/W7/W8), Reviewer đã **APPROVE**
+(xem `docs/review-report.md` mục "Review — US-16 v2 (mở rộng nén ảnh sang `/FlateDecode` + fix
+`bilingual_merge.py`) — 2026-09-08"). Theo brief PM: không lặp lại 100% những gì Reviewer đã làm
+(đã trace tay 13 bước W6, verify W2.2 bằng script độc lập trên 2 fixture, verify `/Decode`/`/Mask`
+độc lập) — QA tập trung vào (1) tự chạy lại toàn bộ test suite không tin số cũ, (2) đối chiếu
+từng dòng acceptance criteria PRD, (3) live verification thêm trên 1 job **CHƯA từng được Dev hay
+Reviewer chạy sống** để lấp khoảng trống R5-03/R6-03 tinh thần, (4) xác nhận riêng nhánh `pdf2zh`
+không bị đụng.
+
+## 1. Chạy lại toàn bộ test suite (độc lập, không tin số cũ)
+
+```
+.venv/bin/python -m pytest -q
+→ 441 passed, 426 warnings in 86.89s
+```
+
+Khớp đúng con số Dev/Reviewer đã báo (441 = 435 trước US-16 v2 + 6 test mới). Warning còn lại là
+`RuntimeError: Event loop is closed` từ teardown thread `aiosqlite` — cùng loại benign warning đã
+ghi nhận ở QA US-16 v1, không liên quan US-16 v2, không chặn.
+
+```
+.venv/bin/python -m pytest tests/test_image_compress.py tests/test_bilingual_merge.py \
+  tests/integration/test_job_orchestrator.py -v
+→ 34 passed (8 test_image_compress + 3 test_bilingual_merge + 23 test_job_orchestrator,
+  bao gồm đủ 5 test mới theo bảng W8: flate_fixture, skips_indexed…, keeps_original_colorspace_key,
+  clears_decode_and_preserves_pixel_render, skips_images_with_mask_key)
+```
+
+Khớp đúng số Reviewer đã báo. Đã tự đọc từng tên test khớp đúng bảng W8 (không chỉ tin số đếm).
+
+## 2. Đọc code thật đối chiếu W6 (không tin lại kết luận Reviewer, tự đọc lại)
+
+Tự đọc toàn bộ `src/postprocess/image_compress.py` (387 dòng) — xác nhận độc lập các điểm quan
+trọng nhất theo góc độ QA (không lặp lại trace 13 bước chi tiết Reviewer đã làm):
+
+- Dòng 97: allowlist `_ELIGIBLE_CS_FAMILIES = {DeviceGray, DeviceRGB, DeviceCMYK, ICCBased}` đọc
+  từ `info[5]` (dòng 182), KHÔNG dùng `Pixmap.colorspace.name` ở bất kỳ đâu cho mục đích guard —
+  khớp đúng BR-IMGCOMP-02c.
+- Dòng 342-349: không có dòng nào ghi `xref_set_key(xref, "ColorSpace", ...)` — khớp W2.
+- Dòng 359-361: `/Decode` chỉ bị xoá khi tồn tại và khác `null` — khớp sửa lỗi tiềm ẩn của
+  BR-IMGCOMP-02c.
+- Dòng 235-244: guard `/Mask` bắt cả `array` lẫn `xref` chỉ bằng so với `"null"` — khớp W3.
+- `src/core/job_orchestrator.py:573-574`: gate DUY NHẤT là
+  `if self._settings.pdf_translate_engine == "babeldoc": await compress_pdf_images(merged_path)`
+  — không đổi so với US-16 v1, `grep -n "compress_pdf_images" src/core/job_orchestrator.py` chỉ ra
+  đúng 2 dòng (import + lời gọi này), không có nhánh `pdf2zh` nào gọi hàm — khớp BR-IMGCOMP-01.
+- `src/postprocess/bilingual_merge.py`: đúng 1 dòng đổi, `save(output_path)` →
+  `save(output_path, garbage=4, deflate=True)` — khớp quyết định (B) đã được user duyệt
+  (`docs/CHANGELOG.md` mục US-16 v2 "2 quyết định user đã duyệt").
+
+Không phát hiện sai lệch nào giữa code thật và thiết kế W6/W10 đã chốt.
+
+## 3. Live verification bổ sung — 1 job CHƯA ai chạy sống (R5-03/R6-03 tinh thần)
+
+Brief nói rõ: Dev đã chạy thật trên `78674af9` (bản copy), Reviewer đã chạy thật trên fixture
+trích từ `78674af9` + `136645f9`. Cả 3 lần đều chỉ dùng **2 job** trong số 6 job có sẵn ở
+`data/outputs/`, và với `bilingual_merge.py` cả Dev lẫn Reviewer **chỉ verify bằng file dựng tay
+20 trang** (`fonts/NotoSerif-Regular.ttf`), chưa ai chạy fix thật trên 1 file bilingual **sản xuất
+đầy đủ** đã có sẵn bug (91MB thật, không phải dựng tay). Đây là khoảng trống cụ thể QA quyết định
+lấp, chọn job **`4c9834bf`** — chưa job nào trong 2 báo cáo trước dùng tới job này cho live test:
+
+```
+$ for job in 40cb4746 803fce52 f18f796c 4c9834bf; do quét info[5]/Filter mọi ảnh; done
+4c9834bf-553c-411d-96c6-290d1a89655a: 298 trang {'/CCITTFaxDecode': 1, '/FlateDecode': 13}
+```
+
+13 ảnh `/FlateDecode` thật — đủ để exercise nhánh BR-IMGCOMP-02b mở rộng.
+
+**Quy trình**: copy `translated_vi.pdf` (6,491,316 bytes) và `bilingual_vi_en.pdf` (91,195,076
+bytes) từ `data/outputs/4c9834bf-553c-411d-96c6-290d1a89655a/` ra scratchpad TRƯỚC khi test. Sau
+khi chạy xong, `md5` lại 2 file gốc tại `data/outputs/...` — **khớp y hệt MD5 lúc trước khi copy**
+(`9580e6a1...`/`aa458d5d...`), xác nhận file production không hề bị đụng.
+
+### 3.1. `compress_pdf_images()` thật trên `4c9834bf/translated_vi.pdf`
+
+Gọi trực tiếp hàm thật (import thẳng `src.postprocess.image_compress.compress_pdf_images`,
+không mock) trên bản copy:
+
+```
+size_before = 6,491,316 bytes
+size_after  = 5,407,021 bytes   (−16.7%)
+stats: images_scanned=14 images_recompressed=13 images_skipped_already_compressed=1
+       images_skipped_larger=0 images_skipped_unsupported=0 images_skipped_small=0
+       images_skipped_colorspace=0
+page_count before/after = 298/298
+pages_with_text_diff = 0/298
+total_chars before/after = 497,886/497,886   (khớp tuyệt đối)
+```
+
+Toàn bộ 13/13 ảnh `/FlateDecode` được re-encode (`images_recompressed=13`), không có ảnh nào bị
+guard colorspace/mask/bpc loại — đúng dự kiến vì cả 13 ảnh đều `DeviceGray`/`DeviceRGB` bpc=8,
+không `Indexed`/mask. Mức giảm 16.7% (6.49MB→5.41MB) **khớp đúng thứ tự độ lớn** với số Architecture.md
+W10 đã ghi cho chính job này ("`4c9834bf` 6.19 → 5.16 MB") — chênh lệch nhỏ do 2 lần trích/đo độc
+lập (đơn vị MB/MiB + độ lệch nội tại của nén Flate/JPEG giữa các lần chạy PyMuPDF, không phải sai
+lệch logic).
+
+Kiểm tra riêng `/ColorSpace` không bị ghi đè (đọc trực tiếp trước/sau bằng `xref_get_key`): các
+ảnh `DeviceGray` re-encode xong vẫn `ColorSpace=/DeviceGray`, không bị đổi — khớp W2. Lưu ý: hầu
+hết xref number đổi giữa trước/sau do `garbage=4` renumber object khi save — đây là hành vi chuẩn
+của PyMuPDF (đã ghi nhận đúng ở QA US-16 v1 mục 2.1), không phải bug.
+
+### 3.2. `bilingual_merge.py` fix thật trên `4c9834bf/bilingual_vi_en.pdf` (596 trang, file THẬT đã bug, không dựng tay)
+
+Đây là điểm QA cho là đáng verify nhất: cả Dev và Reviewer mới chỉ tái hiện cơ chế bug bằng file
+dựng tay 20 trang; số liệu lớn (86.97→7.40 MiB) trong Architecture.md W4 là của Domain Expert đo,
+chưa ai verify lại bằng cách tự chạy đúng lệnh `save()` mới (`garbage=4, deflate=True`) — đúng
+y hệt dòng code mới trong `bilingual_merge.py` — trên file sản xuất đầy đủ:
+
+```
+size_before = 91,195,076 bytes (91.20 MB = 86.97 MiB)
+size_after  = 7,757,449 bytes (7.76 MB = 7.40 MiB)
+reduction   = 91.5%
+/Length1 font streams before/after = 592/9
+page_count before/after = 596/596
+pages_with_text_diff = 0/596
+total_chars before/after = 1,018,503/1,018,503   (khớp tuyệt đối)
+```
+
+**Khớp CHÍNH XÁC** với số liệu Architecture.md W4/W9 đã ghi ("9 font gốc → 592 bản sao", "86.97 →
+7.40 MiB") — đây là lần đầu tiên số liệu này được tái hiện độc lập bởi 1 bên thứ 3 (QA) bằng cách
+tự chạy đúng lệnh save mới trên đúng file production đầy đủ, không phải file dựng tay hay số kế
+thừa từ Domain Expert. Text 596/596 trang giống hệt tuyệt đối, số trang không đổi.
+
+### 3.3. Kiểm tra ảnh còn hiển thị đúng, không đảo màu (render trực tiếp, xem bằng mắt)
+
+Render `page.get_pixmap(dpi=100)` 3 trang có ảnh `/FlateDecode` (trang 46, 47, 49) trước/sau khi
+nén, lưu PNG và tự xem bằng mắt: **giống hệt nhau**, không có dấu hiệu đảo màu/nhiễu/vỡ ảnh, chữ
+tiếng Việt có dấu (tỷ lệ, đáng kể, bánh bông lan) hiển thị đúng, không lệch dòng. Khớp đúng kỳ
+vọng W2 (giữ `/ColorSpace` gốc → không có lệch màu kiểu Quartz mà Domain Expert đã đo khi
+`/ColorSpace` bị ghi đè).
+
+### 3.4. Kết luận mục 3
+
+Live verification bổ sung trên `4c9834bf` (job chưa ai dùng để test sống trước đây) xác nhận cả
+2 thay đổi chính của US-16 v2 hoạt động đúng trên dữ liệu production thật, độc lập với những gì
+Dev/Reviewer đã chạy. Không phát hiện sai lệch. File production gốc không bị đụng (MD5 khớp).
+
+## 4. Xác nhận riêng: nhánh `pdf2zh` KHÔNG bị ảnh hưởng (BR-IMGCOMP-01 không đổi)
+
+- Đọc code: `grep -n "compress_pdf_images" src/core/job_orchestrator.py` → đúng 2 dòng (import
+  dòng 56, lời gọi dòng 574), cả 2 đều nằm trong nhánh `if pdf_translate_engine == "babeldoc"`
+  (dòng 573) — không có lời gọi nào khác trong toàn bộ file.
+- Chạy lại `test_pdf2zh_engine_does_not_compress_images` (`tests/integration/test_job_orchestrator.py:946`)
+  → **PASS** — test dùng spy `AsyncMock` trên `compress_pdf_images`, assert
+  `compress_spy.assert_not_awaited()` khi `pdf_translate_engine="pdf2zh"` — đúng kiểu assertion
+  mạnh (không chỉ tin "job completed"), khớp tinh thần R6-02.
+- `bilingual_merge.py` (đường `save(garbage=4, deflate=True)`) là code path DÙNG CHUNG cho cả 2
+  engine (đã ghi rõ ở Architecture.md W10-b) — nhưng đây là sửa lỗi/tối ưu save, không đổi nội
+  dung logic dịch của `pdf2zh`; đã verify ở mục 3.2 rằng nội dung/số trang không đổi, nên rủi ro
+  cho nhánh `pdf2zh` (nếu user bật song ngữ) là như nhau, không xấu đi.
+
+**PASS** — nhánh `pdf2zh` không bị ảnh hưởng bởi US-16 v2, cả bằng đọc code lẫn test tự chạy lại.
+
+## 5. Đối chiếu Acceptance Criteria (PRD.md §4.9, BR-IMGCOMP-02b/02c) — từng dòng
+
+| # | Acceptance Criteria (PRD BR-IMGCOMP-02b/02c) | Kết quả |
+|---|---|---|
+| 1 | Re-encode ảnh `Filter: null` **HOẶC** `/FlateDecode` (lossless zlib) sang JPEG q85; codec ảnh chuyên dụng (DCTDecode/CCITTFaxDecode/JPXDecode/JBIG2Decode) giữ nguyên tuyệt đối | **PASS** — đọc code dòng 190-207 (eligibility so tuyệt đối, không `in`/`split()` sai chỗ); live test mục 3.1: 13/13 ảnh Flate của `4c9834bf` được re-encode, ảnh DCT giữ nguyên (`images_skipped_already_compressed=1`) |
+| 2 | Chỉ re-encode ảnh `BitsPerComponent=8`, colorspace ∈ {Gray/RGB/CMYK, kể cả ICCBased}; `Indexed`/`Separation`/`DeviceN`/`/SMask`/`/ImageMask`/`/Mask`/ảnh <4KB giữ nguyên | **PASS** — test blocking `test_compress_pdf_images_skips_indexed_images_even_at_zero_threshold` PASS (mục 1); guard đọc từ `info[5]` (allowlist đúng trước Pixmap), không dùng `Pixmap.colorspace.name` (đã tự đọc code xác nhận mục 2) |
+| 3 | Allowlist colorspace phải đọc từ PDF dict TRƯỚC KHI giải mã ảnh (không dựa `Pixmap.colorspace.name`, field này không bao giờ thấy `Indexed`) | **PASS** — dòng 178-183 gom `meta_by_xref` từ `get_page_images(full=True)` TRƯỚC vòng lặp xử lý; guard colorspace (dòng 284) chạy ở bước 7, TRƯỚC khi dựng `Pixmap` (bước 8, dòng 299) — đúng thứ tự |
+| 4 | Khi re-encode KHÔNG ghi đè `/ColorSpace` — giữ ICC profile gốc | **PASS** — đọc code xác nhận không có `xref_set_key(..., "ColorSpace", ...)` (mục 2); live test mục 3.1 xác nhận `ColorSpace=/DeviceGray` không đổi trên ảnh thật đã re-encode; render 3 trang không có dấu hiệu lệch màu (mục 3.3) |
+| 5 | Xoá `/Decode` nếu có sau khi ghi đè stream, tránh ảnh âm bản | **PASS** — dòng 359-361, chỉ xoá khi tồn tại và khác `null`; test blocking `test_compress_pdf_images_clears_decode_and_preserves_pixel_render` PASS |
+| 6 | `pdf2zh` KHÔNG áp dụng bước nén, hành vi giữ nguyên (BR-IMGCOMP-01 không đổi) | **PASS** — xem mục 4 |
+| 7 | File output vẫn mở được, số trang không đổi, nội dung/text không mất | **PASS** — live test mục 3.1: 298/298 trang, 497,886/497,886 ký tự khớp tuyệt đối |
+
+**Quyết định (b) — `bilingual_merge.py` sửa kèm lần này**: **PASS** — 1 dòng đổi đúng như user đã
+duyệt (`save(garbage=4, deflate=True)`), live test mục 3.2 tái hiện chính xác số liệu Architecture
+đã ghi (592→9 font stream, 86.97→7.40 MiB), text/số trang giữ nguyên tuyệt đối trên file 596 trang
+thật.
+
+## 6. Bug list
+
+**Không có bug chặn release.** Không phát hiện sai lệch nào giữa code thật, thiết kế W6/W10 đã
+chốt, và kết quả đo trên dữ liệu thật (cả 2 job Dev/Reviewer đã dùng lẫn job `4c9834bf` QA tự thêm).
+2 issue non-blocking còn tồn đọng từ US-16 v1 (rò `.tmp.pdf` khi `save()` lỗi giữa chừng; filter
+dạng array chưa có mẫu thật) **không nằm trong scope diff của v2** (Reviewer đã xác nhận diff v2
+không đụng 2 chỗ đó) — giữ nguyên trạng thái non-blocking đã ghi ở QA US-16 v1 mục 4, không lặp
+lại đánh giá ở đây.
+
+## 7. R5-03/R6-03 gate — trạng thái verify
+
+Theo đúng đánh giá của brief PM và của chính Architecture.md/CLAUDE.md project: PyMuPDF là thư
+viện Python nội bộ (import trực tiếp, không phải subprocess/HTTP service), **không thuộc phạm vi
+bắt buộc** của Protocol 5; đây cũng không phải chuỗi 2 external tool nối tiếp nên Protocol 6 R6-03
+cũng không bắt buộc theo câu chữ. QA vẫn tự nguyện làm thêm 1 lớp verify (mục 3) vì đánh giá thấy
+khoảng trống cụ thể: `bilingual_merge.py` fix trước đó mới chỉ được verify bằng file dựng tay,
+chưa từng chạy trên file production đầy đủ đã có bug thật; và 4/6 job trong `data/outputs/` chưa
+job nào được Dev/Reviewer dùng để test sống. Sau khi QA tự chạy, khoảng trống này đã được lấp —
+số liệu khớp chính xác với Architecture.md trên dữ liệu thật, không có phần nào của US-16 v2 cần
+đánh dấu "release blocked pending live verification".
+
+## 8. KẾT LUẬN
+
+**ready_for_release: YES** cho US-16 v2.
+
+Tất cả acceptance criteria (BR-IMGCOMP-02b/02c, quyết định (a) và (b) đã được user duyệt) đều
+PASS. Test suite đầy đủ 441/441 pass, test riêng US-16 v2 34/34 pass, khớp đúng số Dev/Reviewer
+báo cáo. QA đã tự đọc lại code (không tin lại lời Reviewer) và tự chạy live verification bổ sung
+trên 1 job production thật (`4c9834bf`, 298 trang + bilingual 596 trang) mà cả Dev lẫn Reviewer
+đều chưa dùng để test sống — kết quả khớp chính xác với số liệu Architecture.md đã verify trước
+đó (592→9 font stream, 86.97→7.40 MiB cho `bilingual_merge.py`; 13/13 ảnh Flate re-encode, text
+298/298 trang khớp tuyệt đối, `/ColorSpace` không bị ghi đè cho `image_compress.py`). Render trực
+quan 3 trang xác nhận không đảo màu/corrupt. Nhánh `pdf2zh` xác nhận không bị ảnh hưởng qua cả đọc
+code lẫn test tự chạy lại. File production gốc không bị đụng trong suốt quá trình QA test (MD5
+khớp trước/sau). Không có bug mới, không có bug blocking.
+
