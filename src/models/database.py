@@ -21,6 +21,7 @@ from src.models import (  # noqa: F401
     LayoutQaFinding,
     OverflowReport,
     Setting,
+    SuggestedTerm,
     TranslationCache,
 )
 
@@ -124,5 +125,22 @@ async def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS idx_glossary_entries_term_nocase "
                 "ON glossary_entries(term_en COLLATE NOCASE)"
+            )
+        )
+        # Architecture.md 6.18.3 (US-20): suggested_terms is a brand-new
+        # table (created above by create_all()) but its 2 composite indexes
+        # need the same raw-SQL pattern as idx_glossary_entries_term_nocase
+        # (SQLModel has no declarative composite-index/unique-constraint
+        # usage elsewhere in this codebase to follow instead).
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_terms_job_term "
+                "ON suggested_terms(job_id, term_en)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_suggested_terms_status_rank "
+                "ON suggested_terms(status, rank_score DESC)"
             )
         )

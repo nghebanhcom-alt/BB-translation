@@ -5150,3 +5150,259 @@ cách, không giả vờ đã verify).
 US-15 chính + `parse_method` override trong session này, không phải vòng sửa lỗi sau REJECT.
 
 ---
+
+# Review Report — US-20 "Các từ mới" (gợi ý thuật ngữ mới)
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-08
+- **Phạm vi**: `src/core/term_extractor.py`, `src/core/glossary_matching.py`,
+  `src/core/term_extraction_service.py`, `src/models/suggested_term.py`,
+  `src/core/wordlists/en_function_words.txt`, `src/api/routes/glossary.py` (phần
+  `/suggested/*`), `src/api/routes/jobs.py` (wire `_run_job_background`,
+  `POST /{id}/extract-terms`, cleanup trong `DELETE /{id}`), `src/models/database.py`,
+  `src/core/config.py`, `web/glossary.html`, `web/js/suggested-terms.js`, cùng 5 file test mới
+  (`tests/test_glossary_matching.py`, `tests/test_term_extractor.py`,
+  `tests/integration/test_term_extraction_service.py`,
+  `tests/integration/test_suggested_terms_api.py`, `tests/integration/test_extract_terms_endpoint.py`).
+- **Không review**: `src/core/glossary_manager.py` (đang sửa song song ở worktree khác, xác nhận qua
+  `git log`/`git status` — Dev không đụng file này), Bug #8 (`rotated_text_overlay.py`/`font_shrink.py`/
+  `searchable_pdf.py`/`pdf_coords.py` và 2 test file liên quan — đang có thay đổi uncommitted của 1
+  session khác, không thuộc US-20), US-15/17/18/19/21/22.
+
+## Verdict: APPROVE
+
+Đã đọc trực tiếp toàn bộ code (không chỉ tin CHANGENOG), đối chiếu từng quyết định với
+Architecture.md §6.18 (đặc biệt §6.18.8 "Final Decision") và
+`docs/expert-review-us20-suggested-terms.md`, tự chạy độc lập tokenizer/n-gram trên fixture MinerU
+thật, tự chạy lại toàn bộ test suite + ruff, và tự grep xác nhận không còn trần cứng 40 nào sót lại.
+Không phát hiện issue blocking. 2 non-blocking suggestion (mục "Danh sách issue").
+
+---
+
+## 1. Đối chiếu Architecture.md §6.18.8 (Final Decision) — verify từng điểm trọng tâm
+
+### 1.1. Tokenizer/n-gram (T1/T2/T4) — tự verify trên dữ liệu MinerU thật, không chỉ tin test có sẵn
+
+Tự chạy `normalize_source_text()` + `extract_terms()` trực tiếp trên
+`tests/fixtures/mineru/parse_only_txt_figoni25/document.md` (fixture OCR thật từ US-15) ngoài phạm vi
+bất kỳ test nào Dev đã viết, để loại trừ khả năng test tự xác nhận giả định của chính nó:
+
+```
+standalone 'avor' token count : 0      (không còn mảnh vỡ ligature đứng lẻ)
+standalone 'flavor' token count: 4
+standalone 'flour' token count : 35
+'avor' xuất hiện như 1 candidate riêng: False
+candidate 'flour': occurrence_count=47 (đã gộp đúng ligature 'fl our' → 'flour')
+'<td>' còn sót trong normalized text: False
+'td'/'tr' xuất hiện như candidate: False
+```
+
+Đây chính là 2 bug nghiêm trọng nhất Domain Expert từng đo được trên spec cũ (`avor` #1 top-40 x638,
+`td td td` #1 nhánh Markdown) — cả hai đều KHÔNG tái diễn. Kết luận: **T4 (tokenizer/ligature/HTML-strip)
+implement đúng, tự verify độc lập xác nhận, không chỉ tin test Dev viết.**
+
+### 1.2. So khớp glossary (T3) — `glossary_matching.py::glossary_match_forms()`
+
+- Đọc trực tiếp `src/core/glossary_matching.py`: xử lý đúng 3 dạng thật trong glossary user
+  (`a / b`, `x (note)`, cụm nhiều từ), sinh biến thể hình thái bằng EXPAND (không stemming ứng viên) —
+  đúng lý do T3 nêu (tránh over-stem trên từ không kiểm soát được).
+- `tests/test_glossary_matching.py::test_real_glossary_114_entries_cover_documented_leak_cases` chạy
+  đúng 13 term Domain Expert đã đo là "leak" dưới `.lower()` cũ (`pound`, `ounce`, `bloom`,
+  `tempering`, `whipping`, `kneading`, `teaspoon`, `glaze`, `silpat`, `fahrenheit`, `knead`,
+  `whisking`, `tablespoon`) + 3 case số nhiều (`crusts`, `meringues`, `mousses`) — PASS. Đã tự chạy lại
+  test này độc lập (không chỉ tin `pytest -q` tổng), xác nhận đúng.
+- **Không đụng `glossary_manager.py::_count_occurrences()`**: grep xác nhận `git status`/`git log`
+  không có thay đổi nào trên file này trong session US-20; `glossary_matching.py` (module mới) không
+  import từ `glossary_manager.py`, và `_collect_existing_glossary_forms()` trong
+  `term_extraction_service.py` query trực tiếp `GlossaryEntry` qua SQLModel thay vì gọi qua
+  `GlossaryManager` — đúng như CHANGELOG mô tả, không có xung đột merge tiềm ẩn với worktree đang sửa
+  song song.
+
+### 1.3. Điều kiện lọc DUY NHẤT = "không có trong glossary" — không còn trần cứng 40
+
+`grep -n "\b40\b" src/core/term_extractor.py src/core/glossary_matching.py
+src/core/term_extraction_service.py src/models/suggested_term.py src/core/config.py` chỉ ra đúng 2 chỗ
+"40" còn lại trong toàn bộ module thuật toán, cả hai đều là **comment nhắc lại thiết kế CŨ đã bị bác
+bỏ** (`term_extractor.py` module docstring, `config.py` comment giải thích "đã đổi ý nghĩa từ 40"),
+không phải giá trị đang dùng. Con số "40" thật duy nhất còn sống trong code là
+`_MAX_TERMS_PER_SUGGEST_TRANSLATION_REQUEST = 40` trong `glossary.py` — đây là **giới hạn batching 1
+request LLM** (đúng Architecture.md §6.18.4 "Gộp tối đa 40 term vào 1 request LLM duy nhất"), khác hẳn
+bản chất với "trần chất lượng hiển thị" đã bị user bác bỏ — không vi phạm quyết định user.
+`max_suggested_terms_per_job` default `20_000`, chỉ cắt khi thật sự chạm van (đọc code
+`extract_terms()` dòng cuối: `if len(results) > cap: ... results = results[:cap]`) — đúng vai trò "van
+chống tràn DB", không phải bộ lọc chất lượng. **Xác nhận: không có trần cứng tuỳ ý nào trái quyết định
+user.**
+
+### 1.4. BR-TERM-01 — trích xuất chạy SAU `completed`, không chặn luồng dịch chính
+
+Trace tay `src/api/routes/jobs.py::_run_job_background()` (dòng 440-473): `run_job()` được `await`
+xong (kể cả nhánh crash có `except Exception` riêng với `return` sớm — đúng CHANGELOG "tránh NameError
+khi tham chiếu `result` chưa gán") TRƯỚC KHI bước US-20 chạy; bước US-20 nằm trong `try/except`
+**riêng biệt**, chỉ log `logger.exception` khi lỗi, không có đường nào gán lại `job.status`. Điều kiện
+`result.status == "completed"` đúng BR-TERM-01/EC-20.3. Xác nhận đúng bằng đọc code trực tiếp.
+
+**Gap nhỏ, non-blocking (xem mục "Danh sách issue" #1)**: property an toàn này (lỗi extraction không
+làm hỏng job dịch) chỉ được xác nhận bằng đọc code tay + test đơn vị cho `extract_and_store_terms()`
+tự nó raise đúng lỗi — chưa có test nào exercise chính cái `try/except` bọc ngoài trong
+`_run_job_background()` (vd mock `extract_and_store_terms` raise, assert `job.status` vẫn
+`"completed"` và không có exception nào lọt ra ngoài background task).
+
+### 1.5. BR-TERM-04 — "Bỏ qua" chỉ trong phạm vi 1 job
+
+Đọc `src/models/suggested_term.py`: `status` chỉ có 3 giá trị `pending | added | dismissed`, không có
+bảng/cờ lưu lịch sử toàn cục nào khác. `dismiss_suggested_term()` trong `glossary.py` chỉ đổi
+`row.status` của đúng 1 row (`suggested_id` cụ thể, gắn với `job_id` cụ thể qua FK) — không có
+`dismissed_terms` bảng riêng hay logic nào chặn từ đó xuất hiện lại ở job khác. Đúng thiết kế đã chốt.
+
+---
+
+## 2. Đánh giá 4 điểm Dev tự quyết định (CHANGELOG mục "Điểm chưa rõ ràng")
+
+**(a) Mâu thuẫn nội tại T3 — "giữ nội dung ngoặc nếu ≥3 ký tự, không phải viết tắt thuần" vs ví dụ
+`pound (lb)`/`SMBC`.** Dev chọn theo ví dụ (luôn giữ nội dung ngoặc, kể cả ngắn/viết tắt). Đánh giá:
+**hợp lý và đúng nguyên tắc rủi ro bất đối xứng mà chính §6.18.8 T3 nêu** ("thà gộp nhầm còn hơn bỏ
+sót" — over-inclusion ở một bộ lọc mà việc gộp nhầm chỉ ẩn bớt 1 gợi ý, trong khi bỏ sót làm lộ lại
+đúng thứ user vừa cấm). Test `test_parenthetical_kept_as_extra_alternative_even_when_short` code hoá
+đúng lựa chọn này, có ghi chú rõ mâu thuẫn trong docstring. Đây thực sự là mâu thuẫn 2 câu trong chính
+Architecture.md (đã tự đọc lại §6.18.8 T3 xác nhận), không phải Dev đọc sai — cần Tech Lead xác nhận
+lại như Dev đã nêu, nhưng lựa chọn hiện tại không sai và có lý do kỹ thuật vững, **không blocking**.
+
+**(b) `data/wordlists/` → `src/core/wordlists/` do `.gitignore` chặn `data/`.** Tự verify:
+`git check-ignore -v data/wordlists/test.txt` → khớp rule `.gitignore:12:data/` (bị chặn);
+`git check-ignore -v src/core/wordlists/en_function_words.txt` → exit 1 (KHÔNG bị chặn). **Xác nhận
+đúng 100% — đây là quyết định kỹ thuật bắt buộc, không phải tuỳ chọn**: nếu ship đúng theo spec gốc
+`data/wordlists/`, file sẽ không bao giờ vào git, mọi checkout mới thiếu wordlist → tokenizer mất toàn
+bộ stoplist hư từ. Đúng, cần ship cùng `src/`.
+
+**(c) `en_freq_top50k.tsv` chưa ship, `specificity` degrade về 1.0.** Đọc `_load_freq_ranks()`
+(`term_extractor.py:89-113`): trả `None` nếu file không tồn tại; `_specificity()` (dòng 163-174) trả
+`1.0` khi `ranks` falsy. Đúng khớp claim "an toàn" của Architecture.md §6.18.8 T2 ("chỉ mất chất lượng
+sắp xếp, không đổi tập hiển thị") — vì `specificity` CHỈ nhân vào `rank_score` (thứ tự hiển thị), không
+xuất hiện ở bất kỳ điều kiện lọc/loại bỏ nào trong `extract_terms()`. **Xác nhận claim đúng bằng đọc
+code, không chỉ tin docstring.**
+
+**(d) `suggest-translation` chưa live-verify LLM thật.** Đúng là gap thuộc Protocol 5 R5-03 (QA phải
+smoke-test thật trước khi coi tính năng "chắc chắn hoạt động"), không phải trách nhiệm Reviewer chặn
+release ở bước này — nhưng cần ghi rõ để QA không bỏ sót (đã ghi lại ở phần "R5-04" bên dưới và mục
+"Danh sách issue" #2 để bảo đảm không bị quên khi bàn giao QA).
+
+---
+
+## 3. Các điểm khác trong brief
+
+**`promote()` gọi thẳng `create_entry()`, chưa có BR-GLOSS-07.** Đọc `create_entry()`
+(`glossary.py:127-148`): dùng `GlossaryManager.bulk_import()` hiện tại (last-updated-wins âm thầm,
+đúng BR-GLOSS-03, chưa có confirm-overwrite 409 của BR-GLOSS-07 — vì `bulk_import()` tự nó chưa
+implement rule đó, xác nhận bằng đọc code, không thấy check trùng nào trước khi ghi). Đây đúng là giới
+hạn của US-17 (chưa implement), không phải Dev né việc — `promote_suggested_term()` docstring ghi rõ
+lý do + `request.force` được nhận nhưng chưa có tác dụng, đúng tinh thần "ghi rõ khoảng trống thay vì
+giả vờ đã xong". **Đánh giá đúng, không blocking.**
+
+**Frontend event bridge tự phát hiện + tự sửa.** Đọc `web/glossary.html` dòng 23:
+`x-init="load(); window.addEventListener('glossary-entries-changed', () => load())"` trên
+`glossaryApp()` (bảng glossary chính) và `web/js/suggested-terms.js::promote()`:
+`window.dispatchEvent(new CustomEvent('glossary-entries-changed'))` sau khi promote thành công. Đây là
+cầu nối cross-component hợp lý cho Alpine.js (2 component độc lập, không có state store chung), không
+phải hack tạm — pattern `CustomEvent` trên `window` là cách chuẩn để 2 Alpine component không có quan
+hệ cha-con giao tiếp. **Xác nhận đúng, không phải hack.**
+
+**R5-04 checklist**: `term_extractor.py`, `glossary_matching.py`, `term_extraction_service.py` —
+**N/A** (thuật toán heuristic thuần + DB/filesystem nội bộ, không gọi external tool/API nào, đúng ghi
+chú trong chính module docstring "không thuộc phạm vi Protocol 5"). `glossary.py::suggest_translation_for_terms`
+— gọi `provider.translate()` (contract LLM provider đã verify/dùng cho pipeline dịch chính, không phải
+contract mới) nên **N/A** theo nghĩa "không phải external contract MỚI", nhưng hành vi
+prompt-engineering cụ thể (LLM có trả đúng JSON theo prompt hay không) **CHƯA VERIFY** — đã ghi nhận ở
+mục 2(d) trên, đúng CHANGELOG tự báo cáo trung thực (`[CHUA VERIFY]` trong docstring
+`_parse_translation_json`), không giấu diếm hay giả vờ đã verify.
+
+---
+
+## 4. Type hints, security, error handling — quét chung
+
+- Toàn bộ hàm mới có type hint đầy đủ tham số + return (`extract_terms`, `normalize_source_text`,
+  `glossary_match_forms`, `_extract_source_text_for_terms`, `extract_and_store_terms`, mọi route
+  handler trong `glossary.py`/`jobs.py` liên quan US-20).
+- Không phát hiện injection: mọi truy vấn DB qua SQLModel `select()` tham số hoá (không có string
+  interpolation vào SQL); path liên quan (`job.file_path`/`ocr_bridge_path`/`output_path`) đều đến từ
+  DB (dữ liệu nội bộ, không phải input trực tiếp từ request), dùng `Path` object nhất quán, không có
+  string-concat path nào mới.
+- Frontend (`suggested-terms.js`) không dùng `x-html`/`innerHTML` — chỉ `x-text`/binding chuẩn Alpine,
+  không có XSS surface mới; mọi gọi API qua `fetch` + `JSON.stringify`, không có template string nối
+  trực tiếp input user vào DOM.
+- `SuggestedTerm` model: `UNIQUE(job_id, term_en)` + idempotent re-run (xoá `pending` cũ, giữ
+  `added`/`dismissed`) — đã tự suy luận 1 kịch bản lý thuyết (surface text đổi giữa 2 lần chạy trên
+  cùng job có thể đụng UNIQUE constraint với `decided_terms` cũ), nhưng vì `source_text` của 1 job
+  `completed` là bất biến (không có đường nào job thay đổi file sau khi hoàn tất) nên `extract_terms()`
+  cho kết quả deterministic giữa các lần chạy lại — rủi ro này không xảy ra trong thực tế, chỉ ghi nhận
+  để hồ sơ, **không phải issue**.
+
+---
+
+## 5. Regression — tự chạy lại độc lập
+
+```
+$ uv run ruff check src/ tests/ web/
+All checks passed!
+
+$ uv run pytest -q
+518 passed, 1 failed, 761 warnings in 88.71s
+FAILED tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle
+```
+
+Khớp đúng 100% số Dev báo cáo (518 passed / 1 failed). `git status --short` xác nhận
+`rotated_text_overlay.py`/`font_shrink.py`/`searchable_pdf.py`/`pdf_coords.py` +
+`tests/test_rotated_text_overlay.py`/`tests/test_font_shrink.py` đang có thay đổi CHƯA COMMIT — khớp
+lời giải thích "1 session/worktree khác đang sửa Bug #8 song song", không liên quan US-20. Fail này đã
+được xác nhận từ trước (xem "Bug #7 Ca C"/US-15 review ở trên trong file này) là bug độc lập, có trước
+US-20.
+
+---
+
+## Danh sách issue
+
+**Không có issue blocking.**
+
+**Non-blocking (2)**:
+
+1. **Thiếu test cho chính `try/except` bọc US-20 trong `_run_job_background()`** (`src/api/routes/jobs.py:467-473`).
+   Toàn bộ test hiện có (`test_term_extraction_service.py`) test `extract_and_store_terms()` tự nó raise
+   đúng lỗi khi lineage sai — đúng, nhưng không có test nào mock `extract_and_store_terms` để raise rồi
+   assert (a) `job.status` vẫn giữ nguyên `"completed"` (không bị ghi đè), (b) background task không
+   crash/propagate exception ra ngoài. Đây là property an toàn quan trọng nhất của BR-TERM-01 (lỗi
+   extraction không được làm hỏng job dịch) — hiện chỉ được bảo vệ bằng đọc code tay, không có
+   regression test tự động. Rủi ro: 1 lần refactor vô tình di chuyển lời gọi US-20 vào trong khối
+   try/except của `run_job()` (hoặc trước khi `result.status` được set) sẽ không bị bất kỳ test nào bắt
+   được. Đề xuất: thêm 1 test ở `test_job_orchestrator.py` hoặc file mới, mock
+   `extract_and_store_terms` raise `Exception`, gọi `_run_job_background()`, assert job vẫn
+   `"completed"`.
+2. **`suggest-translation` chưa có smoke test LLM thật** (đã Dev tự ghi nhận trong CHANGELOG, mục 2(d)
+   ở trên) — nhắc lại ở đây để đảm bảo không bị bỏ sót khi bàn giao QA: đây là gap Protocol 5 R5-03,
+   QA phải chạy ít nhất 1 lần gọi thật (không mock) tới provider mặc định (DeepSeek) trước khi coi
+   tính năng "Gợi ý bản dịch" là sẵn sàng release, và nếu chưa cài được ở máy QA phải ghi rõ
+   `"release blocked pending live verification: <provider>"` trong `docs/test-report.md` theo đúng
+   R5-03 — không được coi mock/fallback-regex-only là đủ điều kiện.
+
+## Kết luận
+
+**APPROVE.**
+
+Căn cứ: mọi quyết định trọng tâm của §6.18.8 (bỏ trần 40, bỏ `en_common.txt`, tokenizer/ligature,
+`glossary_match_forms()` làm điều kiện lọc duy nhất, lineage §6.18.5, cô lập lỗi BR-TERM-01, BR-TERM-04
+per-job) đã được đối chiếu trực tiếp với code (không chỉ tin CHANGELOG) và một phần được tự verify độc
+lập bằng cách chạy trực tiếp trên fixture MinerU thật + grep toàn bộ codebase tìm dấu vết trần cứng còn
+sót. Cả 4 điểm Dev tự quyết định đều hợp lý về kỹ thuật, có bằng chứng cụ thể (đặc biệt điểm (b) đã tự
+verify bằng `git check-ignore`). 2 issue non-blocking không chặn release nhưng cần theo dõi — #1 nên
+được Dev vá trong 1 lần chạm file tiếp theo (chi phí thấp), #2 là trách nhiệm QA (Protocol 5 R5-03), đã
+ghi rõ để không bị bỏ sót.
+
+R5-04: **External contract verified against real source: N/A** cho `term_extractor.py`/
+`glossary_matching.py`/`term_extraction_service.py` (thuật toán + DB/filesystem nội bộ thuần, không có
+external tool/API nào). Riêng `suggest_translation_for_terms()` trong `glossary.py`: contract
+`provider.translate()` chính nó không phải mới (đã verify ở pipeline dịch chính), nhưng hành vi JSON cụ
+thể của prompt mới này **CHƯA VERIFY** với LLM thật — ghi nhận đúng, không giả vờ, đã đưa vào issue #2
+non-blocking ở trên để QA xử lý theo R5-03.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) — đây là lượt review ĐẦU TIÊN của US-20 trong
+session này, không phải vòng sửa lỗi sau REJECT.
+
+---

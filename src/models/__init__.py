@@ -7,6 +7,7 @@ from src.models.job import Job
 from src.models.layout_qa import LayoutQaFinding
 from src.models.overflow import OverflowReport
 from src.models.settings import Setting
+from src.models.suggested_term import SuggestedTerm
 
 __all__ = [
     "Batch",
@@ -18,5 +19,6 @@ __all__ = [
     "LayoutQaFinding",
     "OverflowReport",
     "Setting",
+    "SuggestedTerm",
     "TranslationCache",
 ]

@@ -17,7 +17,11 @@
     <a href="/settings.html" class="text-sm text-gray-600 hover:text-amber-700">Cài đặt</a>
   </nav>
 
-  <main class="max-w-5xl mx-auto p-6" x-data="glossaryApp()" x-init="load()">
+  <main
+    class="max-w-5xl mx-auto p-6"
+    x-data="glossaryApp()"
+    x-init="load(); window.addEventListener('glossary-entries-changed', () => load())"
+  >
     <div class="flex justify-between items-center mb-4">
       <h1 class="text-xl font-bold">Quản lý Glossary</h1>
       <div class="flex gap-2">
@@ -46,6 +50,92 @@
         <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm" @click="confirmImport()">Xác nhận import</button>
         <button class="border px-3 py-1.5 rounded text-sm" @click="importPreview = null">Hủy</button>
       </div>
+    </section>
+
+    <!-- US-20 "Cac tu moi" — khu vuc Cho duyet (Architecture.md 6.18) -->
+    <section class="bg-white border rounded p-4 mb-6" x-data="suggestedTermsApp()" x-init="load()">
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="font-bold">
+          Các từ mới — Chờ duyệt
+          <span class="text-gray-400 font-normal text-sm" x-text="`(${total})`"></span>
+        </h2>
+        <button class="text-xs text-amber-700 hover:underline" @click="collapsed = !collapsed" x-text="collapsed ? 'Hiện' : 'Ẩn'"></button>
+      </div>
+
+      <template x-if="!collapsed">
+        <div>
+          <p class="text-xs text-gray-500 mb-3">
+            Gợi ý thuật ngữ chưa có trong glossary, trích xuất tự động sau khi dịch xong (miễn phí,
+            không gọi LLM). Chọn 1 hoặc nhiều dòng rồi bấm "Gợi ý bản dịch" nếu muốn — thao tác đó
+            có gọi LLM và phát sinh chi phí nhỏ.
+          </p>
+
+          <div class="flex flex-wrap gap-2 mb-3 items-center text-sm">
+            <select x-model="sort" @change="offset = 0; load()" class="border rounded px-2 py-1">
+              <option value="rank">Sắp theo: độ liên quan</option>
+              <option value="count">Sắp theo: số lần xuất hiện</option>
+              <option value="alpha">Sắp theo: A → Z</option>
+            </select>
+            <label class="flex items-center gap-1">
+              <input type="checkbox" :checked="minNgram === 2" @change="minNgram = $event.target.checked ? 2 : 1; offset = 0; load()" />
+              Chỉ cụm ≥ 2 từ
+            </label>
+            <label class="flex items-center gap-1" x-show="noiseHiddenCount > 0 || includeNoise">
+              <input type="checkbox" x-model="includeNoise" @change="offset = 0; load()" />
+              <span x-text="includeNoise ? 'Đang hiện mục nghi nhiễu' : `Hiện thêm ${noiseHiddenCount} mục nghi nhiễu`"></span>
+            </label>
+            <button
+              class="border rounded px-3 py-1 disabled:opacity-40"
+              :disabled="selectedIds.length === 0 || suggestingTranslation"
+              @click="suggestTranslation()">
+              <span x-text="suggestingTranslation ? 'Đang gọi LLM...' : `Gợi ý bản dịch cho ${selectedIds.length} từ (tốn phí)`"></span>
+            </button>
+            <span class="text-xs text-gray-500" x-show="lastSuggestCost !== null" x-text="`Chi phí lần gọi gần nhất: $${lastSuggestCost?.toFixed(4)}`"></span>
+          </div>
+
+          <table class="w-full border rounded text-sm">
+            <thead class="bg-gray-100">
+              <tr>
+                <th class="p-2 w-8"></th>
+                <th class="p-2 text-left">EN</th>
+                <th class="p-2 text-left">Bản dịch VI (tự gõ hoặc bấm Gợi ý)</th>
+                <th class="p-2 text-left">Số lần</th>
+                <th class="p-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="term in entries" :key="term.id">
+                <tr class="border-t">
+                  <td class="p-2 text-center">
+                    <input type="checkbox" :value="term.id" x-model="selectedIds" />
+                  </td>
+                  <td class="p-2">
+                    <span x-text="term.term_en"></span>
+                    <span class="text-gray-400 text-xs" x-show="term.noise_flags" x-text="`(${term.noise_flags})`"></span>
+                  </td>
+                  <td class="p-2">
+                    <input x-model="draftVi[term.id]" placeholder="(keep) hoặc nhập bản dịch" class="border rounded px-1 w-full" />
+                  </td>
+                  <td class="p-2 text-gray-500" x-text="term.occurrence_count"></td>
+                  <td class="p-2 text-right whitespace-nowrap">
+                    <button class="text-amber-700 text-xs mr-2" @click="promote(term)">Thêm vào glossary</button>
+                    <button class="text-gray-500 text-xs" @click="dismiss(term)">Bỏ qua</button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="entries.length === 0">
+                <td class="p-3 text-center text-gray-400" colspan="5">Không có gợi ý nào đang chờ duyệt.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="flex justify-end items-center gap-2 mt-3 text-sm text-gray-500">
+            <span x-text="total === 0 ? '0 entries' : `${offset + 1}-${Math.min(offset + limit, total)} / ${total} entries`"></span>
+            <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset === 0" @click="prevPage()">Trước</button>
+            <button class="border rounded px-2 py-1 disabled:opacity-40" :disabled="offset + limit >= total" @click="nextPage()">Sau</button>
+          </div>
+        </div>
+      </template>
     </section>
 
     <!-- Filter -->
@@ -97,5 +187,6 @@
   </main>
 
   <script src="/js/glossary.js"></script>
+  <script src="/js/suggested-terms.js"></script>
 </body>
 </html>

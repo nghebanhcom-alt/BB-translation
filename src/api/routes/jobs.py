@@ -34,11 +34,13 @@ from src.core.config import Settings, get_effective_settings
 from src.core.cost_gate import check_cap, estimate_translation_cost, gate_error_detail
 from src.core.job_orchestrator import BatchOrchestrator, JobOrchestrator
 from src.core.ocr_warning import build_ocr_warning
+from src.core.term_extraction_service import TermExtractionSourceError, extract_and_store_terms
 from src.models.batch import Batch
 from src.models.chunk import Chunk
 from src.models.database import get_session_factory
 from src.models.job import Job
 from src.models.overflow import OverflowReport
+from src.models.suggested_term import SuggestedTerm
 from src.services.mineru_runner import MinerURunner
 from src.services.pdf2zh_service_map import Pdf2zhServiceMapper, UnsupportedForPdfPipelineError
 from src.services.provider_factory import ProviderConfigError, ProviderFactory, UnknownProviderError
@@ -445,7 +447,7 @@ async def _run_job_background(job_id: str) -> None:
             progress_broadcaster=connection_manager.broadcast_progress,
         )
         try:
-            await orchestrator.run_job(job_id, session)
+            result = await orchestrator.run_job(job_id, session)
         except Exception as exc:  # last-resort guard for the background task
             logger.exception("Job %s crashed in background task", job_id)
             job = await session.get(Job, job_id)
@@ -454,6 +456,21 @@ async def _run_job_background(job_id: str) -> None:
                 job.error_message = str(exc)
                 session.add(job)
                 await session.commit()
+            return
+
+        # US-20 "Cac tu moi" (Architecture.md 6.18.6, BR-TERM-01): chay SAU
+        # khi run_job() da tra ve, trong try/except RIENG cua no — KHONG co
+        # duong nao o day duoc phep doi job.status. Chi chay khi
+        # status=="completed" (EC-20.3: job dang do/that bai thi van nguyen
+        # van ban nguon, khong mat gi khi user retry xong roi trich xuat lai
+        # qua POST /api/jobs/{id}/extract-terms).
+        if result.status == "completed" and settings.term_extraction_enabled:
+            try:
+                await extract_and_store_terms(job_id, session, settings)
+            except Exception:
+                logger.exception(
+                    "Trich xuat tu moi that bai cho job %s — job VAN completed", job_id
+                )
 
 
 async def _run_batch_background(batch_id: str) -> None:
@@ -701,6 +718,29 @@ async def cancel_job(job_id: str, session: SessionDep) -> CancelResponse:
     return CancelResponse(job_id=job.id, status=job.status, cancel_requested=True)
 
 
+class ExtractTermsResponse(BaseModel):
+    job_id: str
+    written: int
+
+
+@router.post("/{job_id}/extract-terms", response_model=ExtractTermsResponse)
+async def extract_terms_manual(job_id: str, session: SessionDep) -> ExtractTermsResponse:
+    """Architecture.md 6.18.6: chay lai thu cong buoc trich xuat US-20 khi
+    lan chay tu dong (sau job completed, trong `_run_job_background()`) bi
+    loi — vd loi doc file tam thoi, hoac glossary thay doi sau do va user
+    muon loc lai. Dung nguyen `extract_and_store_terms()`, KHONG viet lai
+    logic — loi lineage (Architecture.md 6.18.5) tra ve 400 ro rang thay vi
+    500 mo ho.
+    """
+    settings = await get_effective_settings(session)
+    try:
+        written = await extract_and_store_terms(job_id, session, settings)
+    except TermExtractionSourceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ExtractTermsResponse(job_id=job_id, written=written)
+
+
 #: Job dang chay pipeline — xoa luc nay se de lai file dang duoc
 #: JobOrchestrator ghi do dang chay, va Chunk row co the bi ghi lai ngay sau
 #: khi xoa (resumable, BR-CHUNK-05). Phai dung/huy job truoc (POST .../cancel)
@@ -767,6 +807,14 @@ async def delete_job(job_id: str, session: SessionDep) -> Response:
     ).all()
     for overflow_row in overflow_rows:
         await session.delete(overflow_row)
+    # Architecture.md 6.18.3 (US-20): "them suggested_terms vao dung danh
+    # sach xoa thu cong do — khong duoc tin vao ON DELETE CASCADE" (SQLite
+    # tat FK enforcement mac dinh, giong Chunk/OverflowReport o tren).
+    suggested_term_rows = (
+        await session.exec(select(SuggestedTerm).where(SuggestedTerm.job_id == job_id))
+    ).all()
+    for suggested_term_row in suggested_term_rows:
+        await session.delete(suggested_term_row)
     await session.delete(job)
     await session.commit()
 

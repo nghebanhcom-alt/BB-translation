@@ -4962,3 +4962,214 @@ trên — cần PM xác nhận: (1) không gộp migration cho `finished_at`/`to
 `suggested_terms` vì các thay đổi đó chưa hề tồn tại trong code, thuộc task khác hẳn; (2) không mở
 rộng override qua `/api/batches`). **CHƯA spawn Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là
 "xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào `docs/review-report.md`.
+
+## US-20 "Các từ mới" — gợi ý thuật ngữ mới từ tài liệu vừa dịch (2026-09-08)
+
+Implement theo `docs/Architecture.md` §6.18, **ưu tiên §6.18.8 "Final Decision sau phản biện
+Domain Expert + quyết định mới của user"** ở mọi chỗ mâu thuẫn với §6.18.1-6.18.7 gốc (đúng như
+brief yêu cầu — KHÔNG tự suy diễn lại thiết kế). KHÔNG đụng `src/core/glossary_manager.py` (đang
+sửa song song ở 1 session/worktree khác — chỉ đọc tham khảo). KHÔNG implement US-17/US-18/US-22.
+
+### Module mới — thuật toán trích xuất (`src/core/term_extractor.py`)
+
+- `normalize_source_text()` — 6 bước T4 theo đúng thứ tự Architecture.md quy định: strip
+  HTML/Markdown (bảng `<table>`, ảnh `![]()`, heading `#`) → NFKC → nháy cong → straight → ghép
+  mảnh vỡ ligature (2 rule tách biệt: `fi`/`fl` merge cả dạng lẻ lẫn dạng hậu tố; `ff`/`ffi`/`ffl`
+  CHỈ merge khi là token lẻ đứng riêng — tách 2 rule này để tránh false-positive kiểu "staff
+  members" → "staffmembers" mà spec gốc không cảnh báo rõ) → khử gạch nối ngắt dòng.
+- Tokenizer chấp nhận Latin có dấu (`[A-Za-zÀ-ÿ]...`) — `pâte à choux`, `crème` sống sót nguyên
+  vẹn thay vì bị băm thành `p`/`te`.
+- N-gram 1-3, sinh theo từng "segment" (chia theo bộ dấu câu tường minh gồm cả dấu phẩy — 3-gram
+  không vượt dấu phẩy).
+- Khử lồng nhau: chốt cách đọc **"MAX, không SUM"** đúng T5 — mỗi n-gram ngắn chỉ bị hấp thụ nếu
+  MỘT n-gram dài cụ thể (không phải tổng nhiều n-gram dài khác nhau) chiếm ≥80% số lần xuất hiện
+  của nó. N-gram dài đã khớp glossary vẫn được tính là "đã giữ" cho mục đích hấp thụ (dù bản thân
+  nó bị lọc khỏi kết quả) — sửa đúng lỗi thứ tự bước 3/4 mà bản gốc mắc phải (`puff` #35 mồ côi
+  sau khi `puff pastry` bị xoá trước khi kịp hấp thụ `puff`).
+- Sàn tần suất theo SỐ TOKEN (không theo số trang — `total_pages` NULL cho EPUB theo đúng thiết
+  kế): `term_min_occurrences=3` nếu tài liệu ≥50.000 token, `term_min_occurrences_short_doc=2` nếu
+  ngắn hơn.
+- 4 noise flag (`proper_noun`, `stopword_middle`, `fragment_suspect`, `plural_merged`) — **demote
+  rank_score × 0.3 + ẩn mặc định ở UI, KHÔNG xoá** đúng quyết định T4 (khác đề xuất "lọc bỏ" của
+  Domain Expert) — vì `Swiss meringue`, `Silpat`, `Fahrenheit` đều là glossary entry thật và đều
+  là tên riêng viết hoa giữa câu, xoá cứng sẽ mất chúng vĩnh viễn.
+- Trần `max_suggested_terms_per_job` **đổi nghĩa** thành van chống tràn DB (default `20_000`),
+  KHÔNG còn là trần chất lượng — không cắt ở bất kỳ con số "đẹp" nào khác, cắt theo `rank_score`
+  khi thật sự chạm van + log warning.
+- **KHÔNG** ship bộ lọc `en_common.txt`/`baking_sense_allowlist.txt` — T2 đã bác bỏ hẳn hướng này
+  (đo được: bộ lọc phổ thông xoá đúng `proof/score/cream/rest/turn` là glossary entry thật, trong
+  khi giữ lại `flour/sugar/egg` sinh ra top-40 vô dụng). Thay bằng `en_function_words.txt` (~200 hư
+  từ đóng, an toàn tuyệt đối với EC-06 vì `proof`/`score`/... không phải hư từ).
+- `_specificity()` (tín hiệu xếp hạng, KHÔNG phải bộ lọc — T2) đọc `en_freq_top50k.tsv` nếu có;
+  **file này CHƯA ship trong increment này** (không có nguồn danh sách tần suất nào sẵn sàng đóng
+  gói) → luôn degrade về `1.0` cho mọi từ, đúng đường degrade an toàn Architecture.md đã định
+  nghĩa sẵn ("chỉ mất chất lượng sắp xếp, không đổi tập hiển thị"). Cần PM/Tech Lead quyết định có
+  đầu tư nguồn dữ liệu này sau không — không chặn v1.
+- **Lệch vị trí file so với spec**: Architecture.md ghi `data/wordlists/*.txt`, nhưng **toàn bộ
+  thư mục `data/` bị `.gitignore` chặn** ở repo này (`git check-ignore` xác nhận) — ship đúng theo
+  spec sẽ khiến file không bao giờ vào git, mọi checkout mới thiếu mất wordlist. Đổi sang
+  `src/core/wordlists/en_function_words.txt` (nằm cùng cây `src/`, luôn theo git, giống cách
+  `fonts/` đã nằm ngoài `data/` vì lý do tương tự). Đây là thay đổi VỊ TRÍ FILE thuần tuý, không
+  đổi thiết kế/thuật toán — nhưng ghi rõ ở đây để Tech Lead biết và xác nhận lại nếu muốn khác đi.
+
+### Module mới — so khớp glossary (`src/core/glossary_matching.py`)
+
+- `glossary_match_forms(term_en) -> set[str]` — hàm CHUNG dùng cho US-20 (T3, điều kiện lọc DUY
+  NHẤT sau quyết định của user). Tách `/`, bỏ `(...)` nhưng LUÔN giữ cả nội dung trong ngoặc làm
+  phương án riêng (kể cả ngắn/viết tắt — theo đúng VÍ DỤ Architecture.md đưa ra cho `pound (lb)` →
+  giữ cả `lb`, `SMBC` → giữ cả viết tắt, dù câu chữ mô tả rule ở ngay phía trên ví dụ lại nói
+  "≥3 ký tự và không phải viết tắt thuần" — 2 chỗ MÂU THUẪN NHAU trong chính Architecture.md; đã
+  chọn theo ví dụ cụ thể vì rủi ro over-inclusion ở đây là an toàn hơn theo đúng nguyên tắc "thà
+  gộp nhầm còn hơn bỏ sót" mà chính §6.18.8 T3 nêu — **đây là điểm cần Tech Lead xác nhận lại**,
+  xem mục "Điểm chưa rõ ràng" cuối entry).
+- Sinh biến thể hình thái (KHÔNG stemming ứng viên, chỉ EXPAND base đã biết — đúng lý do T3 nêu:
+  cắt hậu tố token bất kỳ dễ over-stem, sinh biến thể từ base đã biết thì dạng thừa vô hại).
+- **Chưa wire vào `GlossaryManager._count_occurrences()`** (bug độc lập §6.6.5 Domain Expert phát
+  hiện, PM đã tách task riêng) — đúng brief, không tự ý sửa file đó.
+- Test (`tests/test_glossary_matching.py`, 9 case): tất cả case dựa trên **114 glossary entry
+  thật** export từ `data/bb_translation.db` (`tests/fixtures/term_extraction/real_glossary_114.json`)
+  — bao gồm chính 13 term Domain Expert đã đo là "leak" dưới `.lower()` cũ (`pound`, `ounce`,
+  `bloom`, `tempering`, `whipping`, `kneading`, `teaspoon`, `glaze`, `silpat`, `fahrenheit`,
+  `knead`, `whisking`, `tablespoon`).
+
+### DB schema mới (`src/models/suggested_term.py`)
+
+- `SuggestedTerm` — bảng MỚI hoàn toàn (không phải `ALTER TABLE` cột mới) nên chỉ cần đăng ký vào
+  `src/models/__init__.py` + import list của `src/models/database.py` — `create_all()` tự tạo,
+  không cần thêm gì vào `_NEW_NULLABLE_COLUMNS`.
+- 2 index composite (`UNIQUE(job_id, term_en)`, `(status, rank_score DESC)`) tạo bằng raw
+  `CREATE INDEX IF NOT EXISTS` trong `init_db()` — theo đúng pattern `idx_glossary_entries_term_nocase`
+  đã có (SQLModel trong repo này chưa có tiền lệ dùng `__table_args__`/`UniqueConstraint`).
+- `src/core/config.py`: 4 field mới (`term_extraction_enabled`, `max_suggested_terms_per_job`,
+  `term_min_occurrences`, `term_min_occurrences_short_doc`) theo đúng bảng T5 đã cập nhật, cả 4
+  vào `SETTINGS_DB_OVERRIDABLE_FIELDS`.
+
+### Data lineage + orchestration (`src/core/term_extraction_service.py`)
+
+- `_extract_source_text_for_terms(job)` — implement ĐÚNG bảng §6.18.5: `pdf_digital` đọc
+  `job.file_path`; `pdf_scan` đọc `job.ocr_bridge_path` (KHÔNG `file_path` — đúng dạng lỗi Bug #5);
+  `parse_only` đọc `Path(job.output_path).parent / "document.md"` (vì `output_path` giờ trỏ
+  `parse_result.zip` theo S15-4, KHÔNG đọc thẳng zip); `epub` raise lỗi rõ ràng (US-22 chưa ship
+  `EpubDocument.full_text()` — nhánh này hiện KHÔNG THỂ bị gọi qua đường bình thường vì
+  `run_job()` reject EPUB trước khi tới `status=completed`, nhưng vẫn viết đúng thay vì đọc nhầm
+  nếu tương lai có đường gọi khác).
+- Test lineage (Protocol 6 R6-02) dùng **decoy file thật**: `pdf_scan` test tạo 1 PDF gốc chứa văn
+  bản "THIS MUST NEVER BE READ" ở `file_path` và văn bản thật ở `ocr_bridge_path` — assert đúng nội
+  dung đọc được, không chỉ `assert extract_terms.called`.
+- `_collect_existing_glossary_forms()` — **query trực tiếp `GlossaryEntry`** (không gọi qua
+  `GlossaryManager`, đúng brief không đụng file đó), gộp scope global + project (`job.batch_id`,
+  cùng pattern `project_id=job.batch_id` đã có trong `job_orchestrator.py`).
+- `extract_and_store_terms(job_id, session, settings)`: chạy sau `run_job()` trả về, chỉ khi
+  `status=="completed"` (BR-TERM-01); **idempotent re-run** — xoá + ghi lại mọi row `pending` cũ,
+  nhưng GIỮ NGUYÊN row đã `added`/`dismissed` (user đã quyết định rồi không bị reset khi chạy lại
+  thủ công qua `POST /api/jobs/{id}/extract-terms`).
+- `src/api/routes/jobs.py`: wire vào `_run_job_background()` đúng pseudo-code §6.18.6 — try/except
+  RIÊNG, không có đường nào đổi `job.status` (thêm `return` sớm ở nhánh crash của `run_job()` để
+  tránh `NameError` khi tham chiếu `result` chưa gán); thêm `POST /{job_id}/extract-terms` (chạy
+  lại thủ công); thêm `SuggestedTerm` vào danh sách xoá thủ công của `DELETE /{job_id}` (đúng ghi
+  chú §6.18.3 — SQLite tắt FK enforcement, không được tin `ON DELETE CASCADE`).
+
+### API (`src/api/routes/glossary.py`)
+
+- `GET /suggested` — `job_id` optional (gộp mọi job), `status` (mặc định `pending`), `sort`
+  (`rank`/`count`/`alpha`), `min_ngram`, `include_noise`, trả `total` + `noise_hidden_count` đúng
+  §6.18.4 đã sửa.
+- `POST /suggested/{id}/dismiss` — 204, chỉ đổi `status='dismissed'` (BR-TERM-04 per-job, KHÔNG
+  blacklist toàn cục).
+- `POST /suggested/{id}/promote` — gọi THẲNG `create_entry()` cùng module (không viết lại logic).
+  **Chưa có BR-GLOSS-07** (409 xác nhận ghi đè) vì `create_entry()`/`bulk_import()` hiện tại CHƯA
+  implement rule đó (US-17 riêng, chưa tới lượt) — đúng brief: không tự thêm confirm-overwrite
+  ngoài phạm vi. `request.force` được nhận nhưng chưa có tác dụng, ghi rõ trong docstring.
+- `POST /suggested/suggest-translation` — hành động DUY NHẤT tốn tiền. Gộp tối đa 40 term/request
+  LLM (tự động chia nhiều request nếu `ids` dài hơn), đi qua `provider.translate()` thật (có
+  `TranslationResult.estimated_cost_usd` thật), chia đều cost cho từng term trong cùng batch, ghi
+  vào `suggested_terms.translation_cost_usd` — **KHÔNG đụng `job.actual_cost`** (Job không hề được
+  load trong hàm này). `[CHƯA VERIFY]`: không có API key thật trong môi trường dev để xác nhận các
+  provider THẬT SỰ trả đúng JSON theo prompt yêu cầu — có fallback parse bằng regex nếu
+  `json.loads()` thất bại, nhưng hành vi sống với LLM thật chưa được smoke-test. Ghi rõ trong
+  docstring + cần QA chạy live trước khi coi tính năng này "chắc chắn hoạt động".
+
+### Frontend (`web/glossary.html`, `web/js/suggested-terms.js`)
+
+- Section "Các từ mới — Chờ duyệt" mới trong `glossary.html`, Alpine component riêng
+  (`suggestedTermsApp()`) độc lập với `glossaryApp()` đã có — sort/min_ngram/include_noise/phân
+  trang 50 dòng, checkbox chọn nhiều dòng cho "Gợi ý bản dịch" (có `confirm()` cảnh báo tốn phí
+  trước khi gọi, đúng BR-TERM-03), input gõ tay `term_vi` hoặc dùng bản gợi ý LLM trả về.
+  "Thêm vào glossary"/"Bỏ qua" gọi đúng 2 endpoint mới.
+- Bridge cross-component: `promote()` thành công dispatch `CustomEvent('glossary-entries-changed')`
+  trên `window`; `glossaryApp()` lắng nghe event này trong `x-init` để tự `load()` lại — nếu không
+  có cầu nối này, bảng glossary chính ở dưới trang sẽ không tự cập nhật sau khi user duyệt 1 từ
+  mới (phát hiện được khi tự tay verify UI qua browser, xem mục Verify bên dưới).
+
+### Test
+
+- `tests/test_glossary_matching.py` (9), `tests/test_term_extractor.py` (20),
+  `tests/integration/test_term_extraction_service.py` (12),
+  `tests/integration/test_suggested_terms_api.py` (10),
+  `tests/integration/test_extract_terms_endpoint.py` (3) — tổng 54 test mới.
+- Theo đúng Protocol 6 R6-02: test lineage assert **giá trị cụ thể** đọc được (không chỉ
+  `assert_called()`), test golden `gluten` (mô phỏng nhỏ, không nhúng nguyên sách — xem "Bản quyền"
+  bên dưới) phải sống sót qua nesting collapse đúng quy tắc MAX-not-SUM.
+- Gate T8 mục 3 (test với glossary THẬT): `test_real_glossary_114_filters_documented_leak_terms_end_to_end`
+  (thuật toán thuần) + `test_extract_and_store_terms_real_glossary_114_end_to_end` (qua DB thật) —
+  cả 2 assert `pound`/`ounce`/`bloom`/`tempering`/`kneading`/`teaspoon`/`whipping` KHÔNG lọt vào
+  "Chờ duyệt" khi 114 glossary entry thật được áp.
+- Dùng fixture Markdown thật `tests/fixtures/mineru/parse_only_txt_figoni25/document.md` (US-15,
+  đã có sẵn) để test nhánh HTML-table-stripping trên dữ liệu MinerU thật, đúng gợi ý của brief.
+- **Bản quyền**: KHÔNG nhúng bất kỳ đoạn văn bản dài nào trích từ 2 cuốn sách thật (Figoni, Cauvain)
+  Domain Expert đã dùng để đo — dù brief khuyến khích "dùng dữ liệu thật thay vì bịa", nhúng nguyên
+  trang sách có bản quyền vào git repo là rủi ro thật (khác chuyện self-test cục bộ). Thay vào đó:
+  (a) tái sử dụng fixture MinerU đã có sẵn trong repo (không phát sinh rủi ro mới), (b) export
+  glossary 114 entry (dữ liệu chức năng của chính team, không phải văn bản sáng tác), (c) câu ví dụ
+  tự viết ngắn nhắm đúng từng hiện tượng đã đo (không phải nguyên văn sách). Đã TỰ CHẠY (không nhúng
+  vào git) thuật toán trên 2 file PDF thật cục bộ trong `data/uploads/` (gitignored) để xác nhận
+  hành vi khớp với số đo của Domain Expert trước khi viết fixture — kết quả khớp (vd `gluten`
+  survive nesting collapse, T3 lọc đúng 13 term leak).
+
+### Verify UI thủ công qua browser (không chỉ tin test)
+
+Chạy 1 server riêng trên port 8001 trỏ tới DB SQLite tạm (KHÔNG đụng `data/bb_translation.db` thật
+— port 8000 đang có 1 process khác chạy, không tắt/không ghi đè), seed job + suggested_terms giả
+qua chính `extract_and_store_terms()`/insert trực tiếp, xác nhận qua trình duyệt thật: trang load
+không lỗi console, `GET /api/glossary/suggested` trả 200 với dữ liệu đúng, `promote()`/`dismiss()`
+chạy qua Alpine component thật cập nhật đúng UI, và phát hiện + sửa luôn bug thiếu cross-component
+refresh (mục Frontend ở trên). Đã dọn dẹp server tạm + thư mục DB tạm sau khi xong.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/ web/                                    → All checks passed!
+uv run ruff format --check <moi file da sua/them trong session nay>   → đa format
+uv run pytest -q                                                       → 518 passed, 1 failed
+```
+
+1 test FAIL — **CÙNG 1 test đã biết từ trước** (`tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle`, Bug #8, đang được 1
+session/worktree khác sửa song song, không liên quan US-20). Baseline trước session này là 464
+passed/1 failed (US-15 §6.21.3 entry ngay trên) → 518-464 = 54 test mới của session này, đúng số
+liệu, không có test cũ nào bị vỡ.
+
+### Điểm chưa rõ ràng khi thực sự code — cần Tech Lead/PM xác nhận (không tự đoán, ghi rõ ở đây)
+
+1. **Mâu thuẫn nội tại trong §6.18.8 T3** giữa câu chữ rule ("giữ nội dung ngoặc nếu ≥3 ký tự và
+   không phải viết tắt thuần") và chính ví dụ đi kèm (`pound (lb)` giữ `lb` — 2 ký tự; `SMBC` —
+   viết tắt thuần) → đã chọn theo ví dụ (luôn giữ), xem `src/core/glossary_matching.py` module
+   docstring. Cần Tech Lead xác nhận đây đúng ý định, không phải lỗi đánh máy ở ví dụ.
+2. **`data/wordlists/` bị `.gitignore` chặn** — đã đổi sang `src/core/wordlists/` (xem mục thuật
+   toán ở trên). Cần Tech Lead xác nhận vị trí mới hoặc chỉ định vị trí khác nếu có lý do khác.
+3. **`en_freq_top50k.tsv` chưa ship** — `_specificity()` luôn trả `1.0` (an toàn nhưng chưa tận
+   dụng được cải thiện recall Domain Expert đã đo: recall@500 18→24/60). Cần quyết định có tìm/
+   soạn nguồn dữ liệu này không, và nếu có thì nguồn nào (bản thân đây sẽ cần ghi "nguồn + ngày
+   lấy" theo đúng tinh thần T2 khi được ship).
+4. **`suggest-translation` chưa live-verify** — hành vi JSON thật của provider (đặc biệt DeepSeek,
+   mặc định) khi nhận prompt yêu cầu JSON chưa được xác nhận bằng lời gọi thật (không có API key
+   trong môi trường dev). Có fallback regex nhưng đây KHÔNG thay thế cho verify thật — nên có ít
+   nhất 1 smoke test thật trước khi release, đúng tinh thần Protocol 5 R5-03 dù đây không hẳn là
+   "external tool contract" theo nghĩa hẹp mà là hành vi prompt-engineering nội bộ dựa trên 1
+   external API.
+
+### Trạng thái
+
+Implement xong theo đúng §6.18.8 (không tự suy diễn lại thiết kế, các điểm mâu thuẫn/thiếu rõ ràng
+đã liệt kê ở trên thay vì tự đoán). **CHƯA spawn Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là
+"xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào `docs/review-report.md`.

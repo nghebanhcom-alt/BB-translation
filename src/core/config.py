@@ -239,6 +239,21 @@ class Settings(BaseSettings):
     # false-positive that tren layout/sach chua tung gap trong 12 dump da do.
     babeldoc_toc_split_enabled: bool = True
 
+    # US-20 "Cac tu moi" (Architecture.md 6.18.2, bang cau hinh CAP NHAT boi
+    # 6.18.8 T5 — 4 field, khong con 3 nhu ban goc). Rule-based, $0, chay SAU
+    # khi job completed (BR-TERM-01) — khong lien quan translation pipeline.
+    term_extraction_enabled: bool = True
+    # DA DOI Y NGHIA boi 6.18.8 T1: KHONG con la "tran chat luong" (spec goc
+    # tung la 40) — gio la van chong tran DB thuan tuy. User da chot "chi
+    # dieu kien loc la khong co trong glossary", khong tran so luong tuy y.
+    # Default 20_000 (~4x worst-case do duoc tren sach 415 trang that,
+    # Architecture.md 6.18.8 T0/T1). KHONG duoc ha xuong "cho gon".
+    max_suggested_terms_per_job: int = 20_000
+    # Ap dung cho tai lieu >= 50_000 token (dem theo token, KHONG theo trang
+    # — total_pages la NULL cho EPUB theo dung thiet ke, 6.18.8 T5).
+    term_min_occurrences: int = 3
+    term_min_occurrences_short_doc: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -276,6 +291,10 @@ SETTINGS_DB_OVERRIDABLE_FIELDS: frozenset[str] = frozenset(
         "max_cost_per_job_usd",
         "max_cost_per_batch_usd",
         "cost_cap_enabled",
+        "term_extraction_enabled",
+        "max_suggested_terms_per_job",
+        "term_min_occurrences",
+        "term_min_occurrences_short_doc",
     }
 )
 

@@ -2287,3 +2287,158 @@ khi QA bắt đầu.
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-15 nhánh PDF trong
 session này.
+
+## US-20 "Các từ mới" — gợi ý thuật ngữ từ tài liệu vừa dịch (2026-09-08)
+
+### Phạm vi
+
+Test US-20 sau khi Dev implement + Reviewer APPROVE (`docs/review-report.md`, section "Review
+Report — US-20", dòng ~5655). Đã đọc trước: `docs/PRD.md` US-20 (§3) + BR-TERM-01..04 (§4.11),
+`docs/Architecture.md` §6.18 toàn bộ (đặc biệt §6.18.8 "Final Decision"), `docs/review-report.md`
+section US-20, `docs/CHANGELOG.md` entry US-20 mới nhất. Baseline DB trước khi test (theo entry
+US-15 gần nhất ở trên): **9 job (toàn bộ `translate`) + 114 glossary entry**, `suggested_terms`
+rỗng (bảng mới, chưa ai ghi dữ liệu thật).
+
+### Phát hiện môi trường quan trọng TRƯỚC khi test (lặp lại đúng loại lỗi US-15 đã gặp)
+
+**Server đang chạy lúc bắt đầu phiên QA là STALE**: `ps aux` cho thấy `uvicorn` khởi động 20:50,
+trong khi `src/core/term_extractor.py`/`src/api/routes/glossary.py` có mtime 21:38 (sau khi
+Dev/Reviewer hoàn tất). Gọi thử `GET /api/glossary/suggested` trên server cũ trả `404 Not Found`
+(route chưa tồn tại trong process cũ) — nếu không phát hiện, toàn bộ QA phía dưới sẽ test nhầm code
+cũ. Đã `kill` 2 process cũ, khởi động lại `nohup uv run uvicorn src.api.main:app --host 0.0.0.0
+--port 8000` (không `--reload`, tránh lặp lại Bug QA-15-2). Xác nhận lại: `GET
+/api/glossary/suggested` trả `200 {"entries":[],"total":0,"noise_hidden_count":0,...}` sau restart.
+
+### Kịch bản test
+
+| # | Kịch bản | Kết quả | Ghi chú |
+|---|---|---|---|
+| 1 | Golden path — job thật hoàn tất → tự động trích xuất | **PASS** | Upload thật file Figoni 25 trang (`data/uploads/739990b0-...-1-25.pdf`, born-digital, qua `POST /api/upload`) → `POST /api/jobs {job_type:"parse_only"}` (chọn `parse_only` thay vì `translate` để giữ chi phí $0 cho kịch bản này — kiểm tra code `_run_job_background` xác nhận điều kiện trigger US-20 chỉ là `result.status=="completed"`, KHÔNG rẽ theo `job_type`, nên `parse_only` verify đúng đường code y hệt `translate`) → job `completed` sau ~90s → `GET /api/glossary/suggested?job_id=...` trả **723 entries**, `total=723`, `noise_hidden_count=153` — không rỗng vô lý, không toàn rác: mẫu thật gồm `bakeshop`(32), `water`(29), `baker's`(26), `WHOLE WHEAT`(8), `Fundamentals of Baking`(4) — đúng dạng cụm 1-3 từ như thiết kế, có cả từ generic (theo đúng chủ đích T2: không lọc theo độ phổ thông, chỉ lọc theo "có/không có trong glossary") |
+| 2 | Lọc trùng glossary (BR-TERM-02) | **PASS** | Xác nhận bằng dữ liệu thật: `baker's percentage` (glossary entry thật, `id=0db772b8...`) xuất hiện **22 lần** trong văn bản gốc (đo trực tiếp bằng PyMuPDF, không qua app) nhưng **0 dòng** khớp `"baker's percentage"` trong Chờ duyệt — bị lọc đúng thiết kế. Trong khi đó `baker's` (n-gram khác, KHÔNG có trong glossary) vẫn xuất hiện với count=26 — đúng quy tắc T3 "so khớp toàn cụm, không substring" (`ganache` có → `chocolate ganache` vẫn được gợi ý, áp dụng y hệt logic cho `baker's percentage` vs `baker's`) |
+| 3 | Không trần cứng | **PASS** | `total=723` cho 1 file 25 trang, không bị cắt ở 40/500/bất kỳ số tròn nào — đúng T1 (bỏ trần 40, chỉ còn van chống tràn DB `max_suggested_terms_per_job=20_000`). Phân trang UI 50 dòng/trang hoạt động đúng (`1-50 / 1449 entries` khi gộp 2 job — xem kịch bản 5) |
+| 4 | Promote vào glossary | **PASS** | (a) Qua API trực tiếp: `POST /suggested/{id}/promote {"term_vi":"..."}` với entry `bakeshop` → `200`, biến mất khỏi `GET /suggested?job_id=...` (rỗng), xuất hiện trong `GET /api/glossary` (count 114→115). (b) Qua UI thật (Browser pane, `web/glossary.html`, server thật port 8000): click nút "Thêm vào glossary" trên dòng `IMPORTANCE OF CONTROLLING` → network tab xác nhận `POST .../promote → 200`, đếm "Chờ duyệt" giảm 1449→1448, và **bảng glossary chính bên dưới TỰ REFRESH** hiện ngay entry mới — xác nhận qua `document.querySelectorAll('table')` cuối cùng chứa đúng text, không cần F5 — đúng bug-fix cross-component refresh Reviewer đã ghi nhận Dev tự phát hiện + tự sửa |
+| 5 | Bỏ qua (per-job, BR-TERM-04) | **PASS — verify bằng dữ liệu thật xuyên 2 job, không chỉ đọc DB** | Dismiss `water` (`id=03fa89d8...`) ở job A (`f9a04c31`, file excerpt 25 trang) → biến mất khỏi Chờ duyệt của job A. Sau đó gọi `POST /api/jobs/{job B=803fce52}/extract-terms` (job B dùng **cùng file gốc**, chạy `translate` từ trước, thuộc baseline 9 job) → `water` (`occurrence_count=29`) xuất hiện **`status=pending`** trong Chờ duyệt của job B — xác nhận "Bỏ qua" chỉ có hiệu lực đúng phạm vi 1 job, không phải blacklist toàn cục. Đồng thời quan sát phụ: `bakeshop` (vừa promote ở kịch bản 4a) **KHÔNG** xuất hiện trong lần extract-terms mới của job B — xác nhận filter glossary áp dụng theo trạng thái glossary TẠI THỜI ĐIỂM extract, không cache cũ |
+| 6 | BR-TERM-01 không chặn luồng dịch chính | **PASS — live-fire, không chỉ đọc code tay như Reviewer đã làm** | Viết script Python độc lập (`qa_us20_br_term01_livefire.py`), chạy trong chính venv app: monkeypatch `JobOrchestrator.run_job` trả về `JobResult(status="completed")` giả lập (tránh chạy dịch/OCR thật tốn thời gian+tiền lần nữa), monkeypatch `extract_and_store_terms` **raise `RuntimeError`** thật, gọi thẳng `_run_job_background()` thật (hàm sản xuất, không phải bản giả lập) trên 1 job thật trong DB. Kết quả: `logger.exception` log đúng traceback lỗi ("Trich xuat tu moi that bai... job VAN completed"), **exception KHÔNG lọt ra ngoài `_run_job_background()`**, `job.status` trước/sau **giống hệt nhau** (`"completed"` → `"completed"`, không bị set `"failed"`). Đóng đúng gap Reviewer đã nêu ở issue non-blocking #1 (chỉ có test đơn vị cho `extract_and_store_terms` tự nó, chưa test cái try/except bọc ngoài trong `_run_job_background`) — nay đã có bằng chứng chạy thật, không chỉ đọc code |
+| 7 | UI thật (`web/glossary.html`) | **PASS** | Mở qua Browser pane thật, server thật (không mock). Xác nhận: khu vực "Các từ mới — Chờ duyệt (N)" hiển thị đúng, mô tả copy đúng BR-TERM-03 ("miễn phí, không gọi LLM"... "Gợi ý bản dịch... có gọi LLM và phát sinh chi phí nhỏ"), dropdown sort (`rank`/`count`/`alpha`), checkbox "Chỉ cụm ≥ 2 từ", "Hiện thêm N mục nghi nhiễu" đều render đúng số liệu khớp API. 2 nút "Thêm vào glossary"/"Bỏ qua" mỗi dòng hoạt động qua click thật (xem kịch bản 4b). Không lỗi console cho lần load hiện tại (1 lỗi 404 xuất hiện trong buffer console nhưng xác nhận qua network log là request CŨ từ TRƯỚC lúc restart server, không phải lỗi của code hiện tại — đã double-check bằng `read_network_requests` lọc theo `localhost:8000`, mọi request SAU restart đều `200`) |
+
+**2 điều tra nhánh phụ, xác nhận KHÔNG phải bug (ghi lại vì lúc đầu trông giống bug)**:
+- `get_page_text` cho thấy cột "VI"/"Notes" của bảng glossary chính trống rỗng với MỌI dòng — nghi
+  ngờ ban đầu là bug hiển thị. Verify bằng `javascript_tool` đọc trực tiếp `input.value` của DOM
+  thật → có dữ liệu đúng (`"nồi gang"`, `"Equipment"`, `"độ F (°F)"`...). Nguyên nhân: cột này là
+  `<input readonly :value="...">`, và text-extraction (`innerText`) không đọc được `value` của thẻ
+  `<input>` — hạn chế của công cụ đọc trang, không phải bug app.
+- Accessibility tree (`read_page`) liệt kê dòng `"Chi phí lần gọi gần nhất: $undefined"` như thể
+  đang hiển thị ngay từ đầu (trước khi bấm "Gợi ý bản dịch" lần nào) — nghi ngờ bug hiện text rác.
+  Verify bằng `getComputedStyle(el).display` → `"none""` — phần tử **có** `x-show="lastSuggestCost
+  !== null"` đúng và `lastSuggestCost` khởi tạo `null` đúng (`suggested-terms.js:19`) nên bị ẩn thật
+  sự; Alpine chỉ đánh giá `x-text` ngầm dù đang ẩn (hành vi bình thường của Alpine, không phải bug)
+  — accessibility-tree tool báo cáo cả phần tử ẩn, không phản ánh đúng UI thật user nhìn thấy.
+
+### R5-03 — Live verification `suggest-translation` (LLM thật, KHÔNG mock)
+
+**Kết quả: PASS thật — đã gọi LLM thật thành công, đóng gap Protocol 5 R5-03 mà Reviewer đã nêu
+(issue non-blocking #2).**
+
+Kiểm tra `.env` trước khi test: `DEEPSEEK_API_KEY` có giá trị thật dạng `sk-...` (không phải
+placeholder rỗng/`dev-...-key` như `CLAUDE_API_KEY`), khớp tiền lệ "DEEPSEEK_API_KEY thật cho gate
+release" đã dùng ở các vòng QA trước. `default_provider` trong `src/core/config.py:113` = `"deepseek"`
+— đúng provider mặc định brief nhắc tới.
+
+Gọi thật `POST /api/glossary/suggested/suggest-translation` với **3 từ** (phạm vi nhỏ, đúng tinh
+thần "ngân sách nhỏ" của tiền lệ): `pastry`, `water`, `baker's`. Kết quả:
+
+```
+{"updated":3,"total_cost_usd":0.00466598}
+```
+
+Đọc lại DB xác nhận **JSON thật từ DeepSeek được parse đúng** (không rơi vào fallback-regex):
+`pastry → "bánh ngọt"`, `water → "nước"`, `baker's → "của thợ làm bánh"` — đều là bản dịch hợp lý,
+không phải rác/lỗi parse. `translation_cost_usd` chia đều đúng 3 dòng (`0.00466598 / 3 =
+0.0015553...` mỗi dòng, khớp DB). Xác nhận `job.actual_cost` của 2 job liên quan (`803fce52`,
+`40cb4746`) **không đổi** trước/sau lệnh gọi này (`0.07241344` và `2.08157356` — y hệt số đo lúc job
+gốc hoàn tất trước đây) — đúng thiết kế Architecture.md §6.18.4 "KHÔNG cộng vào `job.actual_cost`".
+
+**Lưu ý non-blocking cho Tech Lead/PM**: chi phí đo được thật (~$0.00155/từ, tức ~$0.062 nếu ngoại
+suy tuyến tính cho batch đầy 40 từ) cao hơn con số Architecture.md §6.18.4 nêu ("40 term ngắn, chi
+phí thực tế ở DeepSeek < $0.001") — khả năng do request 3 từ nhỏ chưa tận dụng hết chi phí cố định
+(request overhead: system prompt + JSON instruction) nên per-từ cao hơn khi batch đầy 40. Vẫn là
+"chi phí rất nhỏ" theo đúng tinh thần BR-TERM-03/UI cảnh báo, không sai bản chất thiết kế, chỉ là
+con số ước tính trong Architecture.md hơi lạc quan — không blocking, không cần sửa gấp.
+
+Frontend: xác nhận `web/js/suggested-terms.js:90` có `confirm(...)` chặn trước khi gọi
+`suggest-translation` — đúng BR-TERM-03 "phải hiện rõ đây là hành động phát sinh chi phí trước khi
+bấm, không tự động chạy ngầm".
+
+### Bug list
+
+**Không phát hiện bug blocking.**
+
+**Không có bug non-blocking mới** — 2 nghi vấn ban đầu (cột VI/Notes trống, "$undefined") đều đã
+verify là hạn chế của công cụ đọc trang QA dùng, không phải lỗi app thật (xem mục "2 điều tra nhánh
+phụ" ở trên).
+
+2 issue non-blocking Reviewer đã nêu trước đó, cập nhật trạng thái sau QA:
+1. "Thiếu test cho try/except bọc US-20 trong `_run_job_background()`" — **vẫn đúng là thiếu test
+   TỰ ĐỘNG trong suite**, nhưng QA đã tự bổ sung 1 lần verify LIVE (kịch bản 6 ở trên) xác nhận hành
+   vi đúng. Đề xuất giữ nguyên khuyến nghị Reviewer: Dev nên thêm test tự động này vào suite ở lượt
+   chạm file tiếp theo (chi phí thấp, giá trị hồi quy cao) — không chặn release vì hành vi đã verify
+   đúng bằng cách khác.
+2. "`suggest-translation` chưa live-verify LLM thật" — **ĐÃ ĐÓNG**, xem mục R5-03 ở trên.
+
+### Regression — tự chạy lại độc lập
+
+```
+$ uv run ruff check src/ tests/ web/
+All checks passed!
+
+$ uv run pytest -q
+521 passed, 1 failed, 775 warnings in 103.88s
+FAILED tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle
+```
+
+Cùng 1 test FAIL đã biết từ trước (Bug #8, `rotated_text_overlay.py`, đang sửa song song ở
+worktree/session khác, không liên quan US-20 — xác nhận qua `git status --short` vẫn thấy các file
+Bug #8 đang uncommitted). Số passed (521) cao hơn số Reviewer báo cáo lúc review (518) — chênh lệch
+hợp lý do 1 session khác (Bug #8) đã thêm/sửa vài test độc lập giữa lúc Reviewer chạy và lúc QA chạy;
+không có test nào của US-20 bị vỡ, không có regression mới.
+
+### Dọn dẹp sau test
+
+- Xoá job test `f9a04c31` (`DELETE /api/jobs/{id}` → `204`, cascade xoá luôn `suggested_terms` của
+  job này theo đúng thiết kế §6.18.3) và upload test tương ứng (`DELETE /api/upload/{id}` → `204`).
+- Xoá 2 glossary entry tạo trong lúc test (`bakeshop`, `IMPORTANCE OF CONTROLLING`) qua
+  `DELETE /api/glossary/{id}` → `200` cả hai.
+- Xoá thủ công (SQL) các dòng `suggested_terms` còn sót lại gắn với 2 job **baseline có sẵn**
+  (`803fce52`, `40cb4746`) — 2 job này KHÔNG bị xoá (thuộc 9 job gốc), chỉ dọn dữ liệu
+  `suggested_terms` QA tự tạo ra trên chúng qua `POST .../extract-terms` thủ công.
+- Xác nhận lại sau dọn: `SELECT COUNT(*) FROM jobs` = **9** (đúng baseline, cùng 9 ID gốc, không
+  job nào bị xoá nhầm), `SELECT COUNT(*) FROM glossary_entries` = **114** (đúng baseline),
+  `SELECT COUNT(*) FROM suggested_terms` = **0** (về đúng trạng thái trước khi QA bắt đầu).
+  `data/uploads/` không còn file test nào; `data/outputs/`/`data/processing/` không còn thư mục nào
+  của job `f9a04c31`. 2 file EPUB mẫu (`9d436d7b-...Sourdough...epub`,
+  `sample2_Bread-A-Global-History.epub`) xác nhận mtime KHÔNG đổi — không bị đụng.
+- `.env` không bị sửa trong phiên QA này (chỉ đọc để lấy tên biến, không đổi giá trị nào) — không
+  cần khôi phục.
+- Không sửa bất kỳ file `src/`/`web/`/`tests/` nào trong phiên QA này (`git status --short` xác nhận
+  danh sách file thay đổi giống hệt trước khi QA bắt đầu, chỉ khác các file `docs/*.md` đang được
+  QA/Dev/Reviewer cùng cập nhật qua nhiều session).
+
+### KẾT LUẬN
+
+**ready_for_release: YES** cho US-20 "Các từ mới".
+
+Tất cả 7 kịch bản chính đều PASS qua E2E thật (server thật đã restart để tránh stale code, MinerU
+thật cho golden path, DeepSeek thật cho suggest-translation, browser thật cho UI, không mock ở bất
+kỳ điểm quyết định nào). Cả 2 gap non-blocking Reviewer đã nêu đều được xử lý: gap #1 (thiếu test tự
+động cho property an toàn BR-TERM-01) được verify LIVE thay thế tạm thời (khuyến nghị Dev vẫn nên
+thêm test tự động sau, không chặn release); gap #2 (chưa live-verify LLM) nay **ĐÃ ĐÓNG HẲN** với
+bằng chứng gọi thật thành công, JSON parse đúng, cost tracking đúng thiết kế. Không phát hiện bug
+blocking hay non-blocking mới — 2 nghi vấn ban đầu khi đọc UI qua công cụ tự động đều xác nhận là
+hạn chế công cụ, không phải lỗi app. Regression suite đầy đủ khớp kỳ vọng, không có test nào vỡ do
+US-20. Dọn dẹp xong, môi trường DB trả về đúng baseline (9 job/114 glossary/0 suggested_terms) như
+trước khi QA bắt đầu.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-20 trong session
+này.
+
+---

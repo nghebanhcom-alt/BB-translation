@@ -1,15 +1,21 @@
+import json
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlmodel import func, select
 
 from src.api.deps import SessionDep
+from src.core.config import get_effective_settings
 from src.core.glossary_manager import GlossaryManager
 from src.models.glossary import Glossary, GlossaryEntry
+from src.models.suggested_term import SuggestedTerm
+from src.services.provider_factory import ProviderConfigError, ProviderFactory, UnknownProviderError
+from src.services.translation import TranslationProviderError
 from src.utils.excel_utils import (
     GlossaryEntryData,
     export_glossary_to_excel,
@@ -17,6 +23,10 @@ from src.utils.excel_utils import (
 )
 
 router = APIRouter()
+
+#: Architecture.md §6.18.4 "suggest-translation — ràng buộc bắt buộc": gộp
+#: tối đa 40 term / 1 request LLM (không 1 request/từ).
+_MAX_TERMS_PER_SUGGEST_TRANSLATION_REQUEST = 40
 
 
 class GlossaryEntryOut(BaseModel):
@@ -213,3 +223,286 @@ async def export_entries(session: SessionDep) -> FileResponse:
         filename="glossary_export.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+# --- US-20 "Cac tu moi" (Architecture.md 6.18.4) ----------------------------
+
+
+class SuggestedTermOut(BaseModel):
+    id: str
+    job_id: str
+    term_en: str
+    ngram_size: int
+    noise_flags: str
+    occurrence_count: int
+    rank_score: float
+    status: str
+    suggested_term_vi: str | None
+    translation_cost_usd: float | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SuggestedTermListResponse(BaseModel):
+    entries: list[SuggestedTermOut]
+    total: int
+    noise_hidden_count: int
+    limit: int
+    offset: int
+
+
+class SuggestedTermPromoteRequest(BaseModel):
+    term_vi: str | None = None
+    notes: str | None = None
+    # Danh cho tuong lai khi US-17 implement BR-GLOSS-07 (409 xac nhan ghi
+    # de) tren POST /api/glossary — `create_entry()` hien tai (dong nay)
+    # CHUA ho tro, nen field nay chua co tac dung gi. Xem docstring
+    # `promote_suggested_term()` duoi day.
+    force: bool = False
+
+
+def _to_suggested_out(row: SuggestedTerm) -> SuggestedTermOut:
+    return SuggestedTermOut(
+        id=row.id,
+        job_id=row.job_id,
+        term_en=row.term_en,
+        ngram_size=row.ngram_size,
+        noise_flags=row.noise_flags,
+        occurrence_count=row.occurrence_count,
+        rank_score=row.rank_score,
+        status=row.status,
+        suggested_term_vi=row.suggested_term_vi,
+        translation_cost_usd=row.translation_cost_usd,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/suggested", response_model=SuggestedTermListResponse)
+async def list_suggested_terms(
+    session: SessionDep,
+    job_id: str | None = None,
+    status: str = "pending",
+    limit: int = 50,
+    offset: int = 0,
+    sort: str = "rank",
+    min_ngram: int = 1,
+    include_noise: bool = False,
+) -> SuggestedTermListResponse:
+    """Architecture.md 6.18.4: `job_id` bo trong = gop moi job (khu vuc "Cho
+    duyet" chung trong tab Glossary). `total`/`noise_hidden_count` la so dem
+    THEO filter status/job_id/min_ngram (truoc khi ap `include_noise`) — UI
+    dung 2 so nay de hien nut "Hien them N muc nghi nhiem" dung so.
+    """
+    if sort not in {"rank", "count", "alpha"}:
+        raise HTTPException(status_code=400, detail="sort phai la 'rank' | 'count' | 'alpha'")
+
+    base_conditions = [SuggestedTerm.status == status, SuggestedTerm.ngram_size >= min_ngram]
+    if job_id is not None:
+        base_conditions.append(SuggestedTerm.job_id == job_id)
+
+    total_result = await session.exec(
+        select(func.count()).select_from(SuggestedTerm).where(*base_conditions)
+    )
+    total = total_result.one()
+
+    noise_result = await session.exec(
+        select(func.count())
+        .select_from(SuggestedTerm)
+        .where(*base_conditions, SuggestedTerm.noise_flags != "")
+    )
+    noise_hidden_count = noise_result.one()
+
+    list_conditions = list(base_conditions)
+    if not include_noise:
+        list_conditions.append(SuggestedTerm.noise_flags == "")
+
+    list_statement = select(SuggestedTerm).where(*list_conditions)
+    if sort == "count":
+        list_statement = list_statement.order_by(SuggestedTerm.occurrence_count.desc())
+    elif sort == "alpha":
+        list_statement = list_statement.order_by(SuggestedTerm.term_en)
+    else:
+        list_statement = list_statement.order_by(SuggestedTerm.rank_score.desc())
+    list_statement = list_statement.limit(limit).offset(offset)
+
+    rows = (await session.exec(list_statement)).all()
+    return SuggestedTermListResponse(
+        entries=[_to_suggested_out(row) for row in rows],
+        total=total,
+        noise_hidden_count=noise_hidden_count,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/suggested/{suggested_id}/dismiss", status_code=204)
+async def dismiss_suggested_term(suggested_id: str, session: SessionDep) -> Response:
+    """BR-TERM-04: chi an trong pham vi job do (KHONG blacklist toan cuc —
+    khong co status 'rejected', chi 'dismissed' per-row cua chinh job nay).
+    """
+    row = await session.get(SuggestedTerm, suggested_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Khong tim thay suggested term")
+
+    row.status = "dismissed"
+    row.updated_at = datetime.now(UTC)
+    session.add(row)
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/suggested/{suggested_id}/promote", response_model=GlossaryEntryOut)
+async def promote_suggested_term(
+    suggested_id: str, request: SuggestedTermPromoteRequest, session: SessionDep
+) -> GlossaryEntryOut:
+    """Architecture.md 6.18.4: phai di qua DUNG logic `POST /api/glossary`
+    (goi thang `create_entry()` cung module, khong viet lai). Spec goc mo ta
+    hanh vi nay "co ap BR-GLOSS-07" (409 khi trung + force=false) — nhung
+    `create_entry()`/`GlossaryManager.bulk_import()` HIEN TAI (2026-09-08)
+    CHUA implement BR-GLOSS-07 (van la ghi-de-am-tham last-updated-wins,
+    US-17 rieng chua lam). Theo dung brief cua task nay: KHONG tu them
+    confirm-overwrite o day (ngoai pham vi US-20) — chi goi API hien co
+    nguyen trang, `request.force` duoc nhan de tuong thich nguoc khi US-17
+    len nhung CHUA co tac dung gi.
+    """
+    row = await session.get(SuggestedTerm, suggested_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Khong tim thay suggested term")
+    if row.status != "pending":
+        raise HTTPException(
+            status_code=400, detail=f"Suggested term dang status={row.status!r}, khong the promote"
+        )
+
+    entry_out = await create_entry(
+        GlossaryEntryIn(term_en=row.term_en, term_vi=request.term_vi, notes=request.notes),
+        session,
+    )
+
+    row.status = "added"
+    row.updated_at = datetime.now(UTC)
+    session.add(row)
+    await session.commit()
+    return entry_out
+
+
+class SuggestTranslationRequest(BaseModel):
+    ids: list[str]
+
+
+class SuggestTranslationResponse(BaseModel):
+    updated: int
+    total_cost_usd: float
+
+
+_SUGGEST_TRANSLATION_PROMPT = """Ban la chuyen gia dich thuat nganh banh (English -> Vietnamese).
+Voi moi thuat ngu tieng Anh duoi day, dua ra 1 ban dich tieng Viet ngan gon, \
+dung thuat ngu chuyen nganh banh dang dung trong sach day. Neu thuat ngu goc \
+tieng Phap/Y ma nguoi Viet trong nganh thuong giu nguyen, tra ve chuoi \
+"(keep)" cho thuat ngu do thay vi dich.
+
+CHI tra ve 1 doi tuong JSON hop le, KHONG giai thich gi them, dung dang:
+{{"thuat ngu goc 1": "ban dich 1", "thuat ngu goc 2": "ban dich 2"}}
+
+Danh sach thuat ngu can dich:
+{terms_block}
+"""
+
+_JSON_PAIR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _build_suggest_translation_prompt(terms: list[str]) -> str:
+    terms_block = "\n".join(f"- {term}" for term in terms)
+    return _SUGGEST_TRANSLATION_PROMPT.format(terms_block=terms_block)
+
+
+def _parse_translation_json(raw_text: str) -> dict[str, str]:
+    """Best-effort JSON parse of the LLM response. `[CHUA VERIFY]`: khong co
+    API key that trong moi truong dev nay de xac nhan cac provider (DeepSeek
+    mac dinh, Claude/OpenAI/Gemini/Ollama) THAT SU tuan thu dung dinh dang
+    JSON duoc yeu cau trong prompt — day la 1 diem Dev khong tu verify duoc,
+    ghi ro de PM/QA biet can smoke-test that truoc khi coi tinh nang nay la
+    xong (tinh than Protocol 5 R5-03, du day la hanh vi prompt-engineering
+    noi bo chu khong phai contract API cua provider). Fallback regex duoi day
+    (`_JSON_PAIR_RE`) chi la luoi an toan cho truong hop LLM tra ve JSON kem
+    van ban giai thich thua quanh no, KHONG thay the cho viec verify that.
+    """
+    try:
+        parsed = json.loads(raw_text)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return dict(_JSON_PAIR_RE.findall(raw_text))
+
+
+def _find_translation(translations: dict[str, str], term_en: str) -> str | None:
+    if term_en in translations:
+        return translations[term_en]
+    lowered = term_en.lower()
+    for key, value in translations.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+@router.post("/suggested/suggest-translation", response_model=SuggestTranslationResponse)
+async def suggest_translation_for_terms(
+    request: SuggestTranslationRequest, session: SessionDep
+) -> SuggestTranslationResponse:
+    """Architecture.md 6.18.4 "suggest-translation — rang buoc bat buoc":
+    hanh dong DUY NHAT ton tien trong US-20 (BR-TERM-03). Goi
+    `provider.translate()` (KHONG phai tu goi httpx/SDK truc tiep) de co
+    `TranslationResult.estimated_cost_usd` that, chia deu cho tung term
+    trong CUNG 1 batch (moi batch <=40 term = 1 request LLM). KHONG cong vao
+    `job.actual_cost` — chi phi nay bao cao rieng qua chinh
+    `suggested_terms.translation_cost_usd` (Job khong bi dung toi o day).
+    """
+    if not request.ids:
+        raise HTTPException(status_code=400, detail="ids khong duoc de trong")
+
+    rows: list[SuggestedTerm] = []
+    for suggested_id in request.ids:
+        row = await session.get(SuggestedTerm, suggested_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"Khong tim thay suggested term {suggested_id}"
+            )
+        if row.status != "pending":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Suggested term {suggested_id} dang status={row.status!r}",
+            )
+        rows.append(row)
+
+    settings = await get_effective_settings(session)
+    try:
+        provider = ProviderFactory.create(settings.default_provider, settings)
+    except (UnknownProviderError, ProviderConfigError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    updated = 0
+    total_cost = 0.0
+    for start in range(0, len(rows), _MAX_TERMS_PER_SUGGEST_TRANSLATION_REQUEST):
+        batch = rows[start : start + _MAX_TERMS_PER_SUGGEST_TRANSLATION_REQUEST]
+        prompt = _build_suggest_translation_prompt([row.term_en for row in batch])
+        try:
+            result = await provider.translate(
+                text=prompt, glossary_prompt="", source_lang="en", target_lang="vi"
+            )
+        except TranslationProviderError as exc:
+            raise HTTPException(status_code=502, detail=f"Loi goi LLM: {exc}") from exc
+
+        translations = _parse_translation_json(result.text)
+        per_term_cost = result.estimated_cost_usd / len(batch) if batch else 0.0
+        for row in batch:
+            row.suggested_term_vi = _find_translation(translations, row.term_en)
+            row.translation_cost_usd = per_term_cost
+            row.updated_at = datetime.now(UTC)
+            session.add(row)
+            updated += 1
+        total_cost += result.estimated_cost_usd
+
+    await session.commit()
+    return SuggestTranslationResponse(updated=updated, total_cost_usd=total_cost)
