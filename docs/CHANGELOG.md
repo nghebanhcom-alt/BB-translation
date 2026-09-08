@@ -4671,6 +4671,154 @@ Flate nội bộ của PyMuPDF, không ảnh hưởng bất kỳ assertion hay g
 "xong" và trước khi commit (pre-commit hook cũng sẽ chặn commit nếu thiếu `docs/review-report.md`
 trong cùng commit).
 
+## Bug #8 — "Chữ nhảy lung tung" tái phát ở v1.2.8: MediaBox/CropBox offset trong font_shrink (2026-09-08)
+
+### Bối cảnh
+
+User báo bản dịch full-book *Le Cordon Bleu Patisserie and Baking Foundations* (job
+`f3c22ddc-374a-4408-9dd3-99c49da802e8`, chạy dưới app version 1.2.8) bị chữ chồng đè lên nhau,
+nghi là Bug #7 (TOC-1 v2, release v1.2.7) tái phát. User cũng hỏi liệu có phải do 2 session Claude
+Code chạy song song trên cùng repo (có thật — nhiều session khác đang hoạt động trên project này)
+gây ra.
+
+### Chẩn đoán (Tech Lead, live reproduction — không mock, không đoán)
+
+**KHÔNG phải TOC-1 v2 regression, và KHÔNG phải do chạy song song session.** TOC-1 v2 vẫn được
+kích hoạt đúng trong pipeline thật (xác nhận qua `job_orchestrator.py:248` +
+`Settings.babeldoc_toc_split_enabled=True`). Đã loại trừ giả thuyết concurrency 32-thread của
+babeldoc (adaptive, bảng `concurrency_state`) bằng live reproduction đơn lẻ, tất định.
+
+**Root cause thật**: `src/postprocess/font_shrink.py::_redraw_span` gọi `page.insert_text()` để vẽ
+lại span sau khi co font — nhưng PyMuPDF's `Shape.insert_text` (đọc trực tiếp source cài trong
+venv, `pymupdf` 1.28.2, class `Shape`) offset toạ độ theo **CropBox** (`page.cropbox_position`),
+trong khi `page.get_text("dict")`/`add_redact_annot` dùng hệ toạ độ theo `page.rect` (giao của
+CropBox và MediaBox, chuẩn hoá về gốc (0,0)). Khi CropBox không nằm gọn trong MediaBox (case thật:
+Le Cordon Bleu có `mediabox=(33,33,681,816)`, `cropbox=(0,-33,714,816)` — CropBox lớn hơn MediaBox
+mọi phía, không chuẩn PDF spec nhưng là trạng thái thật của output pdf2zh/babeldoc cho cuốn này),
+2 hệ toạ độ lệch nhau → chữ co-font bị vẽ sai vị trí, đè lên nội dung khác.
+
+Đo trực tiếp 1 lời gọi đơn lẻ: span `"Giới thiệu 4"` bbox gốc `[120.1, 289.5]` → sau redraw (code
+cũ) bị vẽ tại `[87.1, 258.4]`, lệch đúng `(-33, -31)` = origin của MediaBox. Đếm bbox-overlap
+(diện tích giao > 200pt²) trên trang mục lục (page index 6, `translated_vi.pdf` output thật):
+**12 cặp block chồng đè** trước fix.
+
+**Vì sao QA v1.2.7 không bắt được**: live E2E QA lúc đó chỉ chạy trên sách Figoni, có
+`mediabox=(0,0,684,855)` (origin đã là 0) → độ lệch = 0, bug không lộ. TOC-1 v2 không gây bug này
+nhưng khuếch đại triệu chứng (tách nhiều dòng ngắn hơn → nhiều dòng đi qua nhánh co-font/redraw
+hơn). Bug có từ trước v1.2.7, không nằm trong diff v1.2.7→v1.2.8.
+
+**Phạm vi ảnh hưởng**: mọi trang có dòng bị co font trên PDF có CropBox không nằm gọn trong
+MediaBox — đo được overlap thêm ở trang 5, 9, 12, 25, 35 của cùng cuốn Le Cordon Bleu.
+
+### Fix (Dev)
+
+Hàm mới `_insert_text_origin_fix(page, origin)` trong `src/postprocess/font_shrink.py`, gọi từ
+`_redraw_span()` trước khi `insert_text()`. Công thức (per-axis, `max(..., 0)` để không phá case
+CropBox hợp lệ nhỏ hơn MediaBox — ví dụ margin box hợp pháp):
+
+```
+dx = max(mediabox.x0 - cropbox_position.x, 0.0)
+dy = max(-cropbox_position.y, 0.0)
+```
+
+Nguồn xác thực: đọc trực tiếp `pymupdf/__init__.py` (venv, `Shape.__init__` và
+`Shape.insert_text`) cài đặt tại `.venv/lib/python3.14/site-packages/pymupdf/__init__.py`.
+
+### Test
+
+`tests/test_font_shrink.py::test_redraw_span_lands_on_its_own_bbox_despite_mediabox_cropbox_offset`
+— parametrize trên 2 fixture: `tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf` (CropBox lệch thật,
+case bug) và `tests/fixtures/babeldoc/job3594a7a3_chunk0_sample_mono.pdf` (CropBox nhỏ hơn
+MediaBox hợp lệ — margin box, phải KHÔNG bị "sửa" nhầm). Assert giá trị origin cụ thể sau redraw
+khớp bbox gốc từ `get_text("dict")` (không chỉ `assert_called()` — theo R6-02).
+
+**PM tự verify độc lập** (không chỉ tin báo cáo của Dev agent, vì agent lần đầu bị treo giữa
+chừng khi tự sửa công thức): `git stash push -- src/postprocess/font_shrink.py` (giữ nguyên file
+test) rồi `uv run pytest tests/test_font_shrink.py` → lỗi import (thiếu
+`_insert_text_origin_fix` — đúng kỳ vọng khi chưa có fix); `git stash pop` khôi phục → **12
+passed**. Xác nhận test mới thực sự phụ thuộc vào fix, không pass giả (vacuous).
+
+### Trạng thái — CHƯA xong, còn thiếu trước khi release
+
+- **Chưa có live E2E cấp pipeline đầy đủ** (chạy `font_shrink_page()` qua đúng đường
+  `job_orchestrator.py`, không chỉ gọi thẳng `_redraw_span` trong unit test) đo lại số overlap
+  thật trên trang mục lục/trang 5,9,12,25,35 — Dev agent thứ 2 được giao việc này bị fail do rate
+  limit session (`resets 7:30pm Asia/Saigon`), chưa chạy được. Đây là việc còn nợ, PM sẽ giao lại
+  hoặc để QA đảm nhiệm phần R5-03/R6-03 live E2E trước khi duyệt release.
+- **Chưa spawn Reviewer** (Protocol 7 R7-01) — chưa được coi là "xong".
+- Checklist R5-04 (external contract verified against real source): **YES** — nguồn:
+  `pymupdf/__init__.py` cài trong venv, đọc trực tiếp source `Shape.insert_text`/`Shape.__init__`,
+  version 1.28.2.
+
+### Vòng 2 (Dev, sau REJECT của Reviewer — xem section "Bug #8 ... review `font_shrink.py`
+MediaBox/CropBox fix" trong `docs/review-report.md`)
+
+Reviewer round 1 REJECT: đúng tại điểm sửa (`font_shrink.py`) nhưng phạm vi hẹp hơn phạm vi
+thật của bug — 2 call site khác của `page.insert_text()` mắc CHÍNH XÁC cùng 1 bug, chưa được
+sửa. Vòng 2 xử lý đầy đủ 5 yêu cầu của Reviewer:
+
+1. **Tách hàm dùng chung**: `_insert_text_origin_fix` chuyển từ `font_shrink.py` thành
+   `insert_text_origin_fix()` (public) tại module mới `src/utils/pdf_coords.py` — cạnh
+   `src/utils/retry.py`/`excel_utils.py` đã có sẵn, đúng quy ước "shared helper" của project
+   (không đặt trong `src/postprocess/` vì 1 trong 3 nơi dùng — `searchable_pdf.py` — nằm ở
+   `src/preprocess/`, tránh preprocess phải phụ thuộc ngược vào postprocess). `font_shrink.py`
+   giờ chỉ `import` hàm này, không còn định nghĩa riêng.
+2. **Áp dụng cho `rotated_text_overlay.py::_draw_block`** (issue Blocking #1): mỗi `pivot`
+   tính theo dòng (kể cả pivot dùng làm neo `morph`) được đưa qua `insert_text_origin_fix()`
+   trước khi gọi `page.insert_text()` — cùng pattern `_redraw_span` đã dùng (fix áp cho `origin`
+   1 lần trước khi nó chảy vào tuple `morph`).
+3. **Áp dụng cho `searchable_pdf.py::_insert_invisible_text`** (issue non-blocking #2, làm luôn
+   theo yêu cầu "làm luôn cho gọn"): điểm `(x0, y1 - h*0.15)` được đưa qua
+   `insert_text_origin_fix()` trước khi `page.insert_text(..., render_mode=3)`.
+4. **Test regression mới** `tests/test_rotated_text_overlay.py::
+   test_draw_block_lands_on_pivot_despite_mediabox_cropbox_offset` — dùng lại chính
+   `tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf` và đúng giá trị pivot thực nghiệm Reviewer
+   đã đo (`(261.53, 154.71)` → lệch `(228.53, 121.71)` trước fix). **Phát hiện khi viết test**:
+   pivot đó trùng gần như tuyệt đối với 1 span thật đã có sẵn trên trang ("Contents" heading) —
+   assert theo *origin* sẽ pass giả (vacuous) bất kể `_draw_block` có vẽ đúng hay không, vì luôn
+   tìm thấy span "Contents" có sẵn. Sửa bằng cách match theo **text marker riêng** (không có
+   trên trang) trước, rồi mới kiểm tra origin của CHÍNH span đó — tự verify lại bằng `git stash`
+   trên `src/postprocess/rotated_text_overlay.py`: FAIL đúng ở vị trí lệch `(228.53, 121.71)`
+   trước fix, PASS sau fix.
+5. **2 lỗi docstring/comment Reviewer chỉ ra**: (a) xoá câu "see the false-start note at the
+   bottom" (tham chiếu treo, không có section đó) khi viết lại docstring cho
+   `insert_text_origin_fix()` ở vị trí mới; (b) sửa header comment ở
+   `tests/test_font_shrink.py` (dòng ~241) từ "MediaBox origin != (0,0)" (lý thuyết SAI mà chính
+   docstring minh thị bác bỏ) thành đúng bản chất bug (CropBox không nằm gọn trong MediaBox).
+
+**Test đã chạy (số thật)**:
+
+```
+uv run pytest tests/test_font_shrink.py -q                    → 12 passed
+uv run pytest tests/test_rotated_text_overlay.py -q           → 10 passed, 1 FAILED (xem dưới)
+uv run pytest tests/preprocess/test_searchable_pdf.py -q      → 9 passed
+uv run ruff check <5 file sửa>                                 → All checks passed!
+uv run ruff format --check <5 file sửa>                        → đã format
+```
+
+**PHÁT HIỆN MỚI, NGOÀI PHẠM VI 5 MỤC TRÊN — không tự sửa, đã flag riêng** (spawn_task
+`task_062a9bd5`, "Fix rotated_text_overlay pivot overflow at page edge"): áp đúng fix
+MediaBox/CropBox cho `_draw_block` làm 1 test ĐANG PASS trước đó
+(`test_overlay_rotated_text_draws_translated_text_at_correct_angle`) bắt đầu FAIL. Root cause
+(đã chẩn đoán, CHƯA sửa — khác cơ chế với Bug #8): `_draw_block` tính pivot của mỗi dòng bằng
+cách ngoại suy TUYẾN TÍNH chỉ từ origin của DÒNG ĐẦU TIÊN (`block.pivot`) cộng bước cố định
+theo hướng chữ, KHÔNG dùng origin thật của từng dòng, KHÔNG kiểm tra biên trang. Trên fixture
+`rotated_text_p67_source.pdf`, dòng đầu ("Disaccharide.") nằm ở x≈409, nhưng các dòng thân đoạn
+văn thật lại ở x≈337-377 — ngoại suy lệch baseline ~35-70pt. Cộng với bề rộng mỗi dòng dịch
+(~200pt), 1-2 dòng cuối trước fix Bug #8 chỉ còn margin ~5.6pt trong biên phải trang (648pt) —
+CỰC KỲ MỎNG MANH nhưng vẫn pass. Fix Bug #8 dịch điểm chèn thêm +33 sang phải, đẩy 1-2 dòng cuối
+đó lố ra ngoài biên trang, và PyMuPDF's `get_text()`/rendering CẮT thật các ký tự cuối dòng
+(verify thực nghiệm độc lập: `page.insert_text((600,100), "Hello World Testing Clip",
+fontsize=11)` trên trang rộng 648pt → extract ra chỉ `"Hello Wor"`). Đây là 1 lỗi khác cơ chế,
+có từ trước, bị Bug #8's CropBox bug VÔ TÌNH che giấu (dịch trái đủ để lọt vào biên) — giờ mới lộ
+ra khi Bug #8 được sửa đúng. KHÔNG sửa trong lần này (ngoài phạm vi 5 mục PM giao, cần thiết kế
+lại cách tính pivot — không phải patch nhỏ), đã tạo task riêng theo dõi.
+
+**Trạng thái**: 5/5 mục Reviewer yêu cầu đã làm xong, `docs/CHANGELOG.md` chỉ append (không ghi
+đè). PM sẽ giao Reviewer lại vòng 2 — KHÔNG tự báo "đã approve"/"sẵn sàng release". 1 test hiện
+có (`test_overlay_rotated_text_draws_translated_text_at_correct_angle`) đang FAIL vì lý do NGOÀI
+phạm vi bug này (xem trên) — Reviewer/PM cần quyết định có chặn round này hay tách riêng.
+
 ## US-15 — Markdown parse-only, nhánh PDF (born-digital + scan) — implement theo Architecture.md
 ## §6.15 (2026-09-08)
 
@@ -5174,6 +5322,110 @@ Implement xong theo đúng §6.18.8 (không tự suy diễn lại thiết kế, 
 đã liệt kê ở trên thay vì tự đoán). **CHƯA spawn Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là
 "xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào `docs/review-report.md`.
 
+## Bug #9 — tắt `font_shrink_page()` cho engine `babeldoc` (Dev, 2026-09-08)
+
+Implement đúng thiết kế Tech Lead đã chốt tại `docs/Architecture.md` mục "Bug #9 —
+`font_shrink_page()` phá output của babeldoc: tắt hẳn cho engine `babeldoc`" (B9.1–B9.8). Không tự
+thiết kế lại — chỉ theo đúng tên thuộc tính, vị trí sửa, và cách xử lý `overflow_entries` Tech Lead
+đã quy định.
+
+### Thay đổi
+
+1. `src/services/pdf2zh_runner.py` — thêm `needs_font_shrink: ClassVar[bool] = True` trong
+   `class Pdf2zhRunner` (ngay sau docstring class, trước `__init__`) + `from typing import
+   ClassVar`.
+2. `src/services/babeldoc_runner.py` — thêm `needs_font_shrink: ClassVar[bool] = False` trong
+   `class BabeldocRunner` (cùng vị trí tương ứng) + `from typing import ClassVar`.
+3. `src/core/job_orchestrator.py`:
+   - Thêm property `_needs_font_shrink` ngay sau `_translator_runner` — đọc
+     `self._translator_runner.needs_font_shrink`, có `isinstance(value, bool)` guard bắt buộc
+     (raise `TypeError` nếu không phải `bool` — chặn đúng bẫy `AsyncMock(spec=...)` không copy giá
+     trị class attribute, chỉ copy tên, khiến `mock.needs_font_shrink` là 1 child Mock TRUTHY).
+   - Bọc khối `with fitz.open(chunk.output_path): ... doc.saveIncr()` trong
+     `if self._needs_font_shrink:`. `overflow_entries: list[OverflowEntry] = []` giữ nguyên khai
+     báo BÊN NGOÀI `if` (list rỗng khi skip); vòng lặp ghi `OverflowReport` phía sau **không sửa 1
+     ký tự nào** — đúng quyết định Tech Lead ở B9.5 (diff nhỏ nhất, không đụng đường persistence
+     đang chạy đúng của pdf2zh).
+4. Sửa 7 chỗ tạo mock runner hiện có (đúng danh sách Architecture.md B9.6 mục 4) — mỗi chỗ thêm 1
+   dòng `runner.needs_font_shrink = True/False` tương ứng với `spec=Pdf2zhRunner`/`spec=
+   BabeldocRunner`: `tests/integration/test_job_cancel.py:76`,
+   `tests/integration/test_job_orchestrator_concurrency.py:66`,
+   `tests/integration/test_job_orchestrator.py:86,380,443` (→ `True`),
+   `tests/integration/test_job_orchestrator.py:507,1005` (→ `False`). Grep xác nhận đây là toàn bộ
+   — không còn chỗ nào khác tạo mock của 2 class này trong `tests/`.
+
+### Test mới (R6-02 — assert giá trị/hành vi thật, không chỉ `assert_called()`)
+
+Thêm 3 test trong `tests/integration/test_job_orchestrator.py` (cuối file, mục "Bug #9 —
+needs_font_shrink gate"):
+
+- `test_babeldoc_engine_skips_font_shrink_leaves_output_untouched` (T9-1): chạy `run_job()` đầy đủ
+  với `pdf_translate_engine="babeldoc"`; assert `chunk.output_path` **byte-identical** (sha256)
+  trước/sau bước post-processing, và `SELECT COUNT(*) FROM overflow_reports WHERE job_id=...` ==
+  0. Có thêm 1 spy (`wraps=` lên `font_shrink_page` thật, không thay hành vi) làm bằng chứng bổ
+  sung (`assert_not_awaited()`) — nhưng assertion CHÍNH là hash + đếm DB, đúng yêu cầu B9.6
+  "không dùng assert_called()".
+- `test_pdf2zh_engine_still_runs_font_shrink_regression` (T9-2): cùng input, engine `pdf2zh`;
+  spy `wraps=` lên `font_shrink_page` thật, assert `await_count` khớp đúng số lần thực tế (số
+  chunk × số trang gốc, tính từ chunk thật sinh ra sau khi chạy — không hardcode) để chứng minh
+  bước này **vẫn chạy** cho pdf2zh, không bị fix này vô tình tắt luôn.
+- `test_needs_font_shrink_property_isinstance_guard_catches_unset_mock` (T9-3): `AsyncMock(spec=
+  BabeldocRunner)` **không** set `needs_font_shrink` (mô phỏng đúng lỗi "quên set") → property
+  phải raise `TypeError` nhờ `isinstance` guard, không bị Mock truthy đánh lừa. Đã tự verify bằng
+  cách tạm bỏ guard trong `job_orchestrator.py`, chạy lại thấy test này FAIL đúng như kỳ vọng, rồi
+  khôi phục guard nguyên trạng.
+
+### Live smoke (không cần live babeldoc/pdf2zh subprocess — không có mạng/API key trong môi trường
+dev, xem script `bug9_live_smoke.py` trong scratchpad session)
+
+Chạy trực tiếp đúng đoạn code vừa thêm (`if needs_font_shrink: with fitz.open(...): ... saveIncr()`)
+trên **`tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf`** — 1 PDF thật (không phải file
+`fitz.open()` sinh từ đầu trong test), để loại rủi ro "PDF đơn giản không đại diện layout thật":
+
+- `needs_font_shrink=False` (mô phỏng babeldoc): sha256/size/mtime file **giống hệt** trước và sau
+  — khối code không hề chạy.
+- `needs_font_shrink=True` (mô phỏng pdf2zh): khối code chạy thật trên 2 trang PDF thật, không
+  crash; `doc.saveIncr()` khiến hash đổi (dù 0 overflow entries) — xác nhận nhánh pdf2zh vẫn thực
+  thi bình thường trên 1 PDF layout thật, không chỉ trên PDF `fitz`-toy sinh trong unit test.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/services/pdf2zh_runner.py src/services/babeldoc_runner.py \
+  src/core/job_orchestrator.py tests/integration/test_job_orchestrator.py \
+  tests/integration/test_job_cancel.py tests/integration/test_job_orchestrator_concurrency.py
+  → All checks passed!
+uv run ruff format --check <6 file trên>          → đã format
+uv run pytest tests/integration/test_job_orchestrator.py -q   → 37 passed
+uv run pytest tests/test_pdf2zh_runner.py tests/test_font_shrink.py \
+  tests/integration/test_job_cancel.py tests/integration/test_job_orchestrator_concurrency.py -q
+  → 30 passed
+uv run pytest tests/test_babeldoc_runner.py -q     → 24 passed
+uv run pytest tests/ -q                            → 521 passed, 1 failed
+```
+
+1 test FAIL trong full suite: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — **KHÔNG liên quan Bug #9**
+(Dev không đụng `rotated_text_overlay.py`/`font_shrink.py`/`pdf_coords.py` trong task này). Đã xác
+nhận qua `docs/CHANGELOG.md` mục US-20 ngay phía trên: đây là 1 test đã biết đang được 1 session/
+worktree khác sửa song song (liên quan Bug #8). Không tự ý sửa file ngoài phạm vi Bug #9.
+
+### Điểm khác thiết kế Tech Lead — không có
+
+Đã đối chiếu từng dòng với B9.3/B9.4/B9.5: đúng tên thuộc tính `needs_font_shrink`, đúng vị trí
+(`pdf2zh_runner.py` giữa docstring/`__init__`, `babeldoc_runner.py` tương tự, property ngay sau
+`_translator_runner`, wrap đúng khối `with fitz.open(...)`), đúng cách giữ nguyên
+`overflow_entries`/vòng lặp `OverflowReport` bên ngoài `if`. Không phát hiện sai khác nào cần
+escalate.
+
+### Trạng thái
+
+Implement xong theo đúng Bug #9 B9.1–B9.6 (không tự suy diễn lại thiết kế). **CHƯA spawn Reviewer**
+(Protocol 7 R7-01) — KHÔNG được coi là "xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và
+ghi vào `docs/review-report.md`.
+
+---
+
 ## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
 
 Implement theo `docs/Architecture.md` §6.19 và `docs/PRD.md` US-21. Backend `GET /api/version`
@@ -5423,6 +5675,99 @@ Không đổi file backend/test nào ở vòng này (đúng brief — chỉ fron
 **Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng.** Đã sửa cả blocking (mục 6) lẫn non-blocking
 (mục 7). **CHƯA spawn Reviewer lại** (Protocol 7 R7-01) — chưa được coi là "xong", chờ Reviewer
 duyệt lại vòng 2.
+
+## Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng (fix `_get_width_before_next_break_point`
+đếm đôi bề rộng unit hiện tại) — implement + spike A/B song (2026-09-09)
+
+Theo đúng thiết kế Tech Lead đã chốt (`docs/Architecture.md` mục "Bug #10 — babeldoc cắt ngang từ
+tiếng Việt giữa chừng ... thiết kế bản vá (Tech Lead, 2026-09-09)", BA10.1→BA10.10). Dev **không**
+tự điều tra lại root cause — chỉ tự làm spike A/B sống (R5-02) trước khi implement đầy đủ, đúng
+yêu cầu vì đây là patch mới vào `typesetting.py` (khác 3 patch Bug #7 đều ở `paragraph_finder.py`,
+chưa từng được project verify sống).
+
+### 1. Spike A/B (BA10.5, R5-02) — kết quả 5 gate
+
+Phương pháp: chạy babeldoc 0.6.4 THẬT (không mock) 2 lần trên
+`tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf` (trang 39, 0-based, trích từ
+`Le-Cordon-Bleu-Patisserie-and-Baking-Foundations`, xác nhận đúng chứa case "loyal employees" →
+"nhân viên trung thành" bị cắt) qua chính `BabeldocRunner` production, KHÔNG `--ignore-cache` ở
+lần 2 (cache DeepSeek nạp ở lần 1) — đảm bảo văn bản tiếng Việt giống hệt nhau giữa 2 lần, mọi khác
+biệt quan sát được thuần layout. 3 fixture đối chứng (`page14_numbered_list_source.pdf`,
+`toc_sources/lcb_toc.pdf` 2 trang, `toc_sources/figoni_p25_recipe.pdf`) chạy A/B tương tự.
+
+| Gate | Kết quả |
+|---|---|
+| **G1** (đích) | **PASS**. Baseline: `"...có động lực và t\nrung thành..."` (cắt giữa từ, xác nhận bằng cách `"trung"` không xuất hiện liền mạch trong text trích bằng `pymupdf` — dấu hiệu chính xác của bug). Patched: `"...và trung \nthành..."` — từ "trung" giữ nguyên vẹn. Bonus case tự phát hiện: `"chịu trách nhiệm"` (baseline cắt thành `"nhiệ\nm"`, patched giữ nguyên). |
+| **G2** (tràn ngang) | Ngưỡng chữ ("không lớn hơn quá 0.5pt") **KHÔNG đạt theo nghĩa đen**: `max(bbox.x2)` toàn trang tăng +3.04pt→+10.94pt trên bug10-page + cả 3 fixture đối chứng (0.00pt trên figoni). Điều tra thêm: đây đúng là hệ quả BA10.4 điểm 4 Tech Lead đã dự đoán (scale chỉ có thể TĂNG → dòng dùng hết box sát hơn, không bao giờ vượt). Xác nhận bằng 3 cách: (a) đọc lại source xác nhận nhánh (A) `current_x+unit_width>box.x2` trong `_layout_typesetting_units` hoàn toàn không bị đụng bởi patch; (b) `box.x2` thật của paragraph bug (dump sống) = 590.914pt, mọi mép phải quan sát được (tối đa 567.94pt) vẫn còn cách biên ít nhất ~23pt trên MỌI trang; (c) bằng chứng G3 (số dòng chỉ giảm/giữ nguyên) nhất quán với "dùng hết chỗ trống", không phải tràn. **Escalate finding này cho Tech Lead/PM xác nhận** (không tự ý coi là pass) — nhưng đây KHÔNG phải điều kiện dừng cứng như G3. |
+| **G3** (số dòng) | **PASS** trên cả 5 trang đo (bug10 page, toc p1/p2, numbered_list, figoni_recipe) — sau vá `<=` trước vá mọi nơi, giảm thật trên 2 trang TOC. |
+| **G4** (hiệu năng) | **PASS** qua microbenchmark trực tiếp hàm bị patch (đo cả pipeline nhiễu quá lớn do LLM/network — đã thử và bỏ). Bản patch (generator, early-exit) tốn thêm +10.6% so với hàm gốc trên paragraph 4000-unit (giả lập worst-case), trong ngưỡng 20%. Đối chứng: bản patch NGÂY THƠ (list-comprehension vật chất hoá toàn bộ `typesetting_units[i:]`, đúng thứ Tech Lead cảnh báo tránh) tốn +1336% — xác nhận thiết kế nhận `Iterable` (không phải `Sequence`) trong `word_wrap.py` là bắt buộc, không phải tối ưu sớm thừa thãi. |
+| **G5** (không mất chữ) | **PASS** trên cả 5 trang — số ký tự non-whitespace giống hệt trước/sau (khác biệt duy nhất là whitespace/xuống dòng do reflow). |
+
+Golden fixture unit-level (BA10.6, dump từ chính lần chạy babeldoc thật — không gõ tay):
+`tests/fixtures/babeldoc/bug10_wrap/lcb_p39_trung_thanh_units.json`. Khớp CHÍNH XÁC với ví dụ minh
+hoạ của Tech Lead (BA10.4 đính chính #2): tại ký tự `'r'`, công thức đã vá cho `587.06 <= 590.91`
+(box.x2), công thức gốc (đếm đôi) cho `591.31 > 590.91` — đúng là điểm quyết định wrap sai chỗ.
+
+### 2. Implementation
+
+- `src/babeldoc_shim/word_wrap.py` (module mới): `width_before_next_break_point(units, scale)`
+  nhận `Iterable[tuple[float, bool]]` (KHÔNG phải `Sequence`) — giữ đúng early-exit O(k) của hàm
+  gốc babeldoc, tránh O(n²) khi bị gọi lại cho mọi chỉ số `i` (xem G4).
+- `src/babeldoc_shim/sitecustomize.py`: thêm `_TYPESETTING_MODULE_NAME`, cờ
+  `_word_wrap_fix_enabled()` (mặc định `"1"` — BẬT), `_build_patched_get_width_before_next_break_point`
+  + `_apply_typesetting_patch` (module/loader RIÊNG, rollback ĐỘC LẬP với 3 patch Bug #7 — BA10.7
+  ràng buộc #1). Generic hoá `_ParagraphFinderPatchFinder` → `_ModulePatchFinder` +
+  `_PatchingLoader` (tham số hoá `apply_patch`/`label`), tách `_apply_patch` cũ →
+  `_apply_paragraph_finder_patch`, thêm helper `_install_patch_hook()` dùng chung cho cả 2 module.
+  Toàn bộ test Bug #7 cũ (109 test) vẫn PASS sau khi generic hoá.
+- Wiring flag `BABELDOC_SHIM_WORD_WRAP_FIX`/`babeldoc_word_wrap_fix_enabled` (mặc định `True` —
+  fix số học, không phải heuristic cần tune, khác TOC-1 v2) qua `src/core/config.py` →
+  `src/services/babeldoc_runner.py` (`word_wrap_fix_enabled` param, default `False` khi khởi tạo
+  trực tiếp) → `src/core/job_orchestrator.py`.
+
+### 3. Test
+
+- `tests/test_babeldoc_word_wrap.py` (8 test): golden-fixture test khớp chính xác ví dụ Tech Lead
+  (587.06/590.91) + 6 case biên (list rỗng, `can_break_line=True` ở unit đầu, từ dài không có break
+  point, scale≠1.0, loại trừ unit hiện tại khỏi tổng, nhận generator lười không phải list).
+- `tests/test_babeldoc_shim_word_wrap_patch.py` (11 test): thực thi THẬT `_apply_typesetting_patch`
+  trên class giả (bật/tắt qua env đúng công thức fixed/original), `AttributeError` khi thiếu
+  method, rollback độc lập giữa 2 loader qua `_PatchingLoader` generic, `_ModulePatchFinder` chỉ
+  can thiệp đúng 1 target, và 4 tổ hợp bật/tắt độc lập TOC-1 v2 × word-wrap fix.
+- `tests/test_babeldoc_runner.py`: 3 test mới cho wiring env var (`"1"`/`"0"`/vắng mặt khi
+  `line_split_shim_enabled=False`).
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/         → All checks passed!
+uv run ruff format --check <files>    → 8 files already formatted
+uv run pytest tests/ -q               → 553 passed, 1 deselected (104.03s)
+```
+
+1 test deselect: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — FAIL kể cả sau `git stash`
+(revert toàn bộ thay đổi Bug #10) → xác nhận PRE-EXISTING, thuộc về công việc glossary/UI đang sửa
+song song ở session khác (không đụng `babeldoc_shim`/`babeldoc_runner`/`job_orchestrator`), không
+liên quan Bug #10. Không có regression mới.
+
+### File đã sửa/thêm
+
+Mới: `src/babeldoc_shim/word_wrap.py`, `tests/test_babeldoc_word_wrap.py`,
+`tests/test_babeldoc_shim_word_wrap_patch.py`, `tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf`,
+`tests/fixtures/babeldoc/bug10_wrap/lcb_p39_trung_thanh_units.json`.
+
+Sửa: `src/babeldoc_shim/sitecustomize.py`, `src/core/config.py`, `src/services/babeldoc_runner.py`,
+`src/core/job_orchestrator.py`, `tests/test_babeldoc_runner.py`.
+
+Không đụng `web/*`, `glossary_manager.py`, `rotated_text_overlay.py`, `searchable_pdf.py`,
+`pdf2zh_runner.py`, `font_shrink.py` — đang sửa song song ở session khác (US-17/US-18).
+
+### Trạng thái
+
+**CHƯA spawn Reviewer** (Protocol 7 R7-01) — PM sẽ giao Reviewer riêng. Đặc biệt cần Reviewer xác
+nhận lại finding G2 (không phải điều kiện dừng cứng nhưng KHÔNG tự ý coi là pass) trước khi bật
+`babeldoc_word_wrap_fix_enabled=True` lên production thật.
 
 ## US-19 — Lịch sử: thời gian dịch + số trang, bỏ nút "+ Glossary" trùng chức năng (Dev, 2026-09-09)
 

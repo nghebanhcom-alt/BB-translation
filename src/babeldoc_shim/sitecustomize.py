@@ -117,9 +117,31 @@ cham) da co san CUA CHINH `process_independent_paragraphs` goc
 Doc lap voi bien BABELDOC_SHIM_TOC_SPLIT (mac dinh "0" — TAT, KHAC 2 patch
 tren mac dinh BAT): day la heuristic MOI NHAT/rui ro cao nhat theo AA5, chi
 bat sau khi QA live xanh (Settings.babeldoc_toc_split_enabled). Cung gate
-version `0.6.4` va cung co che rollback-chung (try/except o `_apply_patch`)
-voi 2 patch kia — babeldoc doi cau truc code se lam CA 3 patch rollback cung
-nhau, khong rieng patch nay.
+version `0.6.4` va cung co che rollback-chung (try/except o
+`_apply_paragraph_finder_patch`) voi 2 patch kia — babeldoc doi cau truc code
+se lam CA 3 patch rollback cung nhau, khong rieng patch nay.
+
+BUG #10 — DEM DOI BE RONG TRONG LOOKAHEAD WRAP (Architecture.md muc "Bug #10
+— babeldoc cat ngang tu tieng Viet giua chung", 2026-09-09)
+---------------------------------------------------------------------------
+Vá THEM, o MODULE KHAC (`babeldoc.format.pdf.document_il.midend.typesetting`,
+giai doan DAN TRANG — chay SAU giai doan tach doan/dong cua 3 patch tren) —
+KHONG co phu thuoc thu tu voi 7.1/7.2/7.4-b. `Typesetting.
+_get_width_before_next_break_point` cong CA be rong cua chinh unit hien tai
+vao tong tra ve, roi noi goi (`_layout_typesetting_units:1411`) CONG THEM
+`unit_width` cua chinh unit do 1 lan nua — dem doi. Voi tieng Trung/Nhat moi
+ky tu deu duoc coi la break point nen loi nay vo hinh; voi tieng Viet (dau/am
+tiet dai) loi lo ra thanh cat ngang giua tu (vd `"trung thanh"` ->
+`"t"`/`"rung thanh"`). Fix: bo be rong unit hien tai khoi tong — thuat toan
+thuan nam o `word_wrap.py`, dung chung voi test golden fixture (Protocol 6
+R6-02).
+
+Patch nay dung LOADER/FINDER RIENG voi 3 patch ParagraphFinder o tren
+(`_ModulePatchFinder`, generic hoa tu `_ParagraphFinderPatchFinder` cu) —
+rollback DOC LAP hoan toan (BA10.7 rang buoc #1): babeldoc doi cau truc
+`typesetting.py` khong lam hong 3 patch Bug #7, va nguoc lai. Doc lap voi
+bien BABELDOC_SHIM_WORD_WRAP_FIX (mac dinh "1" — BAT, KHAC TOC-1 v2: day la
+fix so hoc dung/sai, khong phai heuristic can tune truoc khi bat mac dinh).
 """
 
 from __future__ import annotations
@@ -129,12 +151,20 @@ import importlib.util
 import logging
 import os
 import sys
+from collections.abc import Callable
 from types import ModuleType
 
 logger = logging.getLogger("babeldoc_shim")
 
 _EXPECTED_BABELDOC_VERSION = "0.6.4"
-_TARGET_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.paragraph_finder"
+_PARAGRAPH_FINDER_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.paragraph_finder"
+#: Bug #10 (Architecture.md muc "Bug #10 — babeldoc cat ngang tu tieng Viet
+#: giua chung"). Module RIENG voi `_PARAGRAPH_FINDER_MODULE_NAME` — patch nay
+#: vá `Typesetting._get_width_before_next_break_point` (giai doan dan trang,
+#: chay SAU giai doan tach doan/dong) va rollback DOC LAP hoan toan voi 3
+#: patch ParagraphFinder (BA10.7 rang buoc #1): neu babeldoc doi cau truc
+#: `typesetting.py`, 3 patch Bug #7 van phai chay binh thuong, va nguoc lai.
+_TYPESETTING_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.typesetting"
 
 
 def _numbered_list_split_enabled() -> bool:
@@ -145,6 +175,13 @@ def _toc_split_enabled() -> bool:
     # Mac dinh "0" (TAT) — KHAC 2 patch tren mac dinh BAT (AA5: heuristic moi
     # nhat/rui ro cao nhat, chi bat sau khi QA live xanh).
     return os.environ.get("BABELDOC_SHIM_TOC_SPLIT", "0") == "1"
+
+
+def _word_wrap_fix_enabled() -> bool:
+    # Bug #10: mac dinh "1" (BAT) — KHAC TOC-1 v2 (tung mac dinh TAT). Day la
+    # fix so hoc dung/sai (bo 1 phep cong thua), khong phai heuristic doan y
+    # do layout can tune truoc khi bat mac dinh (Architecture.md BA10.8).
+    return os.environ.get("BABELDOC_SHIM_WORD_WRAP_FIX", "1") != "0"
 
 
 def _is_whitespace_char(char: object) -> bool:
@@ -459,7 +496,35 @@ def _build_patched_process(paragraph_finder_module: ModuleType):
     return patched
 
 
-def _apply_patch(paragraph_finder_module: ModuleType) -> None:
+def _build_patched_get_width_before_next_break_point(typesetting_module: ModuleType):
+    """Boc `Typesetting._get_width_before_next_break_point` (Bug #10):
+    khi bat (`_word_wrap_fix_enabled()`), uy thac tinh toan cho thuat toan
+    thuan `word_wrap.width_before_next_break_point` (bo unit hien tai khoi
+    tong — fix dem doi be rong); khi tat, goi lai HAM GOC da chup lai truoc
+    khi patch (rollback tuc thi qua bien moi truong, khong can deploy lai).
+
+    Truyen GENERATOR (khong phai list) vao `width_before_next_break_point` —
+    xem docstring ham do va BA10.3-b: giu dung do phuc tap O(k) early-exit
+    cua ham goc, tranh O(n^2) khi ham nay bi goi lai cho moi chi so `i` trong
+    `_layout_typesetting_units`.
+    """
+    # `PYTHONPATH` (truyen tu `BabeldocRunner`) tro THANG vao thu muc nay,
+    # nen import module anh em bang ten tran — xem giai thich chi tiet o
+    # `_build_patched_split_paragraph_into_lines` phia tren.
+    from word_wrap import width_before_next_break_point
+
+    original = typesetting_module.Typesetting._get_width_before_next_break_point
+
+    def patched(self, typesetting_units, scale):
+        if not _word_wrap_fix_enabled():
+            return original(self, typesetting_units, scale)
+        unit_pairs = ((unit.width, unit.can_break_line) for unit in typesetting_units)
+        return width_before_next_break_point(unit_pairs, scale)
+
+    return patched
+
+
+def _apply_paragraph_finder_patch(paragraph_finder_module: ModuleType) -> None:
     """Ap patch len `ParagraphFinder._split_paragraph_into_lines` (7.1),
     `ParagraphFinder.process` (7.2) va `ParagraphFinder.
     process_independent_paragraphs` (7.4-b, TOC-1 v2 — Bug #7 Ca C).
@@ -469,7 +534,9 @@ def _apply_patch(paragraph_finder_module: ModuleType) -> None:
     day gia dinh moi thu ton tai dung nhu verify — neu sai (doi ten
     class/method o version khac), exception se bi bat va log canh bao o tang
     tren, KHONG patch GI CA (ca 3 patch deu rollback cung nhau — neu cau truc
-    doi du de 1 patch sai thi 2 patch kia cung dang nghi).
+    doi du de 1 patch sai thi 2 patch kia cung dang nghi). Rollback nay HOAN
+    TOAN DOC LAP voi patch Bug #10 o `_apply_typesetting_patch` (module rieng,
+    loader rieng — BA10.7 rang buoc #1).
     """
     ParagraphFinder = paragraph_finder_module.ParagraphFinder
     if not hasattr(ParagraphFinder, "_split_paragraph_into_lines"):
@@ -505,12 +572,52 @@ def _apply_patch(paragraph_finder_module: ModuleType) -> None:
     )
 
 
+def _apply_typesetting_patch(typesetting_module: ModuleType) -> None:
+    """Ap patch Bug #10 len `Typesetting._get_width_before_next_break_point`.
+
+    Goi tu `exec_module` wrapper cua import hook RIENG cho module
+    `typesetting` (loader/finder rieng voi `_apply_paragraph_finder_patch` —
+    BA10.7 rang buoc #1: rollback DOC LAP, babeldoc doi cau truc
+    `typesetting.py` khong duoc lam hong 3 patch ParagraphFinder cua Bug #7,
+    va nguoc lai). Boc trong try/except o noi goi (`_PatchingLoader`), giong
+    het co che fail-safe cua `_apply_paragraph_finder_patch`.
+    """
+    Typesetting = typesetting_module.Typesetting
+    if not hasattr(Typesetting, "_get_width_before_next_break_point"):
+        raise AttributeError(
+            "Typesetting khong co method _get_width_before_next_break_point "
+            "— cau truc babeldoc co the da doi, khong ap patch Bug #10."
+        )
+    Typesetting._get_width_before_next_break_point = (
+        _build_patched_get_width_before_next_break_point(typesetting_module)
+    )
+    logger.warning(
+        "babeldoc_shim: da vá Typesetting._get_width_before_next_break_point "
+        "(Bug #10 — bo unit hien tai khoi lookahead wrap, tranh dem doi be "
+        "rong khi kiem tra xuong dong, %s). PYTHONPATH shim dang hoat dong.",
+        "bat" if _word_wrap_fix_enabled() else "TAT qua BABELDOC_SHIM_WORD_WRAP_FIX=0",
+    )
+
+
 class _PatchingLoader(importlib.abc.Loader):
     """Boc loader that cua module muc tieu de chay patch NGAY SAU khi module
-    duoc exec xong (khong dung truoc do — cac class/ham chua ton tai)."""
+    duoc exec xong (khong dung truoc do — cac class/ham chua ton tai).
 
-    def __init__(self, wrapped_loader: importlib.abc.Loader) -> None:
+    Tham so hoa boi `apply_patch`/`label` (Bug #10, generic hoa de dung chung
+    cho ca patch ParagraphFinder (Bug #7) lan patch Typesetting (Bug #10)) —
+    moi instance boc DUNG 1 module muc tieu voi DUNG 1 ham patch, nen loi cua
+    module nay khong lam anh huong module kia (BA10.7 rang buoc #1: rollback
+    doc lap)."""
+
+    def __init__(
+        self,
+        wrapped_loader: importlib.abc.Loader,
+        apply_patch: Callable[[ModuleType], None],
+        label: str,
+    ) -> None:
         self._wrapped = wrapped_loader
+        self._apply_patch = apply_patch
+        self._label = label
 
     def create_module(self, spec):
         create = getattr(self._wrapped, "create_module", None)
@@ -519,25 +626,36 @@ class _PatchingLoader(importlib.abc.Loader):
     def exec_module(self, module: ModuleType) -> None:
         self._wrapped.exec_module(module)
         try:
-            _apply_patch(module)
+            self._apply_patch(module)
         except Exception:
             logger.warning(
-                "babeldoc_shim: KHONG the ap patch Bug #7 len %s — babeldoc "
-                "se chay tiep voi hanh vi GOC (khong patch). Co the do "
-                "version babeldoc da doi cau truc code so voi 0.6.4.",
-                _TARGET_MODULE_NAME,
+                "babeldoc_shim: KHONG the ap patch %s — babeldoc se chay tiep "
+                "voi hanh vi GOC (khong patch). Co the do version babeldoc da "
+                "doi cau truc code so voi 0.6.4.",
+                self._label,
                 exc_info=True,
             )
 
 
-class _ParagraphFinderPatchFinder(importlib.abc.MetaPathFinder):
-    """Meta-path finder: chi can thiep dung 1 lan cho dung 1 module muc tieu
-    (`…midend.paragraph_finder`), de nguyen moi import khac cho co che chuan
-    cua Python xu ly.
+class _ModulePatchFinder(importlib.abc.MetaPathFinder):
+    """Meta-path finder: chi can thiep dung 1 lan cho dung 1 module muc tieu,
+    de nguyen moi import khac cho co che chuan cua Python xu ly.
+
+    Generic hoa (Bug #10, doi ten tu `_ParagraphFinderPatchFinder`) de dung
+    chung cho ca 2 module muc tieu (`paragraph_finder` va `typesetting`) — 2
+    instance RIENG BIET, khong chia se trang thai `_resolving`, nen 1 loader
+    that bai khong anh huong loader con lai.
     """
 
-    def __init__(self, target_fullname: str) -> None:
+    def __init__(
+        self,
+        target_fullname: str,
+        apply_patch: Callable[[ModuleType], None],
+        label: str,
+    ) -> None:
         self._target_fullname = target_fullname
+        self._apply_patch = apply_patch
+        self._label = label
         self._resolving = False
 
     def find_spec(self, fullname, path, target=None):
@@ -559,8 +677,35 @@ class _ParagraphFinderPatchFinder(importlib.abc.MetaPathFinder):
         if spec is None or spec.loader is None:
             return None
 
-        spec.loader = _PatchingLoader(spec.loader)
+        spec.loader = _PatchingLoader(spec.loader, self._apply_patch, self._label)
         return spec
+
+
+def _install_patch_hook(
+    target_fullname: str,
+    apply_patch: Callable[[ModuleType], None],
+    label: str,
+) -> None:
+    """Cai hook cho DUNG 1 module muc tieu (Bug #10: tach ra tu than
+    `_install_hook_if_version_matches` de goi 2 lan doc lap — mot cho
+    `paragraph_finder`, mot cho `typesetting`, moi loi that bai chi anh huong
+    dung module do, BA10.7 bang "Vi tri sua", dong `:597`)."""
+    if target_fullname in sys.modules:
+        # Da import roi (khong nen xay ra trong luong CLI binh thuong vi
+        # sitecustomize chay truoc entry point, nhung fail-safe: thu patch
+        # truc tiep thay vi cai hook cho mot import se khong bao gio toi).
+        try:
+            apply_patch(sys.modules[target_fullname])
+        except Exception:
+            logger.warning(
+                "babeldoc_shim: module %s da duoc import truoc do va patch "
+                "truc tiep that bai — babeldoc chay voi hanh vi goc.",
+                label,
+                exc_info=True,
+            )
+        return
+
+    sys.meta_path.insert(0, _ModulePatchFinder(target_fullname, apply_patch, label))
 
 
 def _install_hook_if_version_matches() -> None:
@@ -573,28 +718,24 @@ def _install_hook_if_version_matches() -> None:
     if version != _EXPECTED_BABELDOC_VERSION:
         logger.warning(
             "babeldoc_shim: babeldoc version '%s' khac voi version da verify "
-            "('%s') — KHONG ap patch Bug #7 (Protocol 5 muc 5: doi version "
-            "phai verify lai contract truoc). babeldoc chay voi hanh vi goc.",
+            "('%s') — KHONG ap patch Bug #7/#10 (Protocol 5 muc 5: doi "
+            "version phai verify lai contract truoc). babeldoc chay voi hanh "
+            "vi goc.",
             version,
             _EXPECTED_BABELDOC_VERSION,
         )
         return
 
-    if _TARGET_MODULE_NAME in sys.modules:
-        # Da import roi (khong nen xay ra trong luong CLI binh thuong vi
-        # sitecustomize chay truoc entry point, nhung fail-safe: thu patch
-        # truc tiep thay vi cai hook cho mot import se khong bao gio toi).
-        try:
-            _apply_patch(sys.modules[_TARGET_MODULE_NAME])
-        except Exception:
-            logger.warning(
-                "babeldoc_shim: module muc tieu da duoc import truoc do va "
-                "patch truc tiep that bai — babeldoc chay voi hanh vi goc.",
-                exc_info=True,
-            )
-        return
-
-    sys.meta_path.insert(0, _ParagraphFinderPatchFinder(_TARGET_MODULE_NAME))
+    _install_patch_hook(
+        _PARAGRAPH_FINDER_MODULE_NAME,
+        _apply_paragraph_finder_patch,
+        f"ParagraphFinder (Bug #7, {_PARAGRAPH_FINDER_MODULE_NAME})",
+    )
+    _install_patch_hook(
+        _TYPESETTING_MODULE_NAME,
+        _apply_typesetting_patch,
+        f"Typesetting (Bug #10, {_TYPESETTING_MODULE_NAME})",
+    )
 
 
 try:

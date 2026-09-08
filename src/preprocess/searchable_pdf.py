@@ -40,6 +40,8 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
+from src.utils.pdf_coords import insert_text_origin_fix
+
 logger = logging.getLogger(__name__)
 
 _TEXT_SPAN_TYPES = {"text", "inline_equation"}
@@ -223,8 +225,14 @@ def _insert_invisible_text(
         font_size = max(font_size * min(1.0, (x1 - x0) / text_length), min_font_size)
 
     try:
+        # Bug #8 round-2 (docs/review-report.md, issue non-blocking #2): same
+        # MediaBox/CropBox `page.insert_text()` coordinate bug as
+        # `font_shrink.py::_redraw_span` — `(x0, y1 - h * 0.15)` is page-space
+        # (docstring above, S17), the space `insert_text_origin_fix` corrects
+        # for before handing a point to `page.insert_text()`.
+        origin = insert_text_origin_fix(page, fitz.Point(x0, y1 - h * 0.15))
         page.insert_text(
-            (x0, y1 - h * 0.15),
+            origin,
             content,
             fontname=font_name,
             fontsize=font_size,

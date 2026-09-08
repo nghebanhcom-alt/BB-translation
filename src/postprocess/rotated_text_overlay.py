@@ -83,6 +83,7 @@ from src.services.layout_qa import (
     line_angle_deg,
 )
 from src.services.translation import TranslationProvider
+from src.utils.pdf_coords import insert_text_origin_fix
 
 logger = logging.getLogger(__name__)
 
@@ -369,7 +370,19 @@ def _draw_block(page: fitz.Page, block: RotatedBlock, fit: FitResult, font_path:
     quanh pivot của dòng đầu (Architecture.md U3 spike). PyMuPDF's
     `Matrix(angle)` xoay NGƯỢC chiều `atan2`-based `angle_deg` (đã xác nhận ở
     spike U3: `Matrix(11)` cho ra `dir` ứng với góc đo được là -11 deg), nên
-    dùng `-block.angle_deg` để khớp đúng góc `line_angle_deg()` đã đo."""
+    dùng `-block.angle_deg` để khớp đúng góc `line_angle_deg()` đã đo.
+
+    `pivot` is computed in page-space (`block.pivot`, sourced from
+    `page.get_text("dict")` — see `RotatedBlock.pivot`), the SAME space
+    `src.utils.pdf_coords.insert_text_origin_fix` corrects for before handing
+    a point to `page.insert_text()` — Bug #8 round-2 review found this call
+    site hits the exact same MediaBox/CropBox `page.insert_text()` coordinate
+    bug as `font_shrink.py::_redraw_span` (live-reproduced against
+    `tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf`, `docs/review-report.md`
+    Bug #8 review, issue Blocking #1). The corrected `pivot` is used for BOTH
+    the insertion point and the `morph` rotation anchor, matching how
+    `_redraw_span` fixes `origin` once before it flows into its own `morph`
+    tuple."""
     dx, dy = block.direction
     nx, ny = -dy, dx
     origin_x, origin_y = block.pivot
@@ -378,6 +391,7 @@ def _draw_block(page: fitz.Page, block: RotatedBlock, fit: FitResult, font_path:
 
     for i, text in enumerate(fit.wrapped_lines):
         pivot = fitz.Point(origin_x + nx * line_height * i, origin_y + ny * line_height * i)
+        pivot = insert_text_origin_fix(page, pivot)
         page.insert_text(
             pivot,
             text,

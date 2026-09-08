@@ -64,6 +64,7 @@ def _fake_runner_returning(result_factory) -> Pdf2zhRunner:
     each concurrency test control the exact `Pdf2zhResult` returned.
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
+    runner.needs_font_shrink = True
 
     async def _translate_pages(input_path, output_dir, page_range, service, **kwargs):
         with fitz.open(input_path) as source_doc:

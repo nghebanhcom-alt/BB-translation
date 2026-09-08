@@ -10952,3 +10952,630 @@ cho **cả `pdf2zh` lẫn `babeldoc`** (đúng tiền lệ S8, nơi user đã c�
 xoá `/Decode` (V4.4), không ghi đè `/ColorSpace` + allowlist `info[5]` đi kèm (W2, **cặp không tách
 rời** — W2.2), guard `/Mask` và skip-khi-có-alpha (W3). Nếu user từ chối (a), 4 sửa này vẫn áp dụng
 cho nhánh `Filter: null` hiện hành, và W6 rút gọn về đúng bước 3 cũ (`type == "null"`).
+
+---
+
+## Bug #9 — `font_shrink_page()` phá output của babeldoc: tắt hẳn cho engine `babeldoc` (2026-09-08)
+
+**Trạng thái**: hướng khắc phục P0 **ĐÃ QUA Protocol 2** — user duyệt trực tiếp qua PM
+(2026-09-08) đúng đề xuất của Domain Expert (chạy model Fable): *tắt hẳn `font_shrink_page()` cho
+output của engine `babeldoc`, giữ nguyên cho `pdf2zh`*. Mục này KHÔNG điều tra lại root cause (đã
+xong), chỉ chốt **thiết kế cụ thể** để giao Dev.
+
+### B9.1. Nguồn xác thực (Protocol 5 R5-01 / Protocol 1 mở rộng)
+
+Bảng dưới phân biệt rạch ròi 3 mức: (i) Tech Lead **tự đọc source trong repo này** lúc viết mục
+này; (ii) **Domain Expert đo/đọc thật** và báo cáo lại cho PM (Tech Lead **chưa** tự chạy lại);
+(iii) đã nằm sẵn trong tài liệu handoff đã qua review.
+
+| # | Claim | Mức | Nguồn |
+|---|---|---|---|
+| B9-01 | Chỉ có **đúng 1** call site của `font_shrink_page()` trong toàn bộ `src/` — `job_orchestrator.py:1292`, bên trong `_process_chunk()`, chạy cho **mọi** trang của **mọi** chunk, **không** phân biệt engine | (i) tự verify | `grep -rn "font_shrink" src/` → chỉ 1 lời gọi; đọc `src/core/job_orchestrator.py:1289-1308` |
+| B9-02 | `_process_chunk()` gọi engine qua `self._translator_runner.translate_pages(...)`, engine được chọn ở **1 chỗ duy nhất** là property `_translator_runner` (§6.14.7) | (i) tự verify | `src/core/job_orchestrator.py:264-282` |
+| B9-03 | `_redraw_span()` gọi `page.add_redact_annot(span_bbox, fill=(1,1,1))` rồi `page.apply_redactions()` **ngay lập tức, cho từng span một** — nên khi xử lý dòng N+1, vùng redact của nó xoá luôn glyph mà dòng N vừa được `insert_text()` vẽ vào, nếu 2 bbox giao nhau dù chỉ vài phần mười pt | (i) tự verify (cơ chế đọc được thẳng từ code) | `src/postprocess/font_shrink.py:332-333` |
+| B9-04 | `font_shrink_page()` được thiết kế **cho pdf2zh**: pdf2zh vẽ bản dịch vào đúng vị trí/cỡ chữ của bản gốc EN, không tự fit lại theo bề ngang box | (i) tự verify | docstring `src/postprocess/font_shrink.py:36-51` ("Real overflow happens when pdf2zh draws the (longer) Vietnamese translation at a page position sized for the (shorter) original English text") |
+| B9-05 | babeldoc (`IL/midend/typesetting.py`, bản 0.6.4) **tự bóp cỡ chữ tới tối thiểu 10%** để vừa khung, và **bỏ hẳn đoạn** nếu vẫn không vừa — **không bao giờ** vẽ tràn ra ngoài box | (ii) Domain Expert đọc source thật 2026-09-08 — **Tech Lead CHƯA tự đọc lại** | báo cáo Domain Expert (Fable) gửi PM, 2026-09-08 |
+| B9-06 | Trên output babeldoc, `font_shrink_page` bị kích hoạt bởi **sai số đo float vặt vãnh** (median excess đo được = **0.00%**), tức nó redraw mà không hề sửa được gì | (ii) Domain Expert đo thật | như trên |
+| B9-07 | **Mất chữ thật**: trang 26 của chính cuốn Le Cordon Bleu, **4 dòng nội dung biến mất** sau bước redraw dòng kế tiếp (đúng cơ chế B9-03; pitch dòng babeldoc = `font_size × 1.3` nhưng bbox glyph Noto Serif cao hơn → 2 bbox dòng kề nhau giao ~0.5pt) | (ii) Domain Expert verify sống | như trên |
+| B9-08 | Đo trên chunk 0 thật (40 trang, babeldoc + DeepSeek thật): **126** cặp overlap trước fix Bug #8 → **66** sau fix Bug #8 (mới chỉ sửa toạ độ, CHƯA tắt `font_shrink`) | (iii) đã có trong doc | `docs/test-report.md` mục "Bug #8 — R5-03/R6-03 live E2E trên chunk 0 thật", bảng dòng 2146-2149 |
+| B9-09 | Phần lớn 66 cặp còn lại là **nhiễu đo** (dải giao < 2pt giữa 2 dòng kề nhau, sinh ra do chính `font_shrink` tách dòng thành block riêng); overlap **thật** chỉ còn **11**, toàn bộ nằm ở ảnh minh hoạ/bìa, **không** phải văn xuôi | (ii) Domain Expert đo lại 2026-09-08 | báo cáo Domain Expert — đây là **hiệu chỉnh** cách đọc số 66 ở B9-08, không mâu thuẫn với nó |
+
+> **Lưu ý cho Dev (R5-02)**: B9-05/B9-06/B9-07/B9-09 là claim **chưa được Tech Lead tự verify lại**.
+> Dev **không cần** spike lại để implement thiết kế này — vì thiết kế chỉ *bỏ đi* một bước xử lý,
+> không *thêm* phụ thuộc mới nào vào contract của babeldoc. Nhưng nếu sau này có ai muốn **bật lại**
+> `font_shrink` cho babeldoc, hoặc muốn implement khoảng trống ở B9.7 (đọc `paragraph.scale`),
+> **bắt buộc** phải tự verify B9-05 từ source babeldoc thật trước.
+
+### B9.2. Root cause (tóm tắt — không điều tra lại)
+
+Ba tầng độc lập cộng lại:
+
+1. **babeldoc không cần bước co-font của app** (B9-05). Nó tự typeset lại toàn bộ và tự đảm bảo
+   không vẽ tràn ra ngoài box. Đây là khác biệt bản chất so với pdf2zh (B9-04) — pdf2zh giữ nguyên
+   layout gốc nên tràn khung là chuyện *phải* xử lý ở tầng app.
+2. **`font_shrink_page()` vẫn chạy cho babeldoc** chỉ vì `_process_chunk()` dùng **chung 1 đường
+   ống** cho cả 2 engine (§6.14.7 — nguyên tắc "không rẽ nhánh `if engine ==` rải rác trong thân
+   hàm", đặt ra để tránh tái diễn Bug #5). Nguyên tắc đó **đúng và giữ nguyên**; cái sai là ở chỗ
+   §6.14.7 chỉ nói về *lời gọi engine*, còn bước post-processing phía sau thì mặc nhiên được coi là
+   trung lập với engine — **nó không trung lập**.
+3. **Chạy `font_shrink` trên output babeldoc là thao tác thuần rủi ro, lợi ích bằng 0**: nó không
+   sửa được gì (B9-06: median excess 0.00% — nó chỉ đang phản ứng với sai số float), nhưng vẫn
+   `redact` + `insert_text` lại thật → gây ra Bug #8 (lệch toạ độ MediaBox/CropBox — **đã fix**) VÀ
+   **mất chữ thật** (B9-07 + cơ chế B9-03 — **chưa fix, chính là Bug #9**), đồng thời tạo ra phần
+   lớn "overlap" giả trong số đo (B9-09).
+
+### B9.3. Thiết kế — thuộc tính năng lực trên runner, KHÔNG rẽ nhánh theo tên engine
+
+**Nguyên tắc**: `_process_chunk()` hỏi **năng lực của runner**, không hỏi **tên engine**. Đây là
+mở rộng đúng tinh thần §6.14.7 chứ không phải ngoại lệ của nó: vẫn chỉ có **một** chỗ trong pipeline
+biết engine nào đang chạy (property `_translator_runner`), phần thân hàm chỉ đọc một thuộc tính
+boolean từ runner đã được chọn.
+
+**Tên thuộc tính đã chốt: `needs_font_shrink`.** Lý do chọn tên này (đã cân nhắc `applies_own_fit`
+/ `draws_at_source_layout`):
+- Nó trả lời **đúng câu hỏi mà call site đang hỏi**, không bắt người đọc suy luận thêm một bước.
+- Khớp precedent naming đã có sẵn trong chính pipeline này: `Pdf2zhService.supports_custom_prompt`
+  (dùng ở `src/services/pdf2zh_runner.py:136`) — capability boolean, đặt tên theo *cái mà caller
+  cần biết*, không theo *cơ chế nội bộ của tool*.
+- Kiểu khai báo: **`ClassVar[bool]`** (class attribute, không phải instance attribute / không phải
+  `@property`). Đây là sự thật cố định của engine, không phụ thuộc tham số khởi tạo; khai báo ở cấp
+  class để đọc được mà không cần instance và để `ruff`/type-checker soi được.
+
+```python
+# src/services/pdf2zh_runner.py — trong `class Pdf2zhRunner`, ngay sau docstring
+    #: Bug #9 (Architecture.md "Bug #9"). pdf2zh vẽ bản dịch VÀO ĐÚNG vị trí và
+    #: cỡ chữ của bản gốc EN, không tự fit lại theo bề ngang box — nên bước
+    #: `font_shrink_page()` của app (BR-FONT-02/US-05) là bắt buộc ở đây.
+    needs_font_shrink: ClassVar[bool] = True
+```
+
+```python
+# src/services/babeldoc_runner.py — trong `class BabeldocRunner`, ngay sau docstring
+    #: Bug #9 (Architecture.md "Bug #9"). babeldoc tự typeset lại và tự bóp cỡ
+    #: chữ (tới tối thiểu 10%) để vừa box, bỏ hẳn đoạn nếu vẫn không vừa —
+    #: KHÔNG BAO GIỜ vẽ tràn ra ngoài box. Chạy thêm `font_shrink_page()` trên
+    #: output của nó không sửa được gì (median excess đo được = 0.00%, nó chỉ
+    #: phản ứng với sai số float) nhưng vẫn redact + insert_text lại thật —
+    #: gây Bug #8 (lệch toạ độ, đã fix) và XOÁ MẤT CHỮ THẬT (Bug #9).
+    needs_font_shrink: ClassVar[bool] = False
+```
+
+Cả 2 file cần thêm `from typing import ClassVar` (hiện chưa import `typing`).
+
+### B9.4. Vị trí sửa chính xác trong `job_orchestrator.py`
+
+**(a) Thêm property đọc năng lực — đặt NGAY SAU `_translator_runner` (hiện kết thúc ở dòng 282):**
+
+```python
+    @property
+    def _needs_font_shrink(self) -> bool:
+        """Bug #9 — hỏi NĂNG LỰC của engine đã chọn, không hỏi TÊN engine.
+        Cùng kỷ luật §6.14.7: chỉ `_translator_runner` biết engine nào đang
+        chạy; thân `_process_chunk()` chỉ đọc 1 boolean.
+
+        `isinstance` guard là CÓ CHỦ ĐÍCH, không phải phòng thủ thừa: production
+        luôn trả về `bool` thật (ClassVar trên cả 2 runner), nên nhánh raise chỉ
+        với tới được từ test dùng `AsyncMock(spec=...Runner)` — mock KHÔNG copy
+        GIÁ TRỊ của class attribute, chỉ copy TÊN, nên `mock.needs_font_shrink`
+        là 1 child Mock TRUTHY. Không có guard này, một test babeldoc quên set
+        thuộc tính sẽ âm thầm chạy nhánh pdf2zh và vẫn PASS — đúng loại
+        "mock tự nhất quán với chính nó" mà Protocol 5/6 sinh ra để chặn.
+        """
+        value = self._translator_runner.needs_font_shrink
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self._translator_runner).__name__}.needs_font_shrink phải là bool, "
+                f"nhận được {value!r}. Nếu đây là test dùng AsyncMock(spec=...), phải set "
+                "tường minh `runner.needs_font_shrink = True/False` cho đúng nhánh đang test "
+                "(Architecture.md Bug #9 B9.4)."
+            )
+        return value
+```
+
+**(b) Bọc đúng khối `font_shrink` hiện tại (`job_orchestrator.py:1289-1293`):**
+
+```python
+        overflow_entries: list[OverflowEntry] = []
+        # Bug #9 (Architecture.md "Bug #9", Protocol 2 2026-09-08): CHỈ engine
+        # nào tự nó không fit text vào box mới cần bước này. Với babeldoc, mở
+        # file ra redact + insert_text lại là thao tác thuần rủi ro: không sửa
+        # được gì mà xoá mất chữ thật.
+        if self._needs_font_shrink:
+            with fitz.open(chunk.output_path) as doc:
+                for page in doc:
+                    await font_shrink_page(page, overflow_entries, font_path=self._noto_font_path)
+                doc.saveIncr()
+
+        for entry in overflow_entries:
+            ...  # GIỮ NGUYÊN, không sửa 1 ký tự nào (dòng 1295-1308 hiện tại)
+```
+
+**Tổng phạm vi sửa `src/`**: 3 file, không file nào khác.
+
+| File | Vị trí (theo bản hiện tại) | Việc |
+|---|---|---|
+| `src/services/pdf2zh_runner.py` | dòng 82 (giữa docstring class `Pdf2zhRunner` kết thúc ở 81 và `def __init__` ở 83) | thêm `needs_font_shrink: ClassVar[bool] = True` + import `ClassVar` |
+| `src/services/babeldoc_runner.py` | dòng 220 (giữa docstring class `BabeldocRunner` kết thúc ở 219 và `def __init__` ở 221) | thêm `needs_font_shrink: ClassVar[bool] = False` + import `ClassVar` |
+| `src/core/job_orchestrator.py` | sau dòng 282 | thêm property `_needs_font_shrink` |
+| `src/core/job_orchestrator.py` | dòng 1289-1293 | bọc khối `with fitz.open(...)` trong `if self._needs_font_shrink:` |
+
+**KHÔNG sửa**: `src/postprocess/font_shrink.py` (module giữ nguyên 100% — nó vẫn là đường đúng cho
+pdf2zh), `src/models/overflow.py`, schema DB, `src/core/config.py`.
+
+### B9.5. `overflow_entries` khi `needs_font_shrink=False` — giữ list rỗng, KHÔNG bỏ code
+
+**Quyết định: giữ nguyên khai báo `overflow_entries: list[OverflowEntry] = []` ở ngoài `if`, và
+giữ nguyên vòng lặp ghi `OverflowReport` phía sau — không đụng vào.** Khi tắt, list rỗng, vòng lặp
+chạy 0 lần, 0 row được ghi.
+
+Lý do (đây là phương án **ít xáo trộn nhất**, đúng yêu cầu):
+1. **Diff nhỏ nhất có thể**: đúng 1 dòng `if` + thụt lề 4 dòng. Phương án gộp cả khối ghi DB vào
+   trong `if` phải di chuyển 14 dòng code — nhiều cơ hội sai hơn, và toàn bộ 14 dòng đó là đường
+   **đang chạy đúng** cho pdf2zh.
+2. **Không đụng vào đường persistence của pdf2zh**: đây chính là cách hỏng kiểu Bug #5 (sửa nhánh
+   này làm gãy nhánh kia mà không ai thấy vì test mỗi nhánh tự nhất quán).
+3. **Chừa sẵn chỗ cho khoảng trống B9.7**: nếu sau này lấy được tín hiệu overflow từ chính babeldoc
+   (`paragraph.scale`), chỗ nạp vào `overflow_entries` đã có sẵn, không phải dựng lại đường ghi DB.
+4. Chi phí runtime của việc giữ lại: cấp phát 1 list rỗng + 1 vòng lặp 0 vòng — bằng 0 trên thực tế.
+
+### B9.6. Yêu cầu test cho Dev (R6-02 — assert giá trị, không chỉ assert "đã gọi")
+
+Bắt buộc, vì bug này thuộc đúng loại "hai mock tự nhất quán với nhau":
+
+1. **T9-1 (nhánh babeldoc — không đụng file)**: chạy `_process_chunk()`/`run_job()` với
+   `pdf_translate_engine="babeldoc"` trên 1 PDF thật do PyMuPDF sinh; assert **file
+   `chunk.output_path` byte-identical trước/sau bước post-processing** (so `hashlib.sha256` hoặc
+   `st_mtime` + size), VÀ `SELECT COUNT(*) FROM overflow_reports WHERE job_id=...` **== 0**.
+   Assert nội dung/giá trị, không dùng `assert_called()`.
+2. **T9-2 (nhánh pdf2zh — hồi quy, không được đổi hành vi)**: cùng input, `pdf_translate_engine=
+   "pdf2zh"`; assert bước font_shrink **vẫn chạy** (file bị sửa / `OverflowReport` vẫn được ghi khi
+   có span tràn thật). Đây là test chống việc fix này vô tình tắt cả 2 engine.
+3. **T9-3 (guard)**: `AsyncMock(spec=BabeldocRunner)` không set `needs_font_shrink` → `pytest.raises(TypeError)`.
+   Test này bảo vệ chính cơ chế bảo vệ.
+4. **Sửa 7 chỗ tạo mock runner hiện có** (đây là toàn bộ, đã grep — không có chỗ nào khác):
+   `tests/integration/test_job_cancel.py:76`, `tests/integration/test_job_orchestrator_concurrency.py:66`,
+   `tests/integration/test_job_orchestrator.py:86`, `:379`, `:441` (`spec=Pdf2zhRunner` → set
+   `= True`), `tests/integration/test_job_orchestrator.py:504`, `:1001`
+   (`spec=BabeldocRunner` → set `= False`). Mỗi chỗ thêm đúng 1 dòng
+   `runner.needs_font_shrink = True/False`.
+
+**Live E2E (R6-03)**: chạy lại đúng chunk 0 (40 trang đầu Le Cordon Bleu, babeldoc + DeepSeek thật)
+mà QA đã dùng cho Bug #8, rồi **mở file output ra kiểm tra nội dung** (không tin `status`):
+(a) trang 26 phải có **đủ 4 dòng** mà B9-07 báo là biến mất; (b) đếm lại overlap bằng đúng script
+`ov3.py` (area giao > 200pt², `block[6]==0`) — kỳ vọng tụt mạnh khỏi mốc 66 về gần 11 (B9-09).
+Không đặt ngưỡng cứng "phải bằng 11": 11 cặp còn lại thuộc root cause khác (babeldoc typesetting
+không reflow, xem mục "Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order", 2026-09-07)
+và **không** nằm trong phạm vi Bug #9.
+
+### B9.7. Khoảng trống đã biết trước — CHẤP NHẬN, để dành cho tương lai
+
+Tắt `font_shrink_page()` cho babeldoc đồng nghĩa **nhánh babeldoc không còn ghi `OverflowReport`
+nào nữa** — kể cả khi bản thân babeldoc âm thầm **bỏ hẳn 1 đoạn** vì không vừa box dù đã bóp còn
+10% (B9-05). BA/QA sẽ mất cờ cảnh báo "trang này cần soi tay" cho nhánh babeldoc.
+
+Đây là khoảng trống **đã biết trước và được chấp nhận có ý thức**, KHÔNG vá trong task này:
+
+- Cờ đó vốn đã **gần như vô giá trị** trên babeldoc: nó được sinh ra từ phép đo của
+  `font_shrink_page` trên một trang mà chính babeldoc đã fit xong, tức đo trên sai số float
+  (B9-06) — dữ liệu đúng nhưng vô nghĩa, tệ hơn là kèm theo tác hại xoá chữ.
+- Hướng vá đúng trong tương lai (đề xuất của Domain Expert, **chưa thiết kế**): đọc
+  `paragraph.scale` từ debug output riêng của babeldoc → nếu `scale` chạm sàn (hoặc đoạn bị drop
+  hẳn) thì ghi 1 `OverflowReport`/`layout_qa_finding`. Việc này cần Protocol 5 R5-01 đầy đủ cho
+  format debug output của babeldoc (**chưa ai verify**) nên **không** gộp vào P0 này.
+- Nơi đặt tự nhiên cho tín hiệu đó khi làm: cùng đường `persist_findings()` mà overlay chữ xoay
+  đang dùng (`job_orchestrator.py:593-609`), chứ không nhất thiết là bảng `overflow_reports`.
+
+**Hệ quả cần PM/BA biết**: acceptance criteria US-05/BR-FONT-02 (co font chống tràn khung) từ nay
+**chỉ còn hiệu lực trên đường `pdf2zh`**. Trên đường `babeldoc` (đang là **default** từ 2026-09-05),
+chống tràn khung là trách nhiệm của chính babeldoc, app không can thiệp và không đo. Cần cập nhật
+PRD ở lượt review PRD gần nhất — **không** phải việc của Dev trong task này.
+
+### B9.8. Rollback
+
+**Không thêm feature flag mới** cho bước này (cân nhắc rồi, cố ý bỏ). Lý do: một flag chỉ có ý
+nghĩa khi cả 2 trạng thái đều là lựa chọn hợp lệ; ở đây trạng thái "bật" đã được chứng minh là
+**phá dữ liệu** (xoá chữ thật, B9-07) chứ không phải "đánh đổi". Thêm flag = thêm một đường cấu
+hình dẫn thẳng tới bug đã biết, cộng thêm surface cho `SETTINGS_DB_OVERRIDABLE_FIELDS`.
+
+Đường rollback thực tế nếu cần: (a) `PDF_TRANSLATE_ENGINE=pdf2zh` + restart — flag **đã có sẵn**
+từ §6.14.7, đưa toàn bộ pipeline về đường v1.1.1; hoặc (b) revert đúng 1 hằng số
+`BabeldocRunner.needs_font_shrink` về `True` (1 dòng, 1 commit).
+
+---
+
+## Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng (`_get_width_before_next_break_point` đếm đôi bề rộng ký tự hiện tại) — thiết kế bản vá (Tech Lead, 2026-09-09)
+
+**Trạng thái**: THIẾT KẾ — chưa implement. Đây là **lỗi thật của chính babeldoc 0.6.4 upstream**,
+không phải lỗi code của project. Vá bằng shim monkeypatch qua `src/babeldoc_shim/sitecustomize.py`,
+đúng khuôn mẫu đã dùng cho Bug #7 (7.1/7.2/7.4-b).
+
+**Nguồn phát hiện**: Domain Expert (Fable) trong lúc điều tra Bug #8/#9. Toàn bộ root cause dưới đây
+đã được Tech Lead **tự đọc lại source thật để verify** (Protocol 5 R5-01) — brief của Expert được coi
+là giả thuyết cần kiểm chứng, không phải sự thật. Kết quả: root cause khớp; có **4 điểm cần đính
+chính/bổ sung** so với brief, ghi ở BA10.4.
+
+---
+
+### BA10.1. Nguồn xác thực (Protocol 5 R5-01)
+
+| Mục | Nguồn |
+|---|---|
+| Tool | `babeldoc` **0.6.4**, cài qua `uv tool` |
+| Đường dẫn source đã đọc | `~/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/typesetting.py` (1682 dòng) |
+| Xác nhận version | thư mục `babeldoc-0.6.4.dist-info` cạnh package |
+| Cách verify | Đọc trực tiếp file bằng `Read`/`sed` (không qua trí nhớ, không qua WebFetch bản upstream) |
+| Ngày verify | 2026-09-09 |
+
+**CẢNH BÁO có thật, Dev phải biết**: trên máy này tồn tại **hai** bản babeldoc khác nhau:
+- `~/.local/share/uv/tools/babeldoc/.../babeldoc/format/pdf/document_il/midend/typesetting.py` — bản
+  0.6.4 **app đang thực sự dùng** (`BabeldocRunner._executable = "babeldoc"`). ĐÂY là bản cần vá.
+- `~/.local/share/uv/tools/pdf2zh/.../babeldoc/document_il/midend/typesetting.py` — bản babeldoc **cũ
+  hơn, bundle bên trong tool `pdf2zh`** (đường module KHÁC: không có `format/pdf/`). Bản này chỉ chạy
+  khi `PDF_TRANSLATE_ENGINE=pdf2zh`. **KHÔNG thuộc phạm vi Bug #10** — shim gate theo
+  `babeldoc.__version__ == "0.6.4"` và theo tên module đầy đủ `babeldoc.format.pdf...`, nên tự động
+  không đụng tới bản trong pdf2zh. Không mở rộng phạm vi sang đó trong task này.
+
+---
+
+### BA10.2. Root cause — đã tự verify bằng đọc code thật
+
+#### BA10.2-a. Hàm lookahead ĐÃ CỘNG bề rộng của chính unit hiện tại
+
+`typesetting.py:1285-1298` (trích nguyên văn bản đã cài):
+
+```python
+    def _get_width_before_next_break_point(
+        self, typesetting_units: list[TypesettingUnit], scale: float
+    ) -> float:
+        if not typesetting_units:
+            return 0
+        if typesetting_units[0].can_break_line:
+            return 0
+
+        total_width = 0
+        for unit in typesetting_units:          # <-- BẮT ĐẦU TỪ units[0] = unit HIỆN TẠI
+            if unit.can_break_line:
+                return total_width * scale
+            total_width += unit.width           # <-- cộng cả w(unit hiện tại)
+        return total_width * scale
+```
+
+Vòng lặp bắt đầu từ `typesetting_units[0]`. Ngay trước đó đã có guard `if typesetting_units[0].
+can_break_line: return 0`, nên khi vào được vòng lặp thì `units[0]` chắc chắn KHÔNG phải break point
+⇒ lần lặp đầu tiên luôn chạy `total_width += units[0].width`. Kết luận:
+
+> giá trị trả về = `w(unit_hiện_tại) + w(unit kế) + ... ` cho tới (không kể) break point kế tiếp.
+
+#### BA10.2-b. Chỗ gọi CỘNG THÊM `unit_width` một lần nữa
+
+`typesetting.py:1366` và `:1399-1417` (trong `_layout_typesetting_units`):
+
+```python
+            unit_width = unit.width * scale                       # :1366
+            ...
+            if use_english_line_break:                            # :1399
+                width_before_next_break_point = self._get_width_before_next_break_point(
+                    typesetting_units[i:], scale                  # :1400-1402  <-- lát cắt BẮT ĐẦU tại i
+                )
+            else:
+                width_before_next_break_point = 0
+
+            # 如果当前行放不下这个元素，换行
+            if not unit.is_hung_punctuation and (                 # :1407
+                (current_x + unit_width > box.x2)                 # :1408  (A) chốt chặn cứng
+                or (
+                    use_english_line_break
+                    and current_x + unit_width + width_before_next_break_point > box.x2   # :1411 (B) LỖI
+                )
+                or (
+                    unit.is_cannot_appear_in_line_end_punctuation
+                    and current_x + unit_width * 2 > box.x2       # :1415  (C) không liên quan
+                )
+            ):
+```
+
+Lát cắt truyền vào là `typesetting_units[i:]` — tức **bao gồm chính unit thứ `i`**. Vì vậy biểu thức
+(B) ở `:1411` khai triển ra là:
+
+```
+current_x + w(uᵢ) + [ w(uᵢ) + w(uᵢ₊₁) + ... + w(u_{k-1}) ]      với u_k là break point kế tiếp
+= current_x + 2·w(uᵢ) + w(phần còn lại của từ)
+```
+
+Đúng ra phải là `current_x + w(uᵢ) + w(phần còn lại của từ)` — tức chính xác bằng
+`current_x + width_before_next_break_point` (vì hàm đã bao gồm `w(uᵢ)` rồi). **Xác nhận toàn bộ mô tả
+root cause của Expert, kể cả số dòng (1285-1298 và 1407-1417) đều đúng nguyên văn.**
+
+#### BA10.2-c. Hệ quả: wrap xảy ra SAI CHỖ, cắt giữa từ
+
+Phần dư `+w(uᵢ)` **phụ thuộc vào bề rộng của chính ký tự đang xét**, nên ngưỡng không nhất quán giữa
+các ký tự trong cùng một từ:
+- ký tự hẹp (`t`, w≈3.17pt) → phần dư nhỏ → vượt qua được (B) → được đặt ở cuối dòng;
+- ký tự rộng ngay sau (`r`, w≈4.24pt) → phần dư lớn hơn → (B) kích hoạt → **xuống dòng giữa từ**.
+
+Kết quả quan sát được: `"trung thành"` → `"t"` cuối dòng + `"rung thành"` đầu dòng sau; các case khác
+Expert đo được: `"khâu c|huẩn bị"`, `"liên tục c|ho"`. Quy mô Expert đo: 31 ca / 1.664 dòng trên 40
+trang raw babeldoc (phía tiếng Anh gốc: 7/1.801 — nhiễu nền).
+
+#### BA10.2-d. Tại sao upstream không phát hiện: `LINE_BREAK_REGEX` KHÔNG chứa dải CJK
+
+`typesetting.py:31-88` định nghĩa `LINE_BREAK_REGEX`; `calc_can_break_line` (`:213-219`) trả về
+`False` khi regex match. Các dải có trong regex gồm `a-zA-Z0-9`, Latin-1 Supplement, Latin Extended
+A/B/**Additional (`Ḁ-ỿ`)**, **Combining Diacritical Marks (`̀-ͯ`)**, Cyrillic,
+Greek, Thai, Khmer, Myanmar... — **KHÔNG có dải Hán/Kana nào**.
+
+⇒ Với tiếng Trung/Nhật (thị trường chính của babeldoc), MỌI ký tự đều `can_break_line == True` ⇒
+guard `:1290-1291` trả `0` ⇒ số hạng lỗi ở (B) **triệt tiêu hoàn toàn**, bug **vô hình**.
+⇒ Với tiếng Việt, chữ có dấu nằm đúng trong `Ḁ-ỿ` + `̀-ͯ` ⇒ cả từ là một chuỗi
+`can_break_line == False` dài ⇒ bug lộ ra dày đặc.
+
+Đây là cơ chế **cấu trúc**, mạnh hơn cách diễn đạt của Expert ("lộ rõ hơn ở tiếng Việt vì nhiều từ có
+dấu/âm tiết dài") — xem đính chính BA10.4-3.
+
+---
+
+### BA10.3. Bản vá — thiết kế chốt
+
+#### BA10.3-a. Điểm vá: vá HÀM lookahead, KHÔNG vá chỗ gọi
+
+Hai cách sửa tương đương về số học:
+1. Bỏ `w(uᵢ)` khỏi giá trị trả về của `_get_width_before_next_break_point` (hàm 14 dòng), hoặc
+2. Bỏ `unit_width` khỏi biểu thức `:1411` — nhưng phải thay thế **cả hàm
+   `_layout_typesetting_units` dài 167 dòng** (`:1300-1466`) vì không có điểm hook nhỏ hơn.
+
+**Chốt cách (1)** — patch tối thiểu, đúng nguyên tắc "ưu tiên patch nhỏ, dễ review":
+- Đã grep toàn bộ package babeldoc đã cài: `_get_width_before_next_break_point` có **đúng 1 chỗ gọi**
+  (`typesetting.py:1400`) và **1 chỗ định nghĩa** (`:1285`) — không có consumer nào khác, nên đổi ngữ
+  nghĩa của nó là an toàn tuyệt đối trong phạm vi package.
+- Cách (2) phải copy 167 dòng logic layout (line-skip, mixed CJK/Latin spacing, box expansion...) vào
+  shim — rủi ro sai sót và chi phí re-verify khi upgrade cao hơn hẳn, **loại**.
+
+#### BA10.3-b. Hàm thay thế
+
+Đặt thuật toán thuần (không phụ thuộc babeldoc) tại **module mới `src/babeldoc_shim/word_wrap.py`**
+để test gọi đúng logic production (Protocol 6 R6-02 — không được chép tay thuật toán sang test):
+
+```python
+# src/babeldoc_shim/word_wrap.py  (module MỚI, thuật toán thuần)
+def width_before_next_break_point(
+    units: Sequence[tuple[float, bool]],   # [(width, can_break_line), ...] bắt đầu TẠI unit hiện tại
+    scale: float,
+) -> float:
+    """Bề rộng phần CÒN LẠI của từ, KHÔNG kể unit hiện tại (Bug #10)."""
+    if not units:
+        return 0.0
+    if units[0][1]:              # unit hiện tại tự nó là break point -> giữ nguyên hành vi gốc
+        return 0.0
+    total = 0.0
+    for width, can_break in units[1:]:     # <-- KHÁC BẢN GỐC: bỏ qua units[0]
+        if can_break:
+            break
+        total += width
+    return total * scale
+```
+
+Wrapper trong `sitecustomize.py` chỉ làm nhiệm vụ bóc field từ object babeldoc thật rồi ủy thác:
+
+```python
+def _build_patched_get_width_before_next_break_point(typesetting_module):
+    from word_wrap import width_before_next_break_point       # import tên trần: PYTHONPATH trỏ
+                                                              # THẲNG vào src/babeldoc_shim/
+    def patched(self, typesetting_units, scale):
+        return width_before_next_break_point(
+            [(u.width, u.can_break_line) for u in typesetting_units], scale
+        )
+    return patched
+```
+
+**Lưu ý hiệu năng (bắt buộc cân nhắc khi implement)**: hàm gốc **thoát sớm** tại break point đầu
+tiên, còn list-comprehension ở trên **duyệt toàn bộ lát cắt `typesetting_units[i:]`** (O(n) cho mọi
+`i` ⇒ O(n²) trên paragraph dài). Hàm này nằm trong vòng lặp layout chạy lại cho **mọi giá trị scale**
+thử nghiệm ⇒ nguy cơ chậm thật, không phải lo xa. **Yêu cầu Dev**: hoặc (a) truyền generator/iterator
+lười thay vì list đã materialize, hoặc (b) để wrapper tự duyệt và thoát sớm rồi chỉ ủy thác phép cộng
+— miễn là thuật toán vẫn nằm ở `word_wrap.py` và test gọi đúng nó. Dev đo thời gian dịch 1 trang
+trước/sau patch trong spike (BA10.5-G4) để chứng minh không hồi quy hiệu năng.
+
+#### BA10.3-c. Vì sao bản vá KHÔNG thể gây tràn dòng (tự verify bằng đọc code)
+
+Ba tính chất, đọc thẳng từ source:
+
+1. **Chốt chặn cứng bên phải KHÔNG bị đụng tới.** Nhánh (A) `:1408` `current_x + unit_width > box.x2`
+   là một mệnh đề `or` **độc lập**, không dùng `width_before_next_break_point`, và patch không sửa
+   `_layout_typesetting_units`. Vì vậy sau vá, mọi unit được đặt vẫn thoả `current_x + unit_width <=
+   box.x2` y hệt trước vá ⇒ **không unit nào có thể bị đặt vượt quá `box.x2`**. Đây là tính chất
+   quan trọng nhất, và nó là tính chất **cấu trúc** (nhánh (A) còn nguyên), không phải suy luận số học.
+2. **Số dòng không thể TĂNG.** Patch làm vế trái của (B) **nhỏ đi đúng `unit_width >= 0`** ⇒ (B) là
+   một vị từ **yếu hơn theo từng điểm**: "sau vá wrap" ⟹ "trước vá cũng wrap". Với thuật toán greedy
+   đơn điệu theo `current_x` này, vị từ yếu hơn không bao giờ sinh thêm dòng. Đã kiểm chứng thêm bằng
+   mô phỏng thuần: 20.000 trường hợp ngẫu nhiên (độ dài từ/bề rộng ký tự ngẫu nhiên) — **0 trường hợp
+   nào bản vá cho ra nhiều dòng hơn bản gốc**.
+3. **`all_units_fit` chỉ tuỳ thuộc số dòng.** `:1440-1444` đặt `all_units_fit = False` khi và chỉ khi
+   `current_y < box.y` sau một lần xuống dòng ⇒ ít dòng hơn (hoặc bằng) ⇒ `all_units_fit` chỉ có thể
+   giữ nguyên hoặc chuyển `False → True`, không bao giờ ngược lại.
+
+Từ (2)+(3): trong `_find_optimal_scale_and_layout` (`:973-1002`) vòng `while scale >= min_scale` sẽ
+**dừng sớm hơn hoặc bằng** ⇒ scale được chọn **lớn hơn hoặc bằng** trước vá. Xem hệ quả ở BA10.4-4.
+
+---
+
+### BA10.4. Khác biệt so với báo cáo của Expert (bắt buộc ghi theo Protocol 5 R5-01)
+
+| # | Expert nói | Tech Lead verify | Kết luận |
+|---|---|---|---|
+| 1 | Số dòng `~1285-1298` (hàm) và `~1407-1417` (điều kiện wrap), công thức sai `cx + 2·w(uᵢ) + w(phần còn lại)` | Đúng **nguyên văn**, cả số dòng lẫn công thức | ✅ XÁC NHẬN |
+| 2 | "dòng có thể chứa thêm **tối đa 1 ký tự** khi từ vừa khít" | **KHÔNG chính xác** — xem dưới | ⚠️ ĐÍNH CHÍNH |
+| 3 | Bug "lộ rõ hơn ở tiếng Việt vì nhiều từ có dấu/âm tiết dài" | Cơ chế thật mạnh hơn: `LINE_BREAK_REGEX` (`:31-88`) không chứa dải CJK ⇒ với zh/ja số hạng lỗi **triệt tiêu bằng 0**, bug **vô hình hoàn toàn**, không phải "ít lộ hơn" | ⚠️ BỔ SUNG |
+| 4 | (không đề cập) | Bản vá có **tác dụng phụ nhìn thấy được**: một số paragraph sẽ render **font TO HƠN** trước | ⚠️ BỔ SUNG QUAN TRỌNG |
+
+**Đính chính #2 chi tiết** — vì `can_break_line` là `False` cho toàn bộ chữ cái nhưng `True` cho dấu
+cách, "phần còn lại tới break point kế tiếp" chính là **phần đuôi còn lại của TỪ hiện tại**, không
+phải một ký tự. Trong ca `"trung thành"`: tại `t`, biểu thức đúng là `cx + w("t") + w("rung") =
+cx + w("trung") = 587.06 <= 590.91` ⇒ đặt `t`; tại `r`, `cx' + w("r") + w("ung") = cx + w("trung")`
+= vẫn 587.06 ⇒ đặt tiếp; và cứ thế **cả từ `"trung"` ở lại trên dòng**. Chỗ xuống dòng thật sẽ rơi
+vào **dấu cách** ngay sau đó (`can_break_line == True` ⇒ lookahead = 0 ⇒ chỉ còn nhánh (A)).
+
+⇒ Phát biểu đúng: **một dòng có thể nhận thêm phần đuôi còn lại của MỘT từ (có thể vài ký tự), không
+phải đúng 1 ký tự.** Điều này KHÔNG làm yếu tính chất an toàn, vì tính chất an toàn đến từ nhánh (A)
+còn nguyên (BA10.3-c điểm 1), không đến từ "chỉ thêm 1 ký tự".
+
+**Bổ sung #4 chi tiết** — theo BA10.3-c điểm (2)+(3), `all_units_fit` có thể chuyển `False → True` ở
+một `scale` **lớn hơn**, nên `_get_optimal_scale` sẽ trả về scale lớn hơn cho một số paragraph.
+**Hệ quả nhìn thấy được: chữ ở các paragraph đó TO HƠN sau khi vá.** Đây là **cải thiện**, không phải
+hồi quy (mọi scale được chấp nhận đều đã qua `all_units_fit`, vẫn nằm trong box). QA **phải biết
+trước** điều này để không mở bug mới khi thấy diff cỡ chữ giữa 2 lần chạy A/B.
+
+---
+
+### BA10.5. Yêu cầu spike TRƯỚC KHI implement đầy đủ (Protocol 5 R5-02) — BẮT BUỘC
+
+Đây là lần đầu project vá vào `typesetting.py` (3 patch Bug #7 đều nằm ở `paragraph_finder.py`), tức
+hành vi **chưa từng được project verify sống**. Dev **KHÔNG** được viết implementation + test đầy đủ
+trước khi spike xanh.
+
+**Phương pháp A/B bắt buộc — tận dụng translation cache của babeldoc**: babeldoc cache kết quả dịch
+(`--ignore-cache` để tắt). Chạy lần 1 **KHÔNG patch** (nạp cache), rồi lần 2 **CÓ patch** trên đúng
+input đó **KHÔNG** truyền `--ignore-cache` ⇒ văn bản tiếng Việt **giống hệt nhau** giữa 2 lần, mọi
+khác biệt còn lại **thuần tuý là layout**. Không làm thế này thì LLM trả về text khác nhau và mọi
+phép so sánh trước/sau đều vô nghĩa.
+
+| Gate | Nội dung | Tiêu chí PASS |
+|---|---|---|
+| **G1** (đích) | Chạy trên fixture 1 trang (BA10.6), so sánh raw babeldoc trước/sau patch | Trước: có ít nhất 1 ca cắt giữa từ (kỳ vọng `"trung thành"` bị tách). Sau: ca đó **không còn bị tách** |
+| **G2** (tràn ngang) | Trích bbox mọi text block bằng `pymupdf` trên toàn bộ trang test + trang đối chứng | `max(block.x1)` sau vá **KHÔNG lớn hơn** trước vá quá 0.5pt trên bất kỳ trang nào |
+| **G3** (số dòng) | Đếm số dòng text mỗi trang, trước vs sau | Sau vá `<=` trước vá trên **MỌI** trang. Nếu có trang nào TĂNG ⇒ giả thuyết đơn điệu ở BA10.3-c sai ⇒ **escalate Tech Lead ngay**, không tự sửa |
+| **G4** (hiệu năng) | Đo wall-clock 1 trang, trước vs sau (cache đã nóng cho cả 2) | Không chậm hơn quá 20%. Nếu chậm hơn ⇒ áp dụng tối ưu thoát-sớm ở BA10.3-b |
+| **G5** (không mất chữ) | So tổng độ dài text trích được | Sau vá `>=` trước vá (không được mất ký tự nào) |
+
+**Trang đối chứng cho G2/G3/G5** (trang KHÔNG có bug này từ trước, để bắt hồi quy ngược) — tái dùng
+fixture đã có, **không tạo mới**: `tests/fixtures/babeldoc/page14_numbered_list_source.pdf`,
+`tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf`, `tests/fixtures/babeldoc/toc_sources/figoni_p25_recipe.pdf`.
+
+---
+
+### BA10.6. Golden fixture (Protocol 5 mục 3)
+
+**Fixture nguồn — TẠO MỚI (bắt buộc, không tái dùng được cái nào đang có)**:
+
+```
+tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf
+```
+
+Trích **đúng 1 trang, page index 39 (0-based)** từ
+`data/uploads/7ff56932-0c9e-403e-9555-4b4059c60b59_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf`
+(418 trang, 277MB — **KHÔNG commit file gốc**):
+
+```python
+import pymupdf
+src = pymupdf.open("data/uploads/7ff56932-...-Foundations (1).pdf")
+out = pymupdf.open(); out.insert_pdf(src, from_page=39, to_page=39)
+out.save("tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf")
+```
+
+**Tech Lead đã tự xác nhận trang này đúng là trang có case của Expert**: text trang 39 (0-based) chứa
+`"...recognizes motivated and loyal employees by sending them to do a "stage"..."` — `"loyal
+employees"` chính là nguồn của `"nhân viên trung thành"` mà Expert quan sát thấy bị cắt thành
+`"t|rung thành"`. Trang này cũng là "Chapter 2 / trang in số 24" — dùng để đối chiếu bằng mắt.
+
+**Fixture unit-level — TẠO MỚI trong lúc spike**:
+
+```
+tests/fixtures/babeldoc/bug10_wrap/lcb_p39_trung_thanh_units.json
+```
+
+Trong spike, dump từ **lần chạy babeldoc THẬT** chuỗi `[(unit.width, unit.can_break_line), ...]` của
+paragraph chứa `"trung thành"`, kèm `current_x` tại điểm bắt đầu từ đó, `box.x2` và `scale`. Test đơn
+vị cho `word_wrap.width_before_next_break_point` **phải nạp từ file này**, KHÔNG được gõ tay số liệu
+tự nghĩ ra (Protocol 5 mục 3: mock viết tay theo giả định = test tự xác nhận giả định).
+
+Assertion bắt buộc của test đó (R6-02 — assert **giá trị cụ thể**, không phải "đã gọi"):
+- với dữ liệu golden, biểu thức `current_x + unit_width + width_before_next_break_point(...)` tại ký
+  tự `'r'` phải `<= box.x2` (sau vá), trong khi công thức gốc (đếm đôi) cho `> box.x2` — tức test
+  **chứng minh được chính xác điểm khác biệt hành vi**, không chỉ "hàm chạy không lỗi".
+
+---
+
+### BA10.7. Vị trí sửa trong `src/babeldoc_shim/sitecustomize.py` — cơ chế gate GIỮ NGUYÊN
+
+**KHÔNG tạo cơ chế gate mới.** Tái dùng nguyên `_EXPECTED_BABELDOC_VERSION = "0.6.4"` +
+`_install_hook_if_version_matches()` đang có. Danh sách thay đổi tối thiểu (số dòng theo bản hiện tại,
+603 dòng):
+
+| Vị trí hiện tại | Thay đổi |
+|---|---|
+| `:137` `_TARGET_MODULE_NAME` | Đổi tên thành `_PARAGRAPH_FINDER_MODULE_NAME`; **thêm** `_TYPESETTING_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.typesetting"` |
+| `:144-147` (cạnh `_toc_split_enabled`) | Thêm `_word_wrap_fix_enabled()` đọc `BABELDOC_SHIM_WORD_WRAP_FIX`, **mặc định `"1"` (BẬT)** |
+| mới, cạnh `:427` | Thêm `_build_patched_get_width_before_next_break_point(typesetting_module)` (code ở BA10.3-b) |
+| `:462` `_apply_patch` | Đổi tên → `_apply_paragraph_finder_patch`; **thêm** `_apply_typesetting_patch(module)` riêng: check `hasattr(Typesetting, "_get_width_before_next_break_point")` rồi mới gán, log `logger.warning` riêng |
+| `:508` `_PatchingLoader` | Tham số hoá: `__init__(self, wrapped_loader, apply_patch, label)`; `exec_module` gọi `self._apply_patch(module)` trong try/except như cũ, log kèm `label` |
+| `:533` `_ParagraphFinderPatchFinder` | Đổi tên → `_ModulePatchFinder(target_fullname, apply_patch, label)` (logic `find_spec` giữ **nguyên xi**, kể cả cờ `_resolving` và thủ thuật gỡ/chèn lại `sys.meta_path`) |
+| `:597` | Cài **hai** finder: một cho `paragraph_finder`, một cho `typesetting`. Nhánh fallback `if ... in sys.modules` (`:583-595`) áp dụng riêng cho từng module |
+
+**Ràng buộc thiết kế bắt buộc**:
+
+1. **Rollback ĐỘC LẬP.** Patch typesetting phải nằm trong `try/except` **riêng** với 3 patch
+   `paragraph_finder`. Nếu babeldoc đổi cấu trúc `typesetting.py`, 3 patch Bug #7 vẫn phải chạy bình
+   thường, và ngược lại. (Khác với 3 patch Bug #7 — chúng cố ý rollback CHUNG vì cùng một class.)
+   Vì là 2 module / 2 loader riêng nên tính chất này có sẵn — **không được gộp lại cho "gọn"**.
+2. **KHÔNG có phụ thuộc thứ tự** giữa Bug #10 và 7.1/7.2/7.4-b. `paragraph_finder` chạy ở giai đoạn
+   tách đoạn/dòng, `typesetting` chạy sau ở giai đoạn dàn trang; bản vá Bug #10 không quan tâm đoạn
+   được tách thế nào. (Khác 7.1→7.2 vốn **bắt buộc** đúng thứ tự.)
+3. **Tên module `word_wrap.py` phải không đụng hàng.** `PYTHONPATH` trỏ thẳng vào
+   `src/babeldoc_shim/` nên mọi file `.py` ở đó thành **module top-level** trong subprocess babeldoc,
+   có thể che khuất module cùng tên của stdlib/thư viện. Dev phải xác nhận `word_wrap` không tồn tại
+   trong venv babeldoc. **Tech Lead đã tự kiểm tra 2026-09-09**: `ls ~/.local/share/uv/tools/babeldoc/
+   lib/python3.12/site-packages/ | grep -i word_wrap` → **0 kết quả**, và `python3 -c "import
+   word_wrap"` → `ModuleNotFoundError` ⇒ tên `word_wrap` **an toàn, không đụng hàng**. Rủi ro này có
+   sẵn từ Bug #7 (`line_split`, `toc_split`) — nếu Dev đổi sang tên khác thì phải tự kiểm tra lại.
+
+---
+
+### BA10.8. Feature flag & wiring
+
+Theo đúng mẫu 3 flag đang có (`babeldoc_line_split_shim_enabled` / `..._numbered_list_split_enabled` /
+`..._toc_split_enabled`):
+
+| Tầng | Thêm |
+|---|---|
+| `src/core/config.py` (cạnh `:240`) | `babeldoc_word_wrap_fix_enabled: bool = True` + comment nêu rõ đây là **fix số học đúng/sai**, không phải heuristic |
+| `src/services/babeldoc_runner.py` `__init__` | tham số `word_wrap_fix_enabled: bool = False` (giữ default `False` cho khởi tạo trực tiếp trong test, **giống hệt** `toc_split_enabled`) → `self._word_wrap_fix_enabled` |
+| `src/services/babeldoc_runner.py` `:378` | trong block `if self._line_split_shim_enabled:` thêm `env["BABELDOC_SHIM_WORD_WRAP_FIX"] = "1" if self._word_wrap_fix_enabled else "0"` |
+| `src/core/job_orchestrator.py` `:275-281` | truyền `word_wrap_fix_enabled=self._settings.babeldoc_word_wrap_fix_enabled` |
+
+**Mặc định BẬT (`Settings` = `True`)** — khác TOC-1 v2 (từng mặc định TẮT). Lý do: đây không phải
+heuristic đoán ý đồ layout mà là **sửa một phép cộng thừa**, có tính chất an toàn cấu trúc chứng minh
+được (BA10.3-c) và không có "false positive" theo nghĩa của heuristic. **Nhưng**: Dev **không được**
+đặt default `True` trong cùng commit với spike chưa xanh — thứ tự bắt buộc là spike (BA10.5) xanh →
+Reviewer → mới bật.
+
+**Đường rollback**: `BABELDOC_SHIM_WORD_WRAP_FIX=0` / `babeldoc_word_wrap_fix_enabled=False` — tắt
+riêng Bug #10, **không** đụng 7.1/7.2/7.4-b.
+
+---
+
+### BA10.9. Phạm vi test yêu cầu cho Dev
+
+1. **Unit test thuần** `tests/test_babeldoc_word_wrap.py` — gọi `word_wrap.width_before_next_break_point`
+   trên golden fixture BA10.6, assert đúng điểm khác biệt hành vi (đã nêu chi tiết ở BA10.6). Kèm case
+   biên: list rỗng; `units[0].can_break_line == True` (phải trả `0.0`, **giữ nguyên hành vi gốc**); từ
+   dài không có break point nào tới hết list; `scale != 1.0`.
+2. **Test wiring** trong `tests/test_babeldoc_runner.py` — assert `env["BABELDOC_SHIM_WORD_WRAP_FIX"]`
+   nhận đúng `"1"`/`"0"` theo cờ, và **không** xuất hiện khi `line_split_shim_enabled=False`.
+3. **Test shim** trong `tests/test_babeldoc_shim_unicode_regression.py` (hoặc file mới cùng phong
+   cách) — dựng class giả có `_get_width_before_next_break_point`, chạy `_apply_typesetting_patch`,
+   assert đã bị thay; và assert khi class **thiếu** method đó thì raise `AttributeError` (đường
+   fail-safe) mà **không** ảnh hưởng tới các patch `paragraph_finder`.
+4. **Live E2E (Protocol 6 R6-03, QA gate)** — 1 lần chạy xuyên suốt trên fixture BA10.6 qua
+   `JobOrchestrator` đầy đủ (không chỉ `BabeldocRunner`), **mở file PDF output ra kiểm tra nội dung
+   thật**: `"trung thành"` (hoặc case tương đương thực tế quan sát được trong lần chạy đó) xuất hiện
+   **liền mạch trên cùng một dòng**. Không được chỉ tin `status == "completed"`.
+
+---
+
+### BA10.10. Việc KHÔNG làm trong task này
+
+- **Không** report bug lên upstream babeldoc trong phạm vi task này (Expert đã xác nhận nhánh `main`
+  còn nguyên lỗi, chưa có issue nào mô tả đúng bản chất — issue #615 là chuyện khác). Nếu muốn làm,
+  đó là task riêng do người quyết định, không phải Dev.
+- **Không** đụng bản babeldoc bundle trong tool `pdf2zh` (BA10.1).
+- **Không** gộp chung với 11 cặp overlap còn tồn của Bug #9 / mục "Root Cause Analysis: Text Overlap"
+  (2026-09-07) — đó là root cause khác (babeldoc không reflow), không liên quan.

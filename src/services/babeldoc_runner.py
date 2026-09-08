@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from src.core.concurrency_controller import RATE_LIMIT_LINE_RE
 from src.services.pdf2zh_runner import _drain
@@ -218,6 +219,14 @@ class BabeldocRunner:
     timeout + mop-up 5s.
     """
 
+    #: Bug #9 (Architecture.md "Bug #9"). babeldoc tự typeset lại và tự bóp cỡ
+    #: chữ (tới tối thiểu 10%) để vừa box, bỏ hẳn đoạn nếu vẫn không vừa —
+    #: KHÔNG BAO GIỜ vẽ tràn ra ngoài box. Chạy thêm `font_shrink_page()` trên
+    #: output của nó không sửa được gì (median excess đo được = 0.00%, nó chỉ
+    #: phản ứng với sai số float) nhưng vẫn redact + insert_text lại thật —
+    #: gây Bug #8 (lệch toạ độ, đã fix) và XOÁ MẤT CHỮ THẬT (Bug #9).
+    needs_font_shrink: ClassVar[bool] = False
+
     def __init__(
         self,
         executable: str = "babeldoc",
@@ -225,6 +234,7 @@ class BabeldocRunner:
         line_split_shim_enabled: bool = True,
         numbered_list_split_enabled: bool = True,
         toc_split_enabled: bool = False,
+        word_wrap_fix_enabled: bool = False,
     ) -> None:
         self._executable = executable
         self._deepseek_base_url = deepseek_base_url
@@ -246,6 +256,15 @@ class BabeldocRunner:
         #: qua bien moi truong RIENG de tat duoc mot minh TOC-1 v2 (heuristic
         #: moi nhat/rui ro cao nhat, mac dinh TAT) ma khong dong 7.1/7.2.
         self._toc_split_enabled = toc_split_enabled
+        #: Bug #10 (Architecture.md BA10.8). Doc lap HOAN TOAN voi 3 co tren
+        #: (module/loader/rollback rieng — BA10.7 rang buoc #1): chi co tac
+        #: dung khi shim tong CUNG bat (PYTHONPATH phai duoc set), truyen qua
+        #: bien moi truong RIENG de tat duoc mot minh fix nay ma khong dong
+        #: 7.1/7.2/7.4-b. Default `False` o day (khoi tao truc tiep trong
+        #: test) — gia tri production THAT nam o
+        #: `Settings.babeldoc_word_wrap_fix_enabled` (mac dinh `True`, xem
+        #: src/core/config.py), giong het pattern cua `toc_split_enabled`.
+        self._word_wrap_fix_enabled = word_wrap_fix_enabled
 
     async def translate_pages(
         self,
@@ -367,6 +386,7 @@ class BabeldocRunner:
                 "1" if self._numbered_list_split_enabled else "0"
             )
             env["BABELDOC_SHIM_TOC_SPLIT"] = "1" if self._toc_split_enabled else "0"
+            env["BABELDOC_SHIM_WORD_WRAP_FIX"] = "1" if self._word_wrap_fix_enabled else "0"
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(

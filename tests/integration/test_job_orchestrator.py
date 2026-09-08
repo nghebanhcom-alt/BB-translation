@@ -1,8 +1,9 @@
+import hashlib
 import json
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import fitz  # PyMuPDF
 import pytest
@@ -15,6 +16,8 @@ from src.core.job_orchestrator import EpubNotSupportedError, JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
 from src.models.layout_qa import LayoutQaFinding
+from src.models.overflow import OverflowReport
+from src.postprocess.font_shrink import font_shrink_page as _real_font_shrink_page
 from src.postprocess.image_compress import ImageCompressStats
 from src.postprocess.rotated_text_overlay import OverlayResult
 from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
@@ -84,6 +87,7 @@ def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
     prior review/QA round.
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
+    runner.needs_font_shrink = True
     call_counter = {"n": 0}
 
     async def _translate_pages(
@@ -377,6 +381,7 @@ async def test_run_job_calls_mineru_before_pdf2zh_for_pdf_scan(
         return await mineru_runner.parse_document.side_effect(*args, **kwargs)
 
     tracked_pdf2zh = AsyncMock(spec=Pdf2zhRunner)
+    tracked_pdf2zh.needs_font_shrink = True
     tracked_pdf2zh.translate_pages.side_effect = _tracked_translate_pages
     tracked_mineru = AsyncMock(spec=MinerURunner)
     tracked_mineru.parse_document.side_effect = _tracked_parse_document
@@ -439,6 +444,7 @@ def _fake_pdf2zh_runner_empty_output() -> Pdf2zhRunner:
     (`status="completed"`, 0 readable characters).
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
+    runner.needs_font_shrink = True
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -502,6 +508,7 @@ def _fake_babeldoc_runner() -> BabeldocRunner:
     """Same shape as `_fake_pdf2zh_runner()` but returning `BabeldocResult`
     with babeldoc's own filename pattern (Architecture.md 6.14.1 B7)."""
     runner = AsyncMock(spec=BabeldocRunner)
+    runner.needs_font_shrink = False
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -999,6 +1006,7 @@ async def test_empty_translation_fails_before_compress_runs(
     )
 
     babeldoc_runner = AsyncMock(spec=BabeldocRunner)
+    babeldoc_runner.needs_font_shrink = False
 
     async def _translate_pages_empty(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -1701,3 +1709,145 @@ async def test_run_parse_only_timeout_scales_with_page_count(
 
     await session.refresh(job)
     assert job.total_pages == 200
+
+
+# --- Bug #9 (Architecture.md "Bug #9") -- needs_font_shrink gate ------------
+
+
+@pytest.mark.asyncio
+async def test_babeldoc_engine_skips_font_shrink_leaves_output_untouched(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """T9-1 (Architecture.md B9.6 / Bug #9): babeldoc self-fits (B9-05) --
+    running `font_shrink_page()` on its output is pure risk with 0 benefit
+    (B9-06: median excess measured at 0.00%) and provably deletes real
+    glyphs (B9-07). `_needs_font_shrink` must gate the whole
+    `with fitz.open(...)` block off for `BabeldocRunner`
+    (`needs_font_shrink=False`), so `chunk.output_path` must come out
+    byte-identical to what `BabeldocRunner.translate_pages()` produced, and
+    zero `OverflowReport` rows must be written. Asserts the real file bytes
+    and DB row count (Protocol 6 R6-02) -- deliberately NOT `assert_called()`
+    per Architecture.md B9.6 T9-1.
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    produced_hashes: dict[str, str] = {}
+    original_side_effect = babeldoc_runner.translate_pages.side_effect
+
+    async def _translate_pages_capture(*args, **kwargs):
+        result = await original_side_effect(*args, **kwargs)
+        produced_hashes[str(result.mono_path)] = hashlib.sha256(
+            result.mono_path.read_bytes()
+        ).hexdigest()
+        return result
+
+    babeldoc_runner.translate_pages.side_effect = _translate_pages_capture
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with patch(
+        "src.core.job_orchestrator.font_shrink_page",
+        new=AsyncMock(wraps=_real_font_shrink_page),
+    ) as font_shrink_spy:
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert produced_hashes  # sanity: the capture wrapper actually ran
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = chunks_result.all()
+    assert chunks
+    for chunk in chunks:
+        after_hash = hashlib.sha256(Path(chunk.output_path).read_bytes()).hexdigest()
+        assert after_hash == produced_hashes[chunk.output_path]
+
+    overflow_result = await session.exec(
+        select(OverflowReport).where(OverflowReport.job_id == job.id)
+    )
+    assert overflow_result.all() == []
+    # Belt-and-suspenders on top of the hash/DB-count proof above (which is
+    # the assertion Architecture.md B9.6 T9-1 actually requires): the real
+    # font_shrink_page implementation itself must never even be entered for
+    # a babeldoc chunk.
+    font_shrink_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pdf2zh_engine_still_runs_font_shrink_regression(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """T9-2 (Architecture.md B9.6 / Bug #9, regression guard): the
+    babeldoc-skip fix in `_process_chunk()` must NOT accidentally turn
+    font_shrink off for `pdf2zh` too (`Pdf2zhRunner.needs_font_shrink=True`)
+    -- pdf2zh draws the translation at the ORIGINAL English layout position
+    (B9-04) and genuinely needs this step. `font_shrink_page` is patched
+    with `wraps=` (spies on the call, still runs the real implementation --
+    not a behavior-replacing mock), so `await_count` reflects real
+    invocations against real chunk output pages, not just a boolean
+    `assert_called()`. Expected count is derived from the real chunk count
+    the run actually produced (`_fake_pdf2zh_runner()`'s mono output always
+    re-embeds every source page, per its own docstring), not hardcoded.
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with patch(
+        "src.core.job_orchestrator.font_shrink_page",
+        new=AsyncMock(wraps=_real_font_shrink_page),
+    ) as font_shrink_spy:
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = chunks_result.all()
+    assert chunks
+    # 3 source pages -> each chunk's fake pdf2zh mono output re-embeds all 3.
+    assert font_shrink_spy.await_count == len(chunks) * 3
+
+
+@pytest.mark.asyncio
+async def test_needs_font_shrink_property_isinstance_guard_catches_unset_mock(
+    tmp_path: Path,
+) -> None:
+    """T9-3 (Architecture.md B9.6 / Bug #9): proves the `isinstance` guard in
+    `_needs_font_shrink` is load-bearing, not defensive filler.
+    `AsyncMock(spec=BabeldocRunner)` copies the ATTRIBUTE NAME
+    `needs_font_shrink` from the spec class but NOT its class-attribute
+    VALUE -- a plain child `Mock` is truthy by default. A test author who
+    forgets `runner.needs_font_shrink = False` (exactly the mistake this
+    guard exists to catch) must get a loud `TypeError`, not a silently-wrong
+    `True` that reruns the destructive pdf2zh font_shrink branch against
+    babeldoc output. (Manually verified during implementation: removing the
+    `isinstance` check from `_needs_font_shrink` makes this test fail, as
+    expected -- guard restored afterward.)
+    """
+    runner = AsyncMock(spec=BabeldocRunner)  # deliberately NOT setting needs_font_shrink
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with pytest.raises(TypeError, match="needs_font_shrink"):
+        _ = orchestrator._needs_font_shrink

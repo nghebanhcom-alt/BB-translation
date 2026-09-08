@@ -71,6 +71,8 @@ from dataclasses import dataclass
 
 import fitz  # PyMuPDF
 
+from src.utils.pdf_coords import insert_text_origin_fix
+
 #: BR-FONT-02: step 1, shrink font size by at most 20%.
 MAX_FONT_SHRINK_RATIO = 0.80
 #: BR-FONT-02: step 2, horizontal condensed scaling.
@@ -320,11 +322,18 @@ def _redraw_span(
     """Erases the glyphs at `span_bbox` (the span's *original* position) and
     re-inserts `text` at `origin` if given, else at `span_bbox`'s own origin
     — `origin` lets `_shrink_line`'s repack path draw the span somewhere
-    other than where it used to be, while still erasing the right spot."""
+    other than where it used to be, while still erasing the right spot.
+
+    `add_redact_annot` takes `span_bbox` as-is (verified correct regardless
+    of MediaBox/CropBox mismatch — see `src.utils.pdf_coords.
+    insert_text_origin_fix`'s docstring); only the point handed to
+    `insert_text` needs the MediaBox/CropBox correction, since that's the
+    PyMuPDF call with the coordinate bug."""
     page.add_redact_annot(span_bbox, fill=(1, 1, 1))
     page.apply_redactions()
     if origin is None:
         origin = fitz.Point(span_bbox.x0, span_bbox.y1 - font_size * 0.2)
+    origin = insert_text_origin_fix(page, origin)
     morph = (origin, fitz.Matrix(scale, 1)) if scale != 1.0 else None
     if font_path:
         page.insert_text(

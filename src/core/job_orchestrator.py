@@ -278,8 +278,34 @@ class JobOrchestrator:
                 line_split_shim_enabled=self._settings.babeldoc_line_split_shim_enabled,
                 numbered_list_split_enabled=self._settings.babeldoc_numbered_list_split_enabled,
                 toc_split_enabled=self._settings.babeldoc_toc_split_enabled,
+                word_wrap_fix_enabled=self._settings.babeldoc_word_wrap_fix_enabled,
             )
         return self._pdf2zh_runner
+
+    @property
+    def _needs_font_shrink(self) -> bool:
+        """Bug #9 — hoi NANG LUC cua engine da chon, khong hoi TEN engine.
+        Cung ky luat 6.14.7: chi `_translator_runner` biet engine nao dang
+        chay; than `_process_chunk()` chi doc 1 boolean.
+
+        `isinstance` guard la CO CHU DICH, khong phai phong thu thua:
+        production luon tra ve `bool` that (ClassVar tren ca 2 runner), nen
+        nhanh raise chi voi toi duoc tu test dung `AsyncMock(spec=...Runner)`
+        — mock KHONG copy GIA TRI cua class attribute, chi copy TEN, nen
+        `mock.needs_font_shrink` la 1 child Mock TRUTHY. Khong co guard nay,
+        mot test babeldoc quen set thuoc tinh se am tham chay nhanh pdf2zh va
+        van PASS — dung loai "mock tu nhat quan voi chinh no" ma Protocol 5/6
+        sinh ra de chan.
+        """
+        value = self._translator_runner.needs_font_shrink
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self._translator_runner).__name__}.needs_font_shrink phai la bool, "
+                f"nhan duoc {value!r}. Neu day la test dung AsyncMock(spec=...), phai set "
+                "tuong minh `runner.needs_font_shrink = True/False` cho dung nhanh dang test "
+                "(Architecture.md Bug #9 B9.4)."
+            )
+        return value
 
     async def run_job(self, job_id: str, db_session: AsyncSession) -> JobResult:
         job = await db_session.get(Job, job_id)
@@ -1298,10 +1324,15 @@ class JobOrchestrator:
         await db_session.commit()
 
         overflow_entries: list[OverflowEntry] = []
-        with fitz.open(chunk.output_path) as doc:
-            for page in doc:
-                await font_shrink_page(page, overflow_entries, font_path=self._noto_font_path)
-            doc.saveIncr()
+        # Bug #9 (Architecture.md "Bug #9", Protocol 2 2026-09-08): CHI engine
+        # nao tu no khong fit text vao box moi can buoc nay. Voi babeldoc, mo
+        # file ra redact + insert_text lai la thao tac thuan rui ro: khong sua
+        # duoc gi ma xoa mat chu that.
+        if self._needs_font_shrink:
+            with fitz.open(chunk.output_path) as doc:
+                for page in doc:
+                    await font_shrink_page(page, overflow_entries, font_path=self._noto_font_path)
+                doc.saveIncr()
 
         for entry in overflow_entries:
             db_session.add(

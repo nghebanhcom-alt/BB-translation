@@ -4872,6 +4872,507 @@ lỗi Dev↔Reviewer nào trước đó cho tính năng này.
 
 ---
 
+## Bug #8 — "Chữ nhảy lung tung" tái phát ở v1.2.8: review `font_shrink.py` MediaBox/CropBox fix (2026-09-08)
+
+### Phạm vi review
+
+Diff: `src/postprocess/font_shrink.py` (hàm mới `_insert_text_origin_fix`, dùng trong
+`_redraw_span`) + `tests/test_font_shrink.py`. Bối cảnh đầy đủ đã đọc ở section CHANGELOG "Bug #8
+— 'Chữ nhảy lung tung' tái phát ở v1.2.8" (`docs/CHANGELOG.md`, ngay phía trên). Đây là review
+Protocol 7 (R7-01) đầu tiên cho fix này — chưa qua vòng Dev↔Reviewer nào trước đó.
+
+### 1. Tự verify claim PyMuPDF (KHÔNG tin lời Dev — tự đọc source)
+
+Đọc trực tiếp `.venv/lib/python3.14/site-packages/pymupdf/__init__.py` (PyMuPDF cài trong venv):
+
+- `class Shape` (dòng 15021). `Shape.__init__` (dòng 15043-15052): `self.height =
+  page.mediabox_size.y`, `self.x, self.y = page.cropbox_position.x, page.cropbox_position.y` —
+  **đúng khớp** claim trong docstring của `_insert_text_origin_fix` (lấy `cropbox_position`
+  nguyên trạng, không giao với MediaBox).
+- `Shape.insert_text` (dòng 15382 trở đi): dòng tính toạ độ thật là
+  `top = height - point.y - self.y` và `left = point.x + self.x` (đọc trực tiếp, khớp chính xác
+  con số dòng Dev ghi trong docstring, dù số dòng lệch nhẹ so với ước lượng ~15481-15493 của Dev
+  — không ảnh hưởng tính đúng). Nhánh `morph` (dòng ngay sau, dùng khi `morphing=True`) áp
+  **cùng công thức offset** cho `morph[0]` — quan trọng vì `_redraw_span` áp
+  `_insert_text_origin_fix` cho `origin` **trước khi** dựng tuple `morph = (origin, ...)` (dòng
+  414-415 `font_shrink.py`), nên điểm neo trong `morph` cũng được sửa đúng, không bị bỏ sót.
+- `page.cropbox_position` (`Page.cropbox_position`, dòng 11050) = `self.cropbox.tl`; `page.cropbox`
+  (dòng 11037) gọi `JM_cropbox` (native) — không tự giao với MediaBox ở tầng Python, khớp giả
+  định "raw, un-intersected".
+- `page.mediabox` (dòng 12971) và `page.rect`/`bound()` (dòng 11009): `bound()` gọi thẳng
+  `mupdf.fz_bound_page` (C, không đọc được từ Python source) — claim "`page.rect` = giao CropBox
+  ∩ MediaBox, chuẩn hoá về (0,0)" **không verify được từ đọc source Python**, chỉ verify được
+  bằng đo thực nghiệm (live round-trip). Đã tự đo độc lập ở mục 2 dưới và khớp — chấp nhận được,
+  nhưng lưu ý đây là verify bằng thực nghiệm chứ không phải đọc source cho riêng phần `bound()`.
+
+**Kết luận mục 1**: công thức `dx = max(mediabox.x0 - cropbox_position.x, 0.0)`,
+`dy = max(-cropbox_position.y, 0.0)` khớp đúng với `Shape.insert_text` thật — xác nhận độc lập,
+không chỉ tin lời Dev.
+
+### 2. Tự thử case biên bằng script (`uv run python`, không chỉ đọc code suông)
+
+Script tại `/private/tmp/.../scratchpad/test_edge_cases.py`,
+`test_rotation.py`, `test_mixed.py` (không phải file trong repo, chỉ dùng để review) — chạy trên
+cả file tổng hợp và 4 fixture thật đã có sẵn trong `tests/fixtures/babeldoc/` (`lcb_toc.pdf`,
+`job3594a7a3_chunk0_sample_mono.pdf`, `rotated_chart_p15_source.pdf`,
+`rotated_text_p67_source.pdf`):
+
+- **Case mixed-axis thật** (sửa trực tiếp byte `CropBox[0 0 714 849]` →
+  `CropBox[50 0 714 849]` trong bản sao `lcb_toc.pdf`, tạo ra CropBox hợp lệ theo trục x
+  (`cropbox_position.x=50 > mediabox.x0=33` → `dx=0`, đúng) nhưng vẫn tràn theo trục y
+  (`dy=33`, đúng) — round-trip `_redraw_span`-tương đương landed đúng
+  `expected_origin` (sai số < 0.001pt). Công thức per-axis `max(...,0)` xử lý đúng trường hợp
+  "đúng 1 trục, sai 1 trục" — không có case biên nào bị bỏ sót ở dạng phối hợp trục.
+- **`page.rotation` != 0** (thử 90/180/270 bằng `xref_set_key("Rotate", ...)` +
+  `reload_page` trên `lcb_toc.pdf` thật): round-trip vẫn khớp đúng ở cả 4 giá trị rotation. Không
+  tìm được case rotation nào phá công thức — `page.get_text("dict")`/`insert_text` tự xử lý phần
+  xoay qua cơ chế riêng (CTM), độc lập với offset MediaBox/CropBox mà `_insert_text_origin_fix`
+  sửa.
+- **Lưu ý phụ**: không có fixture thật nào trong repo có `page.rotation != 0` thật sự (2 file tên
+  "rotated_*" chỉ có chữ xoay trong nội dung, `page.rotation == 0`) — case rotation ở trên chỉ
+  verify được bằng cách tự tạo tổng hợp, không phải bằng dữ liệu sản xuất thật. Không blocking,
+  nhưng ghi nhận đây là 1 khoảng trống fixture nếu sau này cần regression test cho rotation.
+
+**Kết luận mục 2**: không phát hiện case biên nào phá công thức fix. Fix đúng cho: CropBox ⊆
+MediaBox (noop), CropBox tràn 1 trục, CropBox tràn cả 2 trục, CropBox tràn phối hợp (1 trục hợp
+lệ + 1 trục tràn), và có/không có `page.rotation`.
+
+### 3. Chạy test thật
+
+```
+uv run pytest tests/test_font_shrink.py -v   → 12 passed (khớp số PM tự verify độc lập trong
+                                                 CHANGELOG bằng git stash)
+uv run ruff check src/postprocess/font_shrink.py tests/test_font_shrink.py       → All checks passed!
+uv run ruff format --check src/postprocess/font_shrink.py tests/test_font_shrink.py → 2 files already formatted
+```
+
+Test mới không vacuous: `test_redraw_span_lands_on_its_own_bbox_despite_mediabox_cropbox_offset`
+tự assert `cropbox_position != mediabox_origin` làm sanity check trước khi assert kết quả — nếu
+fixture tự nhiên hết lệch (ví dụ do đổi PyMuPDF version), test sẽ tự fail rõ ràng thay vì pass giả.
+Assert giá trị origin cụ thể bằng `pytest.approx`, không chỉ `assert_called()` — đúng R6-02.
+
+### 4. Docstring/comment không khớp code (mục brief yêu cầu kiểm tra riêng)
+
+- `_insert_text_origin_fix` docstring (dòng 320-321, `font_shrink.py`) viết: "...NOT the simpler
+  'MediaBox origin != (0,0)' theory this function's name suggests at first glance; **see the
+  false-start note at the bottom**" — nhưng đọc hết toàn bộ docstring (dòng 311-381) **không có
+  section "false-start note" nào ở cuối**. Đây là 1 tham chiếu treo (dangling reference) — comment
+  hứa hẹn nội dung không tồn tại trong code thật. Non-blocking nhưng nên sửa (xoá câu đó hoặc thêm
+  đúng phần đã hứa) để tránh người đọc sau này tưởng mình thiếu context.
+- `tests/test_font_shrink.py` dòng ~239 (header comment của khối test mới) viết: `"--- Regression:
+  'chữ nhảy lung tung' (2026-09-08, MediaBox origin != (0,0)) ---"` — đây **chính là** cái lý
+  thuyết đơn giản mà docstring của `_insert_text_origin_fix` (cùng lần commit, cùng tác giả) minh
+  thị bác bỏ là SAI ("NOT the simpler 'MediaBox origin != (0,0)' theory"). Comment ở test file có
+  vẻ được viết trước khi root cause thật (CropBox, không phải MediaBox origin) được chốt, và không
+  được cập nhật lại khi docstring ở source được viết lại cho đúng. Không ảnh hưởng tính đúng của
+  test (assertion vẫn đúng), nhưng nội dung mô tả sai bản chất bug ngay trong comment của chính
+  bài test — dễ gây hiểu lầm cho người đọc sau này (kể cả Dev tương lai sửa lại chính vùng code
+  này). Đề nghị sửa header comment khớp với root cause CropBox thật.
+
+### 5. PHÁT HIỆN QUAN TRỌNG — fix bị thu hẹp phạm vi, còn ít nhất 2 call site khác của
+`page.insert_text()` mắc CHÍNH XÁC cùng 1 bug, chưa được sửa
+
+Brief chỉ giao review `font_shrink.py`, nhưng theo tinh thần Protocol 6 (trace lineage/tác động
+chéo, không chỉ xác nhận đúng tại điểm sửa) tôi grep toàn bộ `src/` cho `.insert_text(`:
+
+```
+src/postprocess/font_shrink.py:417,426   ← đã sửa (qua _redraw_span → _insert_text_origin_fix)
+src/preprocess/searchable_pdf.py:226     ← CHƯA sửa
+src/postprocess/rotated_text_overlay.py:381 ← CHƯA sửa
+```
+
+**`rotated_text_overlay.py::_draw_block` (dòng 375-387)**: `pivot` lấy trực tiếp từ
+`RotatedBlock.pivot`, mà `RotatedBlock` được dựng từ `page.get_text("dict")` (dòng 216) — **cùng
+hệ toạ độ page-space** mà `_redraw_span`'s `span_bbox`/`origin` dùng. Gọi
+`page.insert_text(pivot, text, ..., morph=(pivot, Matrix(rotation_degrees)))` **không qua**
+`_insert_text_origin_fix`. Tôi đã **tự thực nghiệm trực tiếp trên đúng fixture sản xuất thật**
+(`tests/fixtures/babeldoc/toc_sources/lcb_toc.pdf`, file thật gây ra Bug #8) để chứng minh không
+phải suy đoán:
+
+```
+mediabox: Rect(33.0, 33.0, 681.0, 816.0)  cropbox_position: Point(0.0, -33.0)
+intended pivot (page-space, từ get_text dict): (261.53, 154.71)
+gọi page.insert_text(pivot, ..., morph=(pivot, Matrix(0))) — đúng shape lời gọi của _draw_block
+actual landing origin: (228.53, 121.71)
+OFFSET ERROR: dx=-33.0, dy=-33.0   ← ĐÚNG BẰNG offset đã đo trong Bug #8 gốc
+```
+
+Đây là bằng chứng thực nghiệm, không phải lý thuyết: **cùng cuốn sách, cùng cơ chế lỗi, cùng độ
+lệch (-33,-33)** vẫn tái hiện nguyên vẹn qua `rotated_text_overlay.py`. Module này chủ đích chạy
+trên chính loại file babeldoc/pdf2zh sinh ra (đúng loại PDF có CropBox méo như Le Cordon Bleu, xem
+docstring module dòng 1-30) — không phải rủi ro lý thuyết xa vời.
+
+Architecture.md (dòng 7982, 8180) có ghi "Không đụng `rotated_text_overlay.py` (module đó ĐÚNG, QA
+đã verify sống ở nhánh digital)" — nhưng xác nhận đó **có trước** khi root cause Bug #8 (CropBox ⊄
+MediaBox) được phát hiện (2026-09-08), và CHANGELOG Bug #8 tự ghi rõ lý do QA v1.2.7 không bắt
+được bug tương tự ở `font_shrink.py`: "QA lúc đó chỉ chạy trên sách Figoni, có
+`mediabox=(0,0,684,855)` (origin đã là 0) → độ lệch = 0, bug không lộ." **Cùng cơ chế mù y hệt rất
+có thể áp dụng cho xác nhận "ĐÚNG" của `rotated_text_overlay.py`** — nếu QA verify sống của module
+đó cũng chạy trên 1 cuốn sách có CropBox=MediaBox, kết luận "ĐÚNG" chưa từng bị test qua đúng điều
+kiện gây lỗi, y hệt cách `font_shrink.py` "qua được" review/QA trước v1.2.8.
+
+`searchable_pdf.py::_insert_invisible_text` (dòng 210-232) cũng gọi `page.insert_text((x0, y1 -
+h*0.15), ..., render_mode=3)` với bbox lấy từ `middle.json`/`page.rect`-space (docstring hàm gọi
+nó, dòng 190, tự xác nhận "top-left-origin space as PyMuPDF's `page.rect`"), cũng không qua
+`_insert_text_origin_fix`. Mức độ nghiêm trọng thấp hơn (chữ vô hình, `render_mode=3` — không vẽ
+gì lên trang, chỉ ảnh hưởng độ chính xác của text layer ẩn dùng để search/copy, không gây "chữ đè
+chữ" thấy được bằng mắt) nhưng **cùng root cause PyMuPDF y hệt** vẫn tồn tại nguyên vẹn.
+
+**Vì sao đây là issue BLOCKING cho việc đóng Bug #8** (không phải chỉ nợ kỹ thuật ghi nhận rồi
+thôi): mục tiêu của Bug #8 là loại bỏ triệu chứng "chữ chồng đè" cho các PDF có CropBox méo dạng
+Le Cordon Bleu. Diff hiện tại chỉ đóng đúng 1 trong 2 đường vẽ chữ khả dĩ chạy trên loại PDF đó
+(`font_shrink`), để lại `rotated_text_overlay` với NGUYÊN VẸN cùng 1 lỗi, đã tự chứng minh thực
+nghiệm là sống trên đúng file gây ra Bug #8. Nếu cuốn Le Cordon Bleu (hoặc sách tương lai có cùng
+kiểu CropBox méo) có bất kỳ khối chữ xoay nào cần overlay, "chữ nhảy lung tung" sẽ **tái phát lần
+3** qua đúng cơ chế vừa được cho là đã fix — không có test nào trong diff này bắt được vì
+`rotated_text_overlay.py` không nằm trong phạm vi diff/test.
+
+### 6. Checklist R5-04 (bắt buộc theo CLAUDE.md project)
+
+- **`src/postprocess/font_shrink.py` (hàm `_insert_text_origin_fix`/`_redraw_span`): External
+  contract verified against real source: YES** — nguồn: tôi tự đọc trực tiếp
+  `.venv/lib/python3.14/site-packages/pymupdf/__init__.py` (`class Shape`, dòng 15021;
+  `Shape.__init__` dòng 15043-15052; `Shape.insert_text` dòng 15382+; `Page.cropbox_position` dòng
+  11050; `Page.mediabox` dòng 12971) — không chỉ tin lời Dev, tự verify độc lập theo đúng yêu cầu
+  brief mục 2, cộng thêm tự thử case biên bằng script thật (mục 2 trên) chứ không chỉ đọc source
+  suông.
+- **`src/postprocess/rotated_text_overlay.py` (`_draw_block`) và
+  `src/preprocess/searchable_pdf.py` (`_insert_invisible_text`): External contract verified against
+  real source: N/A cho bản thân PR này** (2 file này không nằm trong diff được giao review) —
+  NHƯNG bản thân PyMuPDF contract mà chúng phụ thuộc (offset theo `cropbox_position` thô) đã được
+  tôi verify là **giống hệt** contract vừa xác nhận ở trên, và đã tự thực nghiệm chứng minh cả 2
+  call site này đang mắc lỗi sống trên dữ liệu thật (mục 5). Ghi nhận đây KHÔNG phải "bỏ qua im
+  lặng" — đây là 1 non-blocking-suggestion-thành-blocking-issue theo đúng cơ chế R5-04 (câu trả
+  lời không phải YES cho phần chưa sửa → tự động là issue phải ghi vào report, không được im
+  lặng bỏ qua).
+
+### Danh sách issue
+
+**Blocking (chặn merge/đóng Bug #8)**:
+
+1. `src/postprocess/rotated_text_overlay.py::_draw_block` (dòng 375-387) gọi `page.insert_text()`
+   với toạ độ page-space nhưng không áp `_insert_text_origin_fix` — đã thực nghiệm chứng minh tái
+   hiện đúng lỗi Bug #8 (offset -33,-33) trên chính file `lcb_toc.pdf` gây ra bug gốc. Cần: (a)
+   chuyển `_insert_text_origin_fix` sang vị trí dùng chung được (ví dụ module nhỏ
+   `src/postprocess/pdf_coords.py`, hoặc export từ `font_shrink.py`), (b) áp dụng trong
+   `_draw_block` trước khi build `pivot`/`morph`, (c) thêm test regression tương tự (fixture
+   `lcb_toc.pdf` + 1 khối chữ xoay giả lập) xác nhận origin landed đúng bất kể CropBox/MediaBox
+   lệch.
+
+**Non-blocking (nên sửa, không chặn merge)**:
+
+2. `src/preprocess/searchable_pdf.py::_insert_invisible_text` (dòng 210-232) cùng root cause,
+   mức độ nhẹ hơn (chữ vô hình, không gây "chữ đè chữ" thấy được, chỉ ảnh hưởng độ chính xác text
+   layer ẩn cho search/copy). Nên áp cùng fix chung khi làm mục 1, tiện thể dọn sạch toàn bộ vùng
+   ảnh hưởng của bug PyMuPDF này trong 1 lần thay vì rải rác 3 chỗ.
+3. `_insert_text_origin_fix` docstring có tham chiếu treo "see the false-start note at the bottom"
+   — không có section đó trong code thật. Sửa: xoá câu hoặc bổ sung đúng phần đã hứa.
+4. Header comment của khối test mới trong `tests/test_font_shrink.py` (dòng ~239) mô tả bug là
+   "MediaBox origin != (0,0)" — đúng lý thuyết mà docstring `_insert_text_origin_fix` (cùng
+   commit) minh thị bác bỏ là sai. Sửa lại header comment khớp root cause CropBox thật để tránh
+   nhầm lẫn cho người đọc/sửa sau này.
+5. Không có fixture thật nào trong repo có `page.rotation != 0` — case rotation trong review này
+   chỉ verify được bằng dữ liệu tổng hợp tự tạo (`xref_set_key` + `reload_page`), không phải dữ
+   liệu sản xuất thật. Cân nhắc thêm 1 fixture thật (nếu tìm được nguồn có `/Rotate` thật) cho lần
+   sau nếu bug tương tự lại liên quan tới rotation.
+
+### Kết luận
+
+**REJECT — không đóng Bug #8 ở trạng thái diff hiện tại.**
+
+Căn cứ:
+
+- Phần code trong phạm vi diff (`font_shrink.py`) **tự nó đúng**: công thức khớp chính xác với
+  `Shape.insert_text` thật (tự đọc source xác nhận), xử lý đúng mọi case biên tôi tự nghĩ ra và
+  thử bằng script thật (mixed-axis, rotation), test mới không vacuous và assert đúng giá trị cụ
+  thể theo R6-02, `pytest`/`ruff` xanh toàn bộ.
+- Nhưng **mục tiêu của Bug #8** — loại bỏ "chữ nhảy lung tung" cho PDF có CropBox méo — **chưa đạt
+  được đầy đủ**: tôi đã thực nghiệm trực tiếp trên chính file `lcb_toc.pdf` gây ra bug gốc và
+  chứng minh `rotated_text_overlay.py::_draw_block` tái hiện NGUYÊN VẸN cùng lỗi (offset -33,-33)
+  qua 1 đường vẽ chữ khác mà diff này không đụng tới. Đây không phải suy đoán hay "issue tiềm ẩn
+  chung chung" — là kết quả đo thực nghiệm cụ thể trên dữ liệu sản xuất thật, đúng tinh thần "tự
+  chạy thật, đừng chỉ tin trace tay" mà brief yêu cầu.
+- Việc merge diff hiện tại rồi báo "Bug #8 đã fix" sẽ lặp lại đúng kiểu sự cố mà Protocol 6 (Bug
+  #5) và chính lịch sử Bug #8 (QA v1.2.7 dùng sách không lộ bug) đang cố ngăn: fix đúng tại 1 điểm
+  đo được, nhưng không trace hết các điểm khác dùng chung 1 cơ chế lỗi, dẫn tới "đã fix" trên giấy
+  nhưng vẫn tái phát ở production khi gặp đúng combo dữ liệu (sách CropBox méo + có chữ xoay cần
+  overlay).
+
+**Yêu cầu để APPROVE ở vòng sau**: xử lý issue Blocking #1 (đưa `_insert_text_origin_fix` dùng
+chung cho `rotated_text_overlay.py`, kèm test regression), và khuyến khích xử lý luôn issue #2
+(`searchable_pdf.py`) trong cùng lần sửa vì cùng root cause. Issue #3, #4, #5 không chặn merge
+nhưng nên sửa kèm theo.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) — đây là vòng review đầu tiên cho fix Bug #8
+này, đồng thời issue Blocking #1 không phải "Dev sửa sai theo đúng spec Architecture.md" mà là
+"phạm vi fix hẹp hơn phạm vi thật của bug" (phát hiện của Reviewer, chưa từng được giao/spec từ
+đầu) — theo tinh thần CLAUDE.md project (vi phạm loại "implement dựa trên contract/scope chưa đủ"
+không tính vào giới hạn vòng lặp thông thường).
+
+---
+
+## Bug #8 — Vòng 2: review fix mở rộng (`pdf_coords.py` dùng chung) + quyết định về test FAILED mới lộ ra (2026-09-08)
+
+### Phạm vi review
+
+Vòng 2, sau REJECT ở vòng 1 (section ngay phía trên). Đọc lại 5 yêu cầu đã đưa ra ở vòng 1
+(mục "Yêu cầu để APPROVE ở vòng sau") và section "Vòng 2 (Dev, sau REJECT của Reviewer...)" vừa
+được Dev append vào `docs/CHANGELOG.md`. Diff thật đọc trực tiếp bằng
+`git diff -- src/utils/pdf_coords.py src/postprocess/font_shrink.py src/postprocess/rotated_text_overlay.py src/preprocess/searchable_pdf.py tests/`
+(file `src/utils/pdf_coords.py` là file mới, untracked, đọc bằng `Read` trực tiếp) — không tin
+suông báo cáo tự thuật của Dev trong CHANGELOG, đối chiếu từng dòng với diff thật.
+
+### 1. Xác nhận 5 yêu cầu vòng 1 — cả 5 đều đã làm đúng, không nửa vời
+
+1. **Tách hàm dùng chung**: `insert_text_origin_fix(page, origin)` (public, có type hints đầy đủ
+   `page: "fitz.Page"`, `origin: "fitz.Point"` → `"fitz.Point"`) nằm tại `src/utils/pdf_coords.py`
+   mới, cạnh `retry.py`/`excel_utils.py` — đúng quy ước thư mục `src/utils/` đã có sẵn trong repo
+   (xác nhận bằng `ls src/utils/`). `font_shrink.py` giờ chỉ `from src.utils.pdf_coords import
+   insert_text_origin_fix` và gọi, không còn định nghĩa `_insert_text_origin_fix` riêng — xác nhận
+   bằng `git diff -- src/postprocess/font_shrink.py`: hàm cũ bị xoá hoàn toàn khỏi file, không có
+   bản sao thừa nào còn sót lại.
+2. **Áp dụng cho `rotated_text_overlay.py::_draw_block`**: đọc trực tiếp code (dòng 392-402) —
+   `pivot` được tính trong vòng lặp `for i, text in enumerate(...)`, rồi
+   `pivot = insert_text_origin_fix(page, pivot)` áp **trước** khi `pivot` được dùng cả làm điểm
+   chèn (`page.insert_text(pivot, ...)`) lẫn làm neo `morph=(pivot, ...)` — đúng yêu cầu "sửa 1 lần
+   trước khi chảy vào cả 2 chỗ dùng", không bị bỏ sót nhánh `morph` như lo ngại đặt ra ở vòng 1.
+   Quan trọng: fix nằm **trong** vòng lặp theo từng dòng (`i`), không phải áp 1 lần cho dòng đầu
+   rồi suy ra các dòng sau — đúng vì mỗi `pivot` tính lại từ `origin_x`/`origin_y` gốc ở mỗi vòng
+   lặp trước khi bị "nhiễm" bởi bất kỳ sửa đổi nào từ vòng lặp trước.
+3. **Áp dụng cho `searchable_pdf.py::_insert_invisible_text`**: đọc trực tiếp code (dòng 226-232) —
+   điểm `(x0, y1 - h * 0.15)` được bọc qua `insert_text_origin_fix()` thành biến `origin` trước khi
+   truyền vào `page.insert_text(origin, ...)`. Đúng như báo cáo.
+4. **Test regression mới cho `rotated_text_overlay.py`**: có, xem mục 5 dưới (verify riêng, không
+   vacuous).
+5. **2 lỗi docstring/comment**: `grep -n "false-start" -r src/ tests/` → không còn kết quả nào,
+   tham chiếu treo đã bị xoá sạch. Header comment ở `tests/test_font_shrink.py` (dòng ~241-256) đã
+   viết lại đúng root cause: `"Regression: 'chữ nhảy lung tung' (2026-09-08, CropBox not contained
+   in MediaBox -- NOT the simpler 'MediaBox origin != (0,0)' theory..."` — khớp chính xác với
+   docstring của `insert_text_origin_fix` (đã đọc cả 2 nơi, nội dung nhất quán với nhau, không còn
+   mâu thuẫn như vòng 1 chỉ ra.
+
+Không có yêu cầu nào bị làm nửa vời hay bỏ sót.
+
+### 2. Verify công thức sau khi refactor sang `src/utils/pdf_coords.py` — không đổi ý nghĩa
+
+Đọc trực tiếp `src/utils/pdf_coords.py` dòng 91-97:
+
+```python
+mediabox = page.mediabox
+cropbox_position = page.cropbox_position
+dx = max(mediabox.x0 - cropbox_position.x, 0.0)
+dy = max(-cropbox_position.y, 0.0)
+if dx == 0 and dy == 0:
+    return origin
+return fitz.Point(origin.x + dx, origin.y + dy)
+```
+
+Giống hệt (không đổi 1 ký tự nào về mặt công thức) với bản đã APPROVE-về-mặt-công-thức ở vòng 1
+(mục 1 review vòng 1: `dx = max(mediabox.x0 - cropbox_position.x, 0.0)`,
+`dy = max(-cropbox_position.y, 0.0)`). Docstring mới (dòng 1-90) được viết lại đầy đủ hơn bản gốc
+trong `font_shrink.py` (thêm phần giải thích tại sao 2 call site khác cũng cần dùng chung, thêm
+tham chiếu tới cả 2 test regression mới) nhưng phần kỹ thuật cốt lõi (nguồn xác thực PyMuPDF
+`Shape.insert_text`/`Shape.__init__`, per-axis `max(...,0)`, case biên margin-box hợp lệ) được giữ
+nguyên nội dung, không bị "diễn giải lại" sai lệch khi di chuyển module. Không phát hiện thay đổi ý
+nghĩa nào.
+
+### 3. Tự chạy test thật — xác nhận đúng con số Dev báo cáo
+
+```
+uv run pytest tests/test_font_shrink.py tests/test_rotated_text_overlay.py tests/preprocess/test_searchable_pdf.py -v
+```
+
+Kết quả tự chạy (không tin số Dev báo, đối chiếu từng dòng output):
+- `tests/test_font_shrink.py` → **12 passed**.
+- `tests/test_rotated_text_overlay.py` → **10 passed, 1 FAILED**
+  (`test_overlay_rotated_text_draws_translated_text_at_correct_angle`).
+- `tests/preprocess/test_searchable_pdf.py` → **9 passed**.
+
+Khớp chính xác con số Dev tự báo trong CHANGELOG ("12 passed" / "10 passed, 1 FAILED" / "9
+passed"). `uv run ruff check` + `uv run ruff format --check` trên cả 7 file trong phạm vi
+(`src/utils/pdf_coords.py`, `src/postprocess/font_shrink.py`,
+`src/postprocess/rotated_text_overlay.py`, `src/preprocess/searchable_pdf.py`,
+`tests/test_font_shrink.py`, `tests/test_rotated_text_overlay.py`,
+`tests/preprocess/test_searchable_pdf.py`) → **All checks passed! / 7 files already formatted**.
+
+**Đọc traceback thật của test FAILED** (không tin lời giải thích của Dev là đúng ngay):
+
+```
+assert "phan tu sucrose" in page_text  # last words of marker_translation
+AssertionError: assert 'phan tu sucrose' in 'Basic Elements/Elements de Base\n51\n...
+...Trong truong hop sucrose, hai monosaccharide lien ket la fructose va glucose...
+...cho thay phan tu fructose, phan tu gluco va lien ket tao nen mot phan tu sucr'
+```
+
+Chuỗi thật bị cắt cụt giữa chừng ở `"...mot phan tu sucr"` — thiếu đúng 3 ký tự cuối của từ
+`"sucrose"`. Đây là dấu hiệu **cắt chữ ở biên trang** (PyMuPDF clip nội dung insert ra ngoài
+`page.rect`), khác hẳn triệu chứng của Bug #8 gốc (Bug #8 là "chữ vẽ SAI VỊ TRÍ toàn cục theo 1
+offset cố định", không phải "chữ bị cắt cụt ở từ cuối dòng cuối"). Đây là bằng chứng độc lập đầu
+tiên (không chỉ tin lời Dev) cho thấy đây là 1 lỗi khác cơ chế.
+
+### 4. Quyết định chính: test FAILED có phải regression của Bug #8 hay là bug khác, độc lập, có trước?
+
+Đây là phần trọng tâm của vòng review này — tự verify bằng code/thực nghiệm, không chỉ tin trace
+tay của Dev, theo đúng yêu cầu brief.
+
+**a) `git blame` xác nhận logic ước lượng vị trí dòng là code CŨ, có trước Bug #8**:
+
+```
+git blame -L 386,401 -- src/postprocess/rotated_text_overlay.py
+```
+
+Toàn bộ logic tính `pivot` theo `origin_x + nx * line_height * i` / `origin_y + ny * line_height *
+i` (ngoại suy tuyến tính từ `block.pivot` của dòng đầu, không dùng origin thật của từng dòng, không
+kiểm tra biên trang) thuộc về commit `b9c89524` (`Bích Bồ`, **2026-09-07 17:08:38 +0700** — "Implement
+P1: overlay chữ xoay (UX-C) + prompt bất biến nội dung"). Chỉ có đúng 1 dòng mới trong vòng 2 này
+(`pivot = insert_text_origin_fix(page, pivot)`, dòng 394, "Not Committed Yet") — nghĩa là logic
+ngoại suy pivot theo dòng **có trước Bug #8 được chẩn đoán và fix 1 ngày** (Bug #8 chẩn đoán/fix
+2026-09-08). Xác nhận độc lập bằng git history, không chỉ tin lời Dev: đây KHÔNG phải code mới viết
+trong vòng 2 để che giấu 1 regression — logic gây lỗi đã tồn tại nguyên vẹn từ trước khi Bug #8
+tồn tại trong nhận thức của team.
+
+**b) Tự đo trực tiếp trên đúng fixture gây fail (`rotated_text_p67_source.pdf`) — xác nhận cơ chế
+"đẩy sang phải +33 → lố biên phải 648pt" là có thật, không phải suy đoán**:
+
+```python
+doc = fitz.open('tests/fixtures/babeldoc/rotated_text_p67_source.pdf')
+p = doc[0]
+mediabox        = Rect(33.0, 33.0, 681.0, 816.0)
+cropbox_position = Point(0.0, -33.0)
+rect (page.rect) = Rect(0.0, 0.0, 648.0, 783.0)
+```
+
+Áp công thức: `dx = max(33.0 - 0.0, 0.0) = 33.0` — khớp đúng "+33 sang phải" Dev mô tả. Bề rộng
+trang hiệu dụng (`page.rect.width`) = **648.0pt** — khớp đúng con số "648pt" Dev nêu trong
+CHANGELOG. Đây chính là fixture thật dùng trong test FAILED (`P67_SOURCE` = biến toàn cục của
+`rotated_text_p67_source.pdf`, dùng trực tiếp trong
+`test_overlay_rotated_text_draws_translated_text_at_correct_angle`) — không phải suy luận trên
+fixture khác rồi suy rộng ra.
+
+**c) Cơ chế lỗi khớp đúng lý thuyết "che giấu lẫn nhau" Dev nêu**: trước khi Bug #8 được fix, mọi
+điểm chèn (kể cả pivot ngoại suy sai của các dòng sau) bị dịch trái/lên do offset CropBox âm — vô
+tình "kéo" các dòng cuối vào lại gần mép an toàn hơn thay vì đẩy chúng ra biên. Sau khi Bug #8
+được sửa đúng (dịch +33 phải, +33 xuống để bù offset CropBox), phần bù đó cộng dồn với vị trí vốn
+đã ngoại suy sai/lố của các dòng cuối, đẩy đúng dòng cuối lố qua mép phải trang thật
+(648pt) → PyMuPDF clip. Đây là quan hệ nhân-quả hợp lý về mặt hình học (dịch phải mọi điểm chèn +
+1 lỗi tính pivot đã cận biên từ trước = dễ vượt biên hơn), không phải trùng hợp ngẫu nhiên.
+
+**d) Phân biệt rõ 2 cơ chế lỗi khác nhau** (đúng tinh thần "khác cơ chế, không phải cùng 1 lỗi lan
+rộng"):
+- Bug #8 (đã fix): lệch **toàn cục, theo 1 offset cố định (dx, dy)** áp dụng như nhau cho MỌI điểm
+  chèn trên trang có CropBox méo — sửa bằng cách offset ngược lại 1 lần, xong.
+- Bug lộ ra ở đây (chưa fix, KHÁC cơ chế): lỗi **ngoại suy vị trí dòng sai + thiếu kiểm tra biên
+  trang** trong `_draw_block` — tồn tại độc lập với CropBox/MediaBox, chỉ cần dòng dịch đủ dài +
+  ngoại suy đủ lệch là lố biên, bất kể trang có CropBox méo hay không. Bug #8's fix chỉ **thay đổi
+  margin an toàn còn lại** (do dịch +33 phải) của 1 bug đã sẵn có, không TẠO RA cơ chế lỗi mới.
+
+**Kết luận mục 4**: đây là **1 bug khác, độc lập, có từ trước** (tiền commit `b9c89524`,
+2026-09-07 — trước cả khi Bug #8 tồn tại trong nhận thức team), bị Bug #8's CropBox bug vô tình
+che giấu bằng may mắn hình học (dịch hướng ngược lại), không phải regression do fix Bug #8 gây ra.
+**Được phép APPROVE Bug #8 dù còn test FAILED này** — với điều kiện tách thành issue riêng (xem
+mục "Kết luận" dưới), không được gộp vào phạm vi/tiêu chí đóng Bug #8.
+
+### 5. Verify test mới cho `rotated_text_overlay.py` không vacuous — tự kiểm tra lại, không tin "đã
+sửa 1 lần vacuous rồi" là đủ
+
+Đọc trực tiếp `test_draw_block_lands_on_pivot_despite_mediabox_cropbox_offset`
+(`tests/test_rotated_text_overlay.py`): dùng `marker_text = "Khoi chu xoay gia lap cho test hoi
+quy Bug8 R2"` (chuỗi không có sẵn trên trang), assert `_span_with_text(page, marker_text) is None`
+**trước** khi gọi `_draw_block`, rồi assert **not None** và đúng toạ độ origin **sau** khi gọi —
+đúng pattern "before/after" chống vacuous, không chỉ match theo origin (đã tự nhận biết rủi ro
+trùng span "Contents" có sẵn và tránh đúng bằng cách match theo text riêng).
+
+Tự verify độc lập bằng `git stash push -m ... -- src/postprocess/rotated_text_overlay.py` (revert
+fix, giữ nguyên test) rồi chạy lại đúng test này:
+
+```
+FAILED — AssertionError: marker text landed at x=228.52999877929688, expected 261.53
+```
+
+**228.53 = 261.53 - 33.0** — đúng chính xác offset -33 của bug gốc (không phải fail vì lý do khác
+như exception/import error). `git stash pop` khôi phục lại đúng trạng thái ban đầu (đã tự kiểm tra
+`git diff`/`git stash list` sau khi pop — sạch, không mất nội dung). Test này **không vacuous**:
+fail đúng giá trị kỳ vọng khi thiếu fix, pass khi có fix.
+
+### 6. Checklist R5-04 (bắt buộc theo CLAUDE.md project)
+
+- **`src/postprocess/rotated_text_overlay.py` (`_draw_block`): External contract verified against
+  real source: YES** — nguồn: cùng 1 hàm `insert_text_origin_fix` đã verify ở vòng 1 (đọc trực
+  tiếp `pymupdf/__init__.py` `Shape.insert_text`/`Shape.__init__`), cộng thêm tôi tự re-verify vòng
+  này bằng thực nghiệm sống trên đúng fixture (`rotated_text_p67_source.pdf`: đo trực tiếp
+  `mediabox`/`cropbox_position`/`page.rect`, xác nhận `dx=33.0` và `page.rect.width=648.0` khớp mô
+  tả của Dev) và bằng `git stash`-verify test regression (mục 5 trên) — không chỉ tin theo
+  Architecture.md hay lời Dev.
+- **`src/preprocess/searchable_pdf.py` (`_insert_invisible_text`): External contract verified
+  against real source: YES** — cùng hàm `insert_text_origin_fix` dùng chung, cùng nguồn xác thực
+  PyMuPDF đã verify. Không có test regression riêng cho call site này (Dev không được yêu cầu thêm
+  ở vòng 2 — bản thân review vòng 1 xếp đây là non-blocking #2 "nên làm luôn", không bắt buộc test
+  mới) — 9/9 test hiện có trong `tests/preprocess/test_searchable_pdf.py` vẫn pass sau khi áp fix,
+  không phát hiện regression nào ở call site này qua bộ test hiện có.
+
+### Danh sách issue
+
+**Đã đóng (round 1 blocking/non-blocking, xác nhận DONE)**:
+1. ~~`rotated_text_overlay.py::_draw_block` chưa áp `insert_text_origin_fix`~~ — DONE, verify độc
+   lập ở mục 2, 5.
+2. ~~`searchable_pdf.py::_insert_invisible_text` cùng root cause~~ — DONE, verify độc lập ở mục 2.
+3. ~~Docstring dangling reference "false-start note"~~ — DONE, `grep` xác nhận sạch.
+4. ~~Header comment test sai bản chất bug~~ — DONE, đã viết lại đúng root cause CropBox.
+5. Thiếu fixture thật có `page.rotation != 0` — vẫn còn (không ai yêu cầu sửa ở vòng 2, giữ
+   nguyên trạng thái "non-blocking, ghi nhận" như vòng 1).
+
+**Mới, tách riêng KHÔNG thuộc phạm vi Bug #8 (non-blocking cho Bug #8, nhưng blocking cho chính
+issue mới này trước khi release tính năng overlay chữ xoay)**:
+6. `rotated_text_overlay.py::_draw_block` (dòng 386-402, code cũ từ commit `b9c89524`,
+   2026-09-07 — **không phải mã mới viết trong vòng 2 này**) ngoại suy pivot của mỗi dòng chỉ từ
+   origin dòng đầu + bước cố định theo hướng chữ, không dùng origin thật của từng dòng, không kiểm
+   tra biên `page.rect`. Bug #8's fix (dịch +33 sang phải trên `rotated_text_p67_source.pdf`) làm
+   lộ ra: dòng cuối cùng của test
+   `test_overlay_rotated_text_draws_translated_text_at_correct_angle` bị PyMuPDF clip mất 3 ký tự
+   cuối ("sucrose" → "sucr"), test hiện FAILED. Đã xác nhận độc lập (mục 4 trên): đây là bug KHÁC
+   cơ chế, có TRƯỚC Bug #8 cả về thời gian (git blame) lẫn về bản chất (ngoại suy sai vs. offset
+   toàn cục), chỉ vừa bị lộ ra vì Bug #8 được sửa đúng làm mất đi margin an toàn giả tạo trước đó.
+   Đã có task riêng theo dõi (`task_062a9bd5`, "Fix rotated_text_overlay pivot overflow at page
+   edge" — theo báo cáo Dev trong CHANGELOG; Reviewer không tự verify được sự tồn tại của task này
+   qua công cụ của phiên review, chỉ verify được NỘI DUNG chẩn đoán bug thông qua code/thực nghiệm
+   độc lập ở mục 4-5). **Không được coi 1 test đang FAILED này là "đã fix" hay "để mai tính" một
+   cách im lặng — phải xuất hiện tường minh trong `docs/CHANGELOG.md`/backlog cho tới khi có PR sửa
+   riêng.**
+
+### Kết luận
+
+**APPROVE Bug #8.**
+
+Căn cứ:
+
+- Cả 5 yêu cầu của vòng 1 đã được xử lý đầy đủ, verify độc lập từng mục (không tin suông báo cáo
+  Dev): hàm dùng chung đúng vị trí quy ước, công thức không đổi ý nghĩa khi refactor, cả 2 call
+  site còn thiếu (`rotated_text_overlay.py`, `searchable_pdf.py`) đã được áp đúng và đúng chỗ
+  (trước khi điểm chèn được dùng, kể cả nhánh `morph`), 2 lỗi docstring/comment đã sửa sạch.
+- Test regression mới cho `rotated_text_overlay.py` verify không vacuous bằng `git stash` độc lập
+  của chính Reviewer (không chỉ tin Dev đã tự làm việc này) — fail đúng offset -33 khi thiếu fix.
+- Test FAILED còn lại (`test_overlay_rotated_text_draws_translated_text_at_correct_angle`) đã được
+  verify là **1 bug độc lập, khác cơ chế, có TRƯỚC Bug #8** (git blame → code từ 2026-09-07, trước
+  ngày chẩn đoán Bug #8; đo thực nghiệm trực tiếp trên đúng fixture gây fail xác nhận đúng cơ chế
+  "đẩy +33 phải, lố biên phải 648pt, PyMuPDF clip" — không phải suy đoán) — **KHÔNG phải regression
+  của diff Bug #8 này**. Mục tiêu của Bug #8 (loại bỏ lệch toạ độ toàn cục do CropBox ⊄ MediaBox
+  trên MỌI đường vẽ chữ `page.insert_text()` trong repo) đã đạt đầy đủ, đúng phạm vi thật của bug
+  đã chỉ ra ở vòng 1.
+- Bug lộ ra (ngoại suy pivot sai + thiếu kiểm tra biên trang trong `_draw_block`) **được tách thành
+  issue riêng**, đã có task theo dõi (`task_062a9bd5`) và được ghi nhận rõ trong issue #6 ở trên —
+  **không được lẫn vào tiêu chí đóng Bug #8**, và **không được coi là đã xong** cho tới khi có PR
+  riêng sửa nó + test `test_overlay_rotated_text_draws_translated_text_at_correct_angle` pass trở
+  lại.
+
+R5-04: cả `rotated_text_overlay.py` và `searchable_pdf.py` đều trả lời **YES** (nguồn PyMuPDF đã
+verify từ vòng 1, tái xác nhận thực nghiệm ở vòng này cho `rotated_text_overlay.py`).
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) theo đúng lý do đã nêu ở vòng 1: issue vòng 1
+là "phạm vi fix hẹp hơn phạm vi thật của bug", không phải "Dev sửa sai theo spec" — Dev vòng 2 đã
+xử lý đúng, đầy đủ, không lặp lại lỗi cũ.
+
+---
+
 ## Review US-15 — Markdown parse-only, nhánh PDF (born-digital + scan) + `parse_method` override (2026-09-08)
 
 ### Phạm vi
@@ -5407,6 +5908,153 @@ session này, không phải vòng sửa lỗi sau REJECT.
 
 ---
 
+## Review — Bug #9: capability `needs_font_shrink` (skip `font_shrink_page()` cho babeldoc) (2026-09-08)
+
+**Phạm vi**: `src/services/pdf2zh_runner.py`, `src/services/babeldoc_runner.py`,
+`src/core/job_orchestrator.py`, `tests/integration/test_job_orchestrator.py`,
+`tests/integration/test_job_cancel.py`, `tests/integration/test_job_orchestrator_concurrency.py`.
+Đối chiếu với thiết kế Tech Lead tại `docs/Architecture.md` mục "Bug #9" (B9.1–B9.8) và CHANGELOG
+mục "Bug #9 — tắt `font_shrink_page()` cho engine `babeldoc`". Không điều tra lại root cause (đã
+chốt ở Architecture.md B9.2), chỉ review đúng phần implement.
+
+### 1. Đối chiếu diff thật với spec Tech Lead (B9.3/B9.4/B9.5)
+
+Đã đọc `git diff` trực tiếp trên cả 3 file `src/`, đối chiếu từng điểm:
+
+- `Pdf2zhRunner.needs_font_shrink: ClassVar[bool] = True` — đúng vị trí (giữa docstring class và
+  `__init__`), đúng giá trị, `from typing import ClassVar` đã thêm. Khớp B9.3/bảng B9.1.
+- `BabeldocRunner.needs_font_shrink: ClassVar[bool] = False` — đúng vị trí tương ứng, đúng giá trị,
+  import đã thêm. Khớp.
+- Property `_needs_font_shrink` trong `job_orchestrator.py` — đặt ngay sau `_translator_runner`
+  (đúng B9.4a), đọc `self._translator_runner.needs_font_shrink`, có `isinstance(value, bool)` guard
+  raise `TypeError` với message trỏ đúng về Architecture.md Bug #9 B9.4. Khớp nguyên văn logic Tech
+  Lead yêu cầu.
+- Khối `font_shrink_page` + `doc.saveIncr()` được bọc đúng trong `if self._needs_font_shrink:`,
+  không đụng gì khác trong thân `_process_chunk()`. Không có branch `if engine == "babeldoc"` nào
+  được thêm ở bất kỳ đâu trong diff (đã `grep "engine =="` trên diff, không có kết quả) — đúng tinh
+  thần capability-based của §6.14.7/Protocol 8 R8-03, không rẽ nhánh cứng theo tên engine.
+- **Không có sai khác nào so với spec Tech Lead.** Phạm vi sửa `src/` đúng 3 file như B9.4 liệt kê,
+  không đụng `font_shrink.py`/`overflow.py`/schema DB/`config.py` như B9.4 yêu cầu "KHÔNG sửa".
+
+### 2. Verify độc lập: guard `isinstance` có thật sự cần thiết không
+
+Không tin suông báo cáo Dev. Đã tự tạm bỏ khối `isinstance` check trong `_needs_font_shrink`
+(sửa file, giữ nguyên phần còn lại), chạy lại đúng:
+
+```
+uv run pytest tests/integration/test_job_orchestrator.py::test_needs_font_shrink_property_isinstance_guard_catches_unset_mock -q
+```
+
+Kết quả: `FAILED ... Failed: DID NOT RAISE TypeError` — xác nhận guard **thật sự load-bearing**,
+không phải phòng thủ thừa: `AsyncMock(spec=BabeldocRunner)` không set `needs_font_shrink` thật sự
+trả về 1 child Mock truthy nếu không có guard, đúng cơ chế Tech Lead mô tả ở B9.4/docstring. Đã khôi
+phục lại file nguyên trạng từ backup ngay sau khi verify (diff `src/core/job_orchestrator.py` sau
+khôi phục khớp lại đúng bản Dev nộp — đã kiểm tra bằng `git diff --stat`).
+
+### 3. Verify độc lập: 1 test fail trong full suite có thật sự không liên quan Bug #9 không
+
+Đây là điểm quan trọng nhất theo yêu cầu — không tin lời Dev, tự chứng minh bằng thực nghiệm.
+
+- Chạy riêng `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+  trên working tree hiện tại (có đủ thay đổi Bug #9): **FAIL** — `AssertionError: assert 'phan tu
+  sucrose' in '...phan tu fructose, phan tu gluco\nva lien ket tao nen mot phan tu sucr\n'`. Đây rõ
+  ràng là lỗi **cắt chữ giữa dòng** (text wrapping/truncation) trong `rotated_text_overlay.py`, không
+  liên quan gì tới `font_shrink`/`needs_font_shrink`.
+- `git diff -- src/postprocess/rotated_text_overlay.py` cho thấy file này đang có 1 thay đổi
+  **KHÔNG thuộc Bug #9** đang nằm sẵn trong working tree: thêm `insert_text_origin_fix()` từ
+  `src/utils/pdf_coords.py` (module mới, untracked) vào `_draw_block()` — đúng như Dev mô tả, đây là
+  phần việc Bug #8 round-2 (sửa toạ độ `insert_text`), không phải Bug #9.
+- **Thực nghiệm quyết định**: `git stash push` đúng 6 file Bug #9
+  (`src/services/pdf2zh_runner.py`, `src/services/babeldoc_runner.py`, `src/core/job_orchestrator.py`,
+  `tests/integration/test_job_orchestrator.py`, `tests/integration/test_job_cancel.py`,
+  `tests/integration/test_job_orchestrator_concurrency.py`) — **giữ nguyên** thay đổi Bug #8 khác
+  trong `rotated_text_overlay.py`/`font_shrink.py`/`pdf_coords.py` — rồi chạy lại đúng test đó:
+  **FAIL giống hệt**, cùng message, cùng chuỗi bị cắt (`...phan tu sucr\n`). Đã `git stash pop` khôi
+  phục lại ngay sau đó (xác nhận bằng `git status --short` — đúng 6 file Bug #9 trở lại trạng thái
+  modified).
+- **Kết luận**: test fail này là **pre-existing, không phải regression do Bug #9** — bằng chứng thực
+  nghiệm (stash test), không chỉ dựa lời Dev. Đúng như Dev báo cáo.
+
+### 4. `overflow_entries`/`OverflowReport` persistence — có bị đụng không
+
+Đọc trực tiếp đoạn code `job_orchestrator.py` sau khối `if self._needs_font_shrink:` (dòng
+~1324-1336): khai báo `overflow_entries: list[OverflowEntry] = []` vẫn nằm **ngoài** `if`, vòng lặp
+`for entry in overflow_entries: db_session.add(OverflowReport(...))` **không sửa 1 ký tự nào** —
+đúng nguyên văn quyết định B9.5. Khi `needs_font_shrink=False`, list rỗng → vòng lặp chạy 0 lần → 0
+row `OverflowReport` được ghi cho babeldoc — hành vi có chủ đích, không phải bug.
+
+### 5. Test mới (T9-1/T9-2/T9-3) và 7 chỗ sửa mock
+
+- 3 test mới đúng như B9.6 yêu cầu: T9-1 assert byte-hash file + `COUNT(*) FROM overflow_reports ==
+  0` (không chỉ `assert_called()`, có thêm spy `wraps=` làm bằng chứng phụ — đúng tinh thần R6-02);
+  T9-2 assert `await_count` của spy `wraps=` lên `font_shrink_page` thật khớp
+  `len(chunks) * 3` — đã tự đọc `_fake_pdf2zh_runner()` (dòng 73-109) xác nhận mono output luôn tái
+  tạo đủ `total_pages` (= 3, từ `_make_pdf(source_pdf, 3)`) cho mỗi chunk, nên con số `len(chunks) *
+  3` là suy ra đúng từ hành vi thật của fixture, không phải hardcode tuỳ tiện; T9-3 chứng minh guard
+  cần thiết (đã tự verify lại độc lập ở mục 2, khớp claim Dev).
+- Đã grep xác nhận đúng 7 chỗ tạo mock runner được sửa, đúng vị trí B9.6 mục 4 liệt kê (số dòng lệch
+  nhẹ so với Architecture.md vì file đã có thay đổi khác từ trước, nhưng đúng hàm/đúng runner):
+  `test_job_cancel.py` (`_fake_pdf2zh_runner_cancel_after_first_chunk`, `=True`),
+  `test_job_orchestrator_concurrency.py` (`_fake_runner_returning`, `=True`),
+  `test_job_orchestrator.py`: `_fake_pdf2zh_runner` (`=True`),
+  `test_run_job_calls_mineru_before_pdf2zh_for_pdf_scan` (`tracked_pdf2zh`, `=True`),
+  `_fake_pdf2zh_runner_empty_output` (`=True`), `_fake_babeldoc_runner` (`=False`),
+  `test_empty_translation_fails_before_compress_runs` (`babeldoc_runner` inline, `=False`). Đủ 7,
+  không thiếu chỗ nào.
+- Full suite hẹp (`test_job_orchestrator.py` + `test_job_cancel.py` +
+  `test_job_orchestrator_concurrency.py` + `test_pdf2zh_runner.py` + `test_font_shrink.py` +
+  `test_babeldoc_runner.py`): tự chạy lại, **91 passed** — khớp tổng Dev báo cáo (37+30+24=91).
+  `ruff check`/`ruff format --check` trên đúng 6 file Dev liệt kê: **All checks passed / đã format**
+  — tự chạy lại, khớp claim.
+
+### 6. Protocol 8 (R8-01/02/03) — capability declare, deny-by-default, không rẽ nhánh cứng
+
+- **R8-03 (capability trên object, không rẽ nhánh cứng)**: **Đạt.** `needs_font_shrink` là
+  `ClassVar[bool]` khai báo trên chính 2 class runner đại diện biến thể, `_process_chunk()` chỉ hỏi
+  `self._needs_font_shrink` (qua đúng 1 property), không có `if engine == "..."` nào trong diff. Đã
+  verify bằng grep, mục 1.
+- **R8-01/R8-02 (audit toàn bộ bước hậu kỳ / deny-by-default khi chưa verify)**: đây là trách nhiệm
+  thiết kế của Tech Lead ở Architecture.md (đã làm — B9.1 liệt kê rõ nguồn cho từng claim, B9-05/06/07
+  đánh dấu mức "(ii) Domain Expert đọc/đo thật — Tech Lead CHƯA tự verify lại", đúng tinh thần
+  deny-by-default: nếu chưa verify thì phải mặc định skip, và ở đây babeldoc **đã được chuyển sang
+  skip** dựa trên bằng chứng Domain Expert cung cấp). Không áp dụng trực tiếp cho phần code Dev vừa
+  nộp (Dev chỉ implement quyết định đã chốt, không tự quyết định capability nào cho bước nào) — **N/A
+  cho phạm vi review này**, không phải vi phạm.
+
+### 7. R5-04 checklist (external dependency contract)
+
+`src/services/pdf2zh_runner.py` và `src/services/babeldoc_runner.py` là service wrapper theo đúng
+mẫu R5-04 áp dụng, nhưng thay đổi trong task này **không đụng tới bất kỳ contract bên ngoài nào**
+(không có CLI flag/endpoint/schema mới) — chỉ thêm 1 `ClassVar` nội bộ Python thuần, không gọi ra
+ngoài. **External contract verified against real source: N/A** (thay đổi thuần nội bộ, không phải
+contract mới của pdf2zh/babeldoc).
+
+## Kết luận Bug #9
+
+**APPROVE.**
+
+Căn cứ: implement khớp 100% với thiết kế Tech Lead (B9.3–B9.6), không có sai khác cần escalate. 2
+claim quan trọng nhất của Dev đã được **tự verify độc lập bằng thực nghiệm, không tin suông**:
+(a) guard `isinstance` thật sự load-bearing (bỏ guard → T9-3 fail đúng như dự đoán), và (b) test fail
+duy nhất trong full suite (`test_overlay_rotated_text_draws_translated_text_at_correct_angle`) là
+pre-existing/không liên quan Bug #9 (`git stash` riêng 6 file Bug #9 → vẫn fail giống hệt). Persistence
+`overflow_entries`/`OverflowReport` xác nhận không bị đụng. Protocol 8 R8-03 (capability, không rẽ
+nhánh cứng theo tên engine) được tuân thủ đúng.
+
+**Non-blocking (1)**:
+
+1. **Comment/docstring tiếng Việt trong `job_orchestrator.py` bị mất dấu** (property `_needs_font_shrink`
+   dòng ~285-298 và comment inline dòng ~1315-1318, ví dụ "hoi NANG LUC cua engine da chon, khong hoi
+   TEN engine" thay vì "hỏi NĂNG LỰC..."). Không ảnh hưởng hành vi, nhưng không nhất quán với chính 2
+   file kia trong cùng diff (`pdf2zh_runner.py`/`babeldoc_runner.py` giữ nguyên dấu tiếng Việt đầy đủ)
+   và với quy ước "tài liệu kỹ thuật/comment bằng tiếng Việt" khi cần giải thích WHY của dự án. Đề xuất
+   Dev sửa lại dấu ở lần chạm file tiếp theo — không đáng để bắt sửa riêng lẻ ngay.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) — lượt review ĐẦU TIÊN của Bug #9 trong session
+này, không phải vòng sửa lỗi sau REJECT.
+
+---
+
 ## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
 
 Review theo Protocol 7 R7-01, brief PM: đọc `docs/PRD.md` US-21, `docs/Architecture.md` §6.19
@@ -5902,6 +6550,264 @@ chưa từng được yêu cầu sửa, không chặn APPROVE, nên xử lý ở
 
 **Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng cho US-17+US-18 — ĐÃ ĐÓNG (APPROVE), không cần vòng
 3.**
+
+---
+
+## Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng — review bản vá (Reviewer, 2026-09-09)
+
+**Phạm vi**: review implementation của Dev cho thiết kế Tech Lead tại `docs/Architecture.md` mục
+"Bug #10 ... thiết kế bản vá (Tech Lead, 2026-09-09)" (BA10.1→BA10.10), đối chiếu kết quả spike A/B
+Dev báo cáo tại `docs/CHANGELOG.md` mục "Bug #10 ... implement + spike A/B song (2026-09-09)".
+Trọng tâm theo brief PM: xác nhận finding G2 (+3→+11pt) Dev tự flag chưa tự coi là pass.
+
+Toàn bộ mục dưới đây là **tự verify độc lập** (đọc source thật, tự chạy babeldoc thật, tự chạy
+pytest thật) — không tin lại diễn giải của Dev/PM, đúng yêu cầu brief.
+
+### 1. Xác nhận định nghĩa G2 đúng nguyên văn (không dùng lại diễn giải của PM)
+
+Đọc trực tiếp bảng gate tại `docs/Architecture.md` (BA10.5, dòng ~11441-11447). Định nghĩa chính xác
+của G2:
+
+> **G2 (tràn ngang)** | Trích bbox mọi text block bằng `pymupdf` trên toàn bộ trang test + trang đối
+> chứng | `max(block.x1)` sau vá **KHÔNG lớn hơn** trước vá quá 0.5pt trên bất kỳ trang nào
+
+Lưu ý: brief PM diễn giải "≤0.5pt" là đúng ý nhưng cột "Nội dung" của Architecture.md ghi
+`max(block.x1)` (không phải `x2`) — rất có thể là lỗi đánh máy của Tech Lead khi soạn bảng, vì toàn
+bộ phần lập luận an toàn ở BA10.3-c và ví dụ số ở BA10.4 đính chính #2 đều xoay quanh **mép phải**
+(`box.x2`, cạnh nơi wrap xảy ra) — `x1` (mép trái) không có ý nghĩa gì với bug này (bug là tràn/dịch
+**phải**, không phải trái). Dev + CHANGENLOG cũng ngầm hiểu là `x2` khi đo (`max(bbox.x2)`, "mọi mép
+phải quan sát được"). Xác nhận đây là cách hiểu đúng — **không phải Dev tự ý đổi thước đo**, mà
+Architecture.md có 1 lỗi đánh máy `x1`→`x2` cần Tech Lead sửa lại cho khớp văn bản (non-blocking,
+mục 8 dưới).
+
+### 2. Tự verify G1 (đích) — CHỨNG MINH được, không chỉ tin số liệu
+
+Tự chạy độc lập công thức gốc (dịch nguyên văn `typesetting.py:1285-1298` đã cài, tự đọc lại file thật
+tại `~/.local/share/uv/tools/babeldoc/.../typesetting.py:1285-1466` — khớp 100% với trích dẫn trong
+Architecture.md, kể cả số dòng) và công thức đã vá (`word_wrap.width_before_next_break_point`) trên
+chính golden fixture `tests/fixtures/babeldoc/bug10_wrap/lcb_p39_trung_thanh_units.json`, mô phỏng lại
+việc đặt từng ký tự của "trung":
+
+```
+i=0 ch='t' ... old_total=590.2345 new_total=587.0630 box_x2=590.9140 old_wraps=False new_wraps=False
+i=1 ch='r' ... old_total=591.3067 new_total=587.0630 box_x2=590.9140 old_wraps=True  new_wraps=False
+i=2 ch='u' ... old_total=592.7844 new_total=587.0630 ...              old_wraps=True  new_wraps=False
+i=3 ch='n' ... old_total=592.8745 new_total=587.0630 ...              old_wraps=True  new_wraps=False
+i=4 ch='g' ... old_total=591.9104 new_total=587.0630 ...              old_wraps=True  new_wraps=False
+i=5 ch=' ' ... old_total=589.4056 new_total=589.4056 ...              old_wraps=False new_wraps=False
+```
+
+Khớp **chính xác** với ví dụ Tech Lead nêu ở BA10.4 đính chính #2 (587.06 ≤ 590.91 vs 591.31 > 590.91
+tại 'r'). Sau đó tự chạy **babeldoc 0.6.4 thật** (không mock) qua CLI trực tiếp trên
+`tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf`, cache DeepSeek đã nạp sẵn từ spike của Dev
+(0 token mới, xác nhận đúng phương pháp A/B cùng bản dịch của Architecture.md BA10.5) — lần 1
+`BABELDOC_SHIM_WORD_WRAP_FIX=0`, lần 2 `=1`:
+
+```
+orig    : "...i nhận những nhân viên có động lực và t\nrung thành bằng cách..."
+patched : "...hi nhận những nhân viên có động lực và trung \nthành bằng cách..."
+```
+
+Từ **"trung" giữ nguyên vẹn** sau vá, điểm xuống dòng dịch sang đúng dấu cách ngay sau nó — khớp
+100% với dự đoán tại BA10.4 đính chính #2 ("một dòng có thể nhận thêm phần đuôi còn lại của MỘT từ").
+**G1: PASS, tự verify bằng chạy sống thật, không chỉ tin báo cáo Dev.**
+
+### 3. Tự verify G2 — số liệu CÓ THẬT, và kết luận "an toàn" của Dev ĐÚNG
+
+**3a. Đọc lại source xác nhận cấu trúc an toàn (BA10.3-c điểm 1)**: tự đọc `_layout_typesetting_units`
+trong file `typesetting.py` cài thật. Xác nhận nhánh (A) `current_x + unit_width > box.x2` là điều
+kiện `or` độc lập, **không** dùng `width_before_next_break_point` — patch chỉ sửa
+`_get_width_before_next_break_point`, không đụng `_layout_typesetting_units`. Vì vậy nhánh (A) (chốt
+chặn cứng) nguyên vẹn 100% trước/sau vá — bất kỳ unit nào được đặt (`relocated_unit`) vẫn phải thoả
+`current_x + unit_width <= box.x2` y hệt trước vá. **Tự xác nhận đúng, không chỉ tin Tech Lead trích
+dẫn.**
+
+**3b. Đọc lại chứng minh đơn điệu (BA10.3-c điểm 2)**: với dữ liệu golden ở trên,
+`original_lookahead = fixed_lookahead + unit_width` tại mọi vị trí (vd tại i=0: 23.7954 = 20.6239 +
+3.1715, đúng bằng `unit_width` của 't'). Suy ra `cond_original = cond_fixed + unit_width >=
+cond_fixed` tại mọi điểm ⇒ **patched wrap ⟹ original cũng wrap** (không có chiều ngược lại) ⇒ patch
+chỉ có thể làm **giảm hoặc giữ nguyên** số lần wrap, không bao giờ tăng. Tự suy luận lại từ số liệu
+thật, không chỉ tin lời Tech Lead — **kết luận đúng**.
+
+**3c. Tự chạy sống đo G2 trên cả 4 fixture (bug10 page + 3 fixture đối chứng)**, dùng `pymupdf` đo
+`max(span.bbox[2])` toàn trang, trước/sau vá, cache tái sử dụng (0 token mới mọi lần chạy patched ⇒
+xác nhận đúng văn bản dịch giống hệt, chỉ khác layout):
+
+| Trang | max_x2 trước | max_x2 sau | Δx2 | lines trước→sau | chars trước/sau |
+|---|---|---|---|---|---|
+| bug10 (lcb_p39) | 553.67 | 558.49 | **+4.82pt** | 46→46 | 2252/2252 (bằng) |
+| numbered_list (page14) | 540.32 | 544.30 | **+3.98pt** | 72→72 | 2202/2202 (bằng) |
+| toc p1 (lcb_toc) | 552.51 | 556.17 | **+3.66pt** | 47→47 | 1041/1041 (bằng) |
+| toc p2 (lcb_toc) | 557.00 | 557.00 | +0.00pt | 45→**43** | 903/903 (bằng) |
+| figoni_p25_recipe | 558.00 | 558.00 | +0.00pt | 73→73 | 1351/1351 (bằng) |
+
+Số liệu tự đo (Δx2 3.66pt→4.82pt trên 3/5 trang) **nằm trong khoảng Dev báo cáo (+3→+11pt)** — xác
+nhận **CÓ THẬT**, không phải Dev tính sai/phóng đại, dù số cụ thể lệch chút do phương pháp lấy mẫu có
+thể khác 1 phần trang/1 lần chạy (không phải vấn đề, chỉ cần cùng khoảng và cùng chiều). Trang không
+đổi scale thì Δx2 = 0.00pt đúng như Dev mô tả (figoni, toc p2).
+
+**Margin thật với `box.x2` (BA10.6 golden = 590.914pt)**: max_x2 patched cao nhất đo được là 558.49pt
+→ margin còn **≥32pt** dưới `box.x2`, còn xa hơn cả con số Dev báo cáo (~23pt) — xác nhận claim "còn
+cách biên an toàn" là ĐÚNG, không phải Dev lạc quan hoá.
+
+**Kết luận mục 3 (trọng tâm brief)**: đồng ý với lý giải của Dev — đây **không phải lỗi thật**, mà là
+hệ quả cấu trúc đã được Tech Lead dự đoán trước ở BA10.4 điểm 4 (patch giảm số dòng ⟹ vòng lặp
+`_find_optimal_scale_and_layout` dừng ở scale bằng-hoặc-lớn-hơn ⟹ chữ to hơn/khít hơn nhưng luôn nằm
+trong nhánh (A) không đổi). Đã tự verify bằng **3 con đường độc lập**: (a) đọc code thật xác nhận cấu
+trúc, (b) tự suy luận toán học từ chính số liệu golden, (c) tự chạy sống đo trên 5 trang thật — cả 3
+đều nhất quán với kết luận "an toàn". **Không có dấu hiệu nào cho thấy patch ảnh hưởng nhiều hơn dự
+tính hay lan ra ngoài phạm vi thiết kế** — kể cả trên các trang KHÔNG có bug gốc (numbered_list, toc
+p1), font vẫn to hơn nhẹ nhưng vẫn nằm sâu trong box. Đây đúng là tác dụng phụ lan rộng (không chỉ
+giới hạn ở trang có bug) như số liệu tự đo xác nhận — QA cần được nhắc lại điều này (đã có trong
+CHANGELOG BA10.4 điểm 4, nhắc lại ở đây để không bị bỏ sót khi so sánh ảnh chụp trước/sau).
+
+**G2 theo đúng nghĩa đen bảng gate: FAIL** (vượt ngưỡng 0.5pt trên 3/5 trang đo). Nhưng đây là **gate
+tự mâu thuẫn với chính thiết kế** — BA10.4 điểm 4 đã dự đoán tác dụng phụ "chữ to hơn" là hệ quả TẤT
+YẾU của việc giảm số dòng (chính là G3, gate quan trọng nhất, PASS), nên bất kỳ lần chạy nào có G3
+giảm thật (không chỉ giữ nguyên) gần như chắc chắn kéo theo G2 vượt ngưỡng 0.5pt — ngưỡng 0.5pt được
+đặt ra mà **không đối chiếu** với chính dự đoán BA10.4-4 trong cùng tài liệu. Vì vậy xử lý đúng ở đây
+không phải "tự ý coi 0.5pt là đạt" (Dev đã làm đúng khi KHÔNG tự ý pass), cũng không phải block release
+vì lý do số học hình thức, mà là: (1) chấp nhận thực tế đo được vì tính an toàn cấu trúc đã chứng minh
+qua 3 con đường độc lập ở trên, (2) đề nghị Tech Lead sửa lại ngưỡng G2 trong Architecture.md cho các
+lần vá tương lai — xem mục 8.
+
+### 4. Tự verify G3 (số dòng) độc lập
+
+Từ đúng bảng dữ liệu mục 3c: **0 trang nào tăng số dòng** trên cả 5 trang tự đo (bug10: 46→46,
+numbered_list: 72→72, toc p1: 47→47, toc p2: **45→43** giảm thật, figoni: 73→73) — khớp hoàn toàn với
+báo cáo Dev ("PASS trên cả 5 trang ... giảm thật trên 2 trang TOC", dù Dev đo 2 trang TOC còn tôi chỉ
+thấy giảm ở 1/2 trang TOC — sai khác nhỏ, không đổi kết luận PASS). **G3: PASS, tự verify.** Đây là
+gate quan trọng nhất theo Tech Lead ("vi phạm → escalate ngay") — không có vi phạm nào ở dữ liệu tôi
+tự đo.
+
+### 5. G4 (hiệu năng) — không tự chạy lại benchmark, verify bằng đọc code
+
+Không tự đo lại wall-clock (tốn thêm 1 vòng gọi LLM thật cho mỗi cấu hình, không cần thiết khi cơ chế
+đã rõ ràng qua đọc code). Đọc `src/babeldoc_shim/word_wrap.py`: hàm nhận `Iterable[tuple[float,
+bool]]`, dùng `iter()` + vòng `for` thoát sớm ngay khi gặp `can_break=True` — đúng độ phức tạp O(k)
+early-exit như hàm gốc, không materialize list. Có test `test_accepts_lazy_generator_not_just_list`
+tự raise `AssertionError` nếu đọc quá break point — chứng minh được early-exit bằng test thật (không
+chỉ đọc code suy luận), đã tự chạy pytest xác nhận PASS. Chấp nhận số +10.6% (trong ngưỡng 20%) Dev
+báo cáo dựa trên cơ chế đã verify đúng thiết kế.
+
+### 6. Tự verify G5 (không mất chữ)
+
+Từ bảng mục 3c: số ký tự non-whitespace **giống hệt tuyệt đối** trước/sau trên cả 5 trang (2252/2252,
+2202/2202, 1041/1041, 903/903, 1351/1351). **G5: PASS, tự verify.**
+
+### 7. Rollback độc lập + generic hoá không phá Bug #7 cũ
+
+- Đọc `git diff` toàn bộ `sitecustomize.py`: `_ModulePatchFinder`/`_PatchingLoader` được tham số hoá
+  đúng (`apply_patch`, `label`), mỗi instance bọc **đúng 1** module mục tiêu + **đúng 1** hàm patch,
+  `exec_module` bọc `self._apply_patch(module)` trong `try/except` **riêng cho từng loader** — xác
+  nhận đúng BA10.7 ràng buộc #1 (rollback độc lập). Không có state dùng chung giữa 2 finder ngoài
+  logic `find_spec` giữ nguyên xi như thiết kế yêu cầu.
+- Có test thực thi thật cơ chế này: `test_rollback_independent_from_paragraph_finder_patch` (loader
+  Typesetting raise lỗi giả lập, xác nhận loader ParagraphFinder vẫn chạy bình thường, không bị nuốt
+  chung 1 try/except) — tự đọc code test, logic đúng, đã tự chạy PASS.
+- Tự chạy toàn bộ 153 test có từ khoá `babeldoc` (bao gồm 4 file test Bug #7 cũ:
+  `test_babeldoc_line_split_shim.py`, `test_babeldoc_numbered_list_split.py`,
+  `test_babeldoc_shim_unicode_regression.py`, `test_babeldoc_toc_split.py`) — **153 passed**, không
+  có regression nào từ việc đổi tên `_ParagraphFinderPatchFinder`→`_ModulePatchFinder`/tham số hoá
+  `_PatchingLoader`.
+
+### 8. Tự verify claim "test fail không liên quan Bug #10" — bằng cách isolate CHẶT hơn Dev
+
+`uv run pytest tests/ -q` (toàn bộ suite): **553 passed, 1 failed** —
+`test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`.
+Dev đã tự verify bằng `git stash` TOÀN BỘ working tree (revert luôn cả các thay đổi song song
+US-17/18/glossary không liên quan) rồi chạy lại thấy vẫn fail — cách làm hợp lý nhưng chưa cô lập
+tuyệt đối vì stash cả những phần không phải Bug #10.
+
+Tự làm chặt hơn: `git stash push` **CHỈ** 6 file Bug #10 đụng tới
+(`sitecustomize.py`/`config.py`/`job_orchestrator.py`/`babeldoc_runner.py`/`test_babeldoc_runner.py`,
+`word_wrap.py` không stash được vì untracked nhưng không được import khi sitecustomize.py bị revert)
+— **giữ nguyên** mọi thay đổi song song khác (`rotated_text_overlay.py`, `font_shrink.py`,
+glossary...). Chạy lại đúng test đó: **vẫn FAIL, cùng lỗi**
+(`assert 'phan tu sucrose' in '...phan tu sucr\n'` — cắt chữ ở `searchable_pdf`/`font_shrink` liên
+quan Bug #9, không liên quan `typesetting.py`/word-wrap). Đã `git stash pop` khôi phục lại working
+tree nguyên trạng. **Xác nhận độc lập, chặt hơn cách Dev tự kiểm: đúng là pre-existing, không phải
+regression của Bug #10.**
+
+### 9. R5-04 checklist (bắt buộc theo CLAUDE.md project)
+
+`src/babeldoc_shim/sitecustomize.py`/`word_wrap.py` là service wrapper vá trực tiếp vào
+`typesetting.py` của babeldoc 0.6.4 (external tool, không do team viết source):
+
+**External contract verified against real source: YES** — tự đọc trực tiếp
+`~/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/format/pdf/document_il/midend/typesetting.py`
+(dòng 1285-1466) khớp 100% với trích dẫn Architecture.md, VÀ tự chạy babeldoc 0.6.4 thật (không mock)
+qua CLI trực tiếp trên 5 trang thật, verify cả G1/G2/G3/G5 bằng số liệu tự đo (mục 2-6) — không chỉ
+tin lại báo cáo Dev/Tech Lead.
+
+### 10. Việc KHÔNG làm (do brief PM không yêu cầu / không cần thiết)
+
+- Không tự đo lại G4 (hiệu năng) bằng benchmark sống — chấp nhận qua đọc code (mục 5).
+- Không chạy live E2E qua `JobOrchestrator` đầy đủ (BA10.9 mục 4) — đây là việc của QA theo Protocol 6
+  R6-03, không phải Reviewer; CLI trực tiếp tôi tự chạy ở mục 2/3 đã đủ để verify các gate kỹ thuật
+  G1-G5, nhưng **không thay thế** live E2E qua toàn bộ pipeline mà QA cần làm trước release.
+
+### 11. Non-blocking suggestions
+
+1. **Architecture.md BA10.5, bảng gate G2**: cột "Nội dung" ghi `max(block.x1)`, nên là `max(block.x2)`
+   (mép phải — nơi bug thật sự xảy ra). Đề nghị Tech Lead sửa lại cho khớp với toàn bộ phần lập luận
+   BA10.3-c/BA10.4 vốn đều nói về `x2`/`box.x2`.
+2. **Architecture.md BA10.5, ngưỡng G2 = 0.5pt**: mâu thuẫn nội tại với chính dự đoán BA10.4 điểm 4
+   (scale có thể tăng khi số dòng giảm thật — hệ quả tất yếu của G3 PASS, không phải trường hợp hiếm).
+   Đề nghị Tech Lead cho lần vá `typesetting.py` tiếp theo (nếu có): thay ngưỡng tuyệt đối 0.5pt bằng
+   điều kiện cấu trúc trực tiếp hơn, ví dụ "mọi `max(block.x2)` sau vá phải `<= box.x2` của chính
+   paragraph đó (không tràn box thật)" — đây mới là bất biến mà BA10.3-c thực sự chứng minh, thay vì
+   một ngưỡng số học cố định dễ bị chính tác dụng phụ đã biết trước vi phạm.
+3. Không có suggestion nào về code Dev — implementation, test, wiring đều đã tự verify khớp thiết kế.
+
+### 12. Khuyến nghị default flag `babeldoc_word_wrap_fix_enabled`
+
+**Khuyến nghị: GIỮ `True`** (đúng như Dev đã set theo spec Tech Lead BA10.8), dựa trên đánh giá rủi ro
+tự thực hiện ở mục 3-4, không chỉ tin lý giải Dev:
+
+- Tính an toàn không tràn box (`current_x + unit_width <= box.x2`) là tính chất **cấu trúc, không
+  phải xác suất/heuristic** — đã tự đọc code xác nhận nhánh (A) nguyên vẹn 100%, không có đường nào
+  patch có thể làm 1 unit vượt `box.x2` mà trước đó không vượt.
+- Tính đơn điệu giảm-số-dòng cũng là **suy luận toán học chặt** từ chính công thức
+  (`original = fixed + unit_width, unit_width >= 0`), không phải quan sát thực nghiệm may rủi — đã tự
+  suy lại từ số liệu golden, khớp.
+- G2 "fail theo nghĩa đen" không phản ánh rủi ro thật — margin thực đo được (≥32pt dưới `box.x2`) rất
+  rộng, và bản chất đây là **cải thiện thẩm mỹ** (chữ khít hơn) đi kèm hiệu ứng phụ, không phải lỗi
+  chức năng.
+- Khác TOC-1 v2 (heuristic đoán ý đồ layout, có false-positive thật đã từng xảy ra) — bản vá này là
+  sửa 1 phép cộng sai, không có "trường hợp mơ hồ" nào để heuristic đoán sai.
+
+**Điều kiện đi kèm khuyến nghị** (không chặn APPROVE, nhưng bắt buộc trước khi release production
+thật, theo đúng Protocol 6 R6-03 + BA10.9 mục 4 đã ghi sẵn trong Architecture.md): QA phải chạy ít
+nhất 1 lần **live E2E qua `JobOrchestrator` đầy đủ** (không chỉ `BabeldocRunner`/CLI như Reviewer đã
+làm ở đây), mở file PDF output thật kiểm tra "trung thành" (hoặc case tương đương) liền mạch trên 1
+dòng — đúng yêu cầu đã có sẵn ở BA10.9 mục 4, Reviewer không thay thế được bước này.
+
+## Kết luận Bug #10
+
+**APPROVE có điều kiện.**
+
+- G1, G3, G5: PASS, tự verify độc lập bằng chạy sống thật + đọc code thật (không chỉ tin báo cáo Dev).
+- G2: **FAIL theo nghĩa đen ngưỡng 0.5pt** (tự đo lại xác nhận số +3.66→+4.82pt Dev báo cáo là CÓ
+  THẬT), nhưng **an toàn về bản chất** — đã tự chứng minh bằng 3 con đường độc lập (đọc code cấu trúc,
+  suy luận toán học từ số liệu golden, đo sống 5 trang thật). Đây là hệ quả tất yếu đã được Tech Lead
+  dự đoán trước (BA10.4-4), không phải lỗi phát sinh ngoài dự tính của patch. Nguyên nhân gốc là ngưỡng
+  0.5pt trong Architecture.md tự mâu thuẫn với chính dự đoán đó (mục 8/11.2) — đề nghị Tech Lead sửa
+  lại gate cho các lần vá `typesetting.py` sau này, không phải lỗi của Dev lần này.
+- G4: chấp nhận qua đọc code (cơ chế early-exit đúng thiết kế, có test verify), không tự benchmark lại.
+- Generic hoá `_ModulePatchFinder`/`_PatchingLoader` không phá vỡ 3 patch Bug #7 cũ — 153 test
+  `babeldoc*` PASS, tự chạy xác nhận.
+- Rollback độc lập giữa patch word-wrap và 3 patch `paragraph_finder` cũ: đúng thiết kế (2 module/2
+  loader riêng), có test thực thi thật cơ chế thất bại độc lập, tự đọc code + chạy test xác nhận.
+- 1 test fail (`test_rotated_text_overlay`) xác nhận **pre-existing, không liên quan Bug #10** bằng
+  cách isolate chặt hơn Dev (chỉ stash đúng 6 file Bug #10, giữ nguyên các thay đổi song song khác) —
+  vẫn fail giống hệt, đúng là do công việc Bug #9/US-17/18 song song, không phải regression mới.
+
+**Khuyến nghị flag**: giữ `babeldoc_word_wrap_fix_enabled = True` (mục 12), với điều kiện QA phải hoàn
+thành live E2E qua `JobOrchestrator` đầy đủ (BA10.9 mục 4, Protocol 6 R6-03) trước khi coi task này là
+`ready_for_release` — đây là điều kiện duy nhất còn thiếu, không phải blocking issue của code.
+
+**Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng cho Bug #10.**
 
 ---
 

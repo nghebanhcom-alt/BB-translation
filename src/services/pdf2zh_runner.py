@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from src.core.concurrency_controller import RATE_LIMIT_LINE_RE
 from src.services.pdf2zh_service_map import Pdf2zhService
@@ -79,6 +80,11 @@ class Pdf2zhRunner:
     6.6.8) for the `--pages`/`--prompt`/`--output`/`--ignore-cache` contract
     this wrapper builds on.
     """
+
+    #: Bug #9 (Architecture.md "Bug #9"). pdf2zh vẽ bản dịch VÀO ĐÚNG vị trí và
+    #: cỡ chữ của bản gốc EN, không tự fit lại theo bề ngang box — nên bước
+    #: `font_shrink_page()` của app (BR-FONT-02/US-05) là bắt buộc ở đây.
+    needs_font_shrink: ClassVar[bool] = True
 
     def __init__(self, executable: str = "pdf2zh") -> None:
         self._executable = executable

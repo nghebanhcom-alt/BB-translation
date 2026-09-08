@@ -239,6 +239,22 @@ class Settings(BaseSettings):
     # false-positive that tren layout/sach chua tung gap trong 12 dump da do.
     babeldoc_toc_split_enabled: bool = True
 
+    # Bug #10 (Architecture.md muc "Bug #10 — babeldoc cat ngang tu tieng
+    # Viet giua chung"): cung `sitecustomize.py` shim tren nhung VA MODULE
+    # KHAC (`typesetting`, giai doan dan trang) — fix
+    # `Typesetting._get_width_before_next_break_point` dem doi be rong cua
+    # chinh unit hien tai trong lookahead wrap. Doc lap hoan toan voi 3 co
+    # tren (rollback rieng, khong phu thuoc thu tu — BA10.7).
+    #
+    # BAT mac dinh (`True`) — KHAC TOC-1 v2 (tung mac dinh TAT luc moi ra).
+    # Ly do (BA10.8): day la fix SO HOC dung/sai (bo 1 phep cong thua), co
+    # tinh chat an toan CAU TRUC chung minh duoc bang doc source
+    # (`current_x + unit_width <= box.x2` nguyen ven sau vá — BA10.3-c), KHONG
+    # phai heuristic doan y do layout can "chi bat sau khi QA live xanh" nhu
+    # TOC-1 v2. Da qua spike A/B song (BA10.5, R5-02) truoc khi bat mac dinh
+    # nay — xem docs/CHANGELOG.md muc Bug #10 cho ket qua 5 gate.
+    babeldoc_word_wrap_fix_enabled: bool = True
+
     # US-20 "Cac tu moi" (Architecture.md 6.18.2, bang cau hinh CAP NHAT boi
     # 6.18.8 T5 — 4 field, khong con 3 nhu ban goc). Rule-based, $0, chay SAU
     # khi job completed (BR-TERM-01) — khong lien quan translation pipeline.

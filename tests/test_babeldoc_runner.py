@@ -499,6 +499,72 @@ async def test_translate_pages_counts_rate_limit_hits_from_golden_stdout(
     assert result.rate_limit_hits == 12
 
 
+# --- Bug #10 word_wrap_fix wiring (Architecture.md BA10.8/BA10.9 muc 2)
+# -----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_word_wrap_fix_enabled_sets_env_flag_1(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(word_wrap_fix_enabled=True)
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert env["BABELDOC_SHIM_WORD_WRAP_FIX"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_word_wrap_fix_disabled_sets_env_flag_0(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(word_wrap_fix_enabled=False)
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert env["BABELDOC_SHIM_WORD_WRAP_FIX"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_word_wrap_fix_env_absent_when_shim_disabled(
+    tmp_path: Path, mocker
+) -> None:
+    """Doc lap voi 3 co Bug #7 (BA10.8): bien BABELDOC_SHIM_WORD_WRAP_FIX chi
+    co y nghia khi shim tong (PYTHONPATH) CUNG duoc bat — giong het cach
+    BABELDOC_SHIM_TOC_SPLIT/BABELDOC_SHIM_NUMBERED_LIST_SPLIT khong duoc gui
+    khi `line_split_shim_enabled=False`."""
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(line_split_shim_enabled=False, word_wrap_fix_enabled=True)
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert "BABELDOC_SHIM_WORD_WRAP_FIX" not in env
+    assert "PYTHONPATH" not in env or "babeldoc_shim" not in env.get("PYTHONPATH", "")
+
+
 # --- Golden-file structural regression (N6 point 2, "assert cau truc, khong
 # assert flag") -----------------------------------------------------------
 #

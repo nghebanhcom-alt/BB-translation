@@ -24,7 +24,10 @@ import pytest
 
 from src.postprocess.rotated_text_overlay import (
     MIN_FONT_SCALE,
+    FitResult,
     RotatedBlock,
+    RotatedLine,
+    _draw_block,
     fit_translated_block,
     group_rotated_lines,
     line_angle_deg,
@@ -39,6 +42,13 @@ FIXTURES = Path(__file__).parent / "fixtures" / "babeldoc"
 P67_SOURCE = FIXTURES / "rotated_text_p67_source.pdf"
 P15_SOURCE = FIXTURES / "rotated_chart_p15_source.pdf"
 NO_ROTATION_SOURCE = FIXTURES / "page14_numbered_list_source.pdf"
+#: Bug #8 round-2 regression fixture (docs/review-report.md, issue Blocking
+#: #1) -- the SAME real Le Cordon Bleu excerpt that exposed the
+#: `page.insert_text()` MediaBox/CropBox coordinate bug in
+#: `font_shrink.py::_redraw_span` (mediabox=(33,33,681,816),
+#: cropbox=(0,-33,714,816)) also reproduces it here, live-verified by the
+#: reviewer directly against `_draw_block`'s exact call shape.
+LCB_TOC_FIXTURE = FIXTURES / "toc_sources" / "lcb_toc.pdf"
 NOTO_FONT_PATH = Path(__file__).parent.parent / "fonts" / "NotoSerif-Regular.ttf"
 
 #: Realistic Vietnamese translation, similar length to the real EN source
@@ -362,3 +372,111 @@ async def test_overlay_rotated_text_noop_when_no_rotated_lines(tmp_path: Path) -
     assert result.flagged_block_count == 0
     assert provider.calls == []
     assert output_path.read_bytes() == original_bytes
+
+
+def _span_with_text(page: "fitz.Page", text_marker: str) -> dict | None:
+    """Finds the span whose text matches `text_marker` exactly -- used
+    instead of matching by origin alone because `lcb_toc.pdf` already has
+    real page content (a genuine "Contents" heading) whose origin happens to
+    coincide with the reviewer's reproduction pivot; matching by origin only
+    would find that PRE-EXISTING span and pass vacuously regardless of
+    whether `_draw_block` drew anything at all, let alone at the right
+    place."""
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if span["text"] == text_marker:
+                    return span
+    return None
+
+
+def test_draw_block_lands_on_pivot_despite_mediabox_cropbox_offset() -> None:
+    """Regression for Bug #8 round-2 (`docs/review-report.md`, "Bug #8 ...
+    review `font_shrink.py` MediaBox/CropBox fix", issue Blocking #1): the
+    reviewer live-reproduced the exact same `page.insert_text()`
+    MediaBox/CropBox coordinate bug fixed in `font_shrink.py::_redraw_span`
+    inside `_draw_block`, on this SAME real fixture --
+
+        mediabox: Rect(33.0, 33.0, 681.0, 816.0)  cropbox_position: Point(0.0, -33.0)
+        intended pivot (page-space, from get_text dict): (261.53, 154.71)
+        actual landing origin (pre-fix): (228.53, 121.71)
+        OFFSET ERROR: dx=-33.0, dy=-33.0
+
+    -- because `_draw_block` calls `page.insert_text(pivot, ...,
+    morph=(pivot, ...))` with a page-space `pivot` (sourced from
+    `block.pivot`, which is `RotatedLine.origin`, itself read from
+    `page.get_text("dict")` in `scan_rotated_lines`) without ever correcting
+    it, the same class of bug as `font_shrink.py`'s uncorrected `origin`.
+    This test uses the reviewer's own reproduction values directly. It FAILS
+    on the pre-fix code (verified via `git stash` on
+    `src/postprocess/rotated_text_overlay.py`) and PASSES once `_draw_block`
+    applies `insert_text_origin_fix` to `pivot` before drawing."""
+    doc = fitz.open(LCB_TOC_FIXTURE)
+    try:
+        page = doc[0]
+        mediabox_origin = (page.mediabox.x0, 0.0)
+        cropbox_position = (page.cropbox_position.x, page.cropbox_position.y)
+        assert cropbox_position != mediabox_origin, (
+            "fixture sanity check failed: this test only proves anything when "
+            "the page's CropBox origin actually diverges from its MediaBox "
+            f"origin (got cropbox_position={cropbox_position}, "
+            f"mediabox origin={mediabox_origin})"
+        )
+
+        # A single-line, non-rotated (angle_deg=0.0) block is enough to
+        # exercise `_draw_block`'s `page.insert_text()` call and its
+        # `insert_text_origin_fix` correction in isolation -- the rotation
+        # angle itself is orthogonal to the MediaBox/CropBox offset bug (see
+        # `insert_text_origin_fix`'s docstring: PyMuPDF's CTM-based rotation
+        # handling is independent of the CropBox-position offset bug).
+        #
+        # `pivot_page_space` intentionally reuses the reviewer's own
+        # reproduction value verbatim -- which turns out to coincide almost
+        # exactly with this fixture's real "Contents" heading span already
+        # on the page (origin (261.5346, 154.7097)). That is exactly why
+        # `_span_with_text` below matches on the DRAWN TEXT, not on origin
+        # proximity: an origin-only check would find that pre-existing
+        # "Contents" span and pass vacuously no matter what `_draw_block`
+        # actually did.
+        pivot_page_space = (261.53, 154.71)
+        marker_text = "Khoi chu xoay gia lap cho test hoi quy Bug8 R2"
+        line = RotatedLine(
+            bbox=(
+                pivot_page_space[0],
+                pivot_page_space[1] - 11.0,
+                pivot_page_space[0] + 180.0,
+                pivot_page_space[1] + 3.0,
+            ),
+            dir=(1.0, 0.0),
+            angle_deg=0.0,
+            text=marker_text,
+            font_size=11.0,
+            origin=pivot_page_space,
+        )
+        block = RotatedBlock(page_number=1, lines=[line])
+        fit = FitResult(fits=True, scale=1.0, font_size=11.0, wrapped_lines=[marker_text])
+
+        assert _span_with_text(page, marker_text) is None  # sanity: not there yet
+
+        _draw_block(page, block, fit, str(NOTO_FONT_PATH))
+
+        redrawn = _span_with_text(page, marker_text)
+        assert redrawn is not None, (
+            "the block _draw_block was told to draw never landed on the page"
+        )
+        assert redrawn["origin"][0] == pytest.approx(pivot_page_space[0], abs=0.05), (
+            f"marker text landed at x={redrawn['origin'][0]!r}, expected "
+            f"{pivot_page_space[0]!r} -- the exact 'chữ nhảy lung tung' "
+            "symptom Bug #8 describes: text drawn at the wrong position "
+            "instead of at its own bbox"
+        )
+        assert redrawn["origin"][1] == pytest.approx(pivot_page_space[1], abs=0.05), (
+            f"marker text landed at y={redrawn['origin'][1]!r}, expected "
+            f"{pivot_page_space[1]!r} -- the exact 'chữ nhảy lung tung' "
+            "symptom Bug #8 describes: text drawn at the wrong position "
+            "instead of at its own bbox"
+        )
+    finally:
+        doc.close()

@@ -23,7 +23,7 @@ Tôi cần một công cụ dịch sách/tạp chí ngành bánh (200-500 trang)
 Xây dựng document-translation pipeline xử lý PDF/EPUB 200-500 trang chứa layout phức tạp (bảng baker's percentage, công thức, ảnh kỹ thuật). Pipeline phải:
 - Giữ nguyên spatial layout (vị trí text/ảnh/bảng) qua overlay rendering
 - Đảm bảo Vietnamese Unicode glyph coverage đầy đủ trên embedded font
-- Xử lý text-length expansion (VI dài hơn EN ~20-40%) bằng concise translation prompt + auto font-shrink
+- Xử lý text-length expansion (VI dài hơn EN ~20-40%) bằng concise translation prompt + auto font-shrink (chỉ engine pdf2zh — babeldoc tự fit, xem US-05 cập nhật 2026-09-09)
 - Hỗ trợ domain-specific glossary (Excel import/export + web CRUD) inject vào translation prompt
 - Batch orchestration với failure isolation + resumable chunking
 - Auto-convert imperial → metric units trong baking formulas
@@ -102,10 +102,24 @@ Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu 
 ### US-05: Xử lý text tràn
 **As a** người dịch sách, **I want** hệ thống tự co/nén font khi text VI tràn, **so that** layout không vỡ.
 
-**Acceptance Criteria:**
+**Cập nhật phạm vi (2026-09-09, sau Bug #9 — xem `docs/Architecture.md` mục "Bug #9",
+`docs/CHANGELOG.md` mục "Bug #9", Protocol 8 trong `CLAUDE.md`)**: acceptance criteria dưới đây
+**chỉ còn áp dụng khi engine dịch là `pdf2zh`** (`Settings.pdf_translate_engine == "pdf2zh"`).
+Với engine `babeldoc` (mặc định từ 2026-09-05, xem 6.14.7) — babeldoc tự co giãn/bóp cỡ chữ bên
+trong chính nó (tới tối thiểu 10%, bỏ hẳn đoạn nếu vẫn không vừa) TRƯỚC khi trả output; app **không
+còn can thiệp thêm** bước co font hậu kỳ nào cho babeldoc nữa (đã verify: chạy hậu kỳ này trên
+output babeldoc chỉ gây lỗi thật — Bug #8 lệch toạ độ + mất chữ, cả 2 đã fix bằng cách tắt hẳn bước
+này cho babeldoc thay vì sửa tiếp). Hệ quả: app **không đo và không flag** trường hợp babeldoc âm
+thầm bỏ 1 đoạn không vừa khung (khoảng trống đã biết, chưa vá — xem `project_state.json`
+`blockers`).
+
+**Acceptance Criteria (chỉ áp dụng cho pdf2zh):**
 - Bước 1: giảm font size tối đa 20%
 - Bước 2: horizontal scaling (condensed) tối đa 85%
 - Bước 3: nếu vẫn tràn → flag cho user review (không cắt text)
+
+**Acceptance criteria cho babeldoc**: không có bước hậu kỳ nào của app — chống tràn khung là trách
+nhiệm nội bộ của babeldoc, ngoài tầm kiểm soát/đo lường của pipeline này.
 
 ### US-06: Auto-chunking file lớn
 **As a** người dịch sách, **I want** hệ thống tự chia file lớn thành chunk, **so that** không bị lỗi do limit.
@@ -306,7 +320,9 @@ Job PDF scan bắt buộc phải fail rõ ràng (không báo "completed") nếu 
 
 ### 4.5. Font & Text Overflow
 - **BR-FONT-01**: Font phải hỗ trợ đầy đủ Vietnamese Unicode. Default: Noto Sans/Serif
-- **BR-FONT-02**: Auto-shrink 3 bước: giảm font 20% → condensed 85% → flag user review
+- **BR-FONT-02**: Auto-shrink 3 bước: giảm font 20% → condensed 85% → flag user review. **Chỉ áp
+  dụng cho engine `pdf2zh`** kể từ Bug #9 (2026-09-09) — babeldoc tự fit bên trong nó, app không
+  chạy bước này cho babeldoc nữa (xem chi tiết ở US-05 và `docs/Architecture.md` mục "Bug #9")
 - **BR-FONT-03**: System prompt yêu cầu dịch súc tích, target VI ≤ 130% độ dài EN
 
 ### 4.6. Typography & Structure Preservation

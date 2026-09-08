@@ -2131,6 +2131,49 @@ job nào được Dev/Reviewer dùng để test sống. Sau khi QA tự chạy, 
 số liệu khớp chính xác với Architecture.md trên dữ liệu thật, không có phần nào của US-16 v2 cần
 đánh dấu "release blocked pending live verification".
 
+## Bug #8 — R5-03/R6-03 live E2E trên chunk 0 thật (40 trang, Le Cordon Bleu) (2026-09-08)
+
+**Bối cảnh**: QA agent được giao live E2E cho Bug #8 (MediaBox/CropBox offset trong
+`page.insert_text()`, xem `docs/CHANGELOG.md` mục "Bug #8" và `docs/review-report.md` 2 vòng
+review tương ứng) đã dựng đúng bộ so sánh (chạy lại babeldoc thật, DeepSeek, không mock, trên 40
+trang đầu — chunk 0 — của file gốc
+`data/uploads/7ff56932-0c9e-403e-9555-4b4059c60b59_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf`,
+1 bản với code trước fix, 1 bản với code sau fix) nhưng agent hết turn budget riêng trước khi tự
+tổng hợp xong (tiến trình nền vẫn chạy độc lập). **PM tự lấy số liệu trực tiếp từ log/output đã có
+sẵn trong scratchpad của agent đó** (không tự chạy lại từ đầu, dùng đúng script bbox-overlap
+(`ov3.py`, area giao > 200pt², `block[6]==0`) mà QA/Tech Lead đã dùng xuyên suốt).
+
+| Bản | Overlap pairs (diện tích giao >200pt², toàn bộ 40 trang chunk 0) |
+|---|---|
+| Trước fix (`lcb_c0_buggy_c0.pdf`, babeldoc thật, DeepSeek) | **126** |
+| Sau fix (`lcb_toc_AFTER_FIX.pdf`, cùng input, cùng pipeline, code đã fix) | **66** |
+
+**Kết luận trung thực (không làm đẹp số liệu)**: Bug #8 giảm được **~48% overlap** trên chunk này
+— đây là cải thiện THẬT, đo được, nhưng **KHÔNG đưa overlap về 0**. Trích 1 vài cặp overlap còn
+lại sau fix để xác nhận bản chất (đọc trực tiếp `qa_after_fix.log`):
+
+> `'Đào tạo liên tục ngày nay là một khía cạnh...'` × `'rung thành bằng cách cử họ đi thực tập...'`
+> (3496pt² giao nhau, trang 38-39)
+
+Đây là 2 đoạn văn xuôi THÔNG THƯỜNG (không phải bảng/mục lục/sidebar phức tạp) đè lên nhau — khác
+cơ chế với Bug #8 (không phải lỗi toạ độ MediaBox/CropBox của `font_shrink`/`rotated_text_overlay`,
+vì các cặp này không đi qua nhánh redraw đó). Khớp với root cause đã ghi nhận trước đó trong
+`docs/Architecture.md` mục "Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order trên
+trang layout phức tạp" (2026-09-07): babeldoc typeset mỗi paragraph độc lập, neo tuyệt đối vào bbox
+gốc, không reflow theo chiều cao thực tế của đoạn trước — khi bản dịch tràn đáy box vẫn vẽ tiếp ra
+ngoài, đè lên đoạn kế tiếp. Root cause này được ghi nhận từ trước v1.2.7, **chưa từng có bản fix
+thật**, chỉ mới dừng ở mức phân tích.
+
+**PASS/FAIL cho gate Bug #8**: **PASS có điều kiện** — Bug #8 (MediaBox/CropBox offset) tự nó đã
+fix đúng, verify được bằng số liệu thật (giảm 126→66), an toàn để release như 1 bug fix độc lập.
+**KHÔNG PASS** nếu tiêu chí là "hết lỗi chữ nhảy lung tung" như user báo cáo ban đầu — phần lớn số
+overlap còn lại (66/126, tức phần lỗi user nhìn thấy ở các trang văn xuôi thường trong ảnh chụp màn
+hình, không phải trang mục lục) đến từ 1 root cause KHÁC, lớn hơn, đã biết trước nhưng chưa fix.
+
+`"release blocked pending live verification: root cause "Text Overlap, Content-Loss & Reading-
+Order" (Architecture.md, babeldoc typesetting không reflow) vẫn chưa có fix — Bug #8 chỉ giải
+quyết được 1 phần (offset toạ độ MediaBox/CropBox), không phải toàn bộ triệu chứng user báo cáo."`
+
 ## 8. KẾT LUẬN
 
 **ready_for_release: YES** cho US-16 v2.
@@ -2288,6 +2331,8 @@ khi QA bắt đầu.
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-15 nhánh PDF trong
 session này.
 
+---
+
 ## US-20 "Các từ mới" — gợi ý thuật ngữ từ tài liệu vừa dịch (2026-09-08)
 
 ### Phạm vi
@@ -2443,6 +2488,89 @@ này.
 
 ---
 
+## QA — Bug #9: gate R5-03/R6-03 cho việc tắt `font_shrink_page()` khi engine = babeldoc (2026-09-08)
+
+### Bối cảnh
+
+Bug #9 đã qua Dev + Reviewer (APPROVE, xem `docs/CHANGELOG.md` mục "Bug #9" và
+`docs/review-report.md` mục "Review — Bug #9: capability `needs_font_shrink`"). Sau fix, output
+cuối cùng cho engine babeldoc = **chính xác** output thô babeldoc trả về (không còn qua
+`font_shrink_page()`/`saveIncr()` nào nữa). Theo yêu cầu R5-03/R6-03 (live verification, không
+mock), QA verify bằng dữ liệu THẬT đã có sẵn từ trước — **không chạy lại babeldoc/pdf2zh thật**
+(không cần thiết cho gate này, artifact thật đã tồn tại):
+
+File dùng làm proxy: `.../scratchpad/c0_on/lcb_p1_40.no_watermark.vi.mono.pdf` — babeldoc thật +
+DeepSeek thật, chunk 0 = 40 trang đầu sách *Le Cordon Bleu*, sinh ra TRƯỚC khi `font_shrink_page`
+từng chạm vào file này → đại diện chính xác cho "output sau khi có Bug #9 fix".
+
+### 1. Trang 26 không còn mất chữ
+
+Mở file bằng `uv run python3` + `pymupdf` (`fitz`), lấy `get_text()` cho các trang lân cận để định
+vị đúng "trang 26" (dùng số trang in trên đầu trang làm neo, vì trang bìa/mục lục chiếm vài trang
+đầu nên index 0-based lệch so với số trang in):
+
+- idx 24 → số in "9", len=2261 ký tự
+- idx 25 → số in "10", len=2672 ký tự — đây là trang có số in gần "26" nhất theo cách đánh số
+  chương (nội dung chương 1 "Lịch sử Pâtisserie ở Pháp"); cũng đã kiểm tra idx 26 (số in "11",
+  len=3846) cho chắc cả 2 cách hiểu "trang 26".
+- idx 27 → số in "12", len=3356 ký tự
+
+Cả 2 ứng viên (idx 25 và idx 26) đều có nội dung đầy đủ, độ dài trong khoảng bình thường so với các
+trang lân cận (2261–3846 ký tự/trang), không có trang nào rỗng hay ngắn bất thường. **Không còn dấu
+hiệu mất chữ** — khớp đúng kỳ vọng: bug mất chữ trước đây do chính `font_shrink_page` gây ra trên
+bản đã qua post-process cũ, nay bước đó bị skip hoàn toàn cho babeldoc nên không còn cơ hội gây lỗi.
+
+**Kết quả: PASS.**
+
+### 2. Đếm lại overlap thật trên cả 40 trang
+
+Dùng lại nguyên `ov3.py` đã có sẵn trong scratchpad (metric block cũ, area giao >200pt², chỉ tính
+`block[6]==0` — không viết lại, không thêm metric mới), chạy trên toàn bộ 40 trang của file trên:
+
+```
+TOTAL 5
+page 13: overlap_pairs=4  (blocks=192, trang có sidebar callout "Phản ứng Maillard" + 61 hình ảnh)
+page 25: overlap_pairs=1  (blocks=10, trang có 1 hình ảnh — pull-quote/caption cạnh ảnh)
+Tất cả các trang khác: overlap_pairs=0
+```
+
+Đã kiểm tra thêm bằng `page.get_images()`: cả 2 trang có overlap (idx 13, idx 25) đều có ảnh nhúng
+(61 ảnh và 1 ảnh tương ứng) — xác nhận overlap chỉ xảy ra ở trang có layout ảnh minh hoạ/callout
+box, KHÔNG có cặp nào là 2 đoạn văn xuôi thường đè lên nhau. Khớp đúng con số Expert đã báo cáo cho
+bản "raw babeldoc" (~5 block-pairs, toàn bộ ở trang có ảnh).
+
+**Kết quả: PASS.**
+
+### 3. pdf2zh không bị ảnh hưởng
+
+- Đọc trực tiếp source: `src/services/pdf2zh_runner.py:87` →
+  `needs_font_shrink: ClassVar[bool] = True` — còn nguyên, không bị đổi bởi Bug #9.
+  (Đối chiếu: `src/services/babeldoc_runner.py:228` → `needs_font_shrink: ClassVar[bool] = False`.)
+- Chạy `uv run pytest tests/test_font_shrink.py -q` → **12 passed** (toàn bộ test cũ liên quan
+  pdf2zh/font_shrink còn nguyên và xanh, không bị Bug #9 đụng vào).
+
+**Kết quả: PASS.**
+
+### Ghi chú ngoài phạm vi (không đào sâu, theo đúng chỉ định)
+
+Không phát hiện thêm gì bất thường ngoài phạm vi 3 mục trên trong lúc kiểm tra. (Bug cắt ngang chữ
+"t|rung thành" = Bug #10 riêng, và lỗi lố biên trang của `rotated_text_overlay`/`_draw_block` đã có
+task riêng theo dõi — cả hai đều ngoài phạm vi gate này, không điều tra thêm.)
+
+### KẾT LUẬN
+
+**PASS — gate Bug #9 (R5-03/R6-03) đạt.** Cả 3 kết quả (trang 26 không mất chữ, overlap thật trên
+40 trang chỉ 5 cặp và đều nằm ở trang có ảnh minh hoạ — không phải văn xuôi đè văn xuôi, pdf2zh giữ
+nguyên `needs_font_shrink=True` và 12 test cũ vẫn xanh) đều khớp đúng kỳ vọng của thiết kế Bug #9.
+Verify dựa trên artifact babeldoc+DeepSeek thật đã sinh sẵn (đúng tinh thần R5-03/R6-03 — không mock
+— dùng lại kết quả live đã có, không cần chạy lại babeldoc/pdf2zh thật tốn thời gian cho riêng gate
+này).
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho Bug #9 trong session
+này.
+
+---
+
 ## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
 
 QA theo Protocol 1, brief PM: đọc `docs/PRD.md` US-21, `docs/Architecture.md` §6.19 (S21-1,
@@ -2540,6 +2668,9 @@ chờ nó). `/docs` hiện đúng "1.2.8", không còn "0.1.0". Regression xanh,
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-21 trong session
 này.
+này.
+
+---
 
 ## US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, search server-side (2026-09-09)
 
@@ -2733,6 +2864,80 @@ API: `total=114`, `Dutch oven`/`ganache` đúng giá trị gốc, không còn r�
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-17/US-18 trong
 session này (Reviewer đã APPROVE ở vòng 2/3 Dev↔Reviewer, không liên quan tới giới hạn Dev↔QA).
+
+## Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng — gate cuối: live E2E qua JobOrchestrator (QA, 2026-09-09)
+
+**Phạm vi (theo brief PM, hẹp có chủ đích)**: Dev đã spike A/B + implement (G1/G3/G4/G5 PASS, G2
+FAIL theo nghĩa đen ngưỡng 0.5pt nhưng an toàn về cấu trúc — xem `docs/CHANGELOG.md` mục "Bug #10").
+Reviewer đã APPROVE có điều kiện, tự chạy babeldoc thật độc lập xác nhận lại G1-G5 (xem
+`docs/review-report.md`, section "Bug #10 ... review bản vá", kết luận). Điều kiện còn thiếu duy
+nhất (Protocol 6 R6-03, Reviewer mục 12): TOÀN BỘ test trước đó (Dev + Reviewer) đều gọi thẳng
+`BabeldocRunner`/babeldoc CLI trực tiếp, chưa có lần nào chạy qua đúng `JobOrchestrator.run_job()`
+thật (có DB session, full chunk/orchestration flow). QA **không** đo lại G1-G5 chi tiết, không điều
+tra thêm G2, không chạy full sách — chỉ verify đúng 1 gate còn thiếu này.
+
+### Đường ống đã chạy qua
+
+**`JobOrchestrator.run_job()` đầy đủ** (không phải `_process_chunk()` trực tiếp) — chạy hết được vì
+setup không phức tạp như lo ngại ban đầu: dùng lại đúng pattern fixture `session()` của
+`tests/integration/test_job_orchestrator.py` (SQLite `aiosqlite` tạo file tạm qua
+`create_async_engine` + `SQLModel.metadata.create_all`, không đụng `data/bb_translation.db`
+production), tạo 1 `Job` row trỏ thẳng vào fixture có sẵn
+`tests/fixtures/babeldoc/bug10_sources/lcb_p39_loyal.pdf` (1 trang, `file_type="pdf_digital"` —
+không cần bridge OCR/MinerU), rồi gọi `await orchestrator.run_job(job.id, session)` — đi qua đúng
+toàn bộ 10 bước thật: chunk planning (`plan_chunks`, 1 trang → 1 chunk, không qua nhánh
+`calculate_chunks`), `_process_chunk()` (gọi `BabeldocRunner.translate_pages()` thật, babeldoc 0.6.4
++ DeepSeek thật qua `DEEPSEEK_API_KEY` có sẵn trong `.env` — cùng key Dev/Reviewer đã dùng, cache
+babeldoc tái sử dụng nên không tốn token mới), `merge_chunk_pdfs`, guard BR-OCR-03 (không rỗng),
+`compress_pdf_images`, finalize cost/status. Settings dùng **mặc định** cho
+`babeldoc_word_wrap_fix_enabled=True` (Bug #10 flag, đúng yêu cầu brief — set tường minh lại trong
+script cho rõ ràng, không dựa ngầm vào default).
+
+**1 deviation có chủ đích, ghi rõ**: tắt `babeldoc_rotated_text_overlay=False` (mặc định `True`) —
+tính năng overlay chữ xoay không liên quan Bug #10 (patch chỉ đụng `typesetting.py`/word-wrap, không
+đụng logic xoay chữ), tắt để tránh 1 lời gọi LLM/probe phụ không cần thiết cho phạm vi hẹp của gate
+này. Mọi setting khác giữ mặc định thật của `Settings()` (đọc từ `.env`), không mock thêm gì khác.
+Script archive tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/3ea6abbf-24a2-41d8-888a-484c59da01c0/scratchpad/live_e2e_bug10.py`.
+
+### Kết quả
+
+```
+=== JobResult ===
+status: completed
+output_path: .../outputs/<job_id>/translated_vi.pdf
+error_message: None
+=== output non-whitespace char count === 2877
+=== context around 'trung' ===
+'ghi nhận những nhân viên có động lực và trung \nthành bằng cách cử họ đi thực tập ("stage") tại một b'
+```
+
+- **Job hoàn tất với `status="completed"`, không có exception/lỗi mới phát sinh** khi chạy qua toàn
+  bộ đường ống thật (khác hẳn chỉ gọi thẳng runner) — `output_path` trỏ tới file PDF thật, đọc lại
+  bằng `fitz`/`pymupdf` `get_text()` xác nhận có 2877 ký tự non-whitespace (không rỗng, không trúng
+  guard BR-OCR-03/Bug #5).
+- **"trung thành" KHÔNG còn bị cắt ngang giữa chừng**: `get_text()` đọc liền mạch cho ra
+  `"...và trung \nthành..."` — từ "trung" giữ nguyên vẹn thành 1 khối, điểm xuống dòng nằm đúng ở dấu
+  cách ngay sau nó. Khớp **chính xác** với kết quả Dev (spike A/B) và Reviewer (tự chạy CLI trực
+  tiếp) đã báo cáo ở `docs/CHANGELOG.md`/`docs/review-report.md` — không có sai khác nào giữa chạy
+  qua CLI trực tiếp và chạy qua `JobOrchestrator` đầy đủ. Xác nhận thêm bằng cách tìm ngược pattern
+  lỗi gốc (`"t\nrung"`, dấu hiệu cắt-giữa-ký-tự của bug) trong output: **không xuất hiện**.
+  (Lưu ý: chuỗi liền `"trung thành"` không match trực tiếp vì có dấu cách + xuống dòng giữa 2 từ —
+  đây là hành vi ĐÚNG theo thiết kế wrap ở ranh giới từ, không phải bug; không dùng chuỗi liền làm
+  tiêu chí PASS mà dùng "từ không bị cắt giữa ký tự" như Dev/Reviewer đã định nghĩa.)
+
+### KẾT LUẬN — Gate cuối Bug #10 (Protocol 6 R6-03)
+
+**PASS.** Bản vá `babeldoc_word_wrap_fix_enabled=True` có hiệu lực thật trên đúng đường sản xuất
+(`JobOrchestrator.run_job()` đầy đủ, DB session thật, không chỉ ở tầng gọi trực tiếp
+`BabeldocRunner`/CLI như Dev + Reviewer đã làm trước đó). Đây là điều kiện cuối cùng Reviewer yêu
+cầu trước release (review-report.md, kết luận Bug #10) — nay đã thoả. Không phát hiện bug mới, không
+có regression từ việc đi qua full pipeline. **`ready_for_release`: CÓ** cho Bug #10 (kèm theo mọi
+điều kiện/khuyến nghị non-blocking Reviewer đã ghi — sửa ngưỡng G2 trong Architecture.md cho lần vá
+`typesetting.py` sau này — không chặn release lần này).
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là gate xác nhận bổ sung theo yêu cầu Reviewer
+(Protocol 6 R6-03), không phải vòng sửa lỗi.
 
 ## US-19 — Lịch sử: thời gian dịch + số trang, bỏ nút "+ Glossary" (QA, 2026-09-09)
 

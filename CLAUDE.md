@@ -194,3 +194,59 @@ sử, chỉ được giao "ghi kết quả vào file X". Bất kỳ ai giao vi�
 `docs/test-report.md`, `docs/CHANGELOG.md`, hoặc `project_state.json` cho 1 agent (Reviewer, QA,
 Dev, Tech Lead) PHẢI nói rõ trong brief: "đọc file hiện có trước, APPEND section mới vào cuối,
 KHÔNG được xoá/ghi đè nội dung cũ" — không được mặc định agent tự hiểu ý này.
+
+## Protocol 8 — Shared Pipeline Assumption Audit
+
+### Bối cảnh (tại sao protocol này tồn tại)
+
+Bug #9 (2026-09-08, phát hiện bởi Domain Expert khi điều tra tiếp Bug #8): §6.14.7 chủ động thiết
+kế `_process_chunk()` (`job_orchestrator.py`) dùng CHUNG 1 đường ống cho cả 2 engine dịch
+(`pdf2zh`, `babeldoc`), không rẽ nhánh `if engine == ...` trong thân hàm — đúng nguyên tắc để
+tránh lặp lại Bug #5 (2 nhánh code lệch nhau khi sửa độc lập). Nguyên tắc này **đúng cho cách gọi**
+(`translator_runner.translate_pages(...)`) nhưng bị áp dụng nhầm sang **từng bước hậu kỳ bên
+trong** đường ống đó: `font_shrink_page()` được viết ra vì 1 lý do RIÊNG của pdf2zh (pdf2zh vẽ y
+nguyên vị trí/cỡ chữ gốc tiếng Anh lên trang, không tự co giãn theo bản dịch tiếng Việt dài hơn —
+cần bước co font hậu kỳ để không tràn khung). Khi `babeldoc` được thêm làm engine thứ 2 và đi qua
+đúng `_process_chunk()` có sẵn đó, không ai quay lại hỏi "lý do bước `font_shrink_page` tồn tại có
+còn đúng với babeldoc không?" — thực tế babeldoc tự bóp cỡ chữ bên trong chính nó (tới tối thiểu
+10%, thậm chí bỏ hẳn đoạn nếu vẫn không vừa, KHÔNG BAO GIỜ vẽ tràn ra ngoài box — verify bằng đọc
+trực tiếp source `IL/midend/typesetting.py` babeldoc 0.6.4). `font_shrink_page` áp lên output
+babeldoc chỉ bắt được SAI SỐ ĐO FLOAT vặt vãnh (median excess đo được = 0.00%) rồi tự ý
+redact+insert_text lại — gây Bug #8 (lệch toạ độ MediaBox/CropBox, đã fix) và, nặng hơn, phát hiện
+cùng lúc **mất chữ thật** (verify cụ thể trang 26 sách Le Cordon Bleu: 4 dòng nội dung biến mất do
+redraw dòng kế tiếp vô tình xoá đè dòng vừa vẽ trước đó).
+
+**Vì sao lọt qua từ lúc thêm babeldoc tới giờ**: bước `rotated_text_overlay` (thêm CÙNG LÚC với
+babeldoc) được gate đúng ngay từ đầu (`if pdf_translate_engine == "babeldoc" and ...`,
+`job_orchestrator.py:564-566`, kèm comment giải thích lý do). Khác biệt duy nhất giữa 2 bước:
+`rotated_text_overlay` là bước MỚI viết cùng lúc với engine mới nên tự nhiên được cân nhắc theo
+engine; `font_shrink_page` là bước CÓ SẴN TỪ TRƯỚC babeldoc, "đã chạy ổn từ trước" nên không ai
+audit lại khi babeldoc đi ké vào cùng đường ống. **Bước cũ, không phải bước mới, là chỗ dễ bị bỏ
+sót nhất** khi mở rộng 1 pipeline dùng chung sang biến thể/engine mới.
+
+### Quy tắc bắt buộc
+
+**R8-01 (Audit toàn bộ bước hậu kỳ, không chỉ bước mới thêm)**: Khi thêm 1 engine/backend/biến thể
+mới vào 1 pipeline đã dùng chung code (theo đúng nguyên tắc "không rẽ nhánh if engine=="), Tech
+Lead phải liệt kê TỪNG bước xử lý hiện có trong pipeline đó — **kể cả bước có từ TRƯỚC biến thể
+mới, không chỉ bước mới thêm cùng lúc** — và với mỗi bước trả lời tường minh trong Architecture.md:
+"bước này tồn tại để giải quyết vấn đề gì của biến thể cũ, biến thể mới có cùng vấn đề đó không?"
+Câu trả lời phải có nguồn xác thực (đọc source biến thể mới, hoặc đo thật) — không suy đoán "chắc
+ổn vì đang dùng chung code nên an toàn".
+
+**R8-02 (Deny-by-default khi chưa verify)**: Câu trả lời "chưa rõ/chưa verify" cho 1 bước → bước đó
+PHẢI mặc định SKIP cho biến thể mới cho tới khi verify xong. Không được mặc định "cứ để chạy chung
+cho an toàn, có sao sửa sau" — chính tư duy đó là nguyên nhân Bug #9.
+
+**R8-03 (Hiện thực bằng capability trên object đại diện biến thể, không rẽ nhánh cứng)**: Cách hiện
+thực "skip có điều kiện" vẫn phải giữ đúng tinh thần "không rẽ nhánh if engine==" của §6.14.7 —
+khai báo 1 thuộc tính/property năng lực trên chính class đại diện biến thể (ví dụ
+`Runner.needs_font_shrink: bool`), để pipeline hỏi object đó thay vì tự đoán theo tên biến thể rải
+rác trong thân hàm.
+
+### Phạm vi áp dụng
+
+Áp dụng khi thêm engine dịch mới (`src/services/*_runner.py`), thêm provider OCR/LLM mới, hoặc bất
+kỳ biến thể nào khác được route qua 1 hàm/pipeline dùng chung đã tồn tại từ trước trong
+`src/core/job_orchestrator.py` hoặc pipeline tương tự. Không áp dụng khi biến thể mới có pipeline
+xử lý hoàn toàn riêng, không đi qua code dùng chung nào.

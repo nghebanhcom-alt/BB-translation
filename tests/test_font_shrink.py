@@ -6,10 +6,12 @@ import pytest
 from src.postprocess.font_shrink import (
     CONDENSED_SCALE,
     MAX_FONT_SHRINK_RATIO,
+    _redraw_span,
     _shrink_line,
     evaluate_span,
     font_shrink_page,
 )
+from src.utils.pdf_coords import insert_text_origin_fix
 
 
 def _span(text: str, font_size: float, bbox: tuple[float, float, float, float]) -> dict:
@@ -234,3 +236,114 @@ async def test_helv_measurement_understates_real_vietnamese_width() -> None:
     real_width = fitz.Font(fontfile=_NOTO_FONT_PATH).text_length(text, fontsize=12)
 
     assert real_width > helv_width * 1.2  # >20% understatement, matches live measurement
+
+
+# --- Regression: "chữ nhảy lung tung" (2026-09-08, CropBox not contained
+# in MediaBox -- NOT the simpler "MediaBox origin != (0,0)" theory; see
+# `src.utils.pdf_coords.insert_text_origin_fix`'s docstring for why that
+# simpler theory is wrong) ---
+#
+# Real, live-captured fixtures (Protocol 5 mục 3 -- no hand-typed mocks of
+# PyMuPDF's coordinate behavior): both PDFs below are genuine excerpts from
+# real books already committed for the TOC/babeldoc work, not fabricated for
+# this bug.
+#   - `toc_sources/lcb_toc.pdf`: Le Cordon Bleu itself. Its pages carry
+#     pdf2zh's malformed CropBox (bigger than MediaBox, invalid per the PDF
+#     spec) that triggered the live bug: mediabox=(33,33,681,816),
+#     cropbox=(0,-33,714,816).
+#   - `job3594a7a3_chunk0_sample_mono.pdf`: a different book, whose CropBox
+#     is a legitimate, spec-valid, *smaller* margin box
+#     (mediabox=(0,0,684,855), cropbox=(36,36,648,819)) -- proves the fix is
+#     general (works for a real "just cropped margins" page too), not
+#     special-cased to the oversized-CropBox case alone.
+_LCB_TOC_FIXTURE = str(
+    Path(__file__).resolve().parent / "fixtures" / "babeldoc" / "toc_sources" / "lcb_toc.pdf"
+)
+_MARGIN_CROP_FIXTURE = str(
+    Path(__file__).resolve().parent / "fixtures" / "babeldoc" / "job3594a7a3_chunk0_sample_mono.pdf"
+)
+
+
+def _first_nontrivial_span(page: "fitz.Page") -> dict:
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if len(span["text"].strip()) > 3:
+                    return span
+    raise AssertionError("no suitable (non-trivial) text span found on fixture page")
+
+
+def _span_with_origin_near(
+    page: "fitz.Page", origin: tuple[float, float], tol: float = 0.5
+) -> dict | None:
+    ox, oy = origin
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                if not span["text"].strip():
+                    continue
+                sx, sy = span["origin"]
+                if abs(sx - ox) <= tol and abs(sy - oy) <= tol:
+                    return span
+    return None
+
+
+def test_insert_text_origin_fix_is_noop_when_cropbox_matches_mediabox() -> None:
+    """The common case (Figoni-style books, CropBox absent/equal to
+    MediaBox): the correction must not move the point at all."""
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)
+    page = doc[0]
+    origin = fitz.Point(120.1, 300.0)
+
+    assert insert_text_origin_fix(page, origin) == origin
+    doc.close()
+
+
+@pytest.mark.parametrize("fixture_path", [_LCB_TOC_FIXTURE, _MARGIN_CROP_FIXTURE])
+def test_redraw_span_lands_on_its_own_bbox_despite_mediabox_cropbox_offset(
+    fixture_path: str,
+) -> None:
+    """Regression for the live "chữ nhảy lung tung" bug: `_redraw_span` must
+    redraw a span at the position `page.get_text("dict")` itself reports for
+    that span's own bbox -- even when the page's CropBox origin diverges from
+    its MediaBox origin. Before the `insert_text_origin_fix` correction,
+    PyMuPDF's `Shape.insert_text` (which backs `page.insert_text`) silently
+    offsets by the *CropBox* origin instead of the MediaBox origin, so the
+    redrawn glyphs land exactly `(mediabox.x0 - cropbox_position.x,
+    -cropbox_position.y)` away from where they should be -- text overlapping
+    whatever else already occupies that other position on the page. This
+    test FAILS on the pre-fix code (verified via `git stash` on
+    `src/postprocess/font_shrink.py`) and PASSES after it."""
+    doc = fitz.open(fixture_path)
+    page = doc[0]
+    mediabox_origin = (page.mediabox.x0, 0.0)
+    cropbox_position = (page.cropbox_position.x, page.cropbox_position.y)
+    assert cropbox_position != mediabox_origin, (
+        "fixture sanity check failed: this test only proves anything when "
+        "the page's CropBox origin actually diverges from its MediaBox "
+        f"origin (got cropbox_position={cropbox_position}, "
+        f"mediabox origin={mediabox_origin})"
+    )
+
+    span = _first_nontrivial_span(page)
+    span_bbox = fitz.Rect(span["bbox"])
+    final_size = span["size"] * MAX_FONT_SHRINK_RATIO  # simulate a real BR-FONT-02 shrink
+    expected_origin = (span_bbox.x0, span_bbox.y1 - final_size * 0.2)
+
+    _redraw_span(page, span_bbox, span["text"], final_size, scale=1.0)
+
+    redrawn = _span_with_origin_near(page, expected_origin)
+    assert redrawn is not None, (
+        f"no span redrawn near the expected origin {expected_origin} -- it "
+        "landed somewhere else on the page (the exact 'chữ nhảy lung tung' "
+        "symptom: text drawn at the wrong position, overlapping other "
+        "content instead of replacing the original span in place)"
+    )
+    assert redrawn["origin"][0] == pytest.approx(expected_origin[0], abs=0.05)
+    assert redrawn["origin"][1] == pytest.approx(expected_origin[1], abs=0.05)
+    doc.close()
