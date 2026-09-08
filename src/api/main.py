@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="BB-Translation", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="BB-Translation", version=_read_app_version(), lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

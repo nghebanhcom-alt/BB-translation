@@ -5406,3 +5406,139 @@ non-blocking ở trên để QA xử lý theo R5-03.
 session này, không phải vòng sửa lỗi sau REJECT.
 
 ---
+
+## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
+
+Review theo Protocol 7 R7-01, brief PM: đọc `docs/PRD.md` US-21, `docs/Architecture.md` §6.19
+(S21-1, S21-2), 2 entry CHANGELOG mới nhất (`US-21 — Hiển thị phiên bản BB-Translation` +
+`Bổ sung — S21-1 (backend, lượt sau)`), và code thật qua 2 lượt Dev: (1) UI nav bar 4 trang +
+`web/js/version.js`, (2) fix `src/api/main.py` dùng `_read_app_version()` thay hardcode `0.1.0`.
+
+### 1. `web/js/version.js`
+
+Đọc toàn bộ file (29 dòng). Đúng với S21-2:
+
+- Gọi `GET /api/version` đúng 1 lần khi script chạy (IIFE, không có listener lặp).
+- `.then((res) => (res.ok ? res.json() : null))` — response lỗi (4xx/5xx) không throw, trả `null`
+  xuống bước sau.
+- `body && body.version` — `body === null` (fetch lỗi HTTP) hoặc thiếu field đều bị chặn an toàn,
+  không crash.
+- `version !== "unknown"` — đúng yêu cầu YA-5.4/S21-2: backend `_read_app_version()` trả
+  `"unknown"` khi đọc `pyproject.toml` lỗi, JS phải im lặng bỏ qua giá trị này thay vì hiện
+  "vunknown" ra nav bar. Xác nhận đúng.
+- `.catch(() => {})` rỗng ở cuối chain — lỗi mạng (network down, CORS, timeout) không throw ra
+  ngoài IIFE, không có `await`/`async` nào trong file nên không có unhandled promise rejection lọt
+  ra global — đúng "không throw chặn phần còn lại trang".
+- Không hardcode version string ở bất kỳ đâu trong file — xác nhận bằng `grep` (mục 5 bên dưới).
+- `render()` guard `if (el)` trước khi set `textContent` — nếu 1 trang tương lai quên thêm
+  `<span id="app-version">`, script không throw `TypeError: Cannot set properties of null`.
+
+Không phát hiện lỗ hổng, không rẽ nhánh chưa xử lý.
+
+### 2. 4 trang HTML (nav bar)
+
+`git diff` từng file:
+
+| File | `<span id="app-version">` đúng vị trí nav bar (không phải footer) | `<script src="/js/version.js">` include | Vị trí include |
+|---|---|---|---|
+| `web/index.html` | Có, cạnh "BB-Translation" | Có | Trước `app.js`, đúng thứ tự |
+| `web/glossary.html` | Có | Có | Trước `glossary.js`/`suggested-terms.js` |
+| `web/history.html` | Có | Có | Trước `history.js` |
+| `web/settings.html` | Có | Có | Trước `settings.js` |
+
+Cả 4 file dùng đúng 1 mẫu `<span class="font-bold text-lg">BB-Translation <span id="app-version"
+class="text-xs font-normal text-gray-400"></span></span>` — nhất quán, không lệch style giữa các
+trang. `index.html` xoá đúng phần footer cũ (`appVersion`/`x-text`), không để sót DOM chết.
+
+### 3. `web/js/app.js` — dọn code cũ
+
+Xoá đúng `appVersion` (state), `loadVersion()` (method), và lời gọi `await this.loadVersion()`
+trong `init()`. Không còn tham chiếu `appVersion`/`loadVersion` nào sót lại trong file (đã grep).
+Không có 2 cơ chế fetch `/api/version` song song trên `index.html` nữa — khớp đúng lý do Dev ghi
+trong CHANGELOG.
+
+### 4. `src/api/main.py`
+
+Diff đúng 1 dòng:
+```
+-app = FastAPI(title="BB-Translation", version="0.1.0", lifespan=lifespan)
++app = FastAPI(title="BB-Translation", version=_read_app_version(), lifespan=lifespan)
+```
+`_read_app_version()` định nghĩa ở dòng 64 (kèm `try/except (OSError, KeyError,
+tomllib.TOMLDecodeError)` → trả `"unknown"` khi lỗi, không raise), dòng `app = FastAPI(...)` ở
+dòng 85 — đứng SAU định nghĩa hàm, đúng thứ tự Python (hàm phải tồn tại tại thời điểm module-level
+code gọi nó khi import). Endpoint `GET /api/version` (dòng 110-112) không bị đụng, vẫn gọi đúng
+`_read_app_version()`, không có regression. Không có thay đổi nào khác trong file (đã xác nhận
+bằng `git diff` toàn file — chỉ 1 dòng, không có `+`/`-` ẩn nào khác).
+
+### 5. File cấm — xác nhận KHÔNG bị đụng bởi task US-21
+
+`git status`/`git diff --stat` tại thời điểm review cho thấy working tree có thay đổi (chưa
+commit) ở nhiều file khác — bao gồm `src/core/job_orchestrator.py`, `src/postprocess/font_shrink.py`,
+`src/postprocess/rotated_text_overlay.py`, `src/preprocess/searchable_pdf.py`,
+`src/services/babeldoc_runner.py`, `src/services/pdf2zh_runner.py`, `src/utils/pdf_coords.py`
+(untracked) — và các file `docs/*`/`project_state.json`/`CLAUDE.md`. Đây là state của 1 session
+khác chạy song song (khớp brief PM đã cảnh báo trước), KHÔNG thuộc phạm vi US-21. Đã xác nhận cụ
+thể bằng 2 cách:
+
+1. `git diff` riêng 6 file service/postprocess/preprocess cấm ở trên → `grep -i "version"` trên
+   diff đó → **không có kết quả** — không đụng gì liên quan version.
+2. Cả 2 entry CHANGELOG của Dev (US-21 chính + bổ sung S21-1) đều tự liệt kê "File đã sửa" khớp
+   đúng: `web/js/version.js` (mới), `web/index.html`, `web/glossary.html`, `web/history.html`,
+   `web/settings.html`, `web/js/app.js`, và riêng `src/api/main.py` ở entry bổ sung — không có file
+   nào trong danh sách cấm.
+
+Kết luận: `git diff --stat` không có nghĩa Dev của US-21 đã đụng các file cấm — đó là nhiễu từ
+session khác trong cùng working tree chưa commit. Trong phạm vi US-21, Dev đã tuân thủ đúng, không
+đụng file cấm.
+
+### 6. Verify qua browser thật
+
+Mở `http://localhost:8000` (server dev đang chạy sẵn) qua Browser pane:
+
+- `index.html`: nav bar hiện đúng "BB-Translation v1.2.8" (screenshot xác nhận), khớp
+  `pyproject.toml` (`version = "1.2.8"`). Không có console error.
+- `glossary.html`: nav bar hiện đúng "BB-Translation v1.2.8" (screenshot xác nhận). Không có
+  console error.
+- `/docs` (Swagger UI): heading hiện đúng "BB-Translation 1.2.8 OAS 3.1" — xác nhận S21-1 hoạt
+  động thật, không còn hardcode `0.1.0`.
+
+Không kiểm tra tay `history.html`/`settings.html` qua browser (cùng 1 đoạn `version.js` dùng
+chung, đã xác nhận include đúng qua diff ở mục 2) — rủi ro thấp, không cần lặp lại.
+
+### 7. Regression
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 521 passed, 1 failed (98.58s)
+```
+1 test FAIL: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — khớp đúng baseline đã biết
+trước (Bug #9, không liên quan US-21). Không có regression mới.
+
+### 8. R5-04 checklist (external dependency contract)
+
+`src/api/main.py`/`web/js/version.js` không phải service wrapper gọi external tool bên thứ 3
+(subprocess/HTTP ra ngoài) — đây là nội bộ Python (`tomllib` đọc file local) + `fetch` gọi API
+nội bộ của chính app. **External contract verified against real source: N/A** — Protocol 5 không
+áp dụng cho US-21.
+
+## Kết luận US-21
+
+**APPROVE.**
+
+Căn cứ: `version.js` xử lý lỗi mạng/`"unknown"` đúng S21-2 (không throw, không chặn phần còn lại
+trang), không hardcode version ở bất kỳ đâu. Cả 4 trang HTML include đúng script, đặt
+`<span id="app-version">` đúng nav bar (không phải footer), nhất quán style. `src/api/main.py` sửa
+đúng 1 dòng theo S21-1, thứ tự định nghĩa hàm/dùng hàm đúng Python, không phá endpoint
+`GET /api/version` hiện có. Không đụng file cấm (đã verify bằng grep diff + đối chiếu CHANGELOG).
+Verify trực tiếp qua browser thật: `index.html`, `glossary.html`, `/docs` đều hiện đúng "1.2.8" —
+không còn lệch số như bug gốc S21-1 mô tả. Regression xanh, khớp baseline 521 passed/1 failed đã
+biết (Bug #9, không liên quan).
+
+**Non-blocking (0)**: không có.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) — lượt review ĐẦU TIÊN của US-21 trong
+session này, không phải vòng sửa lỗi sau REJECT.
+
+---

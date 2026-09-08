@@ -51,26 +51,9 @@ function translationApp() {
     // Nhiem vu 2: provider -> { has_key, model } tu GET /api/settings, dung
     // de hien "OpenAI (gpt-4o-mini)" trong dropdown chon provider.
     providerSettings: {},
-    // US moi (2026-09-06): hien thi version app o footer, doc tu GET /api/version
-    // (ban than doc pyproject.toml o runtime — xem src/api/main.py).
-    appVersion: "",
-
     async init() {
       await this.loadProviderSettings();
-      await this.loadVersion();
       await this.restoreRecentJobs();
-    },
-
-    async loadVersion() {
-      try {
-        const res = await fetch("/api/version");
-        if (res.ok) {
-          const body = await res.json();
-          this.appVersion = body.version || "";
-        }
-      } catch (err) {
-        // non-fatal — footer just shows no version.
-      }
     },
 
     async loadProviderSettings() {

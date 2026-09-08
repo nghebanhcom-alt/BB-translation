@@ -2442,3 +2442,101 @@ trước khi QA bắt đầu.
 này.
 
 ---
+
+## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
+
+QA theo Protocol 1, brief PM: đọc `docs/PRD.md` US-21, `docs/Architecture.md` §6.19 (S21-1,
+S21-2), `docs/review-report.md` section "US-21 — Hiển thị phiên bản BB-Translation" (Reviewer đã
+APPROVE, verify khá kỹ qua browser thật trên `index.html`/`glossary.html`/`/docs`). Phạm vi QA:
+verify E2E cả 4 trang (Reviewer chỉ verify tay 2/4 trang), edge case network lỗi bằng cách chạy
+live thay vì chỉ đọc code, và regression suite đầy đủ.
+
+Server dev đã chạy sẵn tại `http://localhost:8000` (PID 47782, `uvicorn src.api.main:app`) — dùng
+server thật, không mock.
+
+### 1. Cả 4 trang HTML — hiển thị đúng version
+
+Mở qua Browser pane thật, `pyproject.toml` hiện `version = "1.2.8"`:
+
+| Trang | Nav bar hiện | Kết quả |
+|---|---|---|
+| `http://localhost:8000/` (index.html) | "BB-Translation v1.2.8" | PASS (screenshot) |
+| `http://localhost:8000/glossary.html` | "BB-Translation v1.2.8" | PASS (screenshot) |
+| `http://localhost:8000/history.html` | "BB-Translation v1.2.8" | PASS (screenshot) — Reviewer CHƯA verify tay trang này |
+| `http://localhost:8000/settings.html` | "BB-Translation v1.2.8" | PASS (screenshot) — Reviewer CHƯA verify tay trang này |
+
+Cả 4 trang khớp đúng `pyproject.toml`, không trang nào lệch số hay hiện "0.1.0"/"unknown"/rỗng.
+Không có console error trên bất kỳ trang nào.
+
+**Kết quả: PASS.**
+
+### 2. Edge case — `GET /api/version` lỗi mạng
+
+Reviewer đã đọc code xác nhận `version.js` có `.catch(() => {})` rỗng và guard
+`version !== "unknown"`, nhưng chưa chạy thử thật. QA chạy trực tiếp trên `index.html` thật (không
+chỉ đọc code): dùng `javascript_tool` ghi đè tạm `window.fetch` để `/api/version` reject
+(`TypeError: Simulated network failure`), reset `<span id="app-version">` về rỗng, rồi tự chạy lại
+đúng nguyên văn IIFE trong `web/js/version.js` (copy nguyên logic, không sửa) để mô phỏng lại đúng
+hành vi script gốc khi load trang với API lỗi. Có gắn listener `unhandledrejection` để bắt promise
+rejection lọt ra ngoài.
+
+Kết quả đo được:
+- `threwSynchronously: false` — không throw đồng bộ.
+- `unhandledRejection: false` — không có promise rejection nào lọt ra `window`.
+- `spanTextAfterFailure: ""` — span giữ nguyên rỗng, không hiện "vundefined"/"vnull".
+- `document.readyState: "complete"`, nút "Chọn file" vẫn có mặt và hoạt động — trang không bị
+  treo/chặn.
+- `read_console_messages(onlyErrors: true)` → không có log lỗi nào.
+
+**Edge case "chậm" (không chỉ lỗi hẳn)**: xác nhận qua đọc code (không cần giả lập delay thật) —
+`version.js` không có `await`/blocking loop nào quanh lời gọi `fetch`; IIFE gọi `fetch(...).then(...)`
+rồi kết thúc thực thi ngay lập tức, promise chain chạy bất đồng bộ hoàn toàn tách rời khỏi việc
+render phần còn lại của trang (không có `DOMContentLoaded` hay code nào khác `await` script này).
+Vì vậy API chậm bao lâu cũng không thể chặn trang — kết luận này đúng cho MỌI độ trễ, không chỉ
+trường hợp cụ thể đã đo, nên không cần giả lập độ trễ cụ thể thêm.
+
+**Kết quả: PASS.**
+
+### 3. `/docs` (Swagger UI)
+
+Mở `http://localhost:8000/docs` — heading hiện "BB-Translation **1.2.8** OAS 3.1" (screenshot xác
+nhận), không còn "0.1.0". Khớp đúng S21-1.
+
+**Kết quả: PASS.**
+
+### 4. Regression
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 521 passed, 1 failed, 773 warnings (121.48s)
+```
+
+1 FAIL: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp đúng baseline đã biết trước (Bug #9, không liên quan US-21). Không có regression mới. Số
+liệu khớp chính xác với con số Reviewer đã báo cáo (521 passed/1 failed).
+
+**Kết quả: PASS.**
+
+### 5. R5-04 / Protocol 5 checklist
+
+`src/api/main.py`/`web/js/version.js` không gọi external tool bên thứ 3 qua subprocess/HTTP —
+`tomllib` đọc file local + `fetch` gọi API nội bộ của chính app. **External contract verified
+against real source: N/A** — Protocol 5 không áp dụng cho US-21. Đồng ý với đánh giá của Reviewer.
+
+### Bug list
+
+Không phát hiện bug nào.
+
+### KẾT LUẬN
+
+**PASS — ready_for_release: CÓ.**
+
+Căn cứ: cả 4 trang (không chỉ 2 trang Reviewer đã verify tay) đều hiện đúng "v1.2.8" khớp
+`pyproject.toml`, không trang nào lệch. Edge case network lỗi đã CHẠY THẬT (không chỉ đọc code):
+không throw, không unhandled rejection, span giữ rỗng, trang vẫn dùng được bình thường, không có
+console error. Edge case chậm được suy ra an toàn từ cấu trúc code (fetch bất đồng bộ, không có gì
+chờ nó). `/docs` hiện đúng "1.2.8", không còn "0.1.0". Regression xanh, khớp đúng baseline
+521 passed/1 failed đã biết (Bug #9, không liên quan US-21).
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-21 trong session
+này.

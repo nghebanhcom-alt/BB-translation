@@ -5173,3 +5173,78 @@ liệu, không có test cũ nào bị vỡ.
 Implement xong theo đúng §6.18.8 (không tự suy diễn lại thiết kế, các điểm mâu thuẫn/thiếu rõ ràng
 đã liệt kê ở trên thay vì tự đoán). **CHƯA spawn Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là
 "xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào `docs/review-report.md`.
+
+## US-21 — Hiển thị phiên bản BB-Translation (2026-09-09)
+
+Implement theo `docs/Architecture.md` §6.19 và `docs/PRD.md` US-21. Backend `GET /api/version`
+đã có sẵn và đúng từ trước, task này **chỉ frontend** (theo brief PM — S21-1, sửa
+`FastAPI(..., version=...)` hardcode `0.1.0` khỏi khớp OpenAPI, KHÔNG nằm trong phạm vi task này,
+xem mục "Điểm cần PM/Tech Lead xác nhận thêm" bên dưới).
+
+### Thay đổi
+
+- **`web/js/version.js` (mới)**: 1 đoạn JS thuần (không phụ thuộc Alpine) dùng chung cho cả 4
+  trang tĩnh — gọi `GET /api/version` đúng 1 lần khi trang load, điền vào
+  `<span id="app-version">`. Lỗi mạng hoặc version rỗng/`"unknown"` → để trống lặng lẽ (`catch`
+  rỗng), không throw, không chặn phần còn lại của trang — đúng S21-2.
+- **`web/index.html`, `web/glossary.html`, `web/history.html`, `web/settings.html`**: thêm
+  `<span id="app-version">` cạnh chữ "BB-Translation" trong nav bar (style nhỏ,
+  `text-xs font-normal text-gray-400`, không làm rối nav hiện có); include
+  `<script src="/js/version.js">` trước script riêng của từng trang.
+- **`web/index.html` + `web/js/app.js`**: xoá phần hiển thị version cũ ở **footer** của riêng
+  `index.html` (`appVersion`/`loadVersion()` trong `translationApp()`) — implementation cũ này đã
+  tồn tại từ trước (comment "US moi 2026-09-06") nhưng đặt sai vị trí theo AC US-21 (footer thay
+  vì nav bar) và chỉ có ở 1/4 trang, không phải "1 đoạn JS dùng chung" như Architecture §6.19 yêu
+  cầu. Gộp về `version.js` để tránh 2 cơ chế fetch `/api/version` song song trên cùng 1 trang.
+
+### Điểm cần PM/Tech Lead xác nhận thêm
+
+Architecture.md §6.19 mục **S21-1** (đánh dấu "bắt buộc") yêu cầu sửa
+`FastAPI(title="BB-Translation", version="0.1.0", ...)` trong `src/api/main.py` thành
+`version=_read_app_version()` vì `0.1.0` hardcode đang lệch với `1.2.8` thật (hiện ra sai trên
+`/docs` OpenAPI). Brief PM cho task này ghi rõ "KHÔNG sửa backend vì GET /api/version đã hoạt
+động đúng" — Dev tuân theo brief, **chưa sửa S21-1**. Ghi nhận lại ở đây để PM đối chiếu: S21-1
+có vẻ nằm trong phạm vi Architecture §6.19 nhưng brief loại trừ backend; cần PM xác nhận có làm
+trong 1 task riêng hay bổ sung vào task này.
+
+### Verify qua browser thật
+
+Mở `http://localhost:8000` (dev server đang chạy sẵn từ 1 session song song, không tự khởi động
+server mới) qua Browser pane, xác nhận cả 4 trang (`index.html`, `glossary.html`, `history.html`,
+`settings.html`) đều hiện **"BB-Translation v1.2.8"** ở nav bar — khớp `pyproject.toml` (`version
+= "1.2.8"`). Không thấy lỗi console, không thấy "unknown"/trống.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 521 passed, 1 failed (0:01:46)
+```
+
+1 test FAIL: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — khớp baseline đã ghi nhận ở
+mục Bug #9 ngay phía trên (không liên quan US-21, Dev không đụng
+`rotated_text_overlay.py`/`font_shrink.py`/`pdf_coords.py`/`glossary_manager.py`/
+`job_orchestrator.py`/`babeldoc_runner.py`/`pdf2zh_runner.py`/`searchable_pdf.py` trong task này).
+
+### File đã sửa
+
+`web/js/version.js` (mới), `web/index.html`, `web/glossary.html`, `web/history.html`,
+`web/settings.html`, `web/js/app.js`.
+
+### Trạng thái
+
+Implement xong theo đúng US-21 + Architecture §6.19 (trừ S21-1, xem mục trên). **CHƯA spawn
+Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là "xong"/"sẵn sàng" cho tới khi Reviewer thật
+review xong và ghi vào `docs/review-report.md`.
+
+### Bổ sung — S21-1 (backend, lượt sau)
+
+`src/api/main.py:85` — sửa `FastAPI(title="BB-Translation", version="0.1.0", lifespan=lifespan)`
+thành `version=_read_app_version()` (hàm đã có sẵn, định nghĩa dòng 64-76, đứng trước dòng khởi
+tạo `app = FastAPI(...)` nên không cần đổi thứ tự). Giải quyết đúng phần S21-1 còn ghi nhận ở
+mục "Điểm cần PM/Tech Lead xác nhận thêm" phía trên. Verify: `uv run ruff check .` → All checks
+passed; `uv run pytest -q` → 521 passed, 1 failed (khớp baseline, fail cũ ở
+`test_rotated_text_overlay.py`, không liên quan). Restart dev server thật, mở `/docs` qua Browser
+pane → heading hiện đúng "BB-Translation 1.2.8 OAS 3.1" (khớp `GET /api/version` = `1.2.8`, không
+còn `0.1.0`). File đã sửa: `src/api/main.py`. **CHƯA spawn Reviewer** — chưa được coi là xong.
