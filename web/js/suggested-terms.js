@@ -17,6 +17,11 @@ function suggestedTermsApp() {
     draftVi: {},
     suggestingTranslation: false,
     lastSuggestCost: null,
+    // BR-GLOSS-07 tren promote() (Reviewer round 1, docs/review-report.md):
+    // cung idiom retry-with-force voi glossary.js::submitAdd(), nhung o day
+    // la bang nhieu dong nen luu theo termId thay vi 1 modal don.
+    // { termId, message, existing } | null.
+    promoteConflict: null,
 
     async load() {
       const params = new URLSearchParams({
@@ -47,6 +52,9 @@ function suggestedTermsApp() {
         }
       }
       this.selectedIds = this.selectedIds.filter((id) => stillVisible.has(id));
+      if (this.promoteConflict && !stillVisible.has(this.promoteConflict.termId)) {
+        this.promoteConflict = null;
+      }
     },
 
     prevPage() {
@@ -59,22 +67,39 @@ function suggestedTermsApp() {
       this.load();
     },
 
-    async promote(term) {
+    async promote(term, force = false) {
       const termVi = (this.draftVi[term.id] || "").trim() || null;
       const res = await fetch(`/api/glossary/suggested/${term.id}/promote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ term_vi: termVi }),
+        body: JSON.stringify({ term_vi: termVi, force }),
       });
       if (res.ok) {
+        this.promoteConflict = null;
         await this.load();
         // glossaryApp() (bang chinh o duoi trang) khong tu biet entry moi
         // vua duoc them qua duong US-20 — bao cho no load lai.
         window.dispatchEvent(new CustomEvent("glossary-entries-changed"));
+      } else if (res.status === 409) {
+        // BR-GLOSS-07 (Architecture.md 6.16.3): server tra ve entry cu trong
+        // `detail.existing` (GlossaryConflictInfo, khong phai string) de hoi
+        // xac nhan ghi de — cung shape voi create_entry() ma glossary.js::
+        // submitAdd() da xu ly, KHONG duoc alert() thang object nay.
+        const body = await res.json().catch(() => ({}));
+        const detail = body.detail || {};
+        this.promoteConflict = {
+          termId: term.id,
+          message: detail.detail || "Từ này đã có trong glossary.",
+          existing: detail.existing || null,
+        };
       } else {
         const body = await res.json().catch(() => ({}));
         alert(body.detail || "Khong the them vao glossary");
       }
+    },
+
+    cancelPromoteConflict() {
+      this.promoteConflict = null;
     },
 
     async dismiss(term) {

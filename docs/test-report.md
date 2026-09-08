@@ -2540,3 +2540,196 @@ chờ nó). `/docs` hiện đúng "1.2.8", không còn "0.1.0". Regression xanh,
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-21 trong session
 này.
+
+## US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, search server-side (2026-09-09)
+
+Phạm vi: PRD.md US-17/US-18, Architecture.md §6.16, `docs/review-report.md` section "US-17 + US-18
+— vòng review 2/3" (APPROVE), CHANGELOG 2 entry (vòng 1 + vòng sửa 2/3).
+
+### 0. Server dùng để test — xác nhận KHÔNG dùng server stale
+
+Đúng cảnh báo của Reviewer: server `:8000` đang chạy (start lúc 01:10AM) là **stale**
+(`ps`/`lsof` xác nhận tiến trình vẫn sống, nhưng `src/api/routes/glossary.py` đã sửa lúc 01:41 —
+sau khi server start — và `--reload` không nạp lại, cùng nguyên nhân Reviewer đã nêu: nhiều file
+`src/` khác đang bị sửa song song bởi session khác, nghi lỗi import làm reload âm thầm chết).
+**KHÔNG đụng vào `:8000`** (session khác có thể đang phụ thuộc nó). Thay vào đó:
+1. `uv run python -c "import src.api.main"` trên đúng working tree hiện tại → import OK, không lỗi.
+2. Tự dựng 1 instance `uvicorn` sạch, độc lập, ở `127.0.0.1:8002` (khác cổng Reviewer đã dùng
+   `:8001`, tránh đụng độ nếu Reviewer/ai đó còn giữ) từ đúng working tree hiện tại.
+3. `GET /api/version` → `{"version":"1.2.8"}`, `GET /api/glossary` → `total=114` — xác nhận server
+   sống, đọc đúng DB thật, đúng baseline 114 entry trước khi test bất cứ gì.
+4. Toàn bộ test dưới đây chạy qua Browser pane trỏ `http://127.0.0.1:8002/glossary.html` (frontend
+   không hardcode `localhost:8000` — đã grep xác nhận, dùng path tương đối, nên phục vụ qua 8002 tự
+   gọi đúng API 8002) + gọi `curl`/`sqlite3`/API trực tiếp vào `:8002` để verify DB.
+5. Đã `pkill` tắt instance `:8002` sau khi test xong xuôi.
+
+### 1. US-17 — Thêm từ mới (E2E qua browser thật)
+
+Bấm "+ Thêm từ mới", nhập `term_en=QA_ZZTest_NewTerm001` (chưa tồn tại) + `term_vi`/`notes` → Lưu.
+Entry xuất hiện NGAY trong bảng không cần reload, `total` 114 → 115 (xác nhận qua API, không chỉ
+nhìn UI).
+
+**Kết quả: PASS.**
+
+### 2. BR-GLOSS-07 — xác nhận ghi đè khi trùng term (case-insensitive)
+
+Dùng entry thật có sẵn `Dutch oven` (`term_vi="nồi gang"`, `notes="Equipment"`):
+- Nhập `DUTCH OVEN` (khác hoa/thường hoàn toàn) → Lưu → modal xác nhận hiện đúng: *"Từ 'Dutch oven'
+  đã có trong glossary với bản dịch 'nồi gang'. Ghi đè?"* + dòng "Ghi chú cũ: Equipment".
+- Bấm "Hủy" (trong khối xác nhận) → gọi API xác nhận lại `GET /api/glossary?q=Dutch oven`:
+  `term_vi`/`notes`/`updated_at` giữ nguyên y hệt trước — **không đổi gì**, đúng AC.
+- Mở lại modal, nhập `dutch oven` (lowercase khác), sửa `term_vi` thành giá trị test riêng biệt
+  (`"nồi gang TEST-OVERWRITE"`) để chứng minh ghi đè THẬT (không phải UI giả), bấm "Ghi đè" → API
+  xác nhận: cùng `id` (`572b2e04-...`, không tạo dòng mới), `term_vi` cập nhật đúng giá trị mới,
+  `total` KHÔNG tăng thêm (vẫn 115, không phải 116) — đúng ghi-đè-tại-chỗ, không phải tạo trùng.
+
+**Kết quả: PASS** (cả 2 nhánh Hủy/Ghi đè đều đúng, verify bằng API không chỉ nhìn UI).
+
+### 3. Pre-fill khi ghi đè
+
+Đã quan sát trực tiếp ở bước 2: ngay khi modal xác nhận hiện ra, 2 ô `Tiếng Việt`/`Ghi chú` đã tự
+điền sẵn `"nồi gang"` / `"Equipment"` (giá trị cũ), kèm dòng nhắc "Trường trên đã được điền theo
+giá trị cũ — sửa lại trước khi ghi đè nếu cần" — không phải để trống. Khớp đúng CHANGELOG mục
+"non-blocking mục 7" Reviewer đã xác nhận sửa ở vòng 2.
+
+**Kết quả: PASS.**
+
+### 4. US-18 — Search
+
+Qua ô search trên UI thật (debounce, có `wait` 1s sau mỗi lần gõ trước khi chụp/đọc kết quả):
+- Gõ `ganache` (tiếng Anh) → lọc đúng 1/1 kết quả (`term_en="ganache"`).
+- Gõ `nồi gang` (tiếng Việt, có dấu) → lọc đúng 1/1 kết quả (`Dutch oven`) — xác nhận search hoạt
+  động trên CẢ cột `term_vi`, đúng BR-GLOSS-08.
+- Gõ `zzzznomatch9999` (không khớp gì) → **"0 entries"**, bảng rỗng, đúng AC ("total=0").
+- Xóa ô search (bấm nút x) → hiện lại toàn bộ danh sách `1-25/115 entries` — không bị kẹt ở trạng
+  thái lọc cũ.
+
+**Kết quả: PASS** cho cả 4 nhánh AC.
+
+### 5. Promote từ "Chờ duyệt" (US-20 + US-17 tích hợp)
+
+Không có sẵn suggested term nào đang pending trong DB thật tại thời điểm test (đã kiểm tra
+`GET /api/glossary/suggested?status=pending` → rỗng). Tạo trực tiếp 2 row test vào bảng
+`suggested_terms` qua script Python/sqlite3 (KHÔNG phải mock giả — ghi thẳng đúng schema thật của
+bảng đã tồn tại trong DB, dùng `job_id` của 1 job có thật để thoả FK): 1 row `term_en="GANACHE"`
+(khác hoa/thường với `ganache` đã có trong glossary) + 1 row không trùng
+(`QA_ZZTest_Sourdough_Starter`), để test đúng yêu cầu "không lẫn state giữa nhiều dòng" của brief.
+
+- Bấm "Thêm vào glossary" trên dòng `GANACHE` → khối xác nhận hiện đúng: *"Từ 'ganache' đã có trong
+  glossary với bản dịch '(keep)'. Ghi chú cũ: Cake & Sugar Work."* — **không phải `"[object
+  Object]"`**. Dòng `QA_ZZTest_Sourdough_Starter` bên cạnh KHÔNG đổi gì, vẫn hiện nút "Thêm vào
+  glossary"/"Bỏ qua" bình thường — xác nhận không lẫn state giữa 2 dòng hiển thị cùng lúc (đúng
+  điểm brief yêu cầu verify độc lập).
+- Bấm "Ghi đè" → request thành công, "Chờ duyệt" giảm 2 → 1 (chỉ còn dòng không trùng). Verify DB:
+  `suggested_terms.status` của `GANACHE` đổi thành `added`, glossary entry `ganache` được ghi đè
+  đúng `id` cũ.
+- Bấm "Bỏ qua" trên dòng còn lại (`QA_ZZTest_Sourdough_Starter`) → biến mất khỏi "Chờ duyệt" ngay,
+  "Chờ duyệt" về 0 entries. Đây tiện thể verify luôn nhánh "Bỏ qua" (không nằm trong kịch bản gốc
+  nhưng cùng khu vực code, không tốn thêm setup).
+
+**Phát hiện đáng chú ý (KHÔNG phải regression mới, đã được Reviewer ghi nhận non-blocking ở vòng
+2, mục 3 `docs/review-report.md`)**: sau khi bấm "Ghi đè" ở bước trên với ô "Bản dịch VI" trên dòng
+`GANACHE` để TRỐNG (không tự gõ gì), request `promote` gửi `term_vi: null` → glossary entry
+`ganache` bị ghi đè `term_vi`/`notes` thành **`null`** (mất `"(keep)"` / `"Cake & Sugar Work"` cũ),
+KHÔNG có pre-fill như `glossary.js::submitAdd()` đã có (mục 3 ở trên). Đã verify sống lại đúng như
+Reviewer mô tả — xác nhận bug này CÓ THẬT và tái hiện được, không chỉ là suy đoán trên code tĩnh.
+Đã khôi phục lại giá trị đúng ngay sau khi xác nhận (xem mục Dọn dẹp). **Giữ nguyên đánh giá
+non-blocking của Reviewer** (không chặn `ready_for_release` của US-17/US-18, vì đây là hành vi đã
+biết từ trước US-17/US-18 — `bulk_import()` ghi đè im lặng vốn đã là hành vi cũ của luồng promote,
+BR-GLOSS-07 chỉ mới thêm xác nhận, chưa yêu cầu sửa pre-fill ở đúng luồng này) — nhưng QA đề xuất
+xử lý cùng đợt sau vì cùng bản chất rủi ro mất dữ liệu curate thủ công.
+
+**Kết quả: PASS** cho đúng AC US-17/US-18/US-20 tích hợp yêu cầu trong brief; 1 known-issue
+non-blocking (đã có sẵn trong review-report) được xác nhận lại bằng test sống.
+
+### 6. Không phá vỡ chức năng cũ (regression thủ công qua browser + API)
+
+- **Edit inline** (`web/js/glossary.js::startEdit/saveEdit`): dùng chính luồng edit thật để khôi
+  phục `Dutch oven` — click vào ô VI → chuyển sang edit mode (nút "Lưu"/"Hủy" xuất hiện) → sửa giá
+  trị → "Lưu" → API xác nhận `updated_at` đổi, giá trị đúng như đã sửa. **PASS**, đồng thời đây
+  chính là cách QA dùng để cleanup (xem dưới).
+- **Delete** (`DELETE /api/glossary/{id}`): dùng để xoá entry test `QA_ZZTest_NewTerm001` → HTTP
+  200, `{"ok":true}`, entry biến mất khỏi `GET /api/glossary`. **PASS**.
+- **Export Excel**: `GET /api/glossary/export` → HTTP 200, file `.xlsx` hợp lệ (`file` xác nhận
+  `Microsoft Excel 2007+`), 115 dòng dữ liệu tại thời điểm export (khớp `total` DB lúc đó).
+  **PASS**.
+- **Import Excel (preview)**: `POST /api/glossary/import` với chính file vừa export (test read-only,
+  không confirm/ghi DB — tránh phát sinh thêm dữ liệu cần dọn) → parse đúng 115 entries, khớp số
+  dòng đã export, không lỗi. **PASS** (không test nhánh `/import/confirm` ghi DB thật vì không cần
+  thiết để xác nhận parser hoạt động, và giảm rủi ro thao tác nhầm trên dữ liệu thật 114 entry gốc).
+
+### 7. Regression suite
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 553 passed, 1 failed, 852 warnings (118.35s)
+```
+
+1 FAIL: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp đúng baseline đã biết trước (Bug #9, không liên quan US-17/US-18).
+
+**Lệch số so với brief PM ("đúng 531 passed / 1 failed")**: thực đo được **553 passed**, không
+phải 531. Đã kiểm tra nguyên nhân — KHÔNG phải regression của US-17/US-18: `git status` xác nhận
+working tree hiện tại có rất nhiều file khác đang bị sửa song song bởi 1 session khác (đúng cảnh
+báo Reviewer đã nêu ở mục 4 review-report — `job_orchestrator.py`, `pdf2zh_runner.py`,
+`babeldoc_runner.py`, `font_shrink.py`, `rotated_text_overlay.py`, `searchable_pdf.py`,
+`sitecustomize.py`, `config.py`...), kèm nhiều file test MỚI chưa từng có ở thời điểm brief PM viết
+con số 531 (`tests/test_babeldoc_word_wrap.py`, `tests/test_babeldoc_shim_word_wrap_patch.py`,
+`tests/fixtures/babeldoc/bug10_*`) — số test tăng do công việc KHÁC đang song song trong cùng
+working tree, không phải do US-17/US-18 (2 file test glossary/suggested-terms không nằm trong danh
+sách file đổi thêm). Vẫn đúng NGUYÊN 1 lỗi FAIL duy nhất (Bug #9, cùng tên test), không có FAIL mới
+nào phát sinh — kết luận "không regression" cho US-17/US-18 vẫn giữ nguyên, chỉ số tổng khác baseline
+brief vì baseline đó đã cũ so với working tree hiện tại (không phải QA đo sai).
+
+**Kết quả: PASS** (không regression liên quan US-17/US-18; chênh lệch tổng số test đã giải thích rõ
+nguyên nhân, không phải lỗi ẩn).
+
+### 8. Dọn dẹp dữ liệu test
+
+Đã khôi phục về đúng baseline TRƯỚC khi kết thúc:
+- Xoá entry `QA_ZZTest_NewTerm001` (qua `DELETE /api/glossary/{id}`).
+- Khôi phục `ganache`: `term_vi="(keep)"`, `notes="Cake & Sugar Work"` (qua `PUT
+  /api/glossary/{id}`) — sửa lại đúng giá trị đã bị test ở mục 5 (nhánh promote-với-draftVi-rỗng)
+  ghi đè thành `null`.
+- Khôi phục `Dutch oven`: `term_vi="nồi gang"`, `notes="Equipment"` (qua chính luồng Edit inline
+  thật trên UI) — double-check kỹ theo đúng yêu cầu brief PM (Reviewer đã báo có lỡ ghi đè nhầm
+  entry này lúc test qua server `:8000` cũ ở vòng review trước).
+- Xoá 2 row test trong `suggested_terms` (`GANACHE`, `QA_ZZTest_Sourdough_Starter`) sau khi dùng
+  xong.
+
+**Verify cuối cùng bằng API (không chỉ tin đã làm đúng)**:
+```
+GET /api/glossary?limit=1        → total: 114   (khớp baseline gốc)
+GET /api/glossary?q=Dutch oven   → term_vi="nồi gang", notes="Equipment"   (khớp baseline gốc)
+GET /api/glossary?q=ganache      → term_vi="(keep)", notes="Cake & Sugar Work"   (khớp baseline gốc)
+GET /api/glossary/suggested?status=pending → total: 0, entries: []   (sạch, không còn rác)
+```
+Đã `pkill` tắt instance `uvicorn :8002` dùng để test.
+
+### 9. R5-04 / Protocol 5 checklist
+
+`src/api/routes/glossary.py` (US-17/US-18) không gọi external tool/service bên thứ 3 qua
+subprocess/HTTP — thuần SQLAlchemy ORM nội bộ trên SQLite. **External contract verified against
+real source: N/A** — đồng ý với đánh giá Reviewer đã ghi ở review-report.md.
+
+### Bug list
+
+Không phát hiện bug MỚI. 1 known non-blocking issue đã có sẵn trong `docs/review-report.md` (vòng
+2, mục 3) được QA xác nhận lại bằng test sống (mục 5 ở trên) — không phải phát hiện mới, không tạo
+bug entry riêng.
+
+### KẾT LUẬN
+
+**PASS toàn bộ 6 kịch bản trong brief — ready_for_release: CÓ.**
+
+Căn cứ: cả US-17 (thêm mới + BR-GLOSS-07 xác nhận ghi đè + pre-fill), US-18 (search EN/VI/không
+khớp/xóa search), US-20 tích hợp (promote có xác nhận, không lẫn state nhiều dòng, không còn
+`"[object Object]"`), và regression (Edit/Delete/Export/Import Excel) đều verify được bằng E2E thật
+qua browser + API thật (không chỉ đọc code), qua **server sạch tự dựng ở `:8002`** — KHÔNG dùng
+server `:8000` stale như Reviewer đã cảnh báo. Regression suite xanh, đúng NGUYÊN 1 lỗi biết trước
+(Bug #9), không có FAIL mới (chênh lệch số lượng test tổng so với brief đã giải thích rõ — do WIP
+song song của session khác, không phải do US-17/US-18). Dữ liệu test đã dọn sạch, xác nhận lại bằng
+API: `total=114`, `Dutch oven`/`ganache` đúng giá trị gốc, không còn rác trong `suggested_terms`.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-17/US-18 trong
+session này (Reviewer đã APPROVE ở vòng 2/3 Dev↔Reviewer, không liên quan tới giới hạn Dev↔QA).

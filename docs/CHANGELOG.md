@@ -5248,3 +5248,178 @@ passed; `uv run pytest -q` → 521 passed, 1 failed (khớp baseline, fail cũ �
 `test_rotated_text_overlay.py`, không liên quan). Restart dev server thật, mở `/docs` qua Browser
 pane → heading hiện đúng "BB-Translation 1.2.8 OAS 3.1" (khớp `GET /api/version` = `1.2.8`, không
 còn `0.1.0`). File đã sửa: `src/api/main.py`. **CHƯA spawn Reviewer** — chưa được coi là xong.
+
+## US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, search server-side (2026-09-09)
+
+Implement theo Architecture.md §6.16 (đã qua Human Checkpoint 2), theo đúng brief PM — không tự
+suy diễn lại thiết kế.
+
+### US-17 — nút "Thêm từ mới" + BR-GLOSS-07 (xác nhận ghi đè)
+
+- `src/api/routes/glossary.py`:
+  - `GlossaryEntryIn` thêm field `force: bool = False` (opt-in tường minh cho đúng 1 request, cùng
+    kỷ luật `confirm_cost` của cost gate §6.11.4 Lop 2).
+  - `GlossaryConflictInfo` model mới (`entry_id`, `term_en`, `term_vi`, `notes`, `updated_at`).
+  - `create_entry()`: nếu `term_en` trùng (case-insensitive, `GlossaryManager.get_entry()`, đúng
+    BR-GLOSS-02) và `force=False` → raise `HTTPException(409, detail={...})` theo đúng idiom
+    `gate_error_detail()` đã có sẵn ở `src/core/cost_gate.py` (dict `detail=` với 3 key `detail`/
+    `existing`/`requires_confirmation`, KHÔNG ghi gì vào DB). `force=True` → giữ nguyên
+    `bulk_import()` 1 phần tử (BR-GLOSS-03 last-updated-wins) + `logger.info` ghi lại giá trị cũ bị
+    ghi đè. Phạm vi CHỈ áp dụng luồng thêm-1-entry-đơn-lẻ — `bulk_import()` qua
+    `/import/confirm` (Excel hàng loạt) giữ nguyên hành vi ghi đè âm thầm, đúng PRD.
+  - **Lưu ý kỹ thuật khi implement** (không có trong §6.16, tự phát hiện khi code): FastAPI/
+    Starlette KHÔNG chạy `jsonable_encoder` lên `HTTPException.detail` (dùng `json.dumps` thẳng) —
+    nếu truyền thẳng instance `GlossaryConflictInfo` (có field `datetime`) vào `detail=`, request
+    sẽ crash 500 ở tầng serialize thay vì trả 409. Phải gọi `.model_dump(mode="json")` trước khi
+    đưa vào dict `detail=`. Đã verify bằng cách đọc source `fastapi.exception_handlers.
+    http_exception_handler` thật trong `.venv` (fastapi 0.141.1) — không suy đoán.
+  - `promote_suggested_term()` (US-20): wire `force=request.force` xuống `GlossaryEntryIn` khi gọi
+    `create_entry()` — field `force` trên `SuggestedTermPromoteRequest` đã tồn tại sẵn từ US-20
+    nhưng trước đây chưa có tác dụng gì (comment cũ ghi rõ "chờ US-17"). Nếu KHÔNG wire, promote 1
+    suggested term trùng `term_en` với glossary entry có sẵn sẽ vỡ (đổi từ ghi-đè-im-lặng sang
+    HTTP 409 mà không có đường nào cho client xác nhận) — đây là thay đổi ngoài phạm vi liệt kê
+    tường minh trong brief PM (chỉ nói sửa `create_entry()`), làm vì cần thiết để không phá hành
+    vi US-20 hiện có; nêu rõ ở đây để PM/Reviewer biết, không âm thầm mở rộng phạm vi.
+- `web/glossary.html` + `web/js/glossary.js`: nút "+ Thêm từ mới", modal nhập `term_en` (bắt
+  buộc)/`term_vi`/`notes`, gọi `POST /api/glossary`. Khi nhận 409 → hiện `detail.existing` +
+  message xác nhận, nút "Ghi đè" gọi lại với `force=true`. Modal dùng `x-cloak` (rule đã có sẵn ở
+  `web/css/style.css`), không xung đột layout với khu vực "Chờ duyệt" (US-20).
+
+### US-18 — search trong Glossary
+
+- `GET /api/glossary` thêm param `q: str | None`. Filter: `col(GlossaryEntry.term_en).contains(q,
+  autoescape=True) | col(GlossaryEntry.term_vi).contains(q, autoescape=True)` — đúng theo
+  Architecture §6.16.2 đã chốt (KHÔNG dùng `.ilike()`, lý do đã ghi rõ trong Architecture: `.ilike`
+  vô hiệu hoá index qua `lower()` quanh cột mà không giải quyết được hạn chế tiếng Việt có dấu;
+  `autoescape=True` bắt buộc để escape `%`/`_` — thiếu escape thì `q="_"` trả cả bảng).
+  `search_clause` là 1 biến duy nhất áp cho cả `count_statement` lẫn `list_statement` (tránh lệch
+  `total` với số dòng trả về khi thêm filter mới vào query có sẵn 2 statement riêng).
+  `q` AND với `scope` hiện có (không ghi đè nhau).
+- `web/js/glossary.js`: state `searchQuery`, input `@input` debounce 250ms qua `onSearchInput()`
+  (reset `offset = 0` trước khi `load()`), cộng dồn với `scopeFilter` trong cùng query string.
+
+### Test (`tests/integration/test_glossary_api.py`, `tests/integration/test_suggested_terms_api.py`)
+
+R6-02 — assert giá trị cụ thể, không chỉ status code:
+- Thêm entry mới thành công (đã có sẵn từ trước, không đổi).
+- Trùng `term_en` khác hoa/thường không `force` → 409, `detail.existing` đúng entry cũ, GET lại
+  glossary xác nhận `total` và `term_vi`/`notes` KHÔNG đổi (không chỉ tin status code).
+- `force=true` sau 409 → ghi đè thành công, `id` giữ nguyên, `term_vi` cập nhật.
+- Search theo `term_en`, theo `term_vi`, không khớp gì (`total=0`, `entries=[]`), kết hợp `scope`
+  (bao gồm case `scope` không khớp gì → loại hết, chứng minh AND không OR).
+- `q="50%"` và `q="_"` (escape wildcard — nếu thiếu escape, `q="_"` sẽ trả cả bảng).
+- `q=""` (chuỗi rỗng) → trả lại toàn bộ danh sách, không lọc.
+- Sửa test cũ `test_create_single_entry_updates_existing_duplicate` (giả định ghi-đè-im-lặng
+  không còn đúng nữa) thành `test_create_single_entry_force_true_updates_existing_duplicate`
+  (thêm `force: True` vào request).
+- `test_suggested_terms_api.py`: 2 test mới cho việc wire `force` qua `promote()` — trùng term
+  không `force` → 409 + suggested term vẫn `pending` (không bị đánh dấu `added`) + glossary entry
+  cũ không đổi; có `force=true` → ghi đè thành công + đánh dấu `added`.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/api/routes/glossary.py tests/integration/test_glossary_api.py \
+  tests/integration/test_suggested_terms_api.py   → All checks passed!
+uv run pytest -q   → 531 passed, 1 failed (0:01:46)
+```
+
+1 test FAIL: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — khớp đúng baseline Bug #9 đã
+ghi nhận trước đó (không liên quan task này). +10 test so với baseline 521 passed (8 test mới
+trong `test_glossary_api.py` sau khi thay 1 test cũ, 2 test mới trong `test_suggested_terms_api.py`).
+
+### File đã sửa
+
+`src/api/routes/glossary.py`, `web/glossary.html`, `web/js/glossary.js`,
+`tests/integration/test_glossary_api.py`, `tests/integration/test_suggested_terms_api.py`.
+
+Không đụng: `src/core/glossary_manager.py`, `src/core/job_orchestrator.py`,
+`src/postprocess/font_shrink.py`/`rotated_text_overlay.py`, `src/preprocess/searchable_pdf.py`,
+`src/services/babeldoc_runner.py`/`pdf2zh_runner.py`, `src/babeldoc_shim/*`, `CLAUDE.md`,
+`docs/Architecture.md` — đúng theo brief (các file này đang được sửa song song ở session khác).
+
+### Điểm cần PM xác nhận / không rõ khi code (không tự đoán)
+
+1. **Wire `force` xuống `promote_suggested_term()`** (nêu ở mục US-17 trên) — Architecture §6.16
+   không nhắc tới `promote_suggested_term()`, brief PM cũng không liệt kê việc này tường minh.
+   Dev tự quyết định wire vì nếu không làm, hành vi US-20 hiện có (ghi đè im lặng khi promote 1
+   suggested term trùng term) sẽ vỡ ngay khi `create_entry()` đổi sang raise 409. Xin PM xác nhận
+   quyết định này đúng ý, hoặc chỉ định lại nếu muốn xử lý khác.
+2. Message lỗi 409 hiển thị cho user dùng `existing.term_vi or '(chua co)'` khi entry cũ chưa có
+   bản dịch VI (Architecture §6.16.3 ví dụ message không có nhánh này) — tự quyết định hợp lý,
+   không phải suy đoán về contract external tool nên không cần `[CHƯA VERIFY]`, nhưng nêu ra để PM
+   biết đây là 1 lựa chọn UX nhỏ Dev tự thêm.
+3. Ngoài 2 điểm trên, §6.16 mô tả đủ chi tiết (kể cả đoạn code mẫu gần như copy được thẳng) —
+   không phát sinh điểm mập mờ nào khác cần escalate.
+
+### Trạng thái
+
+Implement xong theo đúng US-17 + US-18 + Architecture §6.16. **CHƯA spawn Reviewer** (Protocol 7
+R7-01) — KHÔNG được coi là "xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào
+`docs/review-report.md`.
+
+---
+
+## US-17 + US-18 — vòng sửa 2/3 (Dev↔Reviewer) theo yêu cầu REJECT của Reviewer
+
+Sửa theo `docs/review-report.md` (section "US-17 + US-18" ở trên, mục 6 blocking + mục 7
+non-blocking).
+
+### Blocking (mục 6) — `web/js/suggested-terms.js::promote()` không tiêu thụ được 409/`force`
+
+Copy đúng pattern retry-with-force đã có ở `web/js/glossary.js::submitAdd()`, khác biệt duy nhất:
+`glossaryApp()` có 1 modal đơn (`showAddModal`) nên chỉ cần 1 biến `addConflict`; `suggestedTermsApp()`
+là 1 bảng nhiều dòng nên dùng `promoteConflict = { termId, message, existing } | null` để biết
+đúng dòng nào đang cần xác nhận ghi đè, tránh hiện nhầm confirm cho dòng khác khi có > 1 conflict
+cùng lúc trên trang.
+
+- `promote(term, force = false)` — luôn gửi `force` trong body (trước đây không bao giờ gửi).
+  Khi `res.status === 409`, đọc `body.detail.existing`/`body.detail.detail` (object, đúng shape
+  `GlossaryConflictInfo` mà `create_entry()` trả — KHÔNG còn `alert(body.detail)` render
+  `"[object Object]"` nữa) và lưu vào `promoteConflict` thay vì alert ngay.
+- `cancelPromoteConflict()` — huỷ, xoá `promoteConflict`.
+- `load()`: nếu `promoteConflict` đang trỏ tới 1 `termId` không còn trong trang hiện tại (đã bị
+  promote/dismiss ở nơi khác, hoặc đổi trang), tự xoá — tránh state cũ trỏ tới dòng không tồn tại.
+- `web/glossary.html`: 2 `<template x-if>` trong ô nút của mỗi dòng — nút "Thêm vào
+  glossary"/"Bỏ qua" bình thường khi không có conflict cho dòng đó; khối xác nhận (message + nút
+  "Ghi đè" gọi `promote(term, true)` / "Hủy" gọi `cancelPromoteConflict()`) khi có, cùng style
+  amber-50/amber-200 với modal của `glossaryApp()` để nhất quán UI.
+
+### Non-blocking (mục 7) — pre-fill `term_vi`/`notes` cũ khi "Ghi đè" qua modal `glossary.js`
+
+Sửa luôn (đơn giản, đúng như Reviewer gợi ý):
+- `submitAdd()`: khi nhận 409, nếu `addForm.term_vi`/`notes` đang rỗng (user chưa tự gõ gì) thì
+  pre-fill từ `detail.existing` — giữ nguyên nếu user đã gõ, không ghi đè lựa chọn của user.
+- `glossary.html`: hiện thêm dòng "Ghi chú cũ: ..." trong khối xác nhận (trước đây `notes` cũ
+  hoàn toàn không hiển thị ở đâu) + 1 dòng nhắc "Trường trên đã được điền theo giá trị cũ — sửa
+  lại trước khi ghi đè nếu cần" để user biết form đã tự điền, không phải để trống.
+
+Không đổi backend (`create_entry()`/`bulk_import()`) — đúng như Reviewer xác nhận "không cần đổi
+backend".
+
+### Kết quả chạy thật
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 531 passed, 1 failed (117.10s)
+```
+
+1 test FAIL: `tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle` — khớp đúng baseline Bug #9,
+không liên quan. Không có regression mới so với vòng 1.
+
+### File đã sửa (vòng này)
+
+`web/js/suggested-terms.js`, `web/js/glossary.js`, `web/glossary.html`.
+
+Không đổi file backend/test nào ở vòng này (đúng brief — chỉ frontend). Không đụng
+`glossary_manager.py`, `job_orchestrator.py`, `font_shrink.py`, `rotated_text_overlay.py`,
+`searchable_pdf.py`, `babeldoc_runner.py`, `pdf2zh_runner.py`, `babeldoc_shim/*`, `CLAUDE.md`,
+`Architecture.md` — đang sửa song song ở session khác.
+
+### Trạng thái
+
+**Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng.** Đã sửa cả blocking (mục 6) lẫn non-blocking
+(mục 7). **CHƯA spawn Reviewer lại** (Protocol 7 R7-01) — chưa được coi là "xong", chờ Reviewer
+duyệt lại vòng 2.

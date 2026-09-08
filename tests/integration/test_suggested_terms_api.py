@@ -248,6 +248,62 @@ async def test_promote_creates_glossary_entry_and_marks_added(
 
 
 @pytest.mark.asyncio
+async def test_promote_duplicate_term_without_force_returns_409_and_keeps_pending(
+    db: tuple[TestClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    # BR-GLOSS-07 (Architecture.md 6.16.3) phai propagate qua `promote()` —
+    # PRD US-20 dong 241: "ap dung BR-GLOSS-07 neu lo trung do co job khac
+    # them truoc". `create_entry()` raise HTTPException(409) truc tiep tu
+    # trong 1 loi goi ham Python (khong qua router) nen phai tu propagate len
+    # thanh 409 cua chinh route `promote`.
+    client, session_factory = db
+    client.post("/api/glossary", json={"term_en": "laminated dough", "term_vi": "(keep)"})
+    await _seed_job_and_terms(session_factory, [_term(term_en="Laminated Dough")])
+    listing = client.get("/api/glossary/suggested").json()
+    suggested_id = listing["entries"][0]["id"]
+
+    response = client.post(
+        f"/api/glossary/suggested/{suggested_id}/promote",
+        json={"term_vi": "bot cuon lop moi"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["requires_confirmation"] is True
+
+    # R6-02: assert du lieu that, khong chi status_code — suggested term VAN
+    # con pending (khong bi danh dau "added"), glossary entry cu KHONG doi.
+    still_pending = client.get("/api/glossary/suggested").json()
+    assert len(still_pending["entries"]) == 1
+    glossary_list = client.get("/api/glossary").json()
+    assert glossary_list["total"] == 1
+    assert glossary_list["entries"][0]["term_vi"] == "(keep)"
+
+
+@pytest.mark.asyncio
+async def test_promote_duplicate_term_with_force_overwrites_and_marks_added(
+    db: tuple[TestClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    client, session_factory = db
+    client.post("/api/glossary", json={"term_en": "laminated dough", "term_vi": "(keep)"})
+    await _seed_job_and_terms(session_factory, [_term(term_en="Laminated Dough")])
+    listing = client.get("/api/glossary/suggested").json()
+    suggested_id = listing["entries"][0]["id"]
+
+    response = client.post(
+        f"/api/glossary/suggested/{suggested_id}/promote",
+        json={"term_vi": "bot cuon lop moi", "force": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["term_vi"] == "bot cuon lop moi"
+
+    glossary_list = client.get("/api/glossary").json()
+    assert glossary_list["total"] == 1
+    assert glossary_list["entries"][0]["term_vi"] == "bot cuon lop moi"
+
+    added = client.get("/api/glossary/suggested", params={"status": "added"}).json()
+    assert len(added["entries"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_promote_rejects_non_pending_row(
     db: tuple[TestClient, async_sessionmaker[AsyncSession]],
 ) -> None:

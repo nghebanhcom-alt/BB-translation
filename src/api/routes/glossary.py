@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import tempfile
 from datetime import UTC, datetime
@@ -7,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlmodel import func, select
+from sqlmodel import col, func, select
 
 from src.api.deps import SessionDep
 from src.core.config import get_effective_settings
@@ -21,6 +22,8 @@ from src.utils.excel_utils import (
     export_glossary_to_excel,
     import_glossary_from_excel,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -43,6 +46,18 @@ class GlossaryEntryIn(BaseModel):
     term_en: str
     term_vi: str | None = None
     notes: str | None = None
+    #: BR-GLOSS-07 (Architecture.md 6.16.3) — opt-in tuong minh cho DUNG
+    #: request nay, khong bao gio la default, khong duoc "nho" cho lan sau
+    #: (cung ky luat voi `confirm_cost` cua cost gate 6.11.4 Lop 2).
+    force: bool = False
+
+
+class GlossaryConflictInfo(BaseModel):
+    entry_id: str
+    term_en: str
+    term_vi: str | None
+    notes: str | None
+    updated_at: datetime
 
 
 class GlossaryEntryUpdate(BaseModel):
@@ -131,12 +146,56 @@ async def create_entry(request: GlossaryEntryIn, session: SessionDep) -> Glossar
     trung `term_en`, case-insensitive theo BR-GLOSS-02) voi list 1 phan tu de
     khong nhan doi logic tao-hoac-cap-nhat entry. Scope co dinh "global" —
     UI hien tai (`web/history.html`) chua co lua chon project glossary.
+
+    BR-GLOSS-07 (Architecture.md 6.16.3, US-17): neu `term_en` da trung (case-
+    insensitive, BR-GLOSS-02) voi 1 entry co san va `request.force` la False,
+    KHONG ghi gi vao DB — tra ve 409 kem thong tin entry cu de client hoi xac
+    nhan roi goi lai voi `force=true`. Pham vi CHI ap dung cho luong them-1-
+    entry-don-le nay; `bulk_import()` qua `/import/confirm` (Excel hang loat)
+    giu nguyen hanh vi ghi de am tham (BR-GLOSS-03 last-updated-wins).
     """
     term_en = request.term_en.strip()
     if not term_en:
         raise HTTPException(status_code=400, detail="term_en khong duoc de trong")
 
     manager = GlossaryManager(session)
+    existing = await manager.get_entry(term_en)
+    if existing is not None and not request.force:
+        conflict = GlossaryConflictInfo(
+            entry_id=existing.id,
+            term_en=existing.term_en,
+            term_vi=existing.term_vi,
+            notes=existing.notes,
+            updated_at=existing.updated_at,
+        )
+        raise HTTPException(
+            status_code=409,
+            # Cung 1 idiom voi `gate_error_detail()` (src/core/cost_gate.py) —
+            # `detail=` la 1 dict, FastAPI/Starlette KHONG chay jsonable_encoder
+            # tren no (dung json.dumps thang), nen phai tu convert datetime
+            # sang string bang `.model_dump(mode="json")" thay vi truyen thang
+            # pydantic model.
+            detail={
+                "detail": (
+                    f"Tu '{existing.term_en}' da co trong glossary voi ban dich "
+                    f"'{existing.term_vi or '(chua co)'}'. Ghi de?"
+                ),
+                "existing": conflict.model_dump(mode="json"),
+                "requires_confirmation": True,
+            },
+        )
+
+    if existing is not None and request.force:
+        logger.info(
+            "Glossary entry '%s' bi ghi de (force=true): term_vi cu=%r, notes cu=%r "
+            "-> term_vi moi=%r, notes moi=%r",
+            existing.term_en,
+            existing.term_vi,
+            existing.notes,
+            request.term_vi,
+            request.notes,
+        )
+
     await manager.bulk_import(
         [GlossaryEntryData(term_en=term_en, term_vi=request.term_vi, notes=request.notes)],
         scope="global",
@@ -150,7 +209,11 @@ async def create_entry(request: GlossaryEntryIn, session: SessionDep) -> Glossar
 
 @router.get("", response_model=GlossaryListResponse)
 async def list_entries(
-    session: SessionDep, scope: str | None = None, limit: int = 50, offset: int = 0
+    session: SessionDep,
+    scope: str | None = None,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> GlossaryListResponse:
     count_statement = select(func.count()).select_from(GlossaryEntry)
     list_statement = (
@@ -163,6 +226,19 @@ async def list_entries(
             Glossary, Glossary.id == GlossaryEntry.glossary_id
         ).where(Glossary.scope == scope)
         list_statement = list_statement.where(Glossary.scope == scope)
+
+    # US-18 / BR-GLOSS-08 (Architecture.md 6.16.2): tim trong CA term_en lan
+    # term_vi. `.contains(needle, autoescape=True)` (KHONG `.ilike()` — xem
+    # 6.16.1 G-01/G-02/G-05/G-04) tu dong escape `%`/`_` trong needle.
+    # `search_clause` la 1 bien DUY NHAT dung cho ca count_statement va
+    # list_statement (YA-2.2) de tranh lech `total` voi so dong tra ve.
+    if q is not None and q.strip():
+        needle = q.strip()
+        search_clause = col(GlossaryEntry.term_en).contains(needle, autoescape=True) | col(
+            GlossaryEntry.term_vi
+        ).contains(needle, autoescape=True)
+        count_statement = count_statement.where(search_clause)
+        list_statement = list_statement.where(search_clause)
 
     total_result = await session.exec(count_statement)
     total = total_result.one()
@@ -254,10 +330,11 @@ class SuggestedTermListResponse(BaseModel):
 class SuggestedTermPromoteRequest(BaseModel):
     term_vi: str | None = None
     notes: str | None = None
-    # Danh cho tuong lai khi US-17 implement BR-GLOSS-07 (409 xac nhan ghi
-    # de) tren POST /api/glossary — `create_entry()` hien tai (dong nay)
-    # CHUA ho tro, nen field nay chua co tac dung gi. Xem docstring
-    # `promote_suggested_term()` duoi day.
+    # US-17 da implement BR-GLOSS-07 tren `create_entry()` (409 xac nhan ghi
+    # de khi trung term_en, case-insensitive). Field nay duoc truyen thang
+    # (`force=request.force`) vao `GlossaryEntryIn` o `promote_suggested_term()`
+    # ben duoi de client co the ghi de co-y-thuc khi promote 1 suggested term
+    # trung voi entry da co (vd. do 1 job khac them truoc — PRD US-20 dong 241).
     force: bool = False
 
 
@@ -357,14 +434,15 @@ async def promote_suggested_term(
     suggested_id: str, request: SuggestedTermPromoteRequest, session: SessionDep
 ) -> GlossaryEntryOut:
     """Architecture.md 6.18.4: phai di qua DUNG logic `POST /api/glossary`
-    (goi thang `create_entry()` cung module, khong viet lai). Spec goc mo ta
-    hanh vi nay "co ap BR-GLOSS-07" (409 khi trung + force=false) — nhung
-    `create_entry()`/`GlossaryManager.bulk_import()` HIEN TAI (2026-09-08)
-    CHUA implement BR-GLOSS-07 (van la ghi-de-am-tham last-updated-wins,
-    US-17 rieng chua lam). Theo dung brief cua task nay: KHONG tu them
-    confirm-overwrite o day (ngoai pham vi US-20) — chi goi API hien co
-    nguyen trang, `request.force` duoc nhan de tuong thich nguoc khi US-17
-    len nhung CHUA co tac dung gi.
+    (goi thang `create_entry()` cung module, khong viet lai). Tu khi US-17
+    implement BR-GLOSS-07 (409 khi trung `term_en` + `force=false`),
+    `create_entry()` co the raise `HTTPException(409, ...)` — vi day la loi
+    goi ham Python binh thuong (khong qua router), exception nay tu propagate
+    len thanh response 409 CUA CHINH endpoint promote nay (FastAPI bat
+    `HTTPException` o bat ky do sau trong call stack cua 1 route handler),
+    dung y PRD US-20 dong 241 "ap dung BR-GLOSS-07 neu lo trung do co job
+    khac them truoc". `request.force` duoc truyen thang xuong de client co
+    the ghi de co-y-thuc.
     """
     row = await session.get(SuggestedTerm, suggested_id)
     if row is None:
@@ -375,7 +453,12 @@ async def promote_suggested_term(
         )
 
     entry_out = await create_entry(
-        GlossaryEntryIn(term_en=row.term_en, term_vi=request.term_vi, notes=request.notes),
+        GlossaryEntryIn(
+            term_en=row.term_en,
+            term_vi=request.term_vi,
+            notes=request.notes,
+            force=request.force,
+        ),
         session,
     )
 

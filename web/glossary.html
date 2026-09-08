@@ -25,11 +25,58 @@
     <div class="flex justify-between items-center mb-4">
       <h1 class="text-xl font-bold">Quản lý Glossary</h1>
       <div class="flex gap-2">
+        <button class="bg-amber-600 text-white rounded px-3 py-1.5 text-sm hover:bg-amber-700" @click="openAddModal()">
+          + Thêm từ mới
+        </button>
         <label class="border rounded px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-100">
           Import Excel
           <input type="file" class="hidden" accept=".xlsx,.xlsm" @change="previewImport($event.target.files[0])" />
         </label>
         <a href="/api/glossary/export" class="border rounded px-3 py-1.5 text-sm hover:bg-gray-100">Export Excel</a>
+      </div>
+    </div>
+
+    <!-- US-17 (Architecture.md 6.16.3): modal them 1 tu moi + xac nhan ghi de BR-GLOSS-07 -->
+    <div x-show="showAddModal" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @keydown.escape.window="closeAddModal()">
+      <div class="bg-white rounded p-5 w-full max-w-md shadow-lg" @click.outside="closeAddModal()">
+        <h2 class="font-bold text-lg mb-3">Thêm từ mới</h2>
+
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Tiếng Anh (bắt buộc)</label>
+            <input x-model="addForm.term_en" class="border rounded px-2 py-1 w-full" placeholder="vd. ganache" />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Tiếng Việt</label>
+            <input x-model="addForm.term_vi" class="border rounded px-2 py-1 w-full" placeholder="(để trống = keep nguyên gốc)" />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Ghi chú</label>
+            <input x-model="addForm.notes" class="border rounded px-2 py-1 w-full" />
+          </div>
+        </div>
+
+        <!-- BR-GLOSS-07: xac nhan ghi de khi term_en da trung -->
+        <div x-show="addConflict" class="bg-amber-50 border border-amber-200 rounded p-3 mt-3 text-sm">
+          <p x-text="addError"></p>
+          <p x-show="addConflict?.notes" class="text-gray-500 text-xs mt-1">
+            Ghi chú cũ: <span x-text="addConflict?.notes"></span>
+          </p>
+          <p class="text-xs text-gray-500 mt-1">Trường trên đã được điền theo giá trị cũ — sửa lại trước khi ghi đè nếu cần.</p>
+          <div class="flex gap-2 mt-2">
+            <button class="bg-amber-600 text-white px-3 py-1 rounded text-xs" :disabled="addSubmitting" @click="submitAdd(true)">Ghi đè</button>
+            <button class="border px-3 py-1 rounded text-xs" @click="addConflict = null; addError = null">Hủy</button>
+          </div>
+        </div>
+
+        <p x-show="addError && !addConflict" class="text-red-600 text-sm mt-3" x-text="addError"></p>
+
+        <div class="flex justify-end gap-2 mt-4" x-show="!addConflict">
+          <button class="border px-3 py-1.5 rounded text-sm" @click="closeAddModal()">Hủy</button>
+          <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm disabled:opacity-40" :disabled="addSubmitting" @click="submitAdd(false)">
+            <span x-text="addSubmitting ? 'Đang lưu...' : 'Lưu'"></span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -118,8 +165,26 @@
                   </td>
                   <td class="p-2 text-gray-500" x-text="term.occurrence_count"></td>
                   <td class="p-2 text-right whitespace-nowrap">
-                    <button class="text-amber-700 text-xs mr-2" @click="promote(term)">Thêm vào glossary</button>
-                    <button class="text-gray-500 text-xs" @click="dismiss(term)">Bỏ qua</button>
+                    <!-- BR-GLOSS-07: xac nhan ghi de khi promote trung term_en co san,
+                         cung pattern voi modal "Ghi de" cua glossary.js::submitAdd() -->
+                    <template x-if="!(promoteConflict && promoteConflict.termId === term.id)">
+                      <div>
+                        <button class="text-amber-700 text-xs mr-2" @click="promote(term)">Thêm vào glossary</button>
+                        <button class="text-gray-500 text-xs" @click="dismiss(term)">Bỏ qua</button>
+                      </div>
+                    </template>
+                    <template x-if="promoteConflict && promoteConflict.termId === term.id">
+                      <div class="bg-amber-50 border border-amber-200 rounded p-2 text-left text-xs max-w-xs ml-auto">
+                        <p x-text="promoteConflict.message"></p>
+                        <p x-show="promoteConflict.existing?.notes" class="text-gray-500 mt-1">
+                          Ghi chú cũ: <span x-text="promoteConflict.existing?.notes"></span>
+                        </p>
+                        <div class="flex gap-2 mt-2">
+                          <button class="bg-amber-600 text-white px-2 py-0.5 rounded" @click="promote(term, true)">Ghi đè</button>
+                          <button class="border px-2 py-0.5 rounded" @click="cancelPromoteConflict()">Hủy</button>
+                        </div>
+                      </div>
+                    </template>
                   </td>
                 </tr>
               </template>
@@ -140,6 +205,13 @@
 
     <!-- Filter -->
     <div class="flex gap-2 mb-3 items-center">
+      <!-- US-18 (Architecture.md 6.16.2): search server-side theo term_en/term_vi, cong don voi scopeFilter -->
+      <input
+        type="search"
+        x-model="searchQuery"
+        @input="onSearchInput()"
+        placeholder="Tìm theo tiếng Anh hoặc tiếng Việt..."
+        class="border rounded px-2 py-1 text-sm flex-1 max-w-xs" />
       <select x-model="scopeFilter" @change="offset = 0; load()" class="border rounded px-2 py-1 text-sm">
         <option value="">Tất cả scope</option>
         <option value="global">Global</option>

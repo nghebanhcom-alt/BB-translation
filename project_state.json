@@ -20,8 +20,8 @@
     "test_report": "docs/test-report.md"
   },
   "iterations": {
-    "dev_reviewer": 11,
-    "dev_qa": 10,
+    "dev_reviewer": 13,
+    "dev_qa": 11,
     "by_increment": {
       "increment_1_scaffolding": {
         "dev_reviewer": 2,
@@ -122,6 +122,11 @@
         "dev_reviewer": 1,
         "dev_qa": 1,
         "status": "approved_qa_pass_e2e_browser_verified"
+      },
+      "us17_us18_glossary_add_search": {
+        "dev_reviewer": 2,
+        "dev_qa": 1,
+        "status": "approved_qa_ready_for_release_reject_then_approve_round2"
       }
     }
   },
@@ -149,6 +154,7 @@
     "epub_sample2_2026_09_08: User cung cap file EPUB thu 2 THAT khac hoan toan file cu (khong phai duplicate - lan dau user gui lai dung file cu qua MD5 xac nhan trung, PM da bao va xin lai). File moi: 'Bread: A Global History', luu tai data/uploads/sample2_Bread-A-Global-History.epub, 8.3MB, 19 file HTML/XHTML rieng biet (opf: OEBPS/content.opf) - khac han file cu 35-trang chi co 1 tai lieu gom 97.2% noi dung. Se dung de tang N=1->N=2 cho so lieu nen tang thiet ke US-22 (Architecture.md 6.20.11 muc 7, Z1) khi toi luot #6 EPUB theo thu tu uu tien 7-4-5-1-2-3-6 da chot. Chua xu ly gi them, chi luu san.",
     "us15_markdown_parse_only_DONE_2026_09_08 (#7, uu tien 1/7): Dev (2 luot: nhanh chinh + parse_method override) -> Reviewer APPROVE (doc code that, tu chay lai regression doc lap, xac nhan dung 8 diem trong tam ke ca bug tinh vi ocr_confidence khong duoc ren theo parse_method) -> QA ready_for_release=YES (E2E that qua server that + MinerU that, khong mock, phat hien va tu xu ly 1 van de moi: server dang chay luc bat dau QA la code CU stale, da restart truoc khi test that). 7/7 kich ban PASS. 2 bug non-blocking moi: QA-15-1 (UI text 'dich' cho job parse_only, sua cung luot Dev sau); QA-15-2 (job parse_only ket vinh vien o status parsing neu server crash giua chung - de xuat tach task backlog rieng, khong chan release, co the la lo hong kien truc chung co tu truoc US-15). Nhanh EPUB cua US-15 VAN CHUA lam (phu thuoc US-22, dung thu tu uu tien 7-4-5-1-2-3-6). CHUA COMMIT - dang cho PM hoi user.",
     "us20_cac_tu_moi_DONE_2026_09_08 (#4, uu tien 2/7): Dev (term_extractor.py, glossary_matching.py, term_extraction_service.py, bang moi suggested_terms, API GET/POST /api/glossary/suggested, UI khu vuc 'Cho duyet' trong tab Glossary) -> Reviewer APPROVE (tu chay lai thuat toan tren fixture MinerU that xac nhan het loi ligature 'avor' va nhieu HTML, xac nhan KHONG con tran cung 40 nao trai quyet dinh user) -> QA ready_for_release=YES (E2E that: 723 suggestion tu 1 job that, loc dung glossary trung 'baker's percentage', khong tran cung, promote/dismiss dung BR-TERM-04 per-job, LIVE-VERIFY LLM that cho suggest-translation qua DeepSeek that $0.00466598 cho 3 tu - dong gap Protocol 5 R5-03 Reviewer da neu). 7/7 kich ban PASS, 0 bug moi. DB baseline sau don dep: 9 job/114 glossary/0 suggested_terms. CHUA COMMIT - dang xu ly cung luc voi viec tach rieng noi dung Bug #9 (dang chay song song o session khac, da chen vao ca 3 file CHANGELOG/review-report/test-report VA project_state.json notes) khoi commit cua US-20 bang git plumbing (hash-object + update-index), giu nguyen noi dung Bug #9 trong working tree cho session kia tu commit rieng.",
-    "us21_hien_version_DONE_2026_09_09 (#5, uu tien 3/7): Dev (2 luot: UI nav bar 4 trang qua web/js/version.js dung chung + fix S21-1 sua FastAPI(version='0.1.0' hardcode) sang dung _read_app_version()) -> Reviewer APPROVE (tu mo browser that xac nhan '1.2.8' hien dung ca nav bar lan /docs Swagger) -> QA PASS/ready_for_release (bo sung verify 2 trang Reviewer chua test tay la history.html/settings.html, tu chay edge-case fetch loi that bang ghi de window.fetch, xac nhan khong throw/khong chan trang). 0 bug. Tinh nang nho nhat trong 7 muc, khong co gi dang chu y ve rui ro. CHUA COMMIT."
+    "us21_hien_version_DONE_2026_09_09 (#5, uu tien 3/7): Dev (2 luot: UI nav bar 4 trang qua web/js/version.js dung chung + fix S21-1 sua FastAPI(version='0.1.0' hardcode) sang dung _read_app_version()) -> Reviewer APPROVE (tu mo browser that xac nhan '1.2.8' hien dung ca nav bar lan /docs Swagger) -> QA PASS/ready_for_release (bo sung verify 2 trang Reviewer chua test tay la history.html/settings.html, tu chay edge-case fetch loi that bang ghi de window.fetch, xac nhan khong throw/khong chan trang). 0 bug. Tinh nang nho nhat trong 7 muc, khong co gi dang chu y ve rui ro. CHUA COMMIT.",
+    "us17_us18_glossary_add_search_DONE_2026_09_09 (#1+#2, uu tien 4-5/7): Dev (2 luot, vong 2 sau REJECT) -> Reviewer REJECT vong 1 (blocking: suggested-terms.js::promote() chua cap nhat theo BR-GLOSS-07 moi, hien '[object Object]' vo nghia khi trung glossary) -> Dev sua vong 2 (dung pattern retry-with-force co san o glossary.js, cong them non-blocking pre-fill term_vi/notes cu khi ghi de) -> Reviewer APPROVE vong 2/3 (tu phat hien server dev :8000 bi stale khong nap code moi, tu dung instance rieng :8001 de verify dung) -> QA PASS/ready_for_release=YES (tu dung instance :8002 rieng do cung phat hien :8000 stale, verify du 6 kich ban qua browser that, don dep dung khoi phuc 2 entry lo ghi de nham luc Reviewer test qua server cu). Circuit breaker Dev-Reviewer dong o 2/3. BR-GLOSS-07 (409+force khi trung term_en) va BR-GLOSS-08 (search ca EN/VI) deu hoat dong dung. 1 non-blocking con lai: promote tu 'Cho duyet' voi truong dich de trong luc ghi de se null hoa term_vi/notes cu (cung ban chat voi non-blocking da biet o glossary.js, chua duoc yeu cau sua o luong nay) - khong chan release. CHUA COMMIT."
   ]
 }

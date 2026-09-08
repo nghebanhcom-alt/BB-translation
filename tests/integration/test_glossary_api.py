@@ -158,15 +158,156 @@ def test_create_single_entry_rejects_blank_term_en(client: TestClient) -> None:
     assert response.status_code == 400
 
 
-def test_create_single_entry_updates_existing_duplicate(client: TestClient) -> None:
-    # BR-GLOSS-03 "last-updated-wins": tao lai voi cung term_en (case-insensitive,
-    # BR-GLOSS-02) phai CAP NHAT entry cu, khong tao ban trung.
+def test_create_single_entry_force_true_updates_existing_duplicate(client: TestClient) -> None:
+    # BR-GLOSS-03 "last-updated-wins" van dung KHI da xac nhan ghi de
+    # (force=true, BR-GLOSS-07): tao lai voi cung term_en (case-insensitive,
+    # BR-GLOSS-02) + force=true phai CAP NHAT entry cu, khong tao ban trung.
     first = client.post("/api/glossary", json={"term_en": "ganache", "term_vi": "(keep)"})
     assert first.status_code == 201
 
-    second = client.post("/api/glossary", json={"term_en": "Ganache", "term_vi": "sot ganache"})
+    second = client.post(
+        "/api/glossary",
+        json={"term_en": "Ganache", "term_vi": "sot ganache", "force": True},
+    )
     assert second.status_code == 201
     assert second.json()["id"] == first.json()["id"]
     assert second.json()["term_vi"] == "sot ganache"
 
     assert client.get("/api/glossary").json()["total"] == 1
+
+
+# === US-17 / BR-GLOSS-07 (Architecture.md 6.16.3) — xac nhan ghi de khi trung ===
+
+
+def test_create_single_entry_duplicate_without_force_returns_409_with_existing_entry(
+    client: TestClient,
+) -> None:
+    first = client.post(
+        "/api/glossary", json={"term_en": "ganache", "term_vi": "(keep)", "notes": "chocolate"}
+    )
+    assert first.status_code == 201
+    existing_id = first.json()["id"]
+
+    # Khac hoa/thuong (BR-GLOSS-02 case-insensitive match).
+    response = client.post(
+        "/api/glossary", json={"term_en": "GANACHE", "term_vi": "sot ganache moi"}
+    )
+    assert response.status_code == 409
+    body = response.json()
+    detail = body["detail"]
+    assert detail["requires_confirmation"] is True
+    assert detail["existing"]["entry_id"] == existing_id
+    assert detail["existing"]["term_en"] == "ganache"
+    assert detail["existing"]["term_vi"] == "(keep)"
+    assert detail["existing"]["notes"] == "chocolate"
+
+    # R6-02: assert gia tri cu the, khong chi status_code — dong nghiep du
+    # lieu that (SELECT lai qua API), khong duoc ghi gi vao DB tren nhanh 409.
+    list_body = client.get("/api/glossary").json()
+    assert list_body["total"] == 1
+    unchanged = list_body["entries"][0]
+    assert unchanged["id"] == existing_id
+    assert unchanged["term_vi"] == "(keep)"
+    assert unchanged["notes"] == "chocolate"
+
+
+def test_create_single_entry_duplicate_with_force_overwrites(client: TestClient) -> None:
+    first = client.post("/api/glossary", json={"term_en": "ganache", "term_vi": "(keep)"})
+    assert first.status_code == 201
+    existing_id = first.json()["id"]
+
+    response = client.post(
+        "/api/glossary",
+        json={"term_en": "GANACHE", "term_vi": "sot ganache moi", "force": True},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] == existing_id
+    assert body["term_vi"] == "sot ganache moi"
+
+    list_body = client.get("/api/glossary").json()
+    assert list_body["total"] == 1
+    assert list_body["entries"][0]["term_vi"] == "sot ganache moi"
+
+
+# === US-18 / BR-GLOSS-08 (Architecture.md 6.16.2) — GET /api/glossary?q= ===
+
+
+def _seed_search_entries(client: TestClient) -> None:
+    client.post("/api/glossary", json={"term_en": "Ganache", "term_vi": "sot ganache"})
+    client.post("/api/glossary", json={"term_en": "Buttercream", "term_vi": "kem bo"})
+    client.post("/api/glossary", json={"term_en": "Proofing", "term_vi": "u bot"})
+
+
+def test_search_matches_term_en(client: TestClient) -> None:
+    _seed_search_entries(client)
+    response = client.get("/api/glossary", params={"q": "ganache"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["entries"]) == body["total"]
+    assert body["entries"][0]["term_en"] == "Ganache"
+
+
+def test_search_matches_term_vi(client: TestClient) -> None:
+    _seed_search_entries(client)
+    response = client.get("/api/glossary", params={"q": "kem bo"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["entries"]) == body["total"]
+    assert body["entries"][0]["term_en"] == "Buttercream"
+
+
+def test_search_no_match_returns_empty_total_zero(client: TestClient) -> None:
+    _seed_search_entries(client)
+    response = client.get("/api/glossary", params={"q": "does-not-exist-anywhere"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 0
+    assert body["entries"] == []
+
+
+def test_search_combines_with_scope_filter(client: TestClient) -> None:
+    _seed_search_entries(client)
+    response = client.get("/api/glossary", params={"q": "ganache", "scope": "global"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert len(body["entries"]) == 1
+
+    # scope khac "global" (khong ton tai trong data seed) phai loai het,
+    # chung minh q AND scope, khong ghi de len nhau (EC-18.3).
+    response_other_scope = client.get(
+        "/api/glossary", params={"q": "ganache", "scope": "some-project-scope"}
+    )
+    assert response_other_scope.status_code == 200
+    assert response_other_scope.json()["total"] == 0
+
+
+def test_search_escapes_percent_and_underscore_wildcards(client: TestClient) -> None:
+    # Architecture.md 6.16.1 G-04/G-05: `_`/`%` la wildcard trong LIKE thuong,
+    # `.contains(autoescape=True)` phai tu escape chung. Neu thieu escape,
+    # q="_" se tra ca bang (regression y het bug da do o Architecture.md).
+    client.post("/api/glossary", json={"term_en": "50% hydration", "term_vi": "(keep)"})
+    client.post("/api/glossary", json={"term_en": "sour_dough", "term_vi": "(keep)"})
+    client.post("/api/glossary", json={"term_en": "buttercream", "term_vi": "kem bo"})
+
+    percent_response = client.get("/api/glossary", params={"q": "50%"})
+    assert percent_response.status_code == 200
+    percent_body = percent_response.json()
+    assert percent_body["total"] == 1
+    assert percent_body["entries"][0]["term_en"] == "50% hydration"
+
+    underscore_response = client.get("/api/glossary", params={"q": "_"})
+    assert underscore_response.status_code == 200
+    underscore_body = underscore_response.json()
+    assert underscore_body["total"] == 1
+    assert underscore_body["entries"][0]["term_en"] == "sour_dough"
+
+
+def test_search_empty_string_returns_full_list(client: TestClient) -> None:
+    _seed_search_entries(client)
+    response = client.get("/api/glossary", params={"q": ""})
+    assert response.status_code == 200
+    assert response.json()["total"] == 3

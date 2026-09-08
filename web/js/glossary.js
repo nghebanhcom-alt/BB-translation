@@ -7,6 +7,10 @@ function glossaryApp() {
     entries: [],
     total: 0,
     scopeFilter: "",
+    // US-18 (Architecture.md 6.16.2): search server-side, cong don voi
+    // scopeFilter. searchDebounceTimer dung de debounce ~250ms (YA-2.3).
+    searchQuery: "",
+    searchDebounceTimer: null,
     // Nhiem vu 5: phan trang UI that (thay vi hardcode limit=200/offset=0),
     // theo dung pattern history.js da co (limit/offset + nut Truoc/Sau).
     limit: 25,
@@ -14,6 +18,13 @@ function glossaryApp() {
     importPreview: null,
     editingId: null,
     editDraft: { term_vi: "", notes: "" },
+    // US-17 (Architecture.md 6.16.3): modal "Them tu moi" + xac nhan ghi de
+    // (BR-GLOSS-07).
+    showAddModal: false,
+    addForm: { term_en: "", term_vi: "", notes: "" },
+    addError: null,
+    addConflict: null,
+    addSubmitting: false,
 
     async load() {
       const params = new URLSearchParams({
@@ -21,10 +32,21 @@ function glossaryApp() {
         offset: String(this.offset),
       });
       if (this.scopeFilter) params.set("scope", this.scopeFilter);
+      if (this.searchQuery.trim()) params.set("q", this.searchQuery.trim());
       const res = await fetch(`/api/glossary?${params}`);
       const body = await res.json();
       this.entries = body.entries;
       this.total = body.total;
+    },
+
+    onSearchInput() {
+      // AC-18 dong 3 / YA-2.3: moi thay doi searchQuery phai reset offset=0
+      // truoc khi load(), debounce ~250ms de khong goi API tren tung phim go.
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = setTimeout(() => {
+        this.offset = 0;
+        this.load();
+      }, 250);
     },
 
     changePageSize(newLimit) {
@@ -92,6 +114,68 @@ function glossaryApp() {
       const res = await fetch(`/api/glossary/${entry.id}`, { method: "DELETE" });
       if (res.ok) {
         await this.load();
+      }
+    },
+
+    openAddModal() {
+      this.addForm = { term_en: "", term_vi: "", notes: "" };
+      this.addError = null;
+      this.addConflict = null;
+      this.showAddModal = true;
+    },
+
+    closeAddModal() {
+      this.showAddModal = false;
+      this.addError = null;
+      this.addConflict = null;
+    },
+
+    async submitAdd(force) {
+      const termEn = this.addForm.term_en.trim();
+      if (!termEn) {
+        this.addError = "term_en không được để trống";
+        return;
+      }
+      this.addSubmitting = true;
+      this.addError = null;
+      try {
+        const res = await fetch("/api/glossary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            term_en: termEn,
+            term_vi: this.addForm.term_vi.trim() || null,
+            notes: this.addForm.notes.trim() || null,
+            force: !!force,
+          }),
+        });
+        if (res.status === 201) {
+          this.showAddModal = false;
+          this.addConflict = null;
+          await this.load();
+          return;
+        }
+        if (res.status === 409) {
+          // BR-GLOSS-07: server tra ve entry cu trong `detail.existing` de
+          // hoi xac nhan ghi de (xem create_entry() trong glossary.py).
+          const body = await res.json().catch(() => ({}));
+          const detail = body.detail || {};
+          this.addConflict = detail.existing || null;
+          this.addError = detail.detail || "Từ này đã có trong glossary.";
+          // Reviewer round 1 non-blocking (docs/review-report.md muc 7): neu
+          // user chua tu go term_vi/notes, pre-fill tu entry cu de "Ghi de"
+          // khong am tham xoa mat du lieu da curate (bulk_import() thay toan
+          // bo field, khong patch tung field) — giu nguyen neu user da go.
+          if (this.addConflict) {
+            if (!this.addForm.term_vi.trim()) this.addForm.term_vi = this.addConflict.term_vi || "";
+            if (!this.addForm.notes.trim()) this.addForm.notes = this.addConflict.notes || "";
+          }
+          return;
+        }
+        const body = await res.json().catch(() => ({}));
+        this.addError = body.detail || "Không thêm được từ mới";
+      } finally {
+        this.addSubmitting = false;
       }
     },
   };
