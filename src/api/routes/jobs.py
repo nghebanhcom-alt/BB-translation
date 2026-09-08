@@ -19,7 +19,7 @@ matches a job outliving the HTTP call that started it.
 import asyncio
 import logging
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -152,6 +152,15 @@ class JobDetail(BaseModel):
     # JobOrchestrator thuc su dat status="cancelled" sau chunk hien tai —
     # frontend dung field nay de hien "Dang dung...".
     cancel_requested: bool = False
+    # US-19 (Architecture.md 6.17.3) — backward-compatible, tat ca optional
+    # (cung ky luat voi ocr_confidence/cancel_requested o tren).
+    total_pages: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None
+    # BR-HIST-01: `finished_at - created_at`, CHI khac None khi job da o mot
+    # trong 4 trang thai KET THUC (completed/failed/cancelled/cost_capped) —
+    # job dang chay khong duoc hien con so nay (BR-HIST-02).
 
 
 class JobListResponse(BaseModel):
@@ -221,11 +230,29 @@ class EstimateRequest(BaseModel):
     glossary_project_id: str | None = None
 
 
+#: US-19 (Architecture.md 6.17.3): trang thai KET THUC — chi o day
+#: `duration_seconds` moi duoc tinh (BR-HIST-02, job dang chay hien "-").
+_TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "cost_capped"}
+
+
 def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
     # 1 nguon su that voi WebSocket `ocr_warning` (src/core/job_orchestrator.py
     # `_emit_ocr_warning_if_low`) — ca hai goi cung `build_ocr_warning()`.
     ocr_warning = build_ocr_warning(
         job.ocr_confidence, job.ocr_dropped_spans, ocr_confidence_threshold
+    )
+    # Architecture.md 6.17.3: BR-HIST-01 mocs bat dau la `created_at`, KHONG
+    # `started_at` (started_at gan SAU OCR, se bo sot doan cho dai nhat cua
+    # job pdf_scan). Fallback `job.finished_at or job.completed_at` cho hang
+    # cu truoc migration nay (finished_at NULL); ca hai NULL + status terminal
+    # -> duration_seconds=None, KHONG doan bang `updated_at` (6.17.1 H-02/H-03
+    # — updated_at co the dung o lan chunk thanh cong CUOI CUNG, khong phai
+    # luc job that bai that).
+    finished_at = job.finished_at or job.completed_at
+    duration_seconds = (
+        (finished_at - job.created_at).total_seconds()
+        if finished_at is not None and job.status in _TERMINAL_JOB_STATUSES
+        else None
     )
     return JobDetail(
         id=job.id,
@@ -250,6 +277,10 @@ def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
         ocr_dropped_spans=job.ocr_dropped_spans,
         ocr_warning=ocr_warning,
         cancel_requested=job.cancel_requested,
+        total_pages=job.total_pages,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        duration_seconds=duration_seconds,
     )
 
 
@@ -454,6 +485,10 @@ async def _run_job_background(job_id: str) -> None:
             if job is not None:
                 job.status = "failed"
                 job.error_message = str(exc)
+                # US-19/BR-HIST-01/02, Architecture.md 6.17.2 — diem de quen
+                # nhat (khong nam trong job_orchestrator.py) vi day la nhanh
+                # crash MA run_job() TU NO khong kip bat.
+                job.finished_at = datetime.now(UTC)
                 session.add(job)
                 await session.commit()
             return

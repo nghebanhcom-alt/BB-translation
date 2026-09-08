@@ -48,6 +48,8 @@
           <th class="p-2 text-left">Loại</th>
           <th class="p-2 text-left">Ngày tạo</th>
           <th class="p-2 text-left">Trạng thái</th>
+          <th class="p-2 text-left">Số trang</th>
+          <th class="p-2 text-left">Thời gian dịch</th>
           <th class="p-2 text-left">Chi phí</th>
           <th class="p-2"></th>
         </tr>
@@ -64,38 +66,20 @@
                 Dừng để bảo vệ chi phí — không phải lỗi, không phải bạn hủy. Tăng trần trong Cài đặt rồi bấm Tiếp tục.
               </p>
             </td>
+            <td class="p-2 text-gray-500" x-text="formatTotalPages(job)"></td>
+            <td class="p-2 text-gray-500" x-text="formatDuration(job)"></td>
             <td class="p-2 text-gray-500" x-text="formatCost(job)"></td>
             <td class="p-2 text-right whitespace-nowrap">
               <a x-show="job.status === 'completed'" :href="`/api/jobs/${job.id}/download`" class="text-amber-700 underline text-xs mr-2"
                  x-text="job.job_type === 'parse_only' ? 'Tải Markdown' : 'Tải VI'"></a>
               <a x-show="job.status === 'completed' && job.job_type !== 'parse_only' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs mr-2">Tải song ngữ</a>
-              <button @click="openAddGlossary(job)" class="text-amber-700 underline text-xs mr-2">+ Glossary</button>
               <button @click="deleteJob(job)" class="text-red-600 underline text-xs">Xoá</button>
             </td>
           </tr>
         </template>
-        <tr x-show="jobs.length === 0"><td colspan="6" class="p-4 text-center text-gray-400">Chưa có job nào</td></tr>
+        <tr x-show="jobs.length === 0"><td colspan="8" class="p-4 text-center text-gray-400">Chưa có job nào</td></tr>
       </tbody>
     </table>
-
-    <!-- US moi (2026-09-06): them 1 cap thuat ngu vao glossary truc tiep tu
-         lich su dich, khong can sang trang Glossary rieng. -->
-    <div x-show="addGlossaryJob" class="fixed inset-0 bg-black/30 flex items-center justify-center z-10" @click.self="addGlossaryJob = null">
-      <div class="bg-white rounded-lg p-4 w-80">
-        <h3 class="font-semibold mb-2 text-sm">
-          Thêm thuật ngữ (từ "<span x-text="addGlossaryJob?.filename"></span>")
-        </h3>
-        <label class="block text-xs text-gray-500 mb-1">Thuật ngữ (EN)</label>
-        <input x-model="glossaryDraft.term_en" class="border rounded px-2 py-1 w-full mb-2 text-sm" />
-        <label class="block text-xs text-gray-500 mb-1">Bản dịch (VI)</label>
-        <input x-model="glossaryDraft.term_vi" class="border rounded px-2 py-1 w-full mb-3 text-sm" />
-        <p x-show="glossaryError" x-text="glossaryError" class="text-xs text-red-600 mb-2"></p>
-        <div class="flex gap-2 justify-end">
-          <button class="border px-3 py-1.5 rounded text-sm" @click="addGlossaryJob = null">Hủy</button>
-          <button class="bg-amber-600 text-white px-3 py-1.5 rounded text-sm" @click="saveGlossaryTerm()">Lưu</button>
-        </div>
-      </div>
-    </div>
 
     <div class="flex justify-between items-center mt-3 text-sm text-gray-500">
       <span x-text="`${total} job`"></span>

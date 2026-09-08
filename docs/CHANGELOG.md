@@ -5423,3 +5423,122 @@ Không đổi file backend/test nào ở vòng này (đúng brief — chỉ fron
 **Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng.** Đã sửa cả blocking (mục 6) lẫn non-blocking
 (mục 7). **CHƯA spawn Reviewer lại** (Protocol 7 R7-01) — chưa được coi là "xong", chờ Reviewer
 duyệt lại vòng 2.
+
+## US-19 — Lịch sử: thời gian dịch + số trang, bỏ nút "+ Glossary" trùng chức năng (Dev, 2026-09-09)
+
+Theo đúng thiết kế đã chốt ở Architecture.md §6.17 (Human Checkpoint 2 đã qua) — không tự suy diễn
+lại. §6.17.1 xác định `Job.completed_at`/`Job.updated_at` KHÔNG dùng được làm mốc kết thúc chung
+(chỉ gán khi thành công; `updated_at` có thể đứng yên bằng `created_at` nếu job fail ở chunk đầu —
+"thời gian dịch ~ 0 giây" cho job đã chạy rất lâu rồi mới chết) → cần cột `Job.finished_at` mới.
+
+### 1. Schema
+
+- `src/models/job.py`: thêm `Job.finished_at: datetime | None` — mốc KẾT THÚC chung cho MỌI trạng
+  thái cuối (completed/failed/cancelled/cost_capped), tách biệt với `completed_at` (giữ nguyên
+  nghĩa "hoàn tất THÀNH CÔNG", vẫn là dữ liệu nghiệp vụ của duplicate-detection AC-12.2 + hậu tố
+  tên file tải về — không nạp thêm nghĩa vào cột này).
+- `src/models/database.py`: thêm `("jobs", "finished_at", "DATETIME")` vào `_NEW_NULLABLE_COLUMNS`
+  — dùng đúng cơ chế `_add_missing_columns()` idempotent đã có (như `chunk_size_used`/
+  `parse_method`), **KHÔNG xoá/tạo lại DB** — DB dev hiện có 9 job/114 glossary entry thật được
+  giữ nguyên.
+
+### 2. `job.finished_at = datetime.now(UTC)` tại các điểm thoát
+
+Architecture.md §6.17.2 liệt kê 7 điểm ("Step 4/7/Lớp 3/cancel/Step 8/Step 10" trong `run_job()` +
+`_run_job_background()`'s last-resort guard). Đọc kỹ toàn bộ `job_orchestrator.py`/`jobs.py` phát
+hiện danh sách đó **thiếu 5 điểm thoát** khác cũng chuyển job sang trạng thái cuối — đã bổ sung
+đủ cả 12 điểm (không tự ý đổi thiết kế, chỉ hoàn thiện đúng theo Ý ĐỊNH đã nêu rõ trong chính
+docstring `Job.finished_at`: "MỌI trạng thái cuối"):
+
+1. `run_job()` Step 4 — `UnsupportedForPdfPipelineError` → failed
+2. `run_job()` Step 7 — chunk exception → failed
+3. `run_job()` Lớp 3 — cost_capped
+4. `run_job()` — graceful cancel
+5. `run_job()` Step 8 — merge except → failed
+6. `run_job()` Step 10 — completed (= `job.completed_at`)
+7. `run_parse_only()` — `MinerUCancelledError` → cancelled
+8. `run_parse_only()` — except → failed
+9. `_run_parse_only_pipeline()` — completed (= `job.completed_at`)
+10. **[không có trong §6.17.2]** `BatchOrchestrator._run_one()` — nhánh `already_capped` (job chưa
+    từng chạm `run_job()` vì batch đã vượt trần TRƯỚC lượt của nó)
+11. **[không có trong §6.17.2]** `BatchOrchestrator._run_one()` — `except Exception` (BR-BATCH-01
+    failure isolation: `run_job()` tự nó raise ra ngoài, khác với nhánh nội bộ #2/#5 đã tự bắt)
+12. `jobs.py::_run_job_background()` — last-resort guard (có trong §6.17.2, xác nhận đúng)
+
+### 3. Tầng response (`src/api/routes/jobs.py`)
+
+- `JobDetail` thêm `total_pages`, `started_at`, `finished_at`, `duration_seconds` — tất cả
+  optional/default `None` (cùng kỷ luật backward-compatible với `ocr_confidence`/
+  `cancel_requested`).
+- `_to_detail()`: `duration_seconds = (finished_at or completed_at) - created_at`, CHỈ tính khi có
+  mốc kết thúc VÀ `status` thuộc `{completed, failed, cancelled, cost_capped}` — job đang chạy trả
+  `None` (BR-HIST-02). BR-HIST-01: mốc bắt đầu là `created_at`, KHÔNG `started_at` (giữ đúng quyết
+  định PM/Tech Lead — `started_at` gán SAU OCR nên bỏ sót đoạn chờ dài nhất của job pdf_scan).
+  EC-19.1: hàng cũ (`finished_at` NULL) fallback `completed_at`; cả hai NULL → `None`, KHÔNG đoán
+  bằng `updated_at`.
+
+### 4. Frontend (`web/history.html`, `web/js/history.js`)
+
+- Thêm 2 cột "Số trang" (`formatTotalPages()`, "-" khi NULL) và "Thời gian dịch"
+  (`formatDuration()`, format "X phút Y giây" từ `duration_seconds` giây float do backend trả,
+  "-" khi job đang chạy).
+- Bỏ nút "+ Glossary" khỏi mỗi dòng (BR-HIST-03) + toàn bộ code JS liên quan (`openAddGlossary()`,
+  `saveGlossaryTerm()`, state `addGlossaryJob`/`glossaryDraft`/`glossaryError`) và modal HTML tương
+  ứng — đã verify không còn nơi nào khác trong `web/`/tests dùng các symbol này trước khi xoá. Nút
+  "Xoá job" giữ nguyên (BA đã đính chính: user không nói về nút này).
+
+### 5. Test (Protocol 6 R6-02 — assert giá trị cụ thể, không chỉ "đã chạy")
+
+- `tests/test_database_finished_at_migration.py` (2 test): migration additive trên bảng `jobs`
+  "legacy" mô phỏng DB dev thật trước khi có cột này, giữ nguyên dữ liệu hàng cũ; idempotent no-op
+  trên schema mới.
+- `tests/test_jobs_route_to_detail.py` (9 test): `_to_detail()` thuần — `total_pages` truyền
+  thẳng (kể cả NULL), `duration_seconds` dùng `created_at`/`finished_at` KHÔNG dùng `started_at`,
+  job đang chạy → `duration_seconds=None` + response vẫn hợp lệ, fallback `completed_at` cho hàng
+  cũ, và trường hợp cả `finished_at` lẫn `completed_at` đều NULL → `None` (không đoán qua
+  `updated_at`).
+- `tests/integration/test_job_history_finished_at.py` (12 test) + `tests/integration/
+  test_run_job_background_crash_guard.py` (1 test): chạy qua `JobOrchestrator`/`BatchOrchestrator`/
+  `_run_job_background()` thật — completed (translate + parse_only), fail ở CHUNK ĐẦU TIÊN (đúng
+  kịch bản 6.17.1 H-03), cancelled (translate + parse_only), cost_capped, cả 2 nhánh
+  `BatchOrchestrator`, và last-resort guard trong `jobs.py`. Mỗi test assert `finished_at is not
+  None`/`>= created_at`, không chỉ trạng thái "đã chạy xong".
+
+### Kết quả chạy thật
+
+```
+uv run ruff check <files sửa>          → All checks passed!
+uv run ruff format --check <files sửa> → 8 files already formatted
+uv run pytest tests/test_database_finished_at_migration.py tests/test_jobs_route_to_detail.py \
+  tests/integration/test_job_history_finished_at.py \
+  tests/integration/test_run_job_background_crash_guard.py -q  → 22 passed
+uv run pytest -q (toàn bộ suite)       → 575 passed, 1 failed (91-95s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— PRE-EXISTING, thuộc `src/postprocess/rotated_text_overlay.py` đang sửa song song ở session khác
+(Bug #9/#10, đã tự xác nhận pre-existing bằng `git stash` ở entry Bug #10 phía trên) — KHÔNG đụng
+tới file này trong task US-19. Không có fail mới nào do thay đổi của task này.
+
+### File đã sửa/thêm
+
+Sửa: `src/models/job.py`, `src/models/database.py`, `src/core/job_orchestrator.py`,
+`src/api/routes/jobs.py`, `web/history.html`, `web/js/history.js`.
+
+Mới: `tests/test_database_finished_at_migration.py`, `tests/test_jobs_route_to_detail.py`,
+`tests/integration/test_job_history_finished_at.py`,
+`tests/integration/test_run_job_background_crash_guard.py`.
+
+Không đụng: `src/core/glossary_manager.py`, `src/postprocess/font_shrink.py`/
+`rotated_text_overlay.py`, `src/preprocess/searchable_pdf.py`, `src/services/babeldoc_runner.py`/
+`pdf2zh_runner.py`, `src/babeldoc_shim/*`, `src/core/config.py` — đang sửa song song ở session
+khác (Bug #9/#10).
+
+### Trạng thái
+
+**CHƯA spawn Reviewer** (Protocol 7 R7-01) — báo cáo lại PM, chờ Reviewer thật trước khi coi task
+này là "xong". Điểm cần PM/Tech Lead xác nhận: mục 2 ở trên bổ sung 5 điểm thoát `finished_at`
+KHÔNG có trong danh sách tường minh của Architecture.md §6.17.2 (BatchOrchestrator ×2 + đã đếm lại
+đúng 7 điểm còn lại) — đúng theo Ý ĐỊNH thiết kế ("MỌI trạng thái cuối") nhưng CHƯA qua review
+tường minh cho phần mở rộng này.
+`babeldoc_word_wrap_fix_enabled=True` lên production thật.

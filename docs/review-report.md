@@ -5904,3 +5904,177 @@ chưa từng được yêu cầu sửa, không chặn APPROVE, nên xử lý ở
 3.**
 
 ---
+
+## US-19 — Lịch sử: thời gian dịch + số trang, bỏ nút "+ Glossary" trùng chức năng (Reviewer, 2026-09-09)
+
+Review theo Protocol 7 R7-01, bám PRD US-19/BR-HIST-01..03 (§4.10) + Architecture.md §6.17 + CHANGELOG
+entry Dev 2026-09-09. Đọc toàn bộ `src/models/job.py`, `src/models/database.py`,
+`src/core/job_orchestrator.py` (1634 dòng, đọc hết chứ không chỉ đoạn Dev nêu), `src/api/routes/jobs.py`
+(`JobDetail`, `_to_detail()`, `retry_job()`, `_run_job_background()`), `web/history.html`,
+`web/js/history.js`, và cả 4 file test mới (22 test).
+
+### 1. Trọng tâm: 12 điểm gán `finished_at` — tự đếm lại độc lập
+
+Grep toàn `src/` cho mọi assignment trạng thái cuối của `Job` (`.status = "failed"/"completed"/
+"cancelled"/"cost_capped"`, loại trừ `chunk.status`/`batch.status` — 2 model khác):
+
+```
+src/api/routes/jobs.py:486        job.status = "failed"          (_run_job_background guard)
+src/core/job_orchestrator.py:356  job.status = "failed"          (Step 4)
+src/core/job_orchestrator.py:468  job.status = "failed"          (Step 7 chunk exception)
+src/core/job_orchestrator.py:505  job.status = "cost_capped"     (Lớp 3)
+src/core/job_orchestrator.py:539  job.status = "cancelled"       (graceful cancel)
+src/core/job_orchestrator.py:651  job.status = "failed"          (Step 8 merge except)
+src/core/job_orchestrator.py:679  job.status = "completed"       (Step 10)
+src/core/job_orchestrator.py:783  job.status = "cancelled"       (run_parse_only, MinerUCancelledError)
+src/core/job_orchestrator.py:796  job.status = "failed"          (run_parse_only, except)
+src/core/job_orchestrator.py:917  job.status = "completed"       (_run_parse_only_pipeline)
+src/core/job_orchestrator.py:1565 capped_job.status = "cost_capped"  (BatchOrchestrator, already_capped)
+src/core/job_orchestrator.py:1589 failed_job.status = "failed"      (BatchOrchestrator, except Exception)
+```
+
+**Đúng 12/12, không thiếu điểm thứ 13 nào.** Mỗi điểm đều có `job.finished_at = datetime.now(UTC)`
+(hoặc `= job.completed_at` cho 2 nhánh completed) đi kèm ngay sau, đã đọc từng đoạn code xác nhận —
+không chỉ tin comment `# US-19/BR-HIST-01/02` mà Dev gắn ở mỗi chỗ.
+
+### 2. Đánh giá việc mở rộng 12 vs 7 điểm — CHẤP NHẬN, không phải tự ý đổi kiến trúc
+
+Architecture.md §6.17.2 liệt kê tường minh 7 điểm: 6 điểm trong `run_job()` (Step 4/7/Lớp 3/cancel/
+Step 8/Step 10) + 1 điểm last-resort guard ở `jobs.py`. 5 điểm Dev bổ sung (`run_parse_only()` ×2,
+`_run_parse_only_pipeline()` ×1, `BatchOrchestrator._run_one()` ×2) **không hề mâu thuẫn** với §6.17.2
+— chính docstring của §6.17.2 (và của `Job.finished_at` trong `src/models/job.py:90-97`) nói rõ:
+"mốc KẾT THÚC của job ở **MỌI** trạng thái cuối". PRD BR-HIST-01/02 cũng không giới hạn phạm vi theo
+`job_type` — 1 job `parse_only` completed/failed/cancelled hiển thị trong tab Lịch sử (khi
+`jobTypeFilter=parse_only` hoặc "Tất cả") vẫn phải tuân BR-HIST-01 y hệt job `translate`. §6.17.2 chỉ
+liệt kê các điểm thoát của `run_job()` (nhánh `job_type=translate`) — bỏ sót nhánh `run_parse_only()`
+và 2 điểm của `BatchOrchestrator` là **khoảng trống liệt kê của chính Architecture.md**, không phải
+Dev tự sáng tác thêm hành vi mới. Đây đúng là trường hợp "hoàn thiện đúng tinh thần thiết kế đã công
+bố", không phải vi phạm Protocol 5/6.
+
+**Note bắt buộc cho Tech Lead** (không blocking APPROVE): Architecture.md §6.17.2 cần cập nhật bảng
+liệt kê từ 7 lên đủ 12 điểm (thêm `run_parse_only()`/`_run_parse_only_pipeline()` + `BatchOrchestrator.
+_run_one()` ×2), để bất kỳ điểm thoát trạng thái cuối nào thêm sau này (nếu có nhánh job mới) có 1
+checklist đầy đủ để đối chiếu — hiện tại người đọc chỉ §6.17.2 mà không đọc chính code sẽ tưởng lầm
+chỉ cần 7 điểm.
+
+### 3. `BatchOrchestrator._run_one()` — xác nhận không phá BR-BATCH-01 / resumable
+
+Đọc kỹ `run_batch()`/`_run_one()` (dòng 1519-1628): mỗi job chạy trong `job_session` riêng lấy từ
+`session_factory()` (không dùng chung `db_session` của `run_batch()`), bọc trong
+`asyncio.Semaphore(max_concurrent_files)` — đúng docstring lớp đã ghi "AsyncSession không an toàn
+dùng đồng thời". Nhánh `already_capped` và nhánh `except Exception` mỗi nhánh chỉ fetch + commit
+đúng 1 `Job` row của chính nó (`capped_job`/`failed_job`), không đụng tới job khác đang chạy song song
+— gán `finished_at` ở đây chỉ thêm 1 field write vào đúng transaction đã cô lập sẵn, không mở rộng
+phạm vi ghi. `except Exception` bọc `run_job()` giữ nguyên comment gốc `# BR-BATCH-01 failure
+isolation` — xác nhận `finished_at` không làm thay đổi shape của cơ chế cô lập lỗi này (job khác trong
+batch không hề biết job này raise). Không đụng tới `Chunk`/`chunk_size_used`/logic resumable nào —
+`finished_at` là field độc lập, không được đọc lại ở bất kỳ nhánh quyết định resume nào trong
+`run_job()`. **Không có vi phạm BR-BATCH-01.**
+
+### 4. `JobDetail`/`_to_detail()` — đúng công thức, đúng BR-HIST-01
+
+`_TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "cost_capped"}` (jobs.py:235) và
+`_to_detail()` (dòng 238-284): `finished_at = job.finished_at or job.completed_at`,
+`duration_seconds` chỉ tính khi `finished_at is not None and job.status in _TERMINAL_JOB_STATUSES`,
+mốc bắt đầu là `job.created_at` — **đúng BR-HIST-01, không dùng `started_at`**. Test
+`test_completed_job_duration_uses_created_at_not_started_at` verify đúng bằng cách gài `started_at`
+lệch 5 phút so với `created_at` và assert `duration_seconds != (finished_at - started_at)`.
+
+### 5. Job đang chạy — không lỗi arithmetic, kể cả trường hợp `finished_at` "lệch" sau retry
+
+Response luôn hợp lệ khi `finished_at=None` vì công thức được gate bởi `job.status in
+_TERMINAL_JOB_STATUSES` trước khi trừ — không có `None - datetime` nào chạy tới nhánh trừ. Test
+`test_in_progress_job_has_no_duration_and_no_finished_at` cover đủ 5 status
+(`queued/chunking/translating/parsing/merging`).
+
+**Phát hiện thêm (tự đọc, không nằm trong checklist gốc)**: `retry_job()` (`jobs.py:677-730`) reset
+`status="queued"`, `error_message=None`, `cancel_requested=False` nhưng **không** reset
+`job.finished_at` (cũng không reset `completed_at` — hành vi pre-existing, không phải regression của
+task này). Một job `failed` cũ có `finished_at` từ lần chạy trước, được retry, trong lúc đang
+`queued`/`translating` vẫn giữ `finished_at` cũ trong DB. Không phải bug ảnh hưởng API/UI hiện tại —
+`_to_detail()` gate bằng `status in _TERMINAL_JOB_STATUSES` nên response vẫn đúng (không hiện duration
+trong lúc job chưa xong), và mọi điểm thoát terminal ghi đè `finished_at` vô điều kiện (không phải
+"chỉ set nếu None") nên khi job kết thúc lại, giá trị cũ bị thay đúng. Ghi nhận **non-blocking**: nếu
+sau này có consumer đọc thẳng `Job.finished_at` từ DB (script phân tích, migration khác) mà không qua
+`_to_detail()`'s status gate, giá trị "lệch" từ lần chạy trước có thể gây hiểu lầm. Không chặn APPROVE.
+
+### 6. Bỏ nút "+ Glossary" — sạch, đã grep xác nhận
+
+`grep -rn "openAddGlossary|saveGlossaryTerm|addGlossaryJob|glossaryDraft|glossaryError" web/ tests/`
+→ 0 kết quả. `web/history.html` chỉ còn 1 tham chiếu "Glossary" — link nav sang `/glossary.html`
+(không liên quan action đã xoá). Nút "Xoá job" giữ nguyên đúng theo BA đính chính. `colspan="8"` khớp
+đúng 8 cột hiện có (đã thêm 2 cột Số trang/Thời gian dịch).
+
+### 7. Migration `finished_at` — đúng cơ chế, không mất dữ liệu
+
+`_NEW_NULLABLE_COLUMNS` (`database.py:70`) thêm `("jobs", "finished_at", "DATETIME")`, dùng đúng
+`_add_missing_columns()` (`ALTER TABLE ADD COLUMN`, idempotent, guard `PRAGMA table_info` trước khi
+ALTER) — không có `DROP TABLE`/`create_all` phá dữ liệu cũ nào trong đường đi này.
+`test_migration_adds_finished_at_column_and_preserves_existing_row` dựng bảng `jobs` "legacy" giả lập
+đúng schema trước migration (không có cột `finished_at`), insert 1 hàng thật, chạy `_add_missing_
+columns()`, rồi assert hàng cũ (`filename`/`status`/`completed_at`) còn nguyên VÀ cột mới tồn tại =
+NULL. `test_migration_is_idempotent_noop_on_fresh_schema` verify chạy 2 lần không lỗi. Đạt.
+
+### 8. 22 test — đọc kỹ, xác nhận R6-02 + đóng gap QA-15-2
+
+- `tests/test_database_finished_at_migration.py` (2 test): đã đọc, khớp mục 7.
+- `tests/test_jobs_route_to_detail.py` (9 test): pure-function test cho `_to_detail()`, assert giá trị
+  cụ thể (`duration_seconds == 20*60`, không chỉ `is not None`) cho cả 4 trạng thái terminal +
+  EC-19.1 (hàng cũ fallback `completed_at`, và cả `finished_at`/`completed_at` NULL → `None`, không
+  đoán bằng `updated_at`) + job đang chạy (5 status, response hợp lệ).
+- `tests/integration/test_job_history_finished_at.py` (12 test): chạy thật qua `JobOrchestrator`/
+  `BatchOrchestrator`. **Đúng trọng tâm**:
+  `test_job_failing_on_very_first_chunk_still_gets_finished_at` dùng `fail_on_call_index=0` để job
+  chết ở chunk 0 TRƯỚC KHI `ProgressTracker.update()` chạy lần nào — đúng y hệt kịch bản 6.17.1 H-03
+  (gap QA-15-2 cũ: `updated_at` đứng yên = `created_at` khi job fail sớm) — assert `finished_at is not
+  None` và `>= created_at`. Đây chính là gap phải đóng, đã đóng đúng bằng test, không chỉ bằng code.
+  Cả 2 nhánh `BatchOrchestrator` (`already_capped`, `except Exception` từ `run_job()` raise thật —
+  không phải nhánh nội bộ tự bắt) đều có test riêng.
+- `tests/integration/test_run_job_background_crash_guard.py` (1 test): mock `JobOrchestrator` raise
+  `RuntimeError` để buộc `_run_job_background()`'s last-resort guard chạy thật, assert `finished_at`
+  được set — đúng điểm Architecture.md gọi là "dễ quên nhất".
+
+Không có test nào chỉ `assert_called()`/kiểm tra "đã chạy xong" mà thiếu assert giá trị cụ thể — đạt
+Protocol 6 R6-02.
+
+### 9. R5-04 checklist
+
+N/A — thay đổi không chạm tới bất kỳ external tool/service wrapper nào (`*_runner.py`/`*_provider.py`
+không nằm trong "Không đụng" của Dev CHANGELOG đều đúng thật, đã tự grep xác nhận không file nào trong
+đó bị sửa). Toàn bộ thay đổi là internal state (timestamp field) + response layer + frontend thuần.
+
+### 10. Regression — tự chạy lại, so khớp
+
+```
+uv run ruff check <8 file sửa/thêm>     → All checks passed!
+uv run pytest -q (toàn bộ suite)        → 575 passed, 1 failed (94.57s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp CHÍNH XÁC số lượng và tên test Dev đã báo cáo (pre-existing, thuộc session Bug #9/#10 song
+song, không đụng `rotated_text_overlay.py` trong task này). **Không có fail mới do US-19.**
+
+## Kết luận US-19
+
+**APPROVE.**
+
+- 12/12 điểm gán `finished_at` tự đếm lại khớp đúng Dev báo cáo, không thiếu điểm thứ 13.
+- Việc mở rộng 12 vs 7 điểm so với Architecture.md §6.17.2 là **hợp lý, đúng tinh thần thiết kế** ("MỌI
+  trạng thái cuối"), không phải vi phạm tự ý đổi kiến trúc — nhưng **Tech Lead cần cập nhật §6.17.2**
+  cho khớp thực tế (note không blocking).
+- `BatchOrchestrator._run_one()`: xác nhận không phá BR-BATCH-01 failure isolation, không đụng logic
+  resumable/retry.
+- `_to_detail()`: đúng công thức BR-HIST-01 (dùng `created_at`, không `started_at`), đúng BR-HIST-02
+  (gate theo `_TERMINAL_JOB_STATUSES`), job đang chạy không lỗi arithmetic.
+- Dọn "+ Glossary": sạch, đã grep xác nhận không còn dead code.
+- Migration: đúng cơ chế additive, có test bảo vệ.
+- 22 test: đạt R6-02, đóng đúng gap QA-15-2 (job fail sớm ở chunk đầu).
+- Regression: 0 fail mới.
+
+**Non-blocking suggestion**: `retry_job()` không reset `Job.finished_at` (và `completed_at`, hành vi
+pre-existing) khi requeue — vô hại với API/UI hiện tại nhờ status-gate trong `_to_detail()`, nhưng nên
+lưu ý cho bất kỳ consumer tương lai nào đọc thẳng cột này từ DB.
+
+**Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng cho US-19.**
+
+---

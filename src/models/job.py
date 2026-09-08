@@ -86,5 +86,14 @@ class Job(SQLModel, table=True):
     # chung job do retry.
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
+    finished_at: datetime | None = Field(default=None)
+    # Architecture.md 6.17.2 (US-19, BR-HIST-01/02) — moc KET THUC cua job o
+    # MOI trang thai cuoi (completed | failed | cancelled | cost_capped),
+    # rieng biet voi `completed_at` (chi nghia "hoan tat THANH CONG", van la
+    # du lieu nghiep vu cua duplicate-detection AC-12.2 + hau to ten file tai
+    # ve — KHONG duoc nap them nghia moi vao no, dung loai "troi ngu nghia
+    # im lang" Protocol 6 ton tai de chan). Cot moi, them qua
+    # `_NEW_NULLABLE_COLUMNS` (src/models/database.py) — GIU DU LIEU DB hien
+    # co, khong xoa/tao lai.
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

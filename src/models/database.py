@@ -65,6 +65,9 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     # Architecture.md 6.21.3 (US-15 parse_method override): 'txt'/'ocr' da
     # resolve, khong bao gio 'auto' — xem src/models/job.py.
     ("jobs", "parse_method", "TEXT"),
+    # Architecture.md 6.17.2 (US-19, BR-HIST-01/02): moc KET THUC chung cho
+    # MOI trang thai cuoi cua job — xem docstring day du o src/models/job.py.
+    ("jobs", "finished_at", "DATETIME"),
 ]
 
 

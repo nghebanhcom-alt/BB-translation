@@ -10,10 +10,6 @@ function historyApp() {
     // US-15 S15-7/BR-PARSE-04: mac dinh chi hien job dich, khong tron voi
     // job parse_only vao "translation history".
     jobTypeFilter: "translate",
-    // US moi (2026-09-06): "+ Glossary" tren tung job — modal them 1 entry.
-    addGlossaryJob: null,
-    glossaryDraft: { term_en: "", term_vi: "" },
-    glossaryError: "",
 
     statusBadgeClass(status) {
       const map = {
@@ -44,30 +40,23 @@ function historyApp() {
       return "-";
     },
 
-    // a. Mo modal them 1 cap thuat ngu vao glossary, goi tu hang cua 1 job.
-    openAddGlossary(job) {
-      this.addGlossaryJob = job;
-      this.glossaryDraft = { term_en: "", term_vi: "" };
-      this.glossaryError = "";
+    // US-19 (Architecture.md 6.17.3, BR-HIST-02): "total_pages" la NULL cho
+    // EPUB (khong ap dung o dot nay) va cho job cu truoc migration nay.
+    formatTotalPages(job) {
+      return job.total_pages != null ? String(job.total_pages) : "-";
     },
 
-    async saveGlossaryTerm() {
-      const term_en = this.glossaryDraft.term_en.trim();
-      if (!term_en) {
-        this.glossaryError = "Thuật ngữ (EN) không được để trống.";
-        return;
-      }
-      const res = await fetch("/api/glossary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ term_en, term_vi: this.glossaryDraft.term_vi || null }),
-      });
-      if (res.ok) {
-        this.addGlossaryJob = null;
-      } else {
-        const body = await res.json().catch(() => ({}));
-        this.glossaryError = body.detail || "Không thêm được thuật ngữ.";
-      }
+    // US-19 (Architecture.md 6.17.3, EC-19.2): API luon tra so giay float —
+    // format "X phut Y giay" o day, KHONG dua backend format san.
+    // BR-HIST-02: job dang chay (duration_seconds == null) hien "-", khong
+    // dem tien (tranh phai refresh dinh ky).
+    formatDuration(job) {
+      if (job.duration_seconds == null) return "-";
+      const totalSeconds = Math.round(job.duration_seconds);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      if (minutes === 0) return `${seconds} giây`;
+      return `${minutes} phút ${seconds} giây`;
     },
 
     async load() {

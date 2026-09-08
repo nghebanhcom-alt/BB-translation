@@ -2733,3 +2733,175 @@ API: `total=114`, `Dutch oven`/`ganache` đúng giá trị gốc, không còn r�
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-17/US-18 trong
 session này (Reviewer đã APPROVE ở vòng 2/3 Dev↔Reviewer, không liên quan tới giới hạn Dev↔QA).
+
+## US-19 — Lịch sử: thời gian dịch + số trang, bỏ nút "+ Glossary" (QA, 2026-09-09)
+
+Test theo brief PM, bám PRD US-19/BR-HIST-01..03 (§4.10), Architecture.md §6.17, và
+`docs/review-report.md` section "US-19 ... (Reviewer, 2026-09-09)" (APPROVE, 12/12 điểm gán
+`finished_at` đã tự đếm lại khớp). Toàn bộ E2E thật, không mock — dựng **2 instance server sạch tự
+build từ đúng working tree hiện tại**: `:8003` (API key thật, dùng cho các kịch bản cần dịch thành
+công) và `:8004` (khởi động với `DEEPSEEK_API_KEY` cố ý sai, dùng cho kịch bản job fail) — **không**
+dùng server `:8000` đang chạy sẵn (đúng cảnh báo lặp lại trong brief). Cả 2 trỏ chung
+`data/bb_translation.db` (không đổi `DATABASE_URL`).
+
+### 0. Phát hiện phụ ngoài phạm vi US-19 (ghi nhận, không phải bug chặn US-19)
+
+Dự định dùng "trỏ sai API key" để giả lập job fail sớm (đúng gợi ý trong brief) — thử trên `:8004`
+với `DEEPSEEK_API_KEY` giả với **2 file khác nhau** (kể cả 1 file nội dung ngẫu nhiên chưa từng dịch
+trước đó, loại trừ khả năng cache): cả 2 job đều báo **`status=completed`**, và mở lại
+`translated_vi.pdf` bằng `pymupdf` xác nhận **nội dung y hệt bản gốc tiếng Anh, không có bản dịch
+nào cả** — không có `error_message`, không có `ocr_warning`, không có dấu hiệu nào trong response
+API cho biết dịch đã thất bại. Nghi ngờ babeldoc có cơ chế fallback "giữ nguyên đoạn gốc" khi 1
+đoạn dịch lỗi (401 auth) thay vì raise exception, và job vẫn báo "completed" trót lọt — **silent
+failure dạng khác** (không giống Bug #5 nối sai artifact, đây là 1 provider call lỗi bị nuốt hoàn
+toàn ở tầng dưới). Đây là hiện tượng liên quan tầng dịch (babeldoc/pdf2zh_runner), KHÔNG liên quan
+gì tới `finished_at`/`duration_seconds` của US-19 — job vẫn có `finished_at`/`duration_seconds` tính
+đúng theo BR-HIST-01/02 dù nội dung dịch rỗng. Không đưa vào bug list chặn US-19; ghi lại đây để PM
+cân nhắc mở 1 task riêng điều tra (không thuộc phạm vi brief này, chưa đủ thời gian điều tra sâu
+root cause trong lượt QA US-19 này).
+
+Chuyển sang cách khác để test kịch bản fail sớm: **corrupt file thật trên đĩa ngay trước khi
+background task kịp đọc** (ghi đè file PDF hợp lệ bằng nội dung không phải PDF, ngay sau khi
+`POST /api/jobs` trả 202 — chạy song song `curl` + `sleep 0.15` + ghi đè, đã xác nhận job vẫn được
+tạo trước khi corrupt kịp xảy ra) — cách này buộc `_process_chunk()` raise exception thật ở chunk 0
+(pymupdf không mở được file), đúng lỗi thật chứ không phải mock.
+
+### 1. Golden path (job dịch thật hoàn tất)
+
+- Job `7c9cf093` (`lcb_p39_loyal.pdf`, 1 trang, provider deepseek, `:8003`, API key thật): hoàn tất
+  `status=completed`. `created_at=19:33:58.707132`, `finished_at=19:34:23.605472` (mốc mới, KHÔNG
+  fallback), API trả `duration_seconds=24.89834` — khớp chính xác `finished_at - created_at`, khác
+  với `started_at - created_at` (=24.864571s) — xác nhận đúng BR-HIST-01 dùng `created_at`, không
+  dùng `started_at`, và dùng cột `finished_at` mới (không phải fallback `completed_at`).
+- `total_pages=1` hiển thị đúng.
+- Thêm 1 bằng chứng phụ từ dữ liệu baseline có sẵn (9 job gốc, tạo trước US-19, `finished_at=NULL`
+  trong DB): API vẫn trả `duration_seconds` hợp lệ qua fallback `completed_at` — verify trực tiếp
+  bằng SQL cho job `f3c22ddc`: `completed_at - created_at = 2834.79s`, khớp đúng
+  `duration_seconds` API trả — xác nhận EC-19.1 (hàng cũ thiếu `finished_at`) hoạt động đúng.
+
+**PASS.**
+
+### 2. Job fail ở chunk đầu tiên (đóng gap QA-15-2)
+
+Job `2f1da868` (`:8004`, file bị corrupt ngay trước khi background task đọc): `status=failed`,
+`error_message="Chunk 0 that bai: Failed to open file ... as type pdf."` — xác nhận đúng lỗi thật ở
+chunk 0, TRƯỚC KHI `ProgressTracker.update()` từng chạy lần nào (bằng chứng: `updated_at ==
+created_at` gần như tuyệt đối, chỉ lệch 83 micro-giây do ORM ghi 2 field cùng lúc lúc tạo job, không
+lệch theo hướng có tiến độ nào chạy). Đây đúng kịch bản H-03/QA-15-2 cũ (`updated_at` đứng yên =
+`created_at` khi job chết ở chunk 0). Kết quả: **`finished_at=19:38:23.010127`, `duration_seconds=
+8.333974`** — có mốc kết thúc hợp lý (8.3 giây, không phải "0 giây"/trống). **Gap QA-15-2 đã đóng
+thật bằng live E2E**, không chỉ tin unit test.
+
+**PASS.**
+
+### 3. Job cancelled giữa chừng
+
+Job `47b31f88` (`6page_source.pdf`, 6 trang, `:8003`): gọi `POST /api/jobs/{id}/cancel` lúc đang
+`status=translating`, job dừng ở `status=cancelled` sau đó. `finished_at=19:39:21.1245` (đúng thời
+điểm cancel có hiệu lực), `duration_seconds=21.913639` khớp `finished_at - created_at`.
+
+**PASS.**
+
+### 4. Job đang chạy (translating) — không hiện thời gian dịch, không lỗi
+
+- Verify qua API (job `43237d03` lúc `status=translating`): `finished_at=null`,
+  `duration_seconds=null` — không có `None - datetime` nào chạy (đúng cách gate bằng
+  `status in _TERMINAL_JOB_STATUSES` Reviewer đã xác nhận đọc code).
+- Verify qua UI thật (`web/history.html`, không chỉ API): dòng job đang `translating` hiện cột "Thời
+  gian dịch" = **"-"**, không rỗng/không lỗi. `read_console_messages` xác nhận **0 lỗi console**.
+
+**PASS.**
+
+### 5. `parse_only` (US-15) và `cost_capped`
+
+- **`parse_only`**: job `c21caf01` (`lcb_p39_loyal.pdf`, job_type=parse_only, `:8003`) hoàn tất
+  `status=completed`, `finished_at=19:39:44.475793`, `duration_seconds=5.114555` — đúng công thức,
+  khớp `created_at`.
+- **`cost_capped`**: tạo được (không quá khó như brief lo ngại) bằng cách tạm hạ
+  `max_cost_per_job_usd` xuống `0.0001` qua `PUT /api/settings` (chỉ trên instance `:8003` test,
+  **đã khôi phục lại `8.0` ngay sau khi lấy đủ dữ liệu** — verify lại bằng SQL:
+  `settings.max_cost_per_job_usd = '8.0'`), dùng 1 file 30 trang ghép từ fixture có sẵn +
+  `confirm_cost=true` để vượt qua Lớp 2. Kết quả job `21155eea`: `status=cost_capped`,
+  `error_message` đúng thông báo Lớp 3 ("da vuot tran"), **`finished_at=19:41:17.585353`,
+  `duration_seconds=23.624534`** — có mốc kết thúc đúng, không trống.
+
+**PASS cả 2.**
+
+### 6. Bỏ nút "+ Glossary" khỏi tab Lịch sử
+
+Verify bằng `get_page_text` trên `web/history.html` thật (không chỉ grep code): đọc toàn bộ 17 dòng
+lịch sử hiển thị lúc test (9 gốc + 8 job QA tạo thêm lúc đó), cột action mỗi dòng chỉ còn
+"Tải VI" / "Tải song ngữ" / "Xoá" — **không còn "+ Glossary" ở bất kỳ dòng nào**, kể cả job
+`cost_capped`/`cancelled`/`failed` (các trạng thái trước đây có thể có logic action khác). Không có
+lỗi console (`read_console_messages` → rỗng).
+
+**PASS.**
+
+### 7. Batch job (không bắt buộc, đã làm vì tiện)
+
+Tạo batch 2 file nhỏ (`6page_range1-3_mono.pdf`, `6page_range3-6_mono.pdf`) qua
+`POST /api/batches`. Cả 2 job con hoàn tất `status=completed`, mỗi job có `finished_at` riêng
+(`19:42:14.946225` và `19:42:15.636106`, lệch nhau đúng theo thời điểm mỗi job con thật sự xong) —
+xác nhận `BatchOrchestrator._run_one()` gán đúng `finished_at` độc lập cho từng job con, không bị
+gán chung 1 mốc hay bị job khác trong batch ghi đè (đúng Reviewer mục 3 đã trace code).
+
+**PASS.**
+
+### 8. Regression
+
+```
+uv run ruff check .   → All checks passed!
+uv run pytest -q      → 575 passed, 1 failed (87.42s)
+```
+
+1 FAIL: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp **chính xác cả số lượng lẫn tên test** với con số Reviewer đã báo (review-report.md mục 10:
+"575 passed, 1 failed"). **0 fail mới.**
+
+**Kết quả: PASS.**
+
+### 9. Dọn dẹp dữ liệu test
+
+10 job test tạo trong lượt QA này (`7c9cf093`, `0c7660a2`, `22deedd4`, `2f1da868`, `47b31f88`,
+`c21caf01`, `21155eea`, `e2b3eacc`, `5a976795`, `43237d03`) đã xoá qua `DELETE /api/jobs/{id}` — xoá
+job qua API tự dọn luôn `data/outputs/<job_id>/` tương ứng (verify bằng diff thư mục output với
+danh sách 9 job ID baseline: khớp tuyệt đối, không dư không thiếu). Các file test riêng trong
+`data/uploads/` (18 file — mỗi upload sinh 1 cặp `.json` + file gốc, không tự xoá khi job bị xoá) đã
+xoá tay từng file theo đúng `file_id` đã tạo trong session, KHÔNG đụng tới 53 file upload còn lại
+(xác nhận đều thuộc baseline/QA trước, có tên khớp 9 job gốc hoặc rõ ràng từ vòng QA khác —
+`qa_aimd_65pages.pdf`, `sample2_Bread-A-Global-History.epub`...).
+
+**Verify cuối cùng bằng SQL trực tiếp trên `data/bb_translation.db` (không chỉ tin đã làm đúng)**:
+```
+SELECT COUNT(*) FROM jobs               → 9    (khớp baseline)
+SELECT COUNT(*) FROM glossary_entries   → 114  (khớp baseline)
+SELECT COUNT(*) FROM suggested_terms    → 0    (khớp baseline)
+SELECT value FROM settings WHERE key='max_cost_per_job_usd' → '8.0'  (đã khôi phục, không lỡ để 0.0001)
+```
+Đã `kill` tắt cả 2 instance test (`:8003`, `:8004`).
+
+### 10. R5-04 / Protocol 5 checklist
+
+N/A cho thay đổi chính của US-19 (`_to_detail()`, `finished_at` field, frontend) — không gọi
+external tool/service nào mới. Đồng ý với đánh giá Reviewer (review-report.md mục 9).
+
+### Bug list
+
+Không phát hiện bug MỚI chặn US-19. 1 phát hiện phụ ngoài phạm vi ghi ở mục 0 (babeldoc silent
+fallback khi provider call lỗi — không liên quan `finished_at`/`duration_seconds`, cần task riêng
+điều tra, KHÔNG chặn release US-19).
+
+### KẾT LUẬN US-19
+
+**PASS toàn bộ 7 kịch bản + regression — ready_for_release: CÓ.**
+
+Căn cứ: cả 5 kịch bản bắt buộc trong AC (golden path dùng `finished_at` mới không phải fallback,
+fail sớm đóng đúng gap QA-15-2, cancelled, running không lỗi, parse_only/cost_capped) đều verify
+bằng E2E thật qua 2 server sạch tự dựng từ đúng working tree (`:8003`/`:8004`, không dùng `:8000`
+stale), cả tầng API lẫn tầng UI thật (browser, không chỉ đọc code). Bỏ nút "+ Glossary" xác nhận
+sạch trên UI thật. Batch (không bắt buộc) cũng PASS. Regression 0 fail mới (575 passed/1 failed,
+khớp đúng Reviewer). Dữ liệu test đã dọn sạch, verify lại bằng SQL trực tiếp: `jobs=9`,
+`glossary=114`, `suggested_terms=0`, cost cap đã khôi phục `8.0`.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-19 trong session
+này (Reviewer đã APPROVE ở vòng 1/3 Dev↔Reviewer).

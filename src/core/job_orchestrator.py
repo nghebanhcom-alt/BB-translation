@@ -329,6 +329,7 @@ class JobOrchestrator:
         except UnsupportedForPdfPipelineError as exc:
             job.status = "failed"
             job.error_message = str(exc)
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
             db_session.add(job)
             await db_session.commit()
             await self._broadcast_job_failed(job, completed_chunks=0, total_chunks=0)
@@ -440,6 +441,9 @@ class JobOrchestrator:
 
                     job.status = "failed"
                     job.error_message = f"Chunk {chunk.chunk_index} that bai: {exc}"
+                    job.finished_at = datetime.now(
+                        UTC
+                    )  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
                     db_session.add(job)
                     await db_session.commit()
 
@@ -478,6 +482,7 @@ class JobOrchestrator:
                     f"${completed_cost:.2f} da vuot tran ${effective_cap:.2f}. Cac chunk da "
                     "dich duoc giu nguyen — tang tran trong Settings roi bam Retry de chay tiep."
                 )
+                job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
                 db_session.add(job)
                 await db_session.commit()
 
@@ -506,6 +511,7 @@ class JobOrchestrator:
             await db_session.refresh(job)
             if job.cancel_requested:
                 job.status = "cancelled"
+                job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
                 db_session.add(job)
                 await db_session.commit()
 
@@ -618,6 +624,7 @@ class JobOrchestrator:
         except Exception as exc:  # noqa: BLE001 — same failure shape as Step 7
             job.status = "failed"
             job.error_message = str(exc)
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
             db_session.add(job)
             await db_session.commit()
 
@@ -648,6 +655,7 @@ class JobOrchestrator:
         job.current_chunk = total_chunks
         job.total_chunks = total_chunks
         job.completed_at = datetime.now(UTC)
+        job.finished_at = job.completed_at  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
         db_session.add(job)
         await db_session.commit()
 
@@ -747,6 +755,7 @@ class JobOrchestrator:
             )
         except MinerUCancelledError:
             job.status = "cancelled"
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
             db_session.add(job)
             await db_session.commit()
             await self._broadcast_job_cancelled(job, 0, 1)
@@ -760,6 +769,7 @@ class JobOrchestrator:
         except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7/8
             job.status = "failed"
             job.error_message = str(exc)
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
             db_session.add(job)
             await db_session.commit()
             await self._broadcast_job_failed(job, 0, 1)
@@ -881,6 +891,7 @@ class JobOrchestrator:
         job.status = "completed"
         job.progress = 1.0
         job.completed_at = datetime.now(UTC)
+        job.finished_at = job.completed_at  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
         db_session.add(job)
         await db_session.commit()
 
@@ -1522,6 +1533,11 @@ class BatchOrchestrator:
                     if capped_job is not None:
                         capped_job.status = "cost_capped"
                         capped_job.error_message = message
+                        # US-19/BR-HIST-01/02, Architecture.md 6.17.2 — job
+                        # nay chua bao gio vao run_job() (batch da vuot tran
+                        # TRUOC khi no bat dau), nhung day van la 1 trang thai
+                        # KET THUC that su cho hang Lich su.
+                        capped_job.finished_at = datetime.now(UTC)
                         job_session.add(capped_job)
                         await job_session.commit()
                     return JobResult(
@@ -1541,6 +1557,11 @@ class BatchOrchestrator:
                     if failed_job is not None:
                         failed_job.status = "failed"
                         failed_job.error_message = str(exc)
+                        # US-19/BR-HIST-01/02, Architecture.md 6.17.2 — nhanh
+                        # nay bat loi ma run_job() TU NO khong bat duoc (BR-
+                        # BATCH-01 failure isolation), nen phai tu gan
+                        # finished_at o day, khong the tin run_job() da lam.
+                        failed_job.finished_at = datetime.now(UTC)
                         job_session.add(failed_job)
                         await job_session.commit()
                     result = JobResult(
