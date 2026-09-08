@@ -4670,3 +4670,295 @@ Flate nội bộ của PyMuPDF, không ảnh hưởng bất kỳ assertion hay g
 **Chưa spawn Reviewer** (Protocol 7 R7-01) — PM sẽ tổ chức Reviewer thật trước khi coi US-16 v2 là
 "xong" và trước khi commit (pre-commit hook cũng sẽ chặn commit nếu thiếu `docs/review-report.md`
 trong cùng commit).
+
+## US-15 — Markdown parse-only, nhánh PDF (born-digital + scan) — implement theo Architecture.md
+## §6.15 (2026-09-08)
+
+Implement `job_type=parse_only` cho `pdf_digital`/`pdf_scan` đúng theo thiết kế đã chốt ở
+`docs/Architecture.md` §6.15 (qua Tech Lead + phản biện Domain Expert + sửa lại, Human Checkpoint
+2 đã qua). **KHÔNG làm nhánh EPUB** (phụ thuộc US-22 `EpubDocument`, chưa implement — theo đúng
+thứ tự ưu tiên user chọn 7-4-5-1-2-3-6).
+
+### `src/core/job_orchestrator.py`
+
+- **S15-1**: `run_job()` giờ rẽ theo `job.job_type` TRƯỚC mọi rẽ nhánh khác — `if job.job_type ==
+  "parse_only": return await self.run_parse_only(job, db_session)` chèn ngay đầu hàm, trước Step 1
+  (reject EPUB của luồng translate). Sửa đúng lỗi kiến trúc gốc của §6.8/§6.15 bản đầu (EPUB bị
+  reject ở Step 1 trước mọi rẽ nhánh khiến `parse_only` chết oan).
+- **`run_parse_only()`** (hàm riêng, không nhồi `if job_type` rải rác vào 10 Step của luồng
+  translate — cùng lý do 6.14.7 chọn engine 1 lần duy nhất):
+  - EPUB → raise `EpubNotSupportedError` (lưới an toàn thứ 2; chặn chính nằm ở API layer, xem
+    dưới).
+  - Đếm `total_pages` nếu chưa có (PyMuPDF).
+  - **S15-9**: `mineru_runner is None` hoặc `MinerURunner.health()` fail → raise loạt (không bắt),
+    KHÔNG để job chờ tới timeout — cùng shape với guard `mineru_runner is None` hiện có của
+    `_build_ocr_bridge()` (BR-OCR-01).
+  - `job.status = "parsing"` (status MỚI, xem bên dưới) + `started_at`.
+  - `parse_method`: `"txt"` cho `pdf_digital`, `"ocr"` cho `pdf_scan`.
+  - **S15-14**: `timeout_seconds = max(600, total_pages * 6)` — thay hằng số 3600s cố định (đo
+    thật 89s/25 trang ≈ 3.6s/trang, hệ số 6 = 3.6 × ~1.65 biên an toàn).
+  - **S15-13**: callback `_should_cancel()` (đọc lại `job.cancel_requested` từ DB mỗi vòng poll)
+    truyền xuống `MinerURunner.parse_document(..., should_cancel=...)` — `MinerUCancelledError` →
+    `job.status = "cancelled"` (không phải "failed").
+  - **S15-6 (viết lại đúng theo bản chốt sau phản biện)**: `ocr_confidence`/`ocr_dropped_spans` ép
+    `None` tường minh cho `pdf_digital` bất kể `quality.confidence` runner trả về gì (MinerU 3.4.5
+    gán `score=1.0` cho span text-layer ở mode `txt` — không phải tín hiệu OCR thật); ghi giá trị
+    thật + gọi `_emit_ocr_warning_if_low()` cho `pdf_scan`.
+  - **S15-5**: guard Markdown rỗng (0 ký tự sau `.strip()`) → `ParseOnlyEmptyOutputError`, job
+    `failed` — kiểm tra 2 lần: ngay sau khi MinerU trả về, VÀ đọc lại chính file `document.md` vừa
+    ghi vào `data/outputs/` (R6-02, không tin biến trong bộ nhớ).
+  - **S15-3/S15-4 (bản chốt sau phản biện, KHÔNG phải bản gốc)**: đóng gói ZIP **eager** ngay
+    trong `run_parse_only()` (không lazy trong `download.py`) — danh sách file tường minh
+    (`document.md` + từng file `images/`), KHÔNG `os.walk()` (walk là đường duy nhất khiến zip tự
+    nén chính nó); ghi ra `.tmp` rồi `os.replace()`. `job.output_path` trỏ thẳng file `.zip`.
+  - **Guard ZIP mới** (§6.15.4 bước 5, thêm sau phản biện Expert): mở lại CHÍNH file zip vừa ghi —
+    `testzip() is None`, `"document.md" in namelist()`, số entry `images/` == số file trên đĩa —
+    không đạt → `ParseOnlyZipGuardError`, job `failed`.
+  - Finalize: `actual_cost = 0.0`, `cost_source = "metered"` (0 là số đo thật, không phải ước
+    tính), `completed_at` được set, broadcast `job_completed` cùng shape với luồng translate.
+- **`_run_mineru_and_record_quality()`** (helper mới, S15-13): 1 định nghĩa DUY NHẤT cho "gọi
+  MinerU + ghi `ocr_confidence`/`ocr_dropped_spans` + emit US-11 warning", dùng chung bởi
+  `_build_ocr_bridge()` (translate/`pdf_scan`, hành vi giữ nguyên 100%) và
+  `run_parse_only()`. Tham số `record_confidence=False` cho phép `run_parse_only()`'s
+  `pdf_digital` branch lấy `MinerUResult` thật (cần cho guard) mà KHÔNG để giá trị confidence rò
+  vào `job.ocr_confidence`.
+- 2 exception mới: `ParseOnlyEmptyOutputError`, `ParseOnlyZipGuardError`. Cập nhật docstring
+  `EpubNotSupportedError` để không còn nói riêng về `bilingual_book_maker` (giờ dùng chung cho cả
+  2 lý do EPUB chưa hỗ trợ: translate lẫn parse-only).
+
+### `src/services/mineru_runner.py`
+
+- `MinerUCancelledError(MinerUError)` — raise bởi `_poll_until_done()` khi `should_cancel()` trả
+  `True`. Known limitation ghi rõ trong docstring: MinerU không có endpoint huỷ task đã verify
+  (§6.9.2 không liệt kê) — `⚠️ ASSUMED` task vẫn chạy tiếp server-side, chấp nhận được (compute
+  local, $0).
+- `parse_document()`/`_poll_until_done()` nhận thêm `task_timeout_seconds: float | None` (override
+  timeout của constructor CHO 1 LẦN GỌI, không đổi hành vi mặc định khi không truyền) và
+  `should_cancel: Callable[[], Awaitable[bool]] | None`, kiểm tra mỗi vòng poll TRƯỚC khi gọi
+  `GET /tasks/{id}`. Cả 2 tham số optional, backward-compatible — mọi call site cũ (kể cả
+  `_build_ocr_bridge()`) không đổi hành vi.
+
+### `src/api/routes/jobs.py`
+
+- **S15-2 (mở rộng sau phản biện)**: bỏ `_mark_parse_only_unsupported()` hoàn toàn (cả
+  `create_job` LẪN `create_batch` — bản S15-2 gốc chỉ nói `create_job`, batch vẫn chết nếu chỉ sửa
+  1 chỗ). `parse_only` giờ đi CÙNG đường với `translate`: `status="queued"` +
+  `_schedule_background(...)`.
+- **S15-8 (chặn ở API layer, đúng thiết kế)**: `_reject_epub_parse_only()` — `job_type=parse_only`
+  + `file_type=epub` → HTTP 400 rõ ràng TRƯỚC KHI tạo `Job` row, gọi từ cả `create_job` và
+  `create_batch` (per-upload).
+- **S15-10 [BLOCKING, phát hiện bởi Domain Expert]**: `_find_completed_duplicate()` thêm điều
+  kiện `Job.job_type == "translate"` — job `parse_only` đã `completed` KHÔNG còn bị coi là "đã
+  dịch rồi" khi user sau đó tạo job `translate` trên cùng file hash.
+- **S15-11 [BLOCKING, phát hiện bởi Domain Expert]**: `retry_job()` bỏ hẳn block chặn `parse_only`
+  (400 cũ) — mâu thuẫn trực tiếp với S15-9 (fail sớm khi MinerU chưa chạy thì phải retry được sau
+  khi user bật MinerU lên). `_resolve_provider_or_400`/`_enforce_cost_gate` giờ chỉ chạy khi
+  `job.job_type == "translate"`.
+- **S15-12 [BLOCKING, phát hiện bởi Domain Expert]**: status mới `"parsing"` — thêm vào
+  `_ACTIVE_JOB_STATUSES` (chặn `DELETE /api/jobs/{id}` trong lúc MinerU đang ghi
+  `data/processing/{job_id}/parse_output/`, tránh rmtree giữa chừng).
+- `GET /api/jobs` thêm query param `job_type` (optional, cùng kiểu lọc với `status` đã có) —
+  S15-7/BR-PARSE-04.
+
+### `src/api/routes/download.py`
+
+- **S15-3**: `media_type` suy từ `result_path.suffix` (`.pdf`/`.zip`/`.epub` → MIME tương ứng,
+  mặc định `application/octet-stream`) thay vì hardcode `"application/pdf"`. Tên file
+  `{stem}_markdown_{timestamp}.zip` cho job `parse_only`, giữ nguyên pattern `_vi`/`_bilingual` +
+  timestamp cho `translate`.
+
+### Frontend (`web/`)
+
+- `web/js/app.js`: `RESTORABLE_STATUSES`, `CANCELLABLE_STATUSES`, `statusBadgeClass()` thêm
+  `"parsing"`.
+- `web/index.html`: progress bar hiện cho status `"parsing"` (thông báo riêng "Đang parse
+  (MinerU)..." thay vì %/chunk vô nghĩa); nút Tải/Chạy lại đổi nhãn theo `job_type`.
+- `web/history.html` + `web/js/history.js`: filter `job_type` mới (mặc định `"translate"`,
+  BR-PARSE-04 — không trộn job parse vào "translation history"), option `"parsing"` trong filter
+  status, badge màu, nhãn link tải đổi theo `job_type`.
+
+### Test (Protocol 6 R6-02 — assert giá trị cụ thể, không chỉ `assert_called()`)
+
+- **Golden fixture mới** (Protocol 5 mục 3): `tests/fixtures/mineru/parse_only_txt_figoni25/`
+  (`document.md`, `middle.json`, `summary.json`) — capture từ 1 lần chạy live thật
+  `MinerURunner.parse_document(parse_method="txt")` qua MinerU 3.4.5 (task
+  `cdbd0988-1182-456d-bf23-791e03490bc6`, Figoni *How Baking Works* 25 trang đầu). Dùng bởi
+  `tests/integration/test_job_orchestrator.py::test_run_parse_only_pdf_digital_forces_none_using_golden_mineru_fixture`
+  — chạy `middle.json` THẬT qua `MinerURunner._compute_quality()` THẬT (không hardcode số), xác
+  nhận `confidence=0.9976` (998/1004 span `score=1.0`) rồi assert `run_parse_only()` vẫn ghi
+  `ocr_confidence IS NULL` cho `pdf_digital` — đúng bằng chứng S15-6 cần.
+- `tests/integration/test_job_orchestrator.py`: 10 test mới (pdf_digital completes + ép
+  `ocr_confidence=None`, pdf_scan ghi confidence thật, golden fixture ở trên, data lineage
+  processing→outputs→zip byte-identical, empty-markdown fails, zip-guard fails trên zip hỏng
+  (mock `testzip()`), cancel giữa chừng qua `should_cancel`, MinerU unavailable raise trước khi
+  đụng `job.status`, EPUB raise không gọi MinerU, timeout scale theo số trang).
+- `tests/test_mineru_runner.py`: 2 test mới cho `task_timeout_seconds` override + `should_cancel`
+  callback ở tầng `MinerURunner` (không qua `JobOrchestrator`).
+- `tests/integration/test_upload_and_job_flow.py`: viết lại
+  `test_upload_then_create_parse_only_job_and_check_status` (parse_only giờ async, không còn
+  fail đồng bộ — theo đúng quy ước có sẵn của `test_estimate_and_cancel_api.py`, không mock/chờ
+  background task) và `test_create_job_reports_duplicate_of_completed_job_with_same_hash` (viết
+  lại theo S15-10 — assert CẢ 2 chiều: job `parse_only` completed KHÔNG bị coi trùng, job
+  `translate` completed VẪN bị coi trùng như cũ); thêm test EPUB+parse_only 400 (S15-8) và test
+  `create_batch` schedule đúng cho `parse_only` (S15-2 mở rộng).
+- `tests/integration/test_estimate_and_cancel_api.py`: 2 test mới cho `retry_job()` (S15-11) —
+  `parse_only` failed → retry OK dù `model` là provider bịa (chứng minh cost gate THẬT SỰ bị bỏ
+  qua, không chỉ bỏ check 400), `translate` failed vẫn qua cost gate như cũ (negative test).
+- `tests/integration/test_delete_and_download_naming.py`: test `DELETE` chặn status `"parsing"`
+  (S15-12), test download ZIP đúng MIME/tên file cho `parse_only` (S15-3).
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/ web/                    → All checks passed!
+uv run ruff format --check <file đã sửa>              → đã format
+uv run pytest -q                                       → 462 passed, 1 failed, ... (xem dưới)
+```
+
+1 test FAIL (`tests/test_rotated_text_overlay.py::
+test_overlay_rotated_text_draws_translated_text_at_correct_angle`) — **KHÔNG liên quan tới US-15,
+không phải do session này gây ra**. Đây là lỗi ĐÃ ĐƯỢC GHI NHẬN sẵn ở entry "Bug #8 — 'Chữ nhảy
+lung tung' tái phát..." phía trên (task theo dõi riêng `task_062a9bd5`, do 1 session/worktree khác
+đang sửa `src/postprocess/rotated_text_overlay.py`/`font_shrink.py`/`src/preprocess/
+searchable_pdf.py` song song — 3 file này có thay đổi CHƯA COMMIT tại thời điểm Dev session này
+chạy, không đụng tới bởi source nào của US-15). Toàn bộ 10 test mới của US-15 + mọi test hiện có
+liên quan (`test_job_orchestrator.py` 49/49, `test_mineru_runner.py` 18/18,
+`test_upload_and_job_flow.py` 12/12, `test_estimate_and_cancel_api.py` 10/10,
+`test_delete_and_download_naming.py` 12/12) đều PASS.
+
+### Quyết định phạm vi tự đưa ra (cần PM xác nhận)
+
+**KHÔNG implement `parse_method` override** (§6.21.3 — checkbox UI "ưu tiên độ chính xác ký hiệu"
+cho phép user ép `ocr` mode ngay cả với `pdf_digital`). Lý do: (a) mục "Việc cụ thể" trong brief
+PM giao không liệt kê tính năng này tường minh (khác các mục khác đều rất chi tiết); (b) implement
+đúng cần thêm cột `Job.parse_method` mới để retry dùng lại đúng lựa chọn user — 1 quyết định đổi
+DB schema mà brief không xin phép rõ. `run_parse_only()` vẫn dùng đúng mapping mặc định đã chốt
+(`pdf_digital→txt`, `pdf_scan→ocr`), không có cách nào user ép `ocr` cho file `pdf_digital` ở round
+này. Known limitation L-4 (§6.15.5, `txt` mode mất glyph `=`/`×`) vẫn còn nguyên — nếu PM muốn có
+override này ngay, cần round riêng.
+
+### Trạng thái
+
+Implement xong theo đúng §6.15 (nhánh PDF). `docs/CHANGELOG.md` chỉ append. **CHƯA spawn
+Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là "xong"/"sẵn sàng" cho tới khi Reviewer thật
+review xong và ghi vào `docs/review-report.md`.
+
+## US-15 §6.21.3 — `parse_method` override (auto/txt/ocr) cho `job_type=parse_only`
+
+Bổ sung phần Dev trước đã cố ý bỏ qua ("Quyết định phạm vi tự đưa ra" ở entry ngay trên) — implement
+đúng §6.21.3: cho phép user ép `parse_method="ocr"` cho 1 file `pdf_digital` khi tài liệu nhiều công
+thức toán/hoá, để đọc đúng ký hiệu (L-4, `txt` mode làm mất `=`/`×` do font text-layer không map
+Unicode). KHÔNG đụng `src/core/glossary_manager.py`.
+
+### `src/api/routes/jobs.py`
+
+- `JobCreateRequest` thêm field `parse_method: Literal["auto", "txt", "ocr"] = "auto"` — CHỈ có ý
+  nghĩa khi `job_type=parse_only`.
+- Helper mới `_resolve_parse_method(requested, file_type) -> str`: `"auto"` → mapping theo
+  `file_type` như S15 gốc đã chốt (`pdf_digital`→`"txt"`, `pdf_scan`→`"ocr"`); `"txt"`/`"ocr"` pass
+  through nguyên văn (override tường minh của user).
+- `create_job()`: gọi `_resolve_parse_method()` **1 LẦN** ngay lúc tạo `Job` row (khi
+  `job_type == "parse_only"`) rồi ghi thẳng vào `job.parse_method` — cùng pattern với
+  `Job.chunk_size_used` (chốt 1 lần, ghi lại, KHÔNG suy đoán lại mỗi lần chạy). Nhờ vậy 1 lần
+  `retry_job()` sau đó tự động dùng lại ĐÚNG lựa chọn cũ (BR-CHUNK-05-style resumable) mà không cần
+  sửa gì thêm ở `retry_job()`. `job_type=translate` → `job.parse_method=None` (field không có ý
+  nghĩa ở nhánh này, không validate/reject nếu client lỡ gửi).
+- **Không đổi `create_batch()`/`BatchCreateRequest`** — §6.21.3 chỉ mô tả tường minh
+  `POST /api/jobs`, không nhắc `/api/batches`. Quyết định phạm vi: batch `parse_only` vẫn dùng
+  `"auto"` mặc định như cũ (không regress), chỉ chưa có override qua batch endpoint. Cần PM xác nhận
+  nếu muốn mở rộng.
+
+### `src/core/job_orchestrator.py`
+
+- `run_parse_only()`: dòng hardcode cũ `parse_method = "txt" if job.file_type == FileType.PDF_DIGITAL
+  else "ocr"` đổi thành fallback — `job.parse_method = job.parse_method or (...)`, rồi
+  `parse_method = job.parse_method`. Trong luồng bình thường (đi qua `POST /api/jobs`) giá trị đã
+  được `_resolve_parse_method()` ghi sẵn từ lúc tạo job nên nhánh `or` không kích hoạt; fallback chỉ
+  chạy cho Job row cũ (tạo trước khi có cột này) hoặc Job tạo trực tiếp trong test. Ghi
+  `job.parse_method` cùng 1 `commit()` với `job.status = "parsing"` — không thêm round-trip DB.
+- **KHÔNG đổi rule S15-6** (`_run_parse_only_pipeline()`): `record_confidence=(job.file_type ==
+  FileType.PDF_SCAN)` và `if job.file_type == FileType.PDF_DIGITAL: job.ocr_confidence = None` giữ
+  nguyên 100% — vẫn rẽ theo `file_type`, KHÔNG rẽ theo `parse_method`. Đây chính là bug tiềm ẩn brief
+  cảnh báo trước (`jobs.ocr_confidence` mang 2 ý nghĩa nếu đổi sang rẽ theo `parse_method`) — đã kiểm
+  tra kỹ, không cần sửa gì ở 2 dòng này, chỉ cần đảm bảo không vô tình đụng vào.
+
+### `src/models/job.py`
+
+- Cột mới `parse_method: str | None` — lưu giá trị **đã resolve thật** (`"txt"`/`"ocr"`), KHÔNG bao
+  giờ lưu `"auto"` (cùng pattern `chunk_size_used`).
+
+### `src/models/database.py`
+
+- Thêm `("jobs", "parse_method", "TEXT")` vào `_NEW_NULLABLE_COLUMNS` — dùng ĐÚNG migration mechanism
+  idempotent (`_add_missing_columns()` + `ALTER TABLE ... ADD COLUMN`) đã có sẵn trong codebase cho
+  `chunk_size_used`/`thread_used`/`rate_limit_hits`, không tạo file/script migration riêng.
+- **Quyết định phạm vi (cần PM xác nhận — lệch với 1 câu trong brief)**: brief yêu cầu gộp cột này
+  vào "1 migration script duy nhất" cùng với `Job.finished_at` (§6.17.2), `Job.total_units`
+  (§6.20.6), `Chunk.unit_start`/`unit_end` (§6.20.7), bảng `suggested_terms` (§6.18.3). Đã kiểm tra
+  kỹ: **KHÔNG có script migration nào đang tồn tại cho 4 thay đổi đó** — `src/models/job.py`,
+  `src/models/chunk.py`, `src/models/database.py` hiện tại chưa có field/bảng nào trong 4 thứ này,
+  và cũng chưa có `src/models/suggested_term.py`. 4 thay đổi đó thuộc các user story khác hẳn
+  (US-19 unit tracking cho EPUB, US-20 suggested terms) — không nằm trong phạm vi việc được giao
+  (chỉ §6.21.3). Tự ý implement cả 4 thứ đó sẽ là mở rộng phạm vi ngoài brief + rủi ro đụng session
+  khác đang làm song song (repo hiện có nhiều file chưa commit từ 1 session khác, xem "Trạng thái"
+  entry US-15 phía trên về Bug #8). Theo đúng quy tắc "Không tự ý thay đổi architecture — escalate
+  lên Tech Lead nếu cần" của vai trò Dev: chỉ thêm ĐÚNG 1 dòng `("jobs", "parse_method", "TEXT")` vào
+  `_NEW_NULLABLE_COLUMNS` hiện có (cơ chế migration idempotent duy nhất mà project đang dùng — không
+  có "file migration script" riêng biệt nào khác để gộp vào). Migration cho 4 thay đổi kia (nếu vẫn
+  cần) nên là 1 task riêng, có brief riêng.
+
+### Frontend (`web/`)
+
+- `web/index.html`: checkbox mới trong khối config file (hiện khi `f.job_type === 'parse_only'`),
+  nhãn đúng theo brief: *"Tài liệu nhiều công thức toán/hoá — ưu tiên độ chính xác ký hiệu (chậm
+  hơn)"*.
+- `web/js/app.js`: `handleFiles()` khởi tạo `f.parse_force_ocr = false`; `createJob()` gửi
+  `parse_method: "ocr"` khi `job_type === "parse_only"` VÀ checkbox được tick, ngược lại bỏ field
+  (JSON.stringify tự drop `undefined` → backend dùng mặc định `"auto"`). Không đổi `translateAll()`
+  (nhánh batch) — cùng lý do phạm vi ở trên (§6.21.3 không nhắc `/api/batches`); khi chỉ 1 file
+  pending, `translateAll()` gọi thẳng `createJob()` nên override vẫn hoạt động cho use case phổ biến
+  nhất (dịch/parse từng file).
+
+### Test (Protocol 6 R6-02 — assert giá trị cụ thể, không chỉ `assert_called()`)
+
+- `tests/integration/test_job_orchestrator.py`:
+  - `_create_parse_only_job()` thêm param `parse_method: str | None = None` để mô phỏng Job row đã
+    được `_resolve_parse_method()` ghi sẵn (hoặc chưa, cho nhánh fallback).
+  - Test mới **`test_run_parse_only_pdf_digital_ocr_override_still_forces_confidence_none`** — chính
+    xác test case chống bug đã cảnh báo ở mục 4 của brief: tạo job `pdf_digital` với
+    `parse_method="ocr"` đã resolve sẵn, fake MinerU trả `confidence=0.81`; assert CẢ 2 chiều:
+    (a) `calls[0]["parse_method"] == "ocr"` — override thật sự có hiệu lực, KHÔNG bị âm thầm ép lại
+    thành `"txt"`; (b) `job.ocr_confidence is None` và `job.ocr_dropped_spans is None` — rule S15-6
+    vẫn giữ nguyên theo `file_type`, không rò giá trị 0.81 của fake runner vào DB.
+- `tests/integration/test_upload_and_job_flow.py`: test mới
+  `test_create_job_resolves_parse_method_auto_default_and_explicit_ocr_override` — gọi thật
+  `POST /api/jobs` qua `TestClient`, đọc lại `Job.parse_method` trực tiếp từ DB (cùng pattern
+  `database_module.get_session_factory()` với `test_create_job_reports_duplicate_of_completed_job_with_same_hash`
+  đã có) cho 3 case: (1) field bỏ trống → `"txt"` cho `pdf_digital` (hành vi mặc định không đổi);
+  (2) `parse_method="ocr"` tường minh trên `pdf_digital` → lưu đúng `"ocr"`; (3) `job_type="translate"`
+  kèm `parse_method="ocr"` → `job.parse_method` vẫn `None` (field vô nghĩa ở nhánh translate).
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/ web/                                          → All checks passed!
+uv run ruff format --check <file đã sửa trong session này>                  → đã format
+uv run pytest -q                                                             → 464 passed, 1 failed
+uv run pytest -q tests/integration/test_job_orchestrator.py \
+  tests/integration/test_upload_and_job_flow.py -k "parse_method or parse_only" → 15 passed
+```
+
+1 test FAIL — **CÙNG 1 test đã biết từ trước, KHÔNG liên quan session này**:
+`tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+(Bug #8, đang được 1 session/worktree khác sửa `rotated_text_overlay.py`/`font_shrink.py`/
+`searchable_pdf.py` song song — session này không đụng 3 file đó). 462 test cũ + 2 test mới của
+session này (1 ở `test_job_orchestrator.py`, 1 ở `test_upload_and_job_flow.py`) = 464 passed, khớp
+đúng số liệu.
+
+### Trạng thái
+
+Implement xong đúng §6.21.3 (không tự thêm/bớt so với spec, trừ 2 quyết định phạm vi đã ghi rõ ở
+trên — cần PM xác nhận: (1) không gộp migration cho `finished_at`/`total_units`/`unit_start`-`end`/
+`suggested_terms` vì các thay đổi đó chưa hề tồn tại trong code, thuộc task khác hẳn; (2) không mở
+rộng override qua `/api/batches`). **CHƯA spawn Reviewer** (Protocol 7 R7-01) — KHÔNG được coi là
+"xong"/"sẵn sàng" cho tới khi Reviewer thật review xong và ghi vào `docs/review-report.md`.

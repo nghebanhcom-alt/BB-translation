@@ -155,6 +155,53 @@ def test_download_filename_includes_completed_at_timestamp(client: TestClient, t
     assert "book_vi_20260906-013522.pdf" in disposition
 
 
+async def _insert_completed_parse_only_job(output_dir: Path, completed_at: datetime | None) -> str:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = output_dir / "parse_result.zip"
+    zip_path.write_bytes(b"PK\x03\x04fake zip bytes for a naming/MIME test")
+
+    session_factory = database_module.get_session_factory()
+    async with session_factory() as session:
+        job = Job(
+            filename="book.pdf",
+            file_path=str(output_dir / "book.pdf"),
+            file_size=1,
+            file_hash="deadbeef-parse",
+            file_type="pdf_digital",
+            job_type="parse_only",
+            model="deepseek",
+            status="completed",
+            output_path=str(zip_path),
+            completed_at=completed_at,
+            cost_source="metered",
+            actual_cost=0.0,
+        )
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+        return job.id
+
+
+def test_download_parse_only_job_uses_zip_media_type_and_markdown_label(
+    client: TestClient, tmp_path
+) -> None:
+    """US-15 S15-3 (Architecture.md 6.15.3, rewritten after Domain Expert
+    review): `download.py` must derive `media_type` from the file's own
+    suffix (not the hardcoded `application/pdf`, P-05) and use the
+    `_markdown_` label for `job_type=parse_only` — same timestamp-suffix
+    pattern as `_vi`/`_bilingual`.
+    """
+    completed_at = datetime(2026, 9, 8, 10, 0, 0, tzinfo=UTC)
+    job_id = asyncio.run(_insert_completed_parse_only_job(tmp_path / "out_parse", completed_at))
+
+    response = client.get(f"/api/jobs/{job_id}/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    disposition = response.headers["content-disposition"]
+    assert "book_markdown_20260908-100000.zip" in disposition
+
+
 def test_download_filename_falls_back_to_updated_at_when_no_completed_at(
     client: TestClient, tmp_path
 ) -> None:
@@ -229,6 +276,23 @@ def test_delete_job_rejects_active_status(client: TestClient) -> None:
 
     assert response.status_code == 400
     assert "dang chay" in response.json()["detail"] or "translating" in response.json()["detail"]
+    assert client.get(f"/api/jobs/{job_id}").status_code == 200
+
+
+def test_delete_job_rejects_parsing_status(client: TestClient) -> None:
+    """US-15 S15-12 [BLOCKING] (Architecture.md 6.15.3): before the new
+    "parsing" status existed, a job_type=parse_only job mid-MinerU-call had
+    NO active status of its own, so it was never in `_ACTIVE_JOB_STATUSES`
+    and DELETE would proceed straight to
+    `rmtree(data/processing/{job_id})` while `_write_images()` was still
+    writing into that exact directory. "parsing" must be rejected here the
+    same way "translating" is above.
+    """
+    job_id = asyncio.run(_insert_job_with_chunks(status="parsing"))
+
+    response = client.delete(f"/api/jobs/{job_id}")
+
+    assert response.status_code == 400
     assert client.get(f"/api/jobs/{job_id}").status_code == 200
 
 

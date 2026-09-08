@@ -4871,3 +4871,282 @@ Căn cứ:
 lỗi Dev↔Reviewer nào trước đó cho tính năng này.
 
 ---
+
+## Review US-15 — Markdown parse-only, nhánh PDF (born-digital + scan) + `parse_method` override (2026-09-08)
+
+### Phạm vi
+
+Review 2 lượt Dev liên tiếp trong cùng session (CLAUDE.md Protocol 7 R7-01): (1) implement chính
+US-15 nhánh PDF theo `docs/Architecture.md` §6.15, (2) bổ sung `parse_method` override theo §6.21.3.
+Đọc trước khi review: `docs/PRD.md` US-15 (§3) + BR-PARSE-01..06 (§4.8), `docs/Architecture.md` §6.15
+toàn bộ + §6.21 (đặc biệt §6.21.3), `docs/CHANGELOG.md` 2 entry mới nhất cho US-15. Đọc trực tiếp code
+thật (không chỉ tin CHANGELOG): `src/core/job_orchestrator.py`, `src/api/routes/jobs.py`,
+`src/api/routes/download.py`, `src/services/mineru_runner.py`, `src/models/job.py`,
+`src/models/database.py`, `web/index.html`, `web/js/app.js`, `web/history.html`, `web/js/history.js`,
+`tests/integration/test_job_orchestrator.py`, `tests/integration/test_upload_and_job_flow.py`,
+`tests/integration/test_estimate_and_cancel_api.py`, `tests/integration/test_delete_and_download_naming.py`,
+`tests/test_mineru_runner.py`, fixture `tests/fixtures/mineru/parse_only_txt_figoni25/`.
+
+**Không review** (đúng phạm vi task giao, thuộc task khác đang chạy song song):
+`src/core/glossary_manager.py` (không đụng — xác nhận `git status` không có trong danh sách thay đổi),
+`src/postprocess/rotated_text_overlay.py`/`font_shrink.py`/`src/preprocess/searchable_pdf.py` (Bug #8,
+session khác — xác nhận các file này bị sửa (`git status` "M") nhưng **không** xuất hiện trong diff
+logic của US-15 đọc được ở trên; `job_orchestrator.py` chỉ *gọi* `build_searchable_pdf()` trong nhánh
+`_build_ocr_bridge()` có sẵn từ trước, không sửa file đó).
+
+### 1. `_find_completed_duplicate()` — lọc đúng `job_type` (S15-10)
+
+Đọc trực tiếp `src/api/routes/jobs.py:371-380`: `where(Job.file_hash == file_hash, Job.status ==
+"completed", Job.job_type == "translate")` — đúng điều kiện thứ 3 mới thêm. Job `parse_only` đã
+`completed` **không còn** bị coi là "đã dịch rồi" khi tạo job `translate` trùng hash, và ngược lại job
+`translate` đã `completed` vẫn bị coi trùng như cũ (không regress). Test
+`test_create_job_reports_duplicate_of_completed_job_with_same_hash` (đọc trực tiếp) assert đúng **cả
+2 chiều** — không chỉ assert 1 chiều rồi coi là đủ. **Đạt, đúng S15-10.**
+
+### 2. `retry_job()` — không còn chặn `parse_only` (S15-11)
+
+Đọc `src/api/routes/jobs.py:625-678`: block `if job.job_type == "parse_only": raise HTTPException(400,
+...)` cũ **đã bị xoá hẳn** — không còn dấu vết trong code hiện tại (grep `"parse_only chua duoc ho
+tro"` → 0 kết quả). `_resolve_provider_or_400`/`_enforce_cost_gate` giờ nằm trong `if job.job_type ==
+"translate":` — `parse_only` bỏ qua hoàn toàn 2 bước này, đặt thẳng `status="queued"` +
+`_schedule_background`. Test `test_retry_accepts_failed_parse_only_job_without_cost_gate` dùng
+`model="totally-bogus-provider"` — nếu cost gate còn chạy, `_resolve_provider_or_400` sẽ raise 400 vì
+provider không tồn tại; test PASS (200 + status="queued") chứng minh cost gate **thực sự** bị bỏ qua,
+không chỉ bỏ dòng chặn 400 cũ. Test song song `test_retry_translate_job_still_goes_through_cost_gate`
+xác nhận `translate` vẫn qua gate như cũ (negative test, chặn regression theo hướng ngược lại). **Đạt,
+đúng S15-11, đúng cách Domain Expert cảnh báo trước.**
+
+### 3. `create_batch()` — không còn gọi hàm chặn EPUB/parse_only cũ (S15-2 mở rộng)
+
+Đọc `src/api/routes/jobs.py:874-967`: không còn lời gọi `_mark_parse_only_unsupported()` nào (grep
+toàn file → 0 kết quả, hàm này đã bị xoá khỏi codebase). `_reject_epub_parse_only()` (chặn HTTP 400
+**trước khi** tạo `Job` row, đúng thiết kế S15-8) được gọi cho **từng** upload trong batch
+(`jobs.py:895`), tách biệt hoàn toàn khỏi luồng schedule. Sau vòng lặp tạo `Job`, đúng **1 lần**
+`_schedule_background(_run_batch_background(batch.id))` (`jobs.py:967`) chạy vô điều kiện — không gate
+theo `job_type` như code cũ. Test `test_create_batch_schedules_parse_only_jobs_instead_of_marking_failed`
+patch `_schedule_background` để đếm số lần gọi thật (`len(scheduled) == 1`), không chỉ tin response
+status — batch 2 file `parse_only` ra đúng `202` + `status="processing"` + cả 2 job `"queued"`. **Đạt,
+đúng S15-2 mở rộng.**
+
+### 4. Status `"parsing"` mới — đủ cả 6 vị trí, không còn `"translating"` dùng nhầm (S15-12)
+
+Grep `"parsing"` xuyên suốt các file bắt buộc theo checklist S15-12 của Architecture.md, xác nhận đủ cả
+6 chỗ:
+
+| # | Vị trí | Xác nhận |
+|---|---|---|
+| 1 | `jobs.py` `_ACTIVE_JOB_STATUSES` | có (`jobs.py:719`), kèm comment giải thích lý do (chặn `rmtree` khi MinerU đang ghi) |
+| 2 | `jobs.py` `cancel_job` | không đụng — set `{"completed","failed","cancelled"}` (không có `"parsing"`) nên job `parsing` vẫn dừng được, đúng như spec yêu cầu "chỉ cần xác nhận không đụng" |
+| 3 | `web/js/app.js` `RESTORABLE_STATUSES` | có (dòng 21-24) |
+| 4 | `web/js/app.js` `CANCELLABLE_STATUSES` | có (dòng 40-43) |
+| 5 | `web/index.html` thanh progress | có — `x-show` liệt kê `'parsing'` trong danh sách trạng thái đang chạy (dòng 117) + thông báo riêng "Đang parse (MinerU)..." (dòng 124) |
+| 6 | `web/history.html` + `web/js/history.js` | filter status có option `"parsing"` (`history.html:36`), badge màu có `parsing:` trong cả `app.js:176` và `history.js:28` |
+
+Grep `"translating"` toàn bộ 4 file JS/HTML: mọi chỗ còn `"translating"` đều là entry **riêng** cạnh
+`"parsing"` (danh sách trạng thái, không phải chỗ nào gán nhầm `"translating"` cho job `parse_only`) —
+không phát hiện chỗ nào job `parse_only` bị hiện nhãn "Đang dịch". **Đạt đủ, không thiếu vị trí nào.**
+
+### 5. `ocr_confidence` (S15-6) — điểm tinh vi nhất, đã tự đọc code + chạy lại fixture độc lập
+
+Đây là bug Domain Expert cảnh báo trước dễ mắc: rule PHẢI rẽ theo `job.file_type`, KHÔNG theo
+`parse_method`. Đọc trực tiếp `job_orchestrator.py:803-815` (`_run_parse_only_pipeline`):
+
+```python
+ocr_result = await self._run_mineru_and_record_quality(
+    ..., record_confidence=(job.file_type == FileType.PDF_SCAN),
+)
+if job.file_type == FileType.PDF_DIGITAL:
+    job.ocr_confidence = None
+    job.ocr_dropped_spans = None
+```
+
+Cả 2 điều kiện đều so `job.file_type`, **không** so `parse_method` ở bất kỳ đâu trong hàm này — kể cả
+sau khi thêm override ở §6.21.3 (đọc lại đúng bản Dev sửa lần 2: `record_confidence=(job.file_type ==
+FileType.PDF_SCAN)` giữ nguyên 100%, không đổi thành so `parse_method`). Vì vậy user ép `parse_method
+="ocr"` cho 1 file `pdf_digital` (qua checkbox mới) **vẫn** ghi `ocr_confidence = NULL` — đúng ý đồ
+thiết kế (cột này chỉ có 1 ý nghĩa "độ tin cậy OCR thật", không được rò giá trị từ 1 lần chạy không
+phải OCR thật vào đó).
+
+**Không chỉ tin test pass** — tự chạy lại độc lập thuật toán `_compute_quality()` trên chính
+`middle.json` trong fixture (không qua test suite, tính tay bằng script riêng):
+
+```
+count 1004
+confidence 0.997628187250996
+dropped 1
+num==1.0 998
+```
+
+Khớp CHÍNH XÁC với số liệu `summary.json` trong fixture (`confidence: 0.997628187250996,
+ocr_span_count: 1004`) và với con số Architecture.md §6.9.5 trích dẫn (0.9976, 998/1004 span score=1.0,
+task `cdbd0988-...`). Test `test_run_parse_only_pdf_digital_forces_none_using_golden_mineru_fixture` gọi
+đúng `MinerURunner._compute_quality()` thật trên `middle.json` thật (không hardcode số), rồi assert
+`job.ocr_confidence is None` dù giá trị thật runner trả về là 0.9976 — đúng loại assertion Protocol 5
+đòi hỏi (không phải "mock tự nhất quán với giả định sai"). Test bổ sung ở lượt 2
+(`test_run_parse_only_pdf_digital_ocr_override_still_forces_confidence_none`) verify đúng case Domain
+Expert cảnh báo: `parse_method="ocr"` ép tường minh trên file `pdf_digital`, fake runner trả
+`confidence=0.81` — assert `calls[0]["parse_method"] == "ocr"` (override có hiệu lực thật) VÀ
+`job.ocr_confidence is None` (rule S15-6 không bị đổi theo `parse_method`) trong cùng 1 test. **Đạt,
+đây chính xác là bug đã được chặn đúng cách, có bằng chứng tự verify độc lập, không chỉ tin báo cáo.**
+
+### 6. Zip eager trong `run_parse_only()`, không lazy trong `download.py` (S15-3/S15-4)
+
+Đọc `job_orchestrator.py:850-873`: ZIP được dựng **eager** trong `_run_parse_only_pipeline()`, danh
+sách file tường minh (`zf.write(final_md_path, arcname="document.md")` + loop `image_files`), **không**
+`os.walk()`. Ghi qua `.tmp` rồi `os.replace()` (dòng 860) — không bao giờ tồn tại file `.zip` dở mang
+tên thật. Guard mở lại chính file zip vừa ghi (`testzip()`, `"document.md" in namelist()`, số entry
+`images/` khớp số file trên đĩa, dòng 862-873) — không đạt thì `ParseOnlyZipGuardError`, job `failed`.
+`job.output_path = str(zip_path)` (dòng 875) — trỏ đúng file `.zip`, không phải thư mục/`.md`.
+
+`download.py` (đọc toàn bộ, 78 dòng): **không** có bất kỳ logic nào biết về `parse_only` ngoài chọn
+nhãn tên file — `media_type` suy hoàn toàn từ `result_path.suffix` qua `_MEDIA_TYPES` dict (dòng 23-27,
+72), không hardcode `"application/pdf"` như code cũ. Test
+`test_run_parse_only_data_lineage_processing_to_outputs_to_zip` mở file zip thật bằng `zipfile.ZipFile`,
+so sánh **byte-identical** giữa `zf.read("document.md")` và nội dung thật của
+`data/outputs/{job_id}/document.md` trên đĩa — đúng yêu cầu R6-02 "assert giá trị cụ thể", không chỉ
+`assert_called()`. Test `test_run_parse_only_zip_guard_fails_job_on_corrupt_zip` patch
+`zipfile.ZipFile.testzip` để trả về lỗi giả, xác nhận guard thực sự load-bearing (job `failed`, không
+phải decorative). **Đạt, đúng S15-3/S15-4 bản chốt sau phản biện (không phải bản gốc lazy-zip đã bị bác
+bỏ).**
+
+### 7. Cancel cho `parse_only` qua `should_cancel` (S15-13)
+
+`mineru_runner.py:201-260` (`_poll_until_done`): tham số `should_cancel` được gọi **mỗi vòng poll,
+TRƯỚC** khi gửi `GET /tasks/{id}` (dòng 215-219) — đúng thiết kế "kiểm tra trước khi tiếp tục chờ", trả
+`True` → `MinerUCancelledError` ngay, không chờ thêm request. `job_orchestrator.py:737-742`
+(`_should_cancel` closure trong `run_parse_only()`): `await db_session.refresh(job)` mỗi lần gọi — đọc
+lại `cancel_requested` mới nhất từ DB, không dùng giá trị cache lúc job bắt đầu (cần thiết vì
+`POST .../cancel` là 1 request HTTP khác, có thể đến giữa lúc `parse_only` đang poll MinerU tới ~25
+phút). `run_parse_only()` bắt riêng `MinerUCancelledError` (dòng 748) → `status="cancelled"` (không
+phải `"failed"`) + broadcast riêng. Test `test_run_parse_only_cancelled_via_should_cancel_callback` set
+`job.cancel_requested = True` **trước** khi chạy `run_job()`, assert `result.status == "cancelled"` VÀ
+`job.status == "cancelled"` sau khi refresh từ DB — verify hành vi thật qua toàn bộ `run_job()`, không
+chỉ gọi trực tiếp hàm nội bộ. **Đạt, đúng S15-13.**
+
+### 8. Golden fixture MinerU — xác nhận độc lập là output thật, không phải viết tay (Protocol 5 mục 3)
+
+Đây là điểm Reviewer tự verify sâu nhất thay vì tin đọc code:
+
+- `README.md` trong fixture ghi rõ nguồn: task `cdbd0988-1182-456d-bf23-791e03490bc6`, file Figoni 25
+  trang đầu, chạy live qua MinerU 3.4.5 tại `localhost:8010`, ngày 2026-09-08.
+- `middle.json` (416KB, không phải file rỗng/giả) có cấu trúc thật `{"pdf_info": [...], "_backend":
+  ..., "_version_name": ...}` — đúng shape MinerU thật đã verify ở §6.9 (S6/S3), không phải dict tự chế.
+- **Tự chạy lại thuật toán `_compute_quality()` bằng tay** (không import code app, viết lại đúng logic
+  duyệt `preproc_blocks`/`discarded_blocks` → `lines` → `spans` có key `"score"`) trên chính
+  `middle.json` này → ra đúng `count=1004, confidence=0.997628187250996, dropped=1, num==1.0=998` —
+  khớp tuyệt đối với `summary.json` (`"confidence": 0.997628187250996, "ocr_span_count": 1004`) VÀ với
+  con số Architecture.md §6.9.5/§6.15.3 trích dẫn từ lần chạy thật của Domain Expert (0.9976,
+  998/1004 span score=1.0, cùng task_id). Ba nguồn độc lập (Architecture.md, `summary.json` của
+  fixture, phép tính tay của Reviewer trên `middle.json` thô) cho **cùng một** con số — đây là bằng
+  chứng đủ mạnh để kết luận fixture là dữ liệu thật, không phải mock viết tay tự nhất quán với chính
+  nó. **Đạt, đúng Protocol 5 mục 3.**
+
+### 9. Checklist R5-04 (bắt buộc theo CLAUDE.md project)
+
+**External contract verified against real source: YES.**
+
+Nguồn: `docs/Architecture.md` §6.9 (Protocol 5 R5-01, verify trực tiếp trên MinerU source code branch
+`master`, đã đóng từ trước session này). Dev **không** tự bịa field/endpoint mới nào trong lượt sửa
+này — toàn bộ thay đổi ở `mineru_runner.py` (thêm `task_timeout_seconds` override, `should_cancel`
+callback ở tầng Python) là logic nội bộ team tự thiết kế, không phải claim mới về HTTP contract của
+MinerU. Riêng `parse_method` override (§6.21.3): giá trị `"auto"/"txt"/"ocr"` đều **đã** nằm trong bảng
+form field đã verify ở §6.9.2 (`parse_method`: `str` (`auto`/`txt`/`ocr`)) — Dev chỉ thêm 1 lớp resolve
+ở tầng API (`_resolve_parse_method()`), không đổi cách gọi MinerU. Điểm duy nhất còn `⚠️ ASSUMED` (đã
+ghi rõ trong Architecture.md §6.15.3 S15-13 và trong docstring `MinerUCancelledError`): MinerU có
+endpoint huỷ task server-side hay không — Dev **không** giả vờ đã verify, giữ nguyên nhãn `⚠️ ASSUMED`
+và chọn thiết kế an toàn (chỉ dừng chờ ở phía app, không gọi API huỷ không tồn tại). Đúng tinh thần
+Protocol 5.
+
+### 10. Regression — tự chạy lại độc lập, không chỉ tin số Dev báo
+
+```
+$ uv run ruff check src/ tests/ web/
+All checks passed!
+
+$ uv run pytest -q
+464 passed, 1 failed, 478 warnings in 100.61s
+FAILED tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle
+```
+
+Khớp đúng 100% số Dev báo cáo trong CHANGENOG (464 passed / 1 failed). Xác nhận thêm bằng
+`git status --short`: `src/postprocess/rotated_text_overlay.py`, `font_shrink.py`,
+`src/preprocess/searchable_pdf.py` và `tests/test_rotated_text_overlay.py` đều đang có thay đổi CHƯA
+COMMIT — khớp đúng lời giải thích "1 session/worktree khác đang sửa Bug #8 song song". Đối chiếu thêm
+với chính section "Bug #8 — Vòng 2" ngay phía trên trong file này (đã APPROVE riêng, ghi rõ test FAILED
+này là "1 bug độc lập, khác cơ chế, có TRƯỚC Bug #8", task theo dõi riêng `task_062a9bd5`) — 2 nguồn độc
+lập (CHANGELOG của US-15, review-report Bug #8 vòng 2) xác nhận cùng 1 kết luận: **fail này không liên
+quan tới US-15, không phải regression do session này gây ra.**
+
+### 11. Type hints, error handling, style — quét chung
+
+Toàn bộ hàm mới/sửa (`run_parse_only`, `_run_parse_only_pipeline`, `_run_mineru_and_record_quality`,
+`_resolve_parse_method`, `MinerURunner.parse_document`/`_poll_until_done`) có type hint đầy đủ cho
+tham số + giá trị trả về. `ruff check` xanh (bao gồm cả `web/` — JS không phải phạm vi ruff nhưng lệnh
+Dev chạy có liệt kê, không phát hiện vấn đề). 3 exception mới (`ParseOnlyEmptyOutputError`,
+`ParseOnlyZipGuardError`, `MinerUCancelledError`) đều kế thừa đúng lớp cha hiện có
+(`RuntimeError`/`MinerUError`), có docstring giải thích rõ lý do tồn tại — không phải bare `Exception`.
+File I/O (`document.md`, ảnh, zip) đều qua `Path`, không có string concatenation cho đường dẫn; tên ảnh
+ghi ra dùng `Path(name).name` (đã có từ trước, không đổi) để chặn path traversal từ tên file MinerU trả
+về. Không phát hiện vấn đề security (không có input nào từ user đi thẳng vào SQL/subprocess/path mà
+không qua validate).
+
+**1 điểm style rất nhỏ, non-blocking**: `_resolve_parse_method(requested: str, file_type: str) -> str`
+nhận `requested: str` thay vì `Literal["auto", "txt", "ocr"]` (kiểu chính xác hơn, khớp với
+`JobCreateRequest.parse_method` đã dùng `Literal` ở nơi gọi) — không ảnh hưởng hành vi vì hàm chỉ so
+sánh chuỗi, chỉ là type hint có thể chặt hơn.
+
+### 12. Batch failure isolation (BR-BATCH-01) — không bị ảnh hưởng
+
+Đọc `BatchOrchestrator.run_batch()`/`_run_one()` (`job_orchestrator.py:1453+`): mỗi job chạy trong
+session DB riêng (`session_factory()` per job), gọi `job_orchestrator.run_job()` — với job `parse_only`,
+`run_job()` rẽ ngay sang `run_parse_only()` (S15-1), và `run_parse_only()` tự bọc toàn bộ pipeline
+trong try/except nội bộ (dòng 744-773), luôn trả về `JobResult` thay vì raise ra ngoài — 1 job
+`parse_only` lỗi (MinerU timeout, zip guard fail...) không làm crash `_run_one()`/`run_batch()`, các
+job khác trong batch (kể cả job `translate` trộn chung batch) tiếp tục chạy bình thường. Không phát
+hiện thay đổi nào ở `BatchOrchestrator` tự nó trong 2 lượt Dev này — hành vi failure isolation sẵn có
+được kế thừa đúng nhờ `run_parse_only()` tuân thủ đúng "graceful JobResult, không propagate exception"
+như `run_job()` Step 7/8 đã làm.
+
+### Danh sách issue
+
+**Không có issue blocking.**
+
+**Non-blocking (1)**:
+- `_resolve_parse_method()` (`src/api/routes/jobs.py:287`) nên nhận `requested: Literal["auto", "txt",
+  "ocr"]` thay vì `str` cho khớp kiểu với `JobCreateRequest.parse_method` — thuần type-hint, không ảnh
+  hưởng hành vi runtime. Có thể gộp vào lần sửa tiếp theo chạm file này, không cần round riêng.
+
+**2 quyết định phạm vi Dev tự đưa ra, đã ghi rõ trong CHANGELOG, đúng đắn về mặt kỹ thuật — cần PM xác
+nhận (không phải issue kỹ thuật)**:
+1. `create_batch()`/`BatchCreateRequest` không nhận `parse_method` override — batch `parse_only` luôn
+   dùng `"auto"`. Đúng vì §6.21.3 chỉ mô tả tường minh `POST /api/jobs`; không regress hành vi cũ.
+2. Migration `_NEW_NULLABLE_COLUMNS` chỉ thêm đúng `("jobs", "parse_method", "TEXT")`, không gộp
+   `Job.finished_at`/`Job.total_units`/`Chunk.unit_start`-`end`/bảng `suggested_terms` như 1 câu trong
+   brief PM yêu cầu — tự kiểm tra xác nhận Dev đúng: 4 field/bảng đó **chưa tồn tại** ở bất kỳ đâu trong
+   `src/models/` hiện tại (grep `finished_at\|total_units\|unit_start\|unit_end\|suggested_term` trong
+   `src/models/*.py` → 0 kết quả liên quan), thuộc US-19/US-20 khác hẳn US-15/§6.21.3 — gộp vào sẽ là mở
+   rộng phạm vi ngoài việc được giao, đúng nguyên tắc "escalate thay vì tự ý đổi kiến trúc" của vai trò
+   Dev.
+
+### Kết luận
+
+**APPROVE.**
+
+Căn cứ: cả 8 điểm trọng tâm brief PM yêu cầu xác nhận (S15-10, S15-11, S15-2 mở rộng, status
+`"parsing"` đủ 6 vị trí, S15-6 rẽ theo `file_type`, zip eager + guard, cancel qua `should_cancel`, golden
+fixture thật) đều đã tự đọc code trực tiếp + tự chạy lại độc lập để xác nhận, không chỉ tin CHANGELOG
+hay số Dev báo cáo. Điểm tinh vi nhất (S15-6, mục 5) đã được verify bằng cách tự tính lại thuật toán
+`_compute_quality()` trên `middle.json` thô, ra kết quả khớp tuyệt đối với 2 nguồn độc lập khác. Regression
+suite tự chạy lại khớp 100% với báo cáo Dev (464 passed / 1 failed, fail đã biết và đã được 1 review
+khác trong cùng file này xác nhận không liên quan). Không phát hiện vi phạm Protocol 5/6 nào. 1 issue
+non-blocking duy nhất (type hint) không cần chặn release.
+
+R5-04: **External contract verified against real source: YES** (nguồn: `docs/Architecture.md` §6.9,
+Protocol 5 R5-01 đã đóng từ trước session này; Dev không tự bịa field/endpoint MinerU mới nào trong 2
+lượt sửa được review ở đây; `⚠️ ASSUMED` duy nhất — endpoint huỷ task server-side — được ghi nhận đúng
+cách, không giả vờ đã verify).
+
+**Không tính vào giới hạn Protocol 3** (Dev↔Reviewer) — đây là lượt review ĐẦU TIÊN của cả 2 phần việc
+US-15 chính + `parse_method` override trong session này, không phải vòng sửa lỗi sau REJECT.
+
+---

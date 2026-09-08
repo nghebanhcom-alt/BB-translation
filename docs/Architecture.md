@@ -435,6 +435,16 @@ SQLite database tai `/data/bb_translation.db`, WAL mode enabled.
 
 ### 4.2. Table Definitions
 
+> ℹ️ **DDL dưới đây là ảnh chụp schema tại thời điểm v1.0** — cố ý giữ nguyên làm mốc lịch sử.
+> Các increment sau bổ sung cột/bảng và mô tả schema **ngay trong section của chính increment đó**;
+> nguồn sự thật vận hành luôn là `src/models/*.py`. Danh mục bổ sung cho tới 2026-09-08:
+> `jobs.job_type` (§6.8) · `jobs.cost_cap_usd` + status `cost_capped` (§6.11.4) · `jobs.cancel_requested`
+> (Increment 6) · `jobs.ocr_bridge_path` / `ocr_dropped_spans` (§6.10.7) · `jobs.chunk_size_used`,
+> `chunks.thread_used` / `rate_limit_hits`, bảng `concurrency_state` (§6.12.8) · bảng
+> `layout_qa_findings` (Bug #6) · **và đợt 2026-09-08**: `jobs.finished_at` (§6.17.2),
+> `jobs.total_units` (§6.20.6), `chunks.unit_start` / `unit_end` + `page_start`/`page_end` đổi thành
+> nullable (§6.20.7), bảng mới `suggested_terms` (§6.18.3).
+
 ```sql
 -- Batch: nhom nhieu file dich cung luc
 CREATE TABLE batches (
@@ -1363,6 +1373,26 @@ registry song song cho lop render. Them provider moi = them entry o ca hai cho.
 
 ### 6.7. EPUB Handling
 
+> ⛔ **SECTION NÀY ĐÃ BỊ SUPERSEDE HOÀN TOÀN BỞI §6.20 (2026-09-08). KHÔNG IMPLEMENT THEO ĐÂY.**
+>
+> Giữ nguyên câu chữ bên dưới **chỉ để đối chiếu lịch sử** (đúng kỷ luật R7-03: không xoá nội
+> dung cũ). Toàn bộ §6.7 vi phạm Protocol 5 R5-01: mọi contract CLI của `bilingual_book_maker`
+> và `ebook-convert` ở đây được viết **không có mục "Nguồn xác thực"**, khác hẳn §6.9.1/§6.10.1/
+> §6.11.1/§6.12.1/§6.14.1. Khi Tech Lead verify thật (§6.20.1 — cài `bbook-maker==1.1.0` thật,
+> đọc source thật, chạy thật), kết quả là:
+> - Cờ `--model claude` / `--claude_key` / `--prompt` **có tồn tại** trong bản PyPI 1.1.0 (may mắn
+>   đúng), nhưng đường Claude **hỏng hoàn toàn** với `anthropic` SDK hiện tại và hỏng **im lặng
+>   với exit code 0** (§6.20.2 E-06/E-07) — tức là claim "khac biet co loi so voi pdf2zh:
+>   bilingual_book_maker **co** backend Claude native" ở dưới, dù đúng về mặt chữ, dẫn tới một
+>   kết luận thiết kế SAI.
+> - `bilingual_book_maker` **không có** backend DeepSeek (provider mặc định của app) — §6.20.2 E-03.
+> - Nhánh Calibre `ebook-convert` **ra khỏi scope** theo BR-EPUB-01 (PRD amendment 2026-09-08:
+>   output EPUB-only, không tự convert PDF). 6 cờ liệt kê bên dưới **chưa từng được verify** và
+>   không được dùng lại nếu sau này mở lại tính năng convert PDF.
+>
+> Quyết định thay thế: **Phương án B — `ebooklib` parse + Translation Engine nội bộ của app**,
+> xem §6.20.3/§6.20.4.
+
 **Flow**: bilingual_book_maker dich EPUB → EPUB dich → (optional) Calibre convert sang PDF.
 
 > **Ap dung cung nguyen tac 6.6.2 R1**: bilingual_book_maker cung la tool all-in-one — no tu goi
@@ -1388,6 +1418,10 @@ ebook-convert input.epub output.pdf \
 ```
 
 ### 6.8. Markdown Parse-only Mode (PRD US-15)
+
+> ⚠️ **Đã rà soát lại 2026-09-08 khi US-15 được kích hoạt lại — §6.8 vẫn ĐÚNG ở phần lõi nhưng
+> KHÔNG còn đủ.** Phần nào còn dùng được, phần nào phải sửa (và tại sao) nằm ở **§6.15**. Đọc
+> §6.15 TRƯỚC khi implement; §6.8 giữ nguyên làm bản thiết kế nền.
 
 **Quyet dinh**: Them 1 job type moi `parse_only`, tai su dung Parsing Engine (MinerU) nhung SKIP hoan toan Translation Engine, Glossary Injection, va Unit Conversion.
 
@@ -1628,9 +1662,25 @@ confidence         = sum(s["score"] for s in ocr_spans) / ocr_span_count   neu c
                      None                                                  neu count == 0
 ```
 
-`confidence is None` nghia la **khong co span nao qua OCR** (file thuc ra co text layer). Day la
-trang thai hop le, **khong phai loi** — `jobs.ocr_confidence` de NULL, khong canh bao. Code cu
-`raise MinerUError` khi thieu confidence la sai ca ky thuat lan nghiep vu.
+`confidence is None` nghia la **khong co span nao co key `score`**. Day la trang thai hop le,
+**khong phai loi** — `jobs.ocr_confidence` de NULL, khong canh bao. Code cu `raise MinerUError`
+khi thieu confidence la sai ca ky thuat lan nghiep vu.
+
+> **SUA SAU PHAN BIEN DOMAIN EXPERT (2026-09-08)** — cau cu o dong nay viet `confidence is None`
+> nghia la "khong co span nao qua OCR (file thuc ra co text layer)". **Cau do SAI voi du lieu
+> that.** Domain Expert tu chay `MinerURunner.parse_document(parse_method="txt")` that qua MinerU
+> 3.4.5 tren chinh file Figoni 1-25 trang ban `pdf_digital` (`data/uploads/0f92a0d4-…-1-25.pdf`,
+> task `cdbd0988-1182-456d-bf23-791e03490bc6`, 89.0s): ket qua `confidence = 0.997628187250996`,
+> `ocr_span_count = 1004` — **KHONG phai None**. Phan bo score trong `middle.json`: 1002 span
+> `text` + 2 span `inline_equation` **deu co key `score`**; 998 span co `score == 1.0`, 6 span
+> `< 1.0`. Nghia la MinerU 3.4.5 gan `score = 1.0` cho span lay tu text layer chu khong bo trong
+> key `score`.
+>
+> **He qua bat buoc**: o `parse_method="txt"`, `confidence` (a) gan nhu khong bao gio `None`, va
+> (b) **khong mang y nghia chat luong OCR** — no la trung binh bi pha loang boi 998 so 1.0. Moi
+> noi tieu thu gia tri nay PHAI re theo `job.file_type` chu khong theo gia tri runner tra ve; xem
+> S15-6 (da sua) o §6.15.3. Gia tri `None` van co the xay ra (tai lieu khong co span nao co key
+> `score`) nen nhanh `None` trong `_compute_quality()` giu nguyen, khong sua code runner.
 
 **Vi sao khong chon Option C (heuristic ngoai MinerU, vd do dai text / dien tich trang)**: khong
 co calibration, phu thuoc font size / mat do chu / ngon ngu; trong khi ta da co san tin hieu that
@@ -3682,6 +3732,2052 @@ undo (truong `engine` trong key `ConcurrencyState` 6.14.5 chi them ban ghi moi, 
 
 ---
 
+### 6.15. US-15 — Markdown parse-only: rà soát §6.8 so với code hiện tại (2026-09-08)
+
+§6.8 được viết ở thời điểm trước AIMD (6.12), trước babeldoc (6.14), trước cầu nối OCR (6.10) và
+trước Cost Safety (6.11). Mục này ghi rõ phần nào còn dùng được, phần nào phải sửa.
+
+#### 6.15.1. Nguồn xác thực (Protocol 5 R5-01)
+
+| # | Claim | Nguồn |
+|---|---|---|
+| P-01 | `Job.job_type` (`translate` \| `parse_only`) **đã tồn tại** trong DB, không cần thêm cột | đọc trực tiếp `src/models/job.py` (field `job_type: str = Field(default="translate")`) |
+| P-02 | `POST /api/jobs` đã nhận `job_type`, đã bỏ qua cost gate cho `parse_only`, nhưng gọi `_mark_parse_only_unsupported()` đánh `failed` ngay | đọc `src/api/routes/jobs.py::create_job` + `_mark_parse_only_unsupported()` |
+| P-03 | `MinerURunner.parse_document(file_path, output_dir, parse_method="ocr"\|"txt", lang, start_page_id, end_page_id) -> MinerUResult(markdown_path, images_dir, quality, task_id, middle_json_path)` | đọc trực tiếp `src/services/mineru_runner.py` (interface nội bộ của team, contract MinerU đã VERIFIED ở §6.9.1) |
+| P-04 | `run_job()` reject EPUB ở **Step 1**, TRƯỚC mọi rẽ nhánh khác | đọc `src/core/job_orchestrator.py::run_job` Step 1 |
+| P-05 | `GET /api/jobs/{id}/download` trả **1 file đơn** qua `FileResponse`, media_type hardcode `application/pdf` | đọc `src/api/routes/download.py` |
+| P-06 | `ebooklib` / `beautifulsoup4` / `markdownify` **không có** trong `.venv` của project | `importlib.metadata.distributions()` trên `.venv` thật — 0 kết quả cho cả 3 |
+| P-07 | `ebooklib==0.20` + `beautifulsoup4==4.15.0` **cài và import được trên Python 3.14.7** (đúng Python của `.venv` project) | tự cài vào venv scratch riêng bằng `uv venv --python 3.14` + chạy `import ebooklib, bs4; epub.read_epub` — PASS |
+
+#### 6.15.2. Phần của §6.8 CÒN DÙNG ĐƯỢC nguyên trạng
+
+- Quyết định lõi: `parse_only` chạy Parsing Engine (MinerU) rồi **dừng**, skip Translation Engine +
+  Glossary + Unit Conversion (BR-PARSE-01). Không mâu thuẫn với bất kỳ thay đổi nào sau đó.
+- Cột `job_type` — đã có sẵn (P-01), §6.8 không cần "ALTER TABLE" nữa.
+- Mapping input → tham số MinerU: `pdf_digital` → `parse_method="txt"`, `pdf_scan` → `parse_method="ocr"`,
+  cả hai qua HTTP async task flow của §6.9.3 (không gọi CLI `mineru`). Khớp 1:1 với P-03.
+- Cấu trúc output `output/{job_id}/document.md` + `images/` (BR-PARSE-03). **Lưu ý (2026-09-08)**:
+  cây thư mục đúng, nhưng **ví dụ tên file ảnh ở §6.8:1474-1481 (`page_003_img_01.png`) sai thực
+  tế** — tên thật là SHA-256 + `.jpg` (xem L-6, §6.15.5). Không được viết test/AC theo mẫu tên đó.
+- Chi phí LLM = 0 (BR-PARSE-05).
+
+**Đã rà, KHÔNG liên quan tới `parse_only`** (ghi lại để người đọc sau không phải rà lại — xác nhận
+bằng code chứ không suy đoán, Domain Expert kiểm độc lập cùng kết luận 2026-09-08):
+- `babeldoc_toc_split_enabled` (Bug #7 Ca C) chỉ được đọc **một chỗ duy nhất**:
+  `job_orchestrator.py:248`, bên trong property `_translator_runner`, mà property này chỉ được gọi
+  từ `_process_chunk()`. `run_parse_only()` (S15-1) không đi qua `_process_chunk()`.
+- `compress_pdf_images()` (US-16 / US-16 v2) chỉ được gọi tại `job_orchestrator.py:573-574` trong
+  Step 8 của luồng translate, gate bởi `pdf_translate_engine == "babeldoc"`, input là `merged_path`.
+  `parse_only` không có `merged_path` và không sinh PDF output → không có gì để nén.
+- `MinerURunner.parse_document()` là HTTP call độc lập, không import gì từ `babeldoc_runner.py` /
+  `image_compress.py`.
+
+#### 6.15.3. Phần PHẢI SỬA (spec cho Dev)
+
+**S15-1 — Thứ tự rẽ nhánh trong `run_job()`.** Hiện Step 1 reject EPUB trước tất cả. Một job
+`parse_only` trên file EPUB sẽ chết ở Step 1 dù nhánh parse-only chẳng liên quan gì tới
+`bilingual_book_maker`. **Rẽ theo `job.job_type` TRƯỚC, rồi mới rẽ theo `file_type`**:
+
+```
+run_job(job_id):
+    if job.job_type == "parse_only":
+        return await self.run_parse_only(job, db_session)   # nhánh MỚI, độc lập
+    # ... Step 1..10 hiện tại giữ nguyên cho job_type == "translate"
+```
+
+`run_parse_only()` là **hàm riêng**, không nhồi `if job_type == ...` rải rác vào Step 1-10 —
+cùng lý do §6.14.7 nêu cho việc chọn engine: mỗi chỗ rẽ nhánh nằm bên trong pipeline là 1 cơ hội
+để 2 nhánh lệch nhau (đúng kiểu Bug #5).
+
+**S15-2 — Bỏ `_mark_parse_only_unsupported()`** (`src/api/routes/jobs.py`) và cho `parse_only` đi
+tiếp `status="queued"` + `_schedule_background()` như job translate. Cost gate vẫn skip (code hiện
+tại đã đúng: `if request.job_type == "translate"`).
+
+> **MỞ RỘNG sau phản biện Domain Expert (2026-09-08) — S15-2 bản gốc chỉ nêu `create_job`, THIẾU
+> 2 call site khác.** Đã tự đối chiếu code, xác nhận Expert đúng ở cả hai:
+> - `create_batch` (`src/api/routes/jobs.py:889-891` gọi `_mark_parse_only_unsupported(job)` cho
+>   từng job; `:899-907` đánh cả batch `failed` + `failed_files = len(parse_only_jobs)`). Nếu Dev
+>   chỉ sửa `create_job`, **batch parse_only vẫn chết**. Phải: bỏ cả 2 chỗ, và
+>   `_schedule_background(_run_batch_background(batch.id))` chạy cho **cả hai** `job_type` (hiện
+>   đang gate `if request.job_type == "translate"`).
+> - `retry_job` (`:585-586`: `if job.job_type == "parse_only": raise HTTPException(400, …)`) —
+>   xem S15-11.
+
+**S15-3 (SỬA SAU PHẢN BIỆN DOMAIN EXPERT 2026-09-08) — Download phải là ZIP, và ZIP tạo EAGER
+trong `run_parse_only()`, KHÔNG lazily trong `download.py`.** Bản gốc của S15-3 ghi "nén
+`Path(job.output_path).parent` thành ZIP, tạo lazily lần tải đầu, cache lại". **Bác bỏ chính
+mình** — 3 lý do của Expert đều đúng và tôi không có phản biện nào:
+1. Tạo artifact trong request handler nằm **ngoài** bảng lineage §6.15.4 và **ngoài** guard S15-5:
+   job đã `completed` rồi mà tải về vẫn có thể fail (thư mục `images/` bị xoá tay, đĩa đầy) — đúng
+   shape "báo xong, output không dùng được" của Bug #5, chỉ dời từ bước dịch sang bước tải.
+2. Cache zip nằm **trong chính thư mục bị nén** (`data/outputs/{job_id}/`) → lần dựng lại sẽ nén
+   `parse_result.zip` vào chính nó.
+3. Crash giữa lúc ghi để lại zip cụt, `exists()` vẫn `True` → serve file hỏng mãi mãi.
+
+**Bản chốt:**
+- `run_parse_only()` **tự đóng gói** sau guard S15-5:
+  `data/outputs/{job_id}/parse_result.zip` (`zipfile.ZIP_DEFLATED`), ghi theo **danh sách file
+  tường minh** (`document.md` + từng file trong `images/`), **không** `os.walk` thư mục — walk là
+  đường duy nhất khiến zip tự nén chính nó.
+- Ghi ra `parse_result.zip.tmp` rồi `os.replace()` → không bao giờ tồn tại zip dở mang tên thật.
+- `download.py` **không biết gì về `parse_only`**: chỉ (a) suy `media_type` từ `result_path.suffix`
+  (`{".pdf": "application/pdf", ".zip": "application/zip", ".epub": "application/epub+zip"}`, mặc
+  định `application/octet-stream`) — thay cho hardcode `application/pdf` (P-05, xác nhận lại tại
+  `src/api/routes/download.py:61`), và (b) đặt tên `{stem}_markdown_{timestamp}.zip` cho job
+  `parse_only` (giữ nguyên pattern `_vi`/`_bilingual` + timestamp `:52-60`).
+- UI: `web/index.html:134` ("Tải bản VI") và `web/history.html:59` ("Tải VI") rẽ theo `job_type`
+  → "Tải Markdown (.zip)"; **ẩn** link bản song ngữ cho job parse_only.
+
+**S15-4 (SỬA cùng S15-3) — `job.output_path` cho parse_only trỏ tới
+`data/outputs/{job_id}/parse_result.zip`** (file `.zip`, KHÔNG phải `.md`, KHÔNG phải thư mục).
+Lý do đổi so với bản gốc: `output_path` là thứ `download.py` trả thẳng cho user — nó phải trỏ tới
+**artifact đã hoàn chỉnh và đã được guard**, không phải một mảnh của nó. Consumer nào cần chính
+file `.md` (preview sau này, §6.18 US-20 — xem lineage đã sửa ở §6.18.5) derive bằng
+`Path(job.output_path).parent / "document.md"`. `DELETE /api/jobs/{id}` vẫn dọn theo thư mục
+`data/outputs/{job_id}` như cũ, không phải học khái niệm mới.
+
+**S15-5 — Guard "không im lặng ra file rỗng"** (bản sao tinh thần BR-OCR-03): sau khi MinerU trả
+về, nếu `document.md` có 0 ký tự (sau `.strip()`) → job `failed` với thông báo rõ, KHÔNG báo
+`completed`. Đây chính xác là kịch bản Bug #5 áp cho nhánh parse.
+
+**S15-6 (VIẾT LẠI — bản gốc SAI, sửa sau phản biện Domain Expert 2026-09-08) — `ocr_confidence`
+cho parse_only rẽ theo `file_type`, KHÔNG theo giá trị runner trả về.**
+
+Bản gốc viết: *"`parse_method="txt"` (born-digital) → MinerU không chạy OCR → `quality.confidence
+is None` → ghi NULL"*. **Sai với dữ liệu thật.** Expert tự chạy `MinerURunner` thật ở `txt` mode
+trên chính file Figoni 1-25 trang: `confidence = 0.9976`, `ocr_span_count = 1004`, 998/1004 span
+có `score == 1.0` (chi tiết + nguồn: xem hộp "SỬA SAU PHẢN BIỆN" ở §6.9.5). Đây đúng lớp lỗi
+Protocol 5 mà project đã dính 2 lần: contract được suy ra cho **một mode chưa từng có dữ liệu
+thật** (§6.9 chỉ từng được verify ở `ocr` mode) rồi viết vào tài liệu như sự thật.
+
+Bản chốt cho `run_parse_only()`:
+
+| `job.file_type` | `parse_method` | `jobs.ocr_confidence` / `ocr_dropped_spans` | Cảnh báo US-11 |
+|---|---|---|---|
+| `pdf_digital` | `txt` | **ép `None` bất kể `quality.confidence` trả về gì** | **không** gọi `_emit_ocr_warning_if_low()` |
+| `pdf_scan` | `ocr` | ghi giá trị thật từ `quality` | có, tái dùng `_emit_ocr_warning_if_low()` |
+
+Lý do ép `None` thay vì ghi 0.9976: cột `jobs.ocr_confidence` có **một** ngữ nghĩa duy nhất trong
+toàn app — "độ tin cậy của bước OCR" — và nó được hiển thị nguyên trạng lên `JobDetail`
+(`src/api/routes/jobs.py:240`). Ghi vào đó một con số **không đến từ OCR** là đúng loại "cùng một
+biến, hai ý nghĩa" đã sinh ra Bug #5 và nhầm lẫn `cost_source` ở RC-4.
+
+**Test bắt buộc (Protocol 5 mục 3 — golden file, không mock viết tay)**: fixture sinh từ chính
+run thật của Expert (`middle.json` 998 span `score=1.0`, lưu vào
+`tests/fixtures/mineru/parse_only_txt_figoni25/`), assert `run_parse_only()` ghi `ocr_confidence
+IS NULL` **dù runner trả 0.9976**. Test mà mock runner trả `None` sẽ pass một cách vô nghĩa —
+đúng loại "mock tự nhất quán với giả định sai" mà Protocol 5 tồn tại để chặn.
+
+**S15-7 — BR-PARSE-04 ("không tính vào translation history").** KHÔNG tạo bảng riêng. `GET /api/jobs`
+thêm query param `job_type` (optional, cùng kiểu lọc như `status` đang có); tab Lịch sử mặc định
+lọc `job_type=translate`, khu vực parse hiển thị `job_type=parse_only`. Lý do: tách bảng nghĩa là
+nhân đôi mọi thứ đã có (progress, cancel, delete, WebSocket) cho một khác biệt thuần trình bày.
+
+**S15-8 (VIẾT LẠI — sửa sau phản biện Domain Expert 2026-09-08) — Nhánh EPUB: MỘT loader dùng
+chung, HAI projection riêng.**
+
+Bản gốc viết: tái dùng **`EpubDocument.units`** rồi `units_to_markdown()`. **Expert bác bỏ cách
+làm này và tôi chấp nhận hoàn toàn** — kèm số đo trên chính EPUB thật của user
+(`ops/xhtml/chapter01.html`, 97,4% nội dung cuốn sách):
+
+| Thành phần XHTML nguồn | Có trong file | Qua `units` → `units_to_markdown()` | Qua projection full-DOM |
+|---|---|---|---|
+| `<img>` | 10 | **0** (ảnh không phải đơn vị dịch nên không bao giờ là `EpubUnit`) | 10 |
+| `<strong>` (tên + định lượng nguyên liệu in đậm) | 214 | **0** | 214 |
+| `<em>` | 26 | **0** | 26 |
+| `<sup>`/`<sub>` (6/6 là **tử số phân số**, 0/6 là footnote) | 6 | **bị `extract()` → phá định lượng** | giữ đúng nghĩa |
+| `h2`/`h3` | 2 / 34 | 2 / 34 | 2 / 34 |
+
+Lập luận Protocol 6 của bản gốc ("2 parser EPUB cho cùng 1 file = cấu hình sinh bug 2 nhánh lệch
+nhau") **vẫn đúng và giữ nguyên** — nhưng nó phải áp ở **tầng loader**, không phải tầng
+projection. `EpubUnit` được thiết kế có chủ đích là *danh sách đơn vị DỊCH* (chỉ node có chữ, bỏ
+ảnh, bỏ unit toàn số). Mọi quy tắc đó **đúng cho dịch** và **phá** mục tiêu "giữ nguyên vị trí"
+của parse-only: `units_to_markdown()` sẽ vi phạm trực tiếp 3/4 AC của US-15 (AC ảnh
+`PRD.md:182` mất 100%; AC list `:181` — `EpubUnit.tag == "li"` không biết cha là `ol` hay `ul` nên
+numbered steps thành bullet; AC bảng `:180` — `td`/`th` là unit phẳng, không còn ranh giới
+`tr`/`table` để dựng lại cột; cộng thêm rule "bỏ unit toàn chữ số" xoá sạch ô số của bảng công
+thức).
+
+> **Câu trả lời (đã sửa) cho câu hỏi của PM "parser dùng chung được không?" — CÓ ở tầng LOADER,
+> KHÔNG ở tầng projection.** Cái bắt buộc dùng chung là: mở zip, kiểm DRM, xác định `opf_dir`,
+> thứ tự spine, parse XHTML → soup. Cái phải khác nhau là: chiếu soup đó ra *đơn vị dịch* (US-22)
+> hay ra *Markdown giữ nguyên bố cục* (US-15). Hai projection đọc **cùng một** `spine_documents`
+> → Protocol 6 vẫn được thoả ở đúng chỗ nó có ý nghĩa.
+
+```
+src/services/epub_document.py
+  EpubDocument.load(path)                        # CHUNG: zip, DRM, opf_dir, spine order, soup
+    .spine_documents -> list[tuple[str, BeautifulSoup]]   # MỚI, public, theo thứ tự spine
+    .units           -> list[EpubUnit]           # projection DỊCH        (§6.20.5)
+    .full_text()     -> str                      # text thuần (lọc glossary, US-20 §6.18.5)
+    .write_translated(...)                       # §6.20.5
+    .to_markdown(images_out_dir) -> str          # projection PARSE-ONLY (US-15)  — MỚI
+```
+
+`to_markdown()`: duyệt `spine_documents` **theo đúng thứ tự spine**; mỗi document →
+`markdownify(soup, heading_style="ATX")` qua **converter riêng của app** (xem §6.21 — bắt buộc,
+converter mặc định của `markdownify` làm hỏng số mũ/chỉ số dưới); nối các document bằng
+`\n\n---\n\n`; rewrite mọi `src` ảnh từ đường dẫn tương đối trong zip (`../images/f0003-01.jpg`)
+thành `images/f0003-01.jpg` và copy bytes từ zip ra `images_out_dir` — để cây output EPUB **giống
+hệt** cây output PDF của MinerU (`document.md` + `images/`, BR-PARSE-03), download.py không phải
+biết input là gì.
+
+**Về dependency `markdownify`** (bản gốc muốn tránh): **đảo quyết định, CHẤP NHẬN thêm.** Expert
+đã test hành vi thật (`ol` → `1. 2. 3.`, `ul` lồng → thụt đúng cấp, `<img>` → `![alt](src)`,
+`<figure>/<figcaption>` → ảnh + dòng caption). Thư viện thuần Python, phụ thuộc duy nhất là `bs4`
+— thứ US-22 đã phải cài. Tự viết walker ~100 dòng vẫn phải tự test lại đúng những case đó, không
+rẻ hơn, và là code chúng ta phải nuôi. Ràng buộc kèm theo: **pin version trong `pyproject.toml`**
+và `to_markdown()` phải có golden test trên chính `chapter01.html` (đổi version `markdownify`
+→ golden test đỏ ngay, không âm thầm đổi output).
+
+**Test R6-02 nối 2 projection**: `len(doc.units)` và số heading đếm được trong `to_markdown()`
+phải cùng đến từ **một** lần `load()` — assert số `h2`/`h3` trong Markdown == số unit có
+`tag in {"h2","h3"}`. Nếu 2 projection tách nhau ra dùng 2 lần `load()` khác nhau, đây là dấu
+hiệu Reviewer phải flag.
+
+**Hệ quả thứ tự làm việc**: nhánh EPUB của US-15 **phụ thuộc §6.20 (US-22)**. Nếu increment US-15
+chạy trước US-22, `job_type=parse_only` + `file_type=epub` phải trả **HTTP 400 với thông báo rõ**
+("Xuất Markdown cho EPUB sẽ có cùng đợt với tính năng dịch EPUB") — KHÔNG được tạo job rồi fail
+im lặng. PDF born-digital và PDF scan không phụ thuộc gì, làm được ngay.
+
+**S15-9 — Phụ thuộc hạ tầng phải nói trước (YA-7.3).** `parse_only` cho **PDF born-digital cũng
+bắt buộc phải có MinerU đang chạy** (§6.9.8: chạy `mineru-api` bằng uv tool trên macOS, không phải
+Docker). UI phải nói rõ điều này trước khi user chọn chế độ, và `run_parse_only()` phải gọi
+`MinerURunner.health()` trước, fail sớm với thông báo tiếng Việt rõ ràng thay vì timeout 3600s.
+
+##### Bổ sung sau phản biện Domain Expert (2026-09-08) — 5 điểm §6.15 bản gốc BỎ SÓT
+
+**S15-10 [BLOCKING] — `_find_completed_duplicate()` phải lọc `job_type`.**
+`src/api/routes/jobs.py:322-326` chỉ lọc `Job.file_hash == file_hash, Job.status == "completed"`
+(tự đọc lại code, xác nhận Expert đúng). Hiện **vô hại vì chưa có job `parse_only` nào
+`completed`** — nhưng **ngay khi US-15 ship**: user parse file X xong (job parse_only →
+`completed`), sau đó bấm "Dịch" chính file X → API trả `200 duplicate_found` trỏ tới **job
+parse-only**, frontend hiện "đã dịch rồi, tải?" và link tải là ZIP Markdown. Đây đúng cái bẫy
+"cùng một biến, hai ý nghĩa" mà §6.20.7 tự cảnh báo.
+**Sửa**: thêm `Job.job_type == "translate"` vào `where`. **Không** dedupe cho parse_only ở v1 —
+chi phí = $0, chạy lại vô hại, thêm nhánh là thêm bề mặt lỗi.
+**Test regression bắt buộc**: `create_job(job_type="translate")` trên file đã có 1 job
+`parse_only` `completed` → phải ra **202 + job mới**, không phải `200 duplicate_found`.
+
+**S15-11 [BLOCKING] — `retry_job()` đang chặn `parse_only`, mâu thuẫn trực tiếp với S15-9.**
+`jobs.py:585-586` raise 400 `"parse_only chua duoc ho tro, khong the retry"`, và `:594-605` gọi
+`_resolve_provider_or_400` + `_enforce_cost_gate` **vô điều kiện**. Kịch bản thật trên máy user
+(§6.9.8 — `mineru-api` chạy tay bằng `uv tool`, không phải service tự bật): tạo job → S15-9 fail
+sớm đúng như thiết kế → user bật MinerU → bấm "Tiếp tục" → **400, job chết vĩnh viễn, phải upload
+lại**. Fail sớm mà không retry được thì fail sớm là một cái bẫy.
+**Sửa**: bỏ `:585-586`; với `parse_only` **bỏ qua** `_resolve_provider_or_400` +
+`_enforce_cost_gate` (giống hệt `create_job:475-485` đã làm) → đặt thẳng `status="queued"` +
+`_schedule_background`. Nhãn nút retry trên `web/index.html:139-140` hiện là "Tiếp tục dịch" →
+rẽ theo `job_type` thành "Chạy lại" cho job parse.
+
+**S15-12 [BLOCKING] — Thiếu status riêng `"parsing"`, rủi ro `rmtree` trong lúc MinerU đang ghi.**
+§6.15 bản gốc không nói job ở status nào trong lúc MinerU chạy (có thể tới ~25 phút, xem S15-14).
+Nếu Dev tự chọn: (a) mượn `"translating"` → UI hiện "Đang dịch" cho job không dịch, và
+`current_chunk/total_chunks` hiện `-/-`; (b) đặt `"parsing"` mà **không** sửa các chỗ hardcode
+danh sách status → user xoá được job đang chạy và `DELETE` sẽ `rmtree(data/processing/{job_id})`
+**trong lúc `_write_images()` đang ghi**.
+**Chốt: thêm status `"parsing"`**, kèm **checklist bắt buộc 6 chỗ** (Reviewer grep `"translating"`
+để kiểm, R6-04):
+
+| # | Vị trí | Hậu quả nếu quên |
+|---|---|---|
+| 1 | `jobs.py:648-655` `_ACTIVE_JOB_STATUSES` | guard `DELETE /api/jobs/{id}` (`:672-679`) hở → `rmtree` khi đang ghi (`:708-709`) |
+| 2 | `jobs.py:631` `cancel_job` | (đang chặn `completed/failed/cancelled` → **đã đúng**, chỉ cần xác nhận không đụng) |
+| 3 | `web/js/app.js:16-25` `RESTORABLE_STATUSES` | job biến mất khỏi UI sau F5 |
+| 4 | `web/js/app.js:32-38` `CANCELLABLE_STATUSES` | mất nút "Dừng" |
+| 5 | `web/index.html:110` | thanh progress không hiện |
+| 6 | `web/history.html:23-30` + `web/js/history.js:15-27` | filter + badge màu thiếu trạng thái |
+
+**S15-13 — Cancel hiện VÔ HIỆU với `parse_only`; và `_run_rotated_text_probe` KHÔNG chạy.**
+- `cancel_requested` chỉ được đọc sau mỗi chunk (Step 7); `parse_only` là **1 lời gọi MinerU duy
+  nhất** tới 3600s → nút "Dừng" không có tác dụng. **Sửa**: `_poll_until_done()`
+  (`mineru_runner.py:181-226`) nhận thêm callback `should_cancel: Callable[[], Awaitable[bool]]`,
+  gọi mỗi vòng poll; `True` → ngừng chờ, job `cancelled`. **Known limitation**: MinerU vẫn chạy
+  nốt task server-side — `⚠️ ASSUMED, chưa verify` MinerU 3.4.5 có endpoint huỷ task hay không
+  (§6.9.2 không liệt kê). Chấp nhận được: compute local, chi phí $0.
+- `_run_rotated_text_probe` (Bug #6 Phase 1, `job_orchestrator.py:680`) **không chạy** cho
+  parse_only: theo `mineru_det_probe.py:11-17` chữ xoay vẫn được nhận dạng (chỉ mất góc), và
+  Markdown không có khái niệm góc. Ghi tường minh vì `run_parse_only()` cho `pdf_scan` sẽ **chép
+  lại một phần** `_build_ocr_bridge()` — R6-01 đòi nói rõ bước nào được tái dùng, bước nào không.
+  **Sửa cấu trúc**: tách `job_orchestrator.py:658-665` (gọi MinerU + ghi quality + cảnh báo) thành
+  helper `_run_mineru_and_record_quality()` dùng chung cho cả 2 nhánh — **một** định nghĩa duy
+  nhất cho "gọi OCR" (đúng tinh thần Protocol 6, và cũng là chỗ áp rule rẽ theo `file_type` của
+  S15-6 để 2 nhánh không thể lệch nhau).
+
+**S15-14 — 3 trường "finalize" chưa spec + timeout tính theo số trang.**
+- `completed_at` **phải** được set (như `job_orchestrator.py:607` của nhánh translate) — nếu
+  quên, tên file tải về rơi vào fallback `updated_at` (`download.py:52-53`), lệch hành vi so với PDF.
+- `actual_cost = 0.0`, `cost_source = "metered"`. Lý do chọn `metered` chứ không phải `estimated`:
+  **0 là số đo thật** (không có lời gọi LLM nào), và frontend rẽ theo `cost_source` để hiện cảnh
+  báo "ước tính, có thể sai lệch" (§6.11.4 Lop 0 mục 2) — hiện cảnh báo ước tính cho một con số
+  chắc chắn bằng 0 là nhiễu vô nghĩa.
+- `job.model`: `create_job:500` ghi `model=provider_name` (DeepSeek mặc định) cho **cả** parse_only
+  → tab Lịch sử hiện "deepseek" cho job không dùng LLM. **Giữ nguyên backend** (đụng vào sẽ vướng
+  `_resolve_provider_or_400` ở đường retry), chỉ **ẩn cột model trên UI** khi
+  `job_type == "parse_only"`.
+- **Timeout**: `mineru_task_timeout_seconds = 3600` là hằng số cho mọi file. Đo thật: 89 s / 25
+  trang ≈ **3,6 s/trang** → sách 415 trang ≈ 25 phút, Le Cordon Bleu 418 trang/277 MB **sát trần
+  3600s**. Chốt: timeout cho `parse_only` = `max(600, pages × 6)` giây (hệ số 6 = 3,6 đo được ×
+  1,65 biên an toàn), và BR-PARSE-05 ("thời gian ước tính" trên UI) dùng hệ số 3,6 s/trang.
+- **Batch**: MinerU thật báo `max_concurrent_requests: 1` (`curl localhost:8010/health` →
+  `{"status":"healthy","version":"3.4.5","max_concurrent_requests":1,…}`). Batch 3 file
+  (`max_concurrent_files=3`) submit 3 task, MinerU **xếp hàng server-side**, mà `_poll_until_done`
+  đếm `elapsed` **từ lúc submit — tính cả thời gian nằm trong hàng đợi** → file thứ 3 có thể hết
+  timeout khi còn chưa được xử lý. Chốt v1: **known limitation "batch parse_only nên ≤ 2 cuốn
+  dày"** + timeout theo số trang ở trên. Không đổi cách đếm timeout ở v1 vì tên status "đang xử
+  lý" của MinerU là `⚠️ ASSUMED, chưa verify` (§6.9.2 chỉ liệt kê `completed`/`failed`) — sửa theo
+  giả định về payload của tool bên thứ ba là đúng thứ Protocol 5 cấm.
+
+#### 6.15.4. Data lineage (Protocol 6 — R6-01) — CẬP NHẬT 2026-09-08
+
+| Bước | Artifact tạo ra | Bước sau đọc gì |
+|---|---|---|
+| 1. `run_parse_only()` → `_run_mineru_and_record_quality()` | `MinerUResult.markdown_path` + `images_dir` (PDF, trong `data/processing/`) **hoặc** `EpubDocument.to_markdown(images_out_dir)` (EPUB, §6.21) | (2) |
+| 2. Đóng gói | `data/outputs/{job_id}/document.md` + `data/outputs/{job_id}/images/` | (3) |
+| 3. Guard S15-5 (nội dung) | đọc lại **chính file `document.md` vừa ghi** ở (2), không phải biến trong bộ nhớ | (4) |
+| 4. Đóng gói ZIP (S15-3, **eager**) | `data/outputs/{job_id}/parse_result.zip` — ghi từ **danh sách file tường minh** của (2), qua `.tmp` + `os.replace()` | (5) |
+| 5. **Guard ZIP (MỚI)** | mở lại **chính file zip vừa ghi**: `testzip() is None`, `"document.md" in namelist()`, số entry `images/` **==** số file trong `images/` trên đĩa. Không đạt → job `failed`, KHÔNG `completed` | `job.output_path` = đường dẫn `.zip` này |
+| 6. `download.py` | trả thẳng `job.output_path`, MIME suy từ `.suffix` | user |
+
+Hai sợi dây dễ đứt nhất, **phải có assertion giá trị cụ thể** (R6-02, không được chỉ
+`assert parse_document.assert_awaited()` — đúng dạng assertion đã để lọt Bug #5):
+- **(1) → (2)**: `MinerUResult.markdown_path` nằm trong `data/processing/`, `job.output_path` nằm
+  trong `data/outputs/`. Test assert **đúng đường dẫn cụ thể** được copy/move giữa 2 chỗ.
+- **(2) → (4)**: zip phải được dựng từ **thư mục output vừa ghi**, không phải từ
+  `MinerUResult.markdown_path` gốc. Test: mở zip ra, `document.md` bên trong phải **byte-identical**
+  với `data/outputs/{job_id}/document.md`.
+
+#### 6.15.5. Known limitations của US-15 (đo trên tài liệu bánh THẬT — bắt buộc vào PRD)
+
+Toàn bộ mục này là số đo của Domain Expert trên Figoni *How Baking Works* 25 trang đầu, **cùng
+một file** chạy qua **cả 2 mode** MinerU 3.4.5 (`ocr` đã có sẵn trên đĩa + `txt` chạy live) — nên
+tách được "lỗi do OCR" khỏi "lỗi do layout/table model". Tech Lead **không đo lại** (lặp lần 3
+không tạo thêm thông tin), ghi rõ ranh giới kế thừa này để Reviewer/QA biết.
+
+| # | Giới hạn | Số đo | Hệ quả cho Dev/QA |
+|---|---|---|---|
+| L-1 | **Bảng KHÔNG phải Markdown table syntax** — MinerU xuất **HTML `<table>` một dòng** | 7/7 bảng ở **cả** `ocr` lẫn `txt`; `pipe_table_rows = 0`; có `rowspan=1 colspan=1` | **Giữ nguyên HTML table trong `document.md`** (GFM render được, và giữ được merged cell mà pipe-table không biểu diễn nổi). **KHÔNG viết converter ở v1.** PRD AC `:180` phải sửa (PM) |
+| L-2 | **Cột hẹp bị gộp** — lỗi của table-structure model, KHÔNG phải lỗi OCR | Table 1.4: `POUNDS`+`OUNCES` gộp thành 1 cột; Table 1.5: 4 cột → **2 cột**. **Giống hệt nhau ở cả 2 mode** → born-digital không cứu được | Known limitation. AC-23.1 của BA ("đúng số cột") **sẽ FAIL trên Figoni Table 1.5** — QA không được coi là bug của app |
+| L-3 | **List/bảng dàn 2 cột bị trộn thứ tự**, và lỗi **tàng hình khi render** | Trang "EQUIPMENT AND SMALLWARES": thứ tự ra `1,2,17,3,18,19,4,…`; CommonMark **đánh số lại 1-2-3-4** nên bản render trông "đẹp" | QA **bắt buộc kiểm Markdown thô**, không chỉ bản render (đúng tinh thần R6-03) |
+| L-4 | **`txt` mode mất glyph ký hiệu toán** | Cùng dòng: `ocr` → `= scale readability × 10` (đúng); `txt` → `  scale readability - 10` — `=` mất, **`×` thành `-`** (nhân → trừ) | Xem §6.21 — đây là ca **nghiêm trọng nhất** của yêu cầu "giữ chuẩn công thức", và là lý do phải có `parse_method` override |
+| L-5 | 7 file ảnh "mồ côi" trong `images/` | 23 ảnh ghi ra / 16 được tham chiếu; 7 file dư là **crop của 7 bảng** (MinerU lưu ảnh bảng dù đã xuất HTML) | Vô hại, ZIP vẫn chứa. **QA không được báo bug "ảnh thừa"** |
+| L-6 | Ví dụ tên ảnh ở §6.8:1474-1481 (`page_003_img_01.png`) **SAI thực tế** | Tên thật = **SHA-256 + `.jpg`**, không có số trang; đường dẫn relative `images/` thì **đúng** | Test/AC **không được** assert theo mẫu tên cũ |
+| L-7 | Heading: cấp đúng nhưng 3 lỗi nhỏ | `title` level chỉ có 1 và 2 trong 25 trang (6 + 43), 0 cấp 3; mất khoảng trắng khi nối dòng (`CHAPTER 4SENSORY PROPERTIES…`); sidebar bị nhận nhầm thành heading (`## HELPFUL HINT`) | QA cần trang có **3 cấp heading thật** mới kiểm được AC `:181` |
+| L-8 | Header/footer/số trang **bị loại đúng như mong muốn** (không phải limitation, ghi để QA khỏi báo "mất nội dung") | `discarded_blocks`: header 30, footer 4, page_number 16; `table_footnote` **được giữ** ngay dưới bảng | — |
+
+**Ảnh — ĐÚNG vị trí, xác nhận đồng ý với thiết kế gốc**: 16/16 tham chiếu `![](images/<sha256>.jpg)`
+có file thật trên đĩa ở **cả 2 mode**; ảnh nằm **giữa** đoạn văn và heading kế tiếp đúng như trang
+gốc, không bị dồn xuống cuối. Alt text luôn rỗng (MinerU đặt caption thành dòng text kế bên,
+không nhét vào `alt`) — chấp nhận.
+
+**Giữ MinerU là parser DUY NHẤT cho PDF** (đồng ý với S15-9, Expert xác nhận độc lập): phương án
+thay thế duy nhất đáng cân nhắc là PyMuPDF (`pymupdf4llm`/`find_tables`), nhưng (i) heading level
+ở PyMuPDF là heuristic cỡ font, không có layout model; (ii) nó là **parser thứ hai cho cùng một
+loại input** — đúng thứ Protocol 6 tồn tại để chặn; (iii) MinerU đã chạy sẵn và đã verify sống.
+
+#### 6.15.6. Gate release bổ sung cho US-15 (Protocol 5 R5-03 + Protocol 6 R6-03)
+
+1. **R5-03 `txt` mode**: đã có **1 lần live** (run của Expert, task `cdbd0988-…`). QA vẫn **phải
+   tự chạy lại qua `run_parse_only()` thật** của app, không qua script của Expert.
+2. **R6-03 E2E**: tải ZIP về, **giải nén**, mở `document.md` → có chữ thật (**không chỉ tin
+   `status`**); đếm `![](images/…)` và **mở ít nhất 1 ảnh thật**; kiểm 1 bảng HTML và **1 list 2
+   cột trong Markdown thô** (L-3).
+3. **Golden fixture (Protocol 5 mục 3)**: `tests/test_mineru_runner.py` hiện **không** trỏ tới
+   `tests/fixtures/mineru/` (grep `fixtures/mineru|golden` → 0 kết quả) → mock đang là **viết
+   tay**. Dev phải capture từ run thật vào
+   `tests/fixtures/mineru/parse_only_txt_figoni25/` (`document.md`, `summary.json`, `middle.json`)
+   và test S15-6 **phải** dùng chính `middle.json` này (998 span `score=1.0`).
+4. **Regression chéo S15-10**: file đã có job `parse_only completed` → `create_job(translate)` phải
+   ra **202 + job mới**.
+5. **§6.21 (công thức)**: bắt buộc chạy đủ 5 case của bảng "Gate bắt buộc" ở §6.21.4.
+
+---
+
+### 6.16. US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, và search server-side
+
+#### 6.16.1. Nguồn xác thực (đo thật trên chính stack của project)
+
+Không suy đoán về SQLite/SQLAlchemy — chạy thật trên `.venv` của project (SQLAlchemy 2.0.52,
+SQLModel 0.0.42, aiosqlite 0.22.1, Python 3.14.7) với đúng model `GlossaryEntry` hiện có:
+
+| # | Đo được | Kết quả thật |
+|---|---|---|
+| G-01 | `col(GlossaryEntry.term_en).contains("ganache")` sinh SQL `term_en LIKE '%' \|\| 'ganache' \|\| '%'` | khớp row `"Ganache"` → **LIKE của SQLite case-insensitive cho ASCII, mặc định, không cần `lower()`** |
+| G-02 | `.ilike("%GANACHE%")` sinh `lower(term_en) LIKE lower('%GANACHE%')` | cũng khớp — nhưng `lower()` của SQLite **cũng chỉ ASCII** |
+| G-03 | `.ilike("%đường%")` trên row `"Đường Nâu"` | **0 kết quả**. `.ilike("%Đường%")` → 1 kết quả. Xác nhận EC-18.2 của BA là ĐÚNG: chữ Việt có dấu KHÔNG được fold hoa/thường |
+| G-04 | `.ilike("%_%")` (gạch dưới thô) trên bảng 7 dòng | trả về **cả 7 dòng** — `_` là wildcard, không escape là lỗi thật, không phải lý thuyết |
+| G-05 | `.contains("50%", autoescape=True)` sinh `term_en LIKE '%' \|\| '50/%' \|\| '%' ESCAPE '/'` | khớp đúng 1 dòng `"50% hydration"` — **`autoescape=True` là API đúng để dùng** |
+| G-06 | `count_statement` và `list_statement` dùng **cùng 1 biểu thức điều kiện** OR `(term_en LIKE ... OR term_vi LIKE ...)` | `total` khớp đúng số dòng trả về (3/3) |
+
+#### 6.16.2. US-18 — `GET /api/glossary?q=`
+
+**Quyết định**: filter **server-side**, dùng `col(...).contains(q, autoescape=True)` (KHÔNG dùng
+`.ilike()`).
+
+Lý do chọn `.contains(autoescape=True)` thay vì `.ilike()`:
+1. G-01 vs G-02: cả hai cho cùng kết quả (ASCII fold), nhưng `.ilike()` bọc `lower()` quanh **cột**
+   → vô hiệu hoá mọi index trên `term_en` một cách vĩnh viễn, đổi lại không được gì (G-03: vẫn
+   không fold được tiếng Việt).
+2. `autoescape=True` (G-05) là cách duy nhất trong 2 cách tự xử `%` và `_` — G-04 chứng minh bỏ
+   qua việc này là bug thật.
+
+Spec sửa `src/api/routes/glossary.py::list_entries`:
+
+```python
+async def list_entries(
+    session: SessionDep,
+    scope: str | None = None,
+    q: str | None = None,        # MỚI
+    limit: int = 50,
+    offset: int = 0,
+) -> GlossaryListResponse:
+    ...
+    # BR-GLOSS-08: tìm trong CẢ term_en lẫn term_vi
+    if q is not None and q.strip():
+        needle = q.strip()
+        search_clause = col(GlossaryEntry.term_en).contains(needle, autoescape=True) | col(
+            GlossaryEntry.term_vi
+        ).contains(needle, autoescape=True)
+        count_statement = count_statement.where(search_clause)   # BẮT BUỘC
+        list_statement = list_statement.where(search_clause)     # BẮT BUỘC
+```
+
+**Ràng buộc bắt buộc cho Dev:**
+1. `search_clause` phải là **một biến duy nhất** dùng cho cả 2 statement (YA-2.2). Viết 2 biểu
+   thức song song → Reviewer reject, cùng lý do §6.11.4 Lop 1 điểm 3 cấm 2 công thức cost song song.
+2. Test **bắt buộc** assert `total` khớp `len(entries)` khi kết quả nhỏ hơn `limit` (R6-02: assert
+   giá trị cụ thể, không chỉ "gọi rồi").
+3. Test bắt buộc có case `q="50%"` và `q="_"` (G-04/G-05) — nếu thiếu escape, `q="_"` trả cả bảng
+   và test "search hoạt động" vẫn xanh.
+4. `q` AND với `scope` (EC-18.3), không ghi đè nhau.
+5. Frontend (`web/js/glossary.js`): thêm `searchQuery` vào state; mọi thay đổi `searchQuery` phải
+   `this.offset = 0` trước khi `load()` (YA-2.3, AC-18 dòng 3), có debounce ~250ms.
+
+**Known limitation ghi vào PRD (đã có sẵn ở US-18, đây là số đo xác nhận)**: G-03 — gõ `"đường"`
+không ra `"Đường Nâu"`. Không phải chỉ là "không bỏ dấu" (accent-insensitive) như PRD viết, mà
+**còn không fold được hoa/thường cho ký tự có dấu**. Cả hai đều xuất phát từ cùng một nguyên nhân
+(SQLite build mặc định chỉ Unicode-fold ASCII). Nếu sau này thấy bất tiện thật, hướng nâng cấp rẻ
+nhất là thêm cột dẫn xuất `term_vi_fold` (đã `casefold()` + strip dấu bằng `unicodedata`) và search
+trên cột đó — KHÔNG cần đổi sang Postgres.
+
+#### 6.16.3. US-17 — BR-GLOSS-07: xác nhận ghi đè khi trùng term
+
+**Quyết định: backend trả `409 Conflict` kèm entry cũ; client hỏi user rồi gọi lại với `force=true`.**
+
+Đúng phương án PM ưu tiên (nhất quán với `confirm_cost` của cost gate §6.11.4 Lop 2 và với `force`
+của duplicate-hash AC-12.2 đã có trong `POST /api/jobs`).
+
+Bác bỏ phương án "client tự `GET` rồi so sánh trước khi `POST`" vì 3 lý do:
+1. **TOCTOU thật**: giữa lần GET và lần POST, một luồng khác (import Excel, hoặc promote từ US-20)
+   có thể đã tạo entry đó. Kiểm tra ở client chỉ là gợi ý, không phải bảo đảm.
+2. Nhân đôi luật BR-GLOSS-02 (case-insensitive match) sang JavaScript — luật này hiện chỉ tồn tại
+   ở đúng 1 chỗ (`GlossaryManager._find_entry_in_scope` dùng `func.lower(...)`).
+3. Không bảo vệ được các client khác (curl, script import) — mà BR-GLOSS-07 nói "hệ thống PHẢI
+   hỏi xác nhận", là một luật nghiệp vụ, không phải một chi tiết UI.
+
+Spec:
+
+```python
+class GlossaryEntryIn(BaseModel):
+    term_en: str
+    term_vi: str | None = None
+    notes: str | None = None
+    #: BR-GLOSS-07 — opt-in tường minh cho ĐÚNG request này, không bao giờ là
+    #: default, không được "nhớ" cho lần sau (cùng kỷ luật `confirm_cost`).
+    force: bool = False
+
+
+class GlossaryConflictInfo(BaseModel):
+    entry_id: str
+    term_en: str          # nguyên văn hoa/thường của entry ĐANG CÓ
+    term_vi: str | None
+    notes: str | None
+    updated_at: datetime
+```
+
+`POST /api/glossary`:
+- `existing = await manager.get_entry(term_en)` (đã có sẵn, đúng BR-GLOSS-02).
+- `existing is not None and not request.force` → **HTTP 409**, body
+  `{"detail": "Tu '<term_en cu>' da co trong glossary voi ban dich '<term_vi cu>'. Ghi de?",
+    "existing": GlossaryConflictInfo, "requires_confirmation": true}`. **KHÔNG ghi gì vào DB.**
+- `force=true` → giữ nguyên `bulk_import()` 1 phần tử như hiện tại (BR-GLOSS-03 last-updated-wins),
+  kèm `logger.info` ghi lại giá trị cũ đã bị ghi đè.
+
+**Phạm vi KHÔNG đổi**: `bulk_import()` qua `POST /api/glossary/import/confirm` (Excel hàng loạt)
+giữ nguyên hành vi ghi đè im lặng — BR-GLOSS-07 chỉ áp cho luồng thêm-1-entry-đơn-lẻ, đúng câu
+chữ PRD.
+
+**Ràng buộc test (R6-02)**: test phải assert **số dòng trong bảng KHÔNG đổi** và **`term_vi` cũ
+KHÔNG đổi** sau một request 409 — không được chỉ assert `response.status_code == 409` (đúng kiểu
+assertion mà test cost gate §6.11 đã làm đúng: đếm thật bằng `SELECT COUNT(*)`).
+
+---
+
+### 6.17. US-19 — Lịch sử: thời gian dịch + số trang
+
+#### 6.17.1. Phát hiện chặn thiết kế: `updated_at` KHÔNG dùng làm mốc kết thúc được
+
+PRD US-19 giả định đây là thay đổi thuần tầng response ("các cột này ĐÃ có trong `Job` table, chỉ
+thiếu ở tầng serialize"). Đúng cho `total_pages` và `started_at`. **Sai cho mốc kết thúc.**
+
+Đo thật (grep toàn `src/`, đọc `src/models/job.py`):
+
+| # | Sự thật | Hệ quả |
+|---|---|---|
+| H-01 | `Job.completed_at` chỉ được gán ở **đúng 1 chỗ**: nhánh thành công cuối `run_job()` (Step 10) | job `failed`/`cancelled`/`cost_capped` có `completed_at = NULL` |
+| H-02 | `Job.updated_at` **không có `onupdate=`**, và chỉ có **1 writer duy nhất** trong toàn `src/`: `ProgressTracker.update()` (`src/core/progress_tracker.py`) — gọi sau MỖI chunk xong | với job `failed`, `updated_at` = lúc chunk **cuối cùng THÀNH CÔNG**, không phải lúc fail |
+| H-03 | Nhánh fail của Step 7 `return` **trước** `progress_tracker.update()` | job fail ngay ở chunk 0 → `updated_at` vẫn bằng `created_at` → "thời gian dịch ≈ 0 giây" cho một job chạy 20 phút rồi chết |
+
+Fallback `completed_at or updated_at` (cách làm hiển nhiên nhất) vì thế **cho ra con số sai một
+cách im lặng** đúng ở kịch bản AC-19.2 của BA quan tâm nhất ("nó chạy bao lâu rồi mới chết?").
+
+#### 6.17.2. Quyết định: thêm cột `Job.finished_at`
+
+```python
+# src/models/job.py
+finished_at: datetime | None = Field(default=None)
+# Mốc KẾT THÚC của job ở MỌI trạng thái cuối (completed | failed | cancelled |
+# cost_capped), phục vụ BR-HIST-01/02. Cố ý KHÔNG dùng lại `completed_at`:
+# `completed_at` hiện có đúng nghĩa "hoàn tất THÀNH CÔNG" và đang là dữ liệu
+# nghiệp vụ của 2 chỗ khác (duplicate-detection AC-12.2 và hậu tố tên file
+# tải về) — nới nghĩa của nó là đúng loại "trôi ngữ nghĩa im lặng" mà
+# Protocol 6 tồn tại để chặn. BREAKING SCHEMA CHANGE, xoá/tạo lại DB dev.
+```
+
+**KHÔNG đổi `completed_at`, KHÔNG đổi `started_at`, KHÔNG đổi `total_pages`** — 3 cột này giữ
+nguyên ý nghĩa và consumer hiện có.
+
+Gán `job.finished_at = datetime.now(UTC)` tại **cả 5** điểm thoát cuối của `run_job()`:
+Step 4 (`UnsupportedForPdfPipelineError` → failed), Step 7 (chunk failed), Lop 3 (`cost_capped`),
+graceful cancel (`cancelled`), Step 8 (merge failed), Step 10 (`completed`). Và tại
+`_run_job_background()`'s last-resort guard (`except Exception` → failed) — đây là điểm dễ quên
+nhất vì nó nằm ở `jobs.py` chứ không ở orchestrator.
+
+Với hàng cũ trong DB (`finished_at` NULL) → fallback `completed_at`; nếu cả hai NULL và status là
+terminal → hiển thị `-`, **không** đoán bằng `updated_at`.
+
+#### 6.17.3. Thay đổi tầng response (spec cho Dev)
+
+```python
+class JobDetail(BaseModel):
+    ...  # giữ nguyên toàn bộ field hiện có
+    total_pages: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None   # BR-HIST-01: finished_at - created_at
+    total_units: int | None = None          # §6.20.6 — EPUB, NULL cho PDF
+```
+
+Tất cả optional với default → backward-compatible, không phá client cũ (cùng kỷ luật đã dùng cho
+`ocr_confidence`/`cancel_requested`).
+
+`_to_detail()` tính:
+
+```
+_TERMINAL = {"completed", "failed", "cancelled", "cost_capped"}
+
+end = job.finished_at or job.completed_at
+duration = (end - job.created_at).total_seconds() if (end and job.status in _TERMINAL) else None
+```
+
+- BR-HIST-01: mốc bắt đầu là `created_at`, **không** `started_at` — giữ đúng quyết định PM. Lý do
+  kỹ thuật xác nhận quyết định đó đúng: `started_at` được gán ở Step 6, tức SAU toàn bộ OCR của
+  nhánh `pdf_scan`, nên nó bỏ mất phần chờ dài nhất của job scan. `started_at` vẫn được expose
+  để UI có thể hiện "trong đó OCR ≈ started_at − created_at" nếu muốn — **không bắt buộc** ở đợt này.
+- BR-HIST-02: job đang chạy → `duration_seconds = None`, UI hiện `-` (không đếm tiến, tránh phải
+  refresh định kỳ).
+- EC-19.1: job cũ thiếu field → NULL → UI hiện `-`, không được vỡ.
+- EC-19.2: định dạng "8 phút 12 giây" là việc của frontend; API luôn trả **số giây float**, một
+  đơn vị duy nhất.
+- **`total_pages` cho EPUB = NULL** → UI hiện `-` đúng theo AC US-19. `total_units` (§6.20.6) là
+  thông tin bổ sung tuỳ chọn cho EPUB, không thay thế cột "số trang".
+
+#### 6.17.4. BR-HIST-03 — bỏ "+ Glossary" khỏi tab Lịch sử
+
+Thuần frontend: xoá nút ở `web/history.html` và hàm mở modal tương ứng ở `web/js/history.js`.
+Nút **"Xoá job"** đã có từ 2026-09-06 **giữ nguyên** (BA đính chính Đ-02 — user không nói về nút này).
+
+---
+
+### 6.18. US-20 — "Các từ mới": gợi ý thuật ngữ từ tài liệu vừa dịch
+
+#### 6.18.1. Mâu thuẫn phải giải: BR-TERM-03 ($0 mặc định) vs "thuật ngữ chuyên môn" (cần LLM)
+
+PM nêu đúng mâu thuẫn: rule-based miễn phí nhưng không phân biệt được `flour` (từ thường) với
+`laminated dough` (thuật ngữ); LLM-based chính xác hơn nhưng tốn 1 lượt gọi/job kể cả khi user
+không cần — vi phạm BR-TERM-03.
+
+**Cách gỡ: đây không phải bài toán phân loại nhị phân, mà là bài toán XẾP HẠNG cho một danh sách
+người duyệt.** Khu vực "Chờ duyệt" theo thiết kế của chính user là nơi user **triage bằng mắt** —
+mỗi dòng có 2 nút "Thêm" / "Bỏ qua". Với giao diện đó, chi phí của một false-positive là **một cú
+bấm**, còn chi phí của một false-negative là **thuật ngữ đó vĩnh viễn không bao giờ được gợi ý**.
+Hai loại lỗi không hề đối xứng. Vậy nên tiêu chí đúng cho v1 là **recall cao + xếp hạng tốt**,
+không phải precision cao.
+
+Rule-based đạt được điều đó với chi phí $0. LLM không mua thêm được recall (nó chỉ lọc bớt), nên
+trả tiền cho nó ở bước liệt kê là trả tiền cho thứ không cần thiết.
+
+**Quyết định: rule-based cho bước LIỆT KÊ (mặc định, $0, đúng BR-TERM-03). LLM chỉ xuất hiện ở
+nút "Gợi ý bản dịch" người dùng chủ động bấm.**
+
+Chốt thêm 2 điều để rule-based không thành rác:
+1. **N-gram 1–3 từ, không phải chỉ từ đơn** — EC-20.6 của BA đúng: `baker's percentage`,
+   `double boiler`, `laminated dough` là nhóm giá trị nhất và trích xuất theo từ đơn bỏ sót toàn bộ.
+2. ~~**Có bộ lọc từ phổ thông tiếng Anh**~~ — **ĐIỂM NÀY ĐÃ BỊ BÁC BỎ, xem §6.18.8.**
+
+> ### ⚠️ §6.18.1 và §6.18.2 (bản 2026-09-08 sáng) ĐÃ BỊ THAY THẾ MỘT PHẦN
+>
+> **Khung tư duy** của §6.18.1 (đây là bài toán XẾP HẠNG cho người duyệt, không phải phân loại
+> nhị phân; recall > precision; rule-based $0 mặc định, LLM chỉ khi user bấm) **giữ nguyên hiệu
+> lực** — Domain Expert đã phản biện độc lập và đồng ý với khung này.
+>
+> **Hai thứ bị thay thế**, do (a) phản biện Domain Expert 2026-09-08 với số đo trên sách thật, và
+> (b) **quyết định mới của user cùng ngày**:
+> - **điểm 2 ở trên** (bộ lọc `en_common.txt` ~3.000 từ) — bị bác bỏ hoàn toàn, xem §6.18.8 mục T2;
+> - **bước 6 của §6.18.2** (cắt cứng còn 40 term) — bị bác bỏ, xem §6.18.8 mục T1.
+>
+> Ví dụ minh hoạ "`flour` bị loại" trong đoạn văn trên **cũng sai với dữ liệu thật**: với danh
+> sách phổ thông tiêu biểu (google-10000), `flour` xếp hạng **9751** nên **KHÔNG** bị lọc, trong
+> khi `proof` (2933), `score` (1154), `cream` (2966), `rest` (1539), `turn`, `cup` — **đều là
+> glossary entry thật của user** — thì **BỊ** lọc. Bộ lọc chạy ngược đúng hướng xấu nhất.
+>
+> Dev đọc **§6.18.8 trước**, rồi mới đọc §6.18.2 để lấy phần chưa bị thay thế.
+
+#### 6.18.2. Thuật toán trích xuất (spec cho Dev — `src/core/term_extractor.py`, module MỚI)
+
+Input: `source_text: str` (tiếng Anh, xem lineage §6.18.5), `existing_terms: set[str]` (đã
+`.lower()`), `settings`.
+
+```
+1. Tách câu thô theo dấu câu; trong mỗi câu, tokenize theo [A-Za-z][A-Za-z'-]* (giữ dấu nháy đơn
+   cho "baker's", giữ gạch nối cho "pre-ferment"), hạ về lowercase để đếm.
+2. Sinh n-gram n = 1, 2, 3 KHÔNG vượt qua ranh giới câu và không bắt đầu/kết thúc bằng stopword.
+3. Loại bỏ:
+   - n-gram mà MỌI token đều nằm trong en_common.txt
+   - n-gram chứa chữ số, hoặc dài < 3 ký tự
+   - n-gram đã có trong glossary (BR-TERM-02, so khớp .lower(), kể cả khớp một phần: nếu
+     "ganache" đã có thì "chocolate ganache" VẪN được gợi ý — nó là thuật ngữ khác)
+   - n-gram xuất hiện < `min_occurrences` (mặc định 3; YA-4.6 của BA đề xuất bỏ từ chỉ xuất hiện
+     1 lần vì phần lớn là tên riêng / lỗi OCR)
+4. Khử trùng lặp lồng nhau: nếu "laminated dough" xuất hiện 12 lần và "laminated" xuất hiện 12
+   lần (tức "laminated" gần như luôn đi kèm), giữ n-gram DÀI, bỏ n-gram ngắn. Ngưỡng: bỏ n-gram
+   ngắn nếu >= 80% số lần xuất hiện của nó nằm bên trong 1 n-gram dài hơn đã giữ.
+5. Xếp hạng: điểm = occurrence_count × (1 + 0.5 × (n − 1)) — ưu ái cụm nhiều từ vì đó là nhóm
+   thuật ngữ giá trị nhất.
+6. Cắt còn `max_suggested_terms_per_job` (mặc định 40; PRD đề xuất 30-50).
+```
+
+> **CẢNH BÁO — khối pseudo-code trên là BẢN CŨ, đã bị §6.18.8 thay thế ở bước 1, 3, 4, 5, 6.**
+> Chỉ còn bước 2 (sinh n-gram 1–3, không vượt ranh giới câu) là còn nguyên hiệu lực. Dev
+> **KHÔNG** được implement theo khối này; nó ở lại để đọc hiểu lịch sử quyết định.
+
+Config mới (`src/core/config.py`, cả 3 vào `SETTINGS_DB_OVERRIDABLE_FIELDS`) — **bảng này đã được
+§6.18.8 mục T5 cập nhật, đọc bảng ở đó**:
+
+| Field | Default | Ý nghĩa |
+|---|---|---|
+| `term_extraction_enabled` | `True` | Tắt hẳn bước gợi ý (kill switch) |
+| ~~`max_suggested_terms_per_job`~~ | ~~`40`~~ | ~~Trần chống spam (YA-4.6)~~ → đổi nghĩa thành **van chống tràn DB**, default `20_000`, xem T1 |
+| `term_min_occurrences` | `3` | Bỏ từ xuất hiện quá ít — xem T5 (thêm biến thể cho tài liệu ngắn) |
+
+**Đây là thuật toán heuristic thuần, KHÔNG phải external tool** → không thuộc phạm vi Protocol 5.
+Nhưng bắt buộc phải có **golden file**: `tests/fixtures/term_extraction/` chứa text EN thật trích
+từ 1 job đã dịch, kèm danh sách kỳ vọng — để lần chỉnh ngưỡng sau này đo được là tốt lên hay xấu đi.
+
+#### 6.18.3. DB schema mới
+
+```sql
+CREATE TABLE suggested_terms (
+    id                 TEXT PRIMARY KEY,     -- UUID
+    job_id             TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term_en            TEXT NOT NULL,        -- dạng bề mặt hiển thị cho user
+    match_key          TEXT NOT NULL,        -- MỚI (T3): dạng chuẩn hoá dùng để so glossary
+    ngram_size         INTEGER NOT NULL,     -- MỚI (T4): 1 | 2 | 3 — cho bộ lọc UI "chỉ cụm >= 2 từ"
+    noise_flags        TEXT NOT NULL DEFAULT '',
+                       -- MỚI (T4): CSV các nhãn nghi-nhiễu: proper_noun | stopword_middle
+                       --           | fragment_suspect | plural_merged.
+                       -- KHÔNG phải điều kiện loại bỏ — chỉ để UI ẩn mặc định + demote rank.
+    occurrence_count   INTEGER NOT NULL,
+    rank_score         REAL NOT NULL,        -- điểm xếp hạng (T5), để sắp xếp ổn định
+    status             TEXT NOT NULL DEFAULT 'pending',
+                       -- pending | added | dismissed
+    suggested_term_vi  TEXT,                 -- CHỈ khác NULL sau khi user bấm "Gợi ý bản dịch"
+    translation_cost_usd REAL,               -- chi phí THẬT của lượt LLM đó (metered)
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_suggested_terms_job ON suggested_terms(job_id);
+CREATE UNIQUE INDEX idx_suggested_terms_job_term ON suggested_terms(job_id, term_en);
+-- MỚI: khu vực "Chờ duyệt" gộp mọi job, mặc định lọc status + ẩn nhiễu, sắp theo rank_score.
+CREATE INDEX idx_suggested_terms_status_rank ON suggested_terms(status, rank_score DESC);
+```
+
+**3 cột thêm sau phản biện Domain Expert (2026-09-08)** — lý do đầy đủ ở §6.18.8:
+`match_key` (T3), `ngram_size` + `noise_flags` (T4). Cả 3 nằm trong **cùng đợt migration
+`ALTER TABLE`** đã chốt ở §6.20.11 mục 1 — bảng này là bảng MỚI nên chỉ là `CREATE TABLE`, không
+phải `ALTER`. Kích thước: pool đo thật trên sách 415 trang = **5.177 dòng/job** (§6.18.8 T1) —
+không đáng kể với SQLite, nhưng là lý do phải có index `status, rank_score`.
+
+Ghi chú thiết kế:
+- `ON DELETE CASCADE` theo `job_id` — trả lời BA-Q13/EC-20.7: xoá job thì xoá luôn gợi ý chưa
+  duyệt. Nhất quán với `chunks`/`overflow_reports` đang có. **Nhưng** `DELETE /api/jobs/{id}` hiện
+  xoá thủ công từng bảng con (`chunks`, `overflow_reports`) chứ không dựa vào cascade của SQLite
+  (SQLite mặc định **tắt** foreign key enforcement) → Dev phải thêm `suggested_terms` vào đúng
+  danh sách xoá thủ công đó, không được tin vào `ON DELETE CASCADE`.
+- **Không có** trạng thái `rejected` toàn cục. Đúng BR-TERM-04 (user đã chốt: "Bỏ qua" chỉ ẩn
+  trong phạm vi job đó). Rủi ro BA nêu ở YA-4.2 (sau vài cuốn cùng chủ đề, danh sách lặp lại) là
+  **có thật** nhưng được giảm nhẹ đáng kể bởi BR-TERM-02: mỗi từ user đã "Thêm vào glossary" biến
+  mất vĩnh viễn khỏi mọi gợi ý tương lai. Chỉ những từ user chủ động **từ chối** mới lặp lại. Ghi
+  vào §6.18.7 để PM theo dõi, không tự đổi luật.
+
+#### 6.18.4. API
+
+| Method | Path | Ghi chú |
+|---|---|---|
+| `GET` | `/api/glossary/suggested?job_id=&status=pending&limit=&offset=&sort=&min_ngram=&include_noise=` | `job_id` optional — bỏ trống = gộp mọi job (khu vực "Chờ duyệt" chung trong tab Glossary, đúng BA-Q4 phương án (B) user đã chọn). **4 tham số mới sau phản biện 2026-09-08** — xem T4: `sort` ∈ `rank` (mặc định) \| `count` \| `alpha`; `min_ngram` ∈ 1 (mặc định) \| 2; `include_noise` bool (mặc định `false`); response **bắt buộc** trả thêm `total` và `noise_hidden_count` để UI hiện đúng "Hiện thêm N mục nghi nhiễu" |
+| `POST` | `/api/glossary/suggested/{id}/dismiss` | `status='dismissed'`, trả 204 |
+| `POST` | `/api/glossary/suggested/{id}/promote` | body `{term_vi, notes, force}` → gọi **đúng logic `POST /api/glossary`** (§6.16.3), tức **có áp BR-GLOSS-07**: trùng + `force=false` → 409, entry Chờ duyệt **giữ nguyên `pending`**. Thành công → `status='added'` |
+| `POST` | `/api/glossary/suggested/suggest-translation` | body `{ids: [...]}` — **hành động DUY NHẤT tốn tiền** trong US-20 |
+
+**`suggest-translation` — ràng buộc bắt buộc:**
+- Gộp **tối đa 40 term vào 1 request LLM duy nhất** (không 1 request/từ). Với 40 term ngắn, chi phí
+  thực tế ở DeepSeek < $0.001 — nhưng vẫn phải hiển thị trước, không được giấu.
+- Đi qua `provider.translate()` (§6.6.2 R3 mục 4 đã dành sẵn chỗ cho "cac pipeline tuong lai khong
+  di qua pdf2zh") → **có `TranslationResult.input_tokens/output_tokens/estimated_cost_usd` thật**.
+  Ghi vào `suggested_terms.translation_cost_usd`.
+- **KHÔNG cộng vào `job.actual_cost`.** Lý do: `job.actual_cost` đi kèm `job.cost_source =
+  'estimated'` (§6.6.6) — trộn một số **đo thật** vào một tổng **ước lượng** làm hỏng ngữ nghĩa của
+  chính `cost_source`, đúng loại nhầm lẫn RC-4 của sự cố $6.50. Chi phí gợi ý bản dịch báo cáo
+  riêng.
+- UI: nút phải nói rõ *"Gợi ý bản dịch cho N từ — hành động này gọi LLM và phát sinh chi phí"*
+  TRƯỚC khi bấm (BR-TERM-03, và Lop 0 §6.11.4 điểm 3).
+- Prompt: yêu cầu trả JSON `{"<term_en>": "<term_vi>"}`; với thuật ngữ gốc Pháp/Ý (BA-Q15) hướng
+  dẫn LLM trả `"(keep)"` — đúng BR-GLOSS-04. Không bắt buộc phải đúng, chỉ là gợi ý user duyệt.
+
+#### 6.18.5. Data lineage (Protocol 6 — R6-01) — sợi dây quan trọng nhất của US-20
+
+`source_text` phải là **văn bản tiếng Anh của tài liệu đó**, và với mỗi `file_type` nó nằm ở một
+chỗ khác nhau. Đây đúng dạng lỗi Bug #5 (đọc nhầm `job.file_path` thay vì file cầu nối):
+
+| `job.file_type` | Nguồn `source_text` BẮT BUỘC | Tuyệt đối KHÔNG đọc |
+|---|---|---|
+| `pdf_digital` | `_extract_full_text(Path(job.file_path))` | — |
+| `pdf_scan` | `_extract_full_text(Path(job.ocr_bridge_path))` — file searchable PDF do §6.10 dựng | ❌ `job.file_path` (ảnh scan, 0 ký tự → danh sách gợi ý rỗng, im lặng) |
+| `epub` | `EpubDocument.load(job.file_path).full_text()` (§6.20.5) — `full_text()` trả **text thuần đã strip tag**, KHÔNG phải inner-HTML của `EpubUnit.source_html` | ❌ `_extract_full_text()` (PyMuPDF không mở được EPUB); ❌ `"\n".join(u.source_html)` — sẽ sinh ứng viên `strong strong strong` |
+| `parse_only` bất kỳ | `Path(job.output_path).parent / "document.md"` — **SỬA 2026-09-08**: `job.output_path` của parse_only nay trỏ tới `parse_result.zip` (S15-4 đã sửa), không phải `.md` | ❌ đọc thẳng `job.output_path` (sẽ đọc phải bytes của file ZIP) |
+
+Chuỗi đầy đủ:
+
+| Bước | Artifact tạo ra | Bước sau đọc gì |
+|---|---|---|
+| 1. `run_job()` kết thúc `status="completed"` | `job.file_path` / `job.ocr_bridge_path` / `job.output_path` | (2) |
+| 2. `_extract_source_text_for_terms(job)` (hàm MỚI, bảng trên) | `source_text: str` | (3) |
+| 3. `GlossaryManager` liệt kê mọi `term_en` hiện có, **scope global + project** (BR-GLOSS-06) | `existing_forms: set[str]` = hợp của `glossary_match_forms(term_en)` cho mọi entry — **KHÔNG** phải `{term_en.lower()}` (T3) | (4) |
+| 4. `extract_terms(source_text, existing_forms, settings)` | `list[TermCandidate]` | (5) |
+| 5. ghi `suggested_terms` rows | `status='pending'` | UI |
+
+> **SỬA bước 3 sau phản biện Domain Expert (2026-09-08)**: bản gốc ghi `existing_terms` = tập
+> `term_en.lower()`. Đo trên glossary **thật** của user (114 entry): **23/114 (20%)** entry có
+> dạng `a / b` hoặc `x (ghi chú)` (`knead / kneading`, `bloom (chocolate)`, `pound (lb)`,
+> `tempering (sugar)`…) → `.lower()` nguyên chuỗi **không bao giờ** bằng một n-gram, nên
+> `pound` x112, `ounce` x92, `bloom` x56, `tempering` x32, `whipping` x40, `kneading` x15 … **vẫn
+> lọt vào "Chờ duyệt"** dù đã có trong glossary. Đây là **vi phạm trực tiếp điều kiện lọc DUY
+> NHẤT mà user vừa chốt** ("chỉ gợi ý từ không có trong glossary"). Chi tiết cơ chế thay thế:
+> §6.18.8 T3. `build_prompt_snippet()` đã có sẵn logic gộp 2 scope
+> (`src/core/glossary_manager.py:151-158`) → tái dùng, không viết lại.
+
+**Test bắt buộc (R6-02)**: với 1 job `pdf_scan`, phải assert `_extract_source_text_for_terms` được
+gọi/đọc **đúng `job.ocr_bridge_path`**, không chỉ `assert extract_terms.called`. Nếu 2 mock trong
+cùng test không có assertion nào nối input của (4) với output của (2) → Reviewer flag (R6-02).
+
+#### 6.18.6. Chạy ở đâu, và không được làm hỏng job dịch (BR-TERM-01, YA-4.5)
+
+Trong `_run_job_background()` (`src/api/routes/jobs.py`), **SAU** khi `run_job()` trả về:
+
+```
+result = await orchestrator.run_job(job_id, session)
+if result.status == "completed" and settings.term_extraction_enabled:
+    try:
+        await extract_and_store_terms(job_id, session)
+    except Exception:
+        logger.exception("Trich xuat tu moi that bai cho job %s — job VAN completed", job_id)
+```
+
+- Đặt ở đây (không đặt bên trong `run_job()`) để **không tồn tại đường nào** khiến lỗi trích xuất
+  đổi được `job.status`. Job đã ra file đúng rồi.
+- Chỉ chạy khi `status == "completed"` — trả lời EC-20.3: job `cost_capped`/`failed` **không** trích
+  xuất (bản dịch dở dang, và văn bản nguồn thì vẫn nguyên vẹn nên chẳng mất gì khi user retry xong).
+- Chạy **tuần tự sau job**, không `create_task` song song: nó đọc cùng `session`, và với 40 n-gram
+  trên vài trăm nghìn ký tự thì đây là công việc mili-giây, không đáng để đánh đổi lấy một luồng
+  đồng thời nữa.
+- Có `POST /api/jobs/{id}/extract-terms` để chạy lại thủ công khi bước này lỗi (AC-20.3 của BA).
+
+#### 6.18.7. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)
+
+1. **BR-TERM-04 (phạm vi "Bỏ qua")** — user đã chốt per-job. Tech Lead **thực hiện đúng** như chốt,
+   nhưng ghi lại rủi ro đã đo được: cuốn thứ hai cùng chủ đề sẽ gợi ý lại đúng những từ user đã từ
+   chối ở cuốn thứ nhất. Nếu sau 2-3 cuốn user thấy phiền, việc nâng lên "nhớ toàn cục" chỉ là đổi
+   `UNIQUE(job_id, term_en)` thành một bảng `dismissed_terms(term_en)` riêng — không phá gì đã có.
+   **Không cần quyết định lại bây giờ**, chỉ cần biết đường lùi tồn tại.
+2. **EC-20.1 (từ đã có trong glossary nhưng tài liệu dùng bản dịch khác)** — v1 **không** phát hiện
+   được (app không có cặp EN↔VI cho nhánh PDF, xem §6.6.2 R1). Đây là "đề xuất SỬA", khác hẳn "từ
+   MỚI", và trộn chung sẽ khiến user vô tình ghi đè entry đã curate. **Ngoài scope US-20.** Ghi
+   nhận: khi US-22 (§6.20) lên production, EPUB **sẽ có** cặp EN↔VI thật → tính năng "đề xuất sửa
+   bản dịch" trở nên khả thi, nhưng chỉ cho EPUB.
+3. **EC-20.5 (rác OCR leo vào danh sách)** — ~~`term_min_occurrences=3` lọc được phần lớn (lỗi OCR
+   hiếm khi lặp y hệt 3 lần)~~. **SỬA 2026-09-08**: lập luận này **sai với lỗi hệ thống**. Đo
+   thật trên Figoni: `avor` xuất hiện **638 lần**, `rst` 147 lần — artifact của tầng trích xuất
+   text lặp lại hàng trăm lần, `min_occurrences` không phải phòng tuyến cho loại này. Phòng tuyến
+   đúng là bước chuẩn hoá ở T2 (§6.18.8). `min_occurrences` vẫn giữ, nhưng chỉ với đúng vai trò
+   "sàn tần suất", không phải "chống rác OCR".
+
+#### 6.18.8. Final Decision sau phản biện Domain Expert + quyết định mới của user (2026-09-08)
+
+**Tác giả**: Tech Lead — thiết kế, KHÔNG implement.
+**Quan hệ tài liệu**: mục này **thay thế (supersede)** — §6.18.1 điểm 2, §6.18.2 **bước 1, 3, 4,
+5, 6** và bảng config, §6.18.5 bước 3, §6.18.7 mục 3. Mọi phần khác của §6.18 **giữ nguyên hiệu
+lực**. Khi mâu thuẫn, **mục này thắng**.
+
+**Hai nguồn thay đổi, phải phân biệt rõ**:
+- **(a) Phản biện Domain Expert** — 4 lỗi đo được trên dữ liệu thật của user (2 cuốn sách đã dịch
+  + 1 bản OCR MinerU + 114 glossary entry thật).
+- **(b) Quyết định MỚI của user cùng ngày** (trả lời trực tiếp 2 câu hỏi Expert đặt cho PM):
+  *"Chỉ khuyến nghị từ mới khi từ đó không có trong glossary. CÓ thể mở pool nếu cần nhưng thoả
+  mãn điều kiện trước"* và *"Chỉ gợi ý các từ không có trong glossary"*. Tức: **điều kiện lọc DUY
+  NHẤT là "không có trong glossary"** — không trần số lượng tuỳ ý, và **BR-TERM-04 giữ nguyên
+  per-job** (không thêm cơ chế nhớ "đã bỏ qua" xuyên nhiều cuốn).
+
+Quyết định (b) làm **đổi trọng tâm kỹ thuật của cả US-20**: trước đây trọng tâm là "chọn con số
+trần và công thức xếp hạng cho vừa 40 slot"; bây giờ trọng tâm là **làm cho phép so khớp "đã có
+trong glossary" thật sự chính xác** (T3) và **làm cho ứng viên sạch ngay từ tầng token** (T2) —
+vì mọi thứ qua được 2 cửa đó đều sẽ hiển thị.
+
+##### T0. Số đo nền (kế thừa từ phản biện, Tech Lead KHÔNG đo lại)
+
+Ghi rõ ranh giới kế thừa để Reviewer/QA biết cái gì đã được verify và bởi ai. Nguồn: Figoni *How
+Baking Works* 415 trang (1.149.727 ký tự) + Cauvain *Baking Problems Solved* 298 trang, cả hai
+trích bằng **chính `_extract_full_text()` của app** (`src/core/job_orchestrator.py:131`); glossary
+thật 114 entry đọc từ `data/bb_translation.db`.
+
+| Đo được | Figoni | Cauvain |
+|---|---|---|
+| Pool ứng viên sau lọc + khử lồng (`min_occ=3`) | **5.177** | 2.343 |
+| Term user đã tự curate, xuất hiện ≥3 lần trong sách | 60 | 29 |
+| **Median tần suất** của các term đó | **13** | 11 |
+| Tần suất thấp nhất lọt top-40 theo spec cũ | ≥172 | ≥68 |
+| **recall@40** (spec cũ) | **1/60** | 5/29 |
+| recall@500 | 18/60 | 14/29 |
+
+Kết luận không thể tránh: **term user thật sự muốn nằm rải rác từ hạng #11 tới #4438** — không có
+công thức xếp hạng nào cứu được một con số trần cứng bằng 40. Đó là lý do quyết định (b) của user
+là đúng về kỹ thuật, không chỉ là sở thích.
+
+##### T1. Bỏ trần cứng 40 → liệt kê hết, phân trang ở UI
+
+- `extract_terms()` trả **toàn bộ** ứng viên qua sàn tần suất, sau khi đã bỏ hết ứng viên khớp
+  glossary (T3). **Không cắt ở bất kỳ con số nào.**
+- `max_suggested_terms_per_job` **đổi nghĩa**: từ "trần chất lượng" thành **van chống tràn DB**,
+  default **`20_000`** (≈ 4× worst case đo được là 5.177). Chạm trần → ghi `logger.warning` nêu rõ
+  số bị cắt + `job_id`, cắt theo `rank_score` giảm dần. Đây là lưới an toàn chống tài liệu bệnh
+  lý, **không phải** cơ chế chọn lọc chất lượng — Dev không được hạ con số này xuống "cho gọn".
+- UI "Chờ duyệt": **phân trang 50 dòng/trang**, có `sort` + `min_ngram` + `include_noise`
+  (§6.18.4 đã cập nhật). Mặc định: `sort=rank`, `min_ngram=1`, `include_noise=false`.
+
+##### T2. Bỏ HẲN `en_common.txt` (~3.000 từ) — thay bằng chuẩn hoá token + stoplist hư từ
+
+**Bằng chứng bác bỏ** (Expert, google-10000 làm list tiêu biểu): với ngưỡng 3.000 từ, `flour`
+(hạng 9751), `sugar`, `egg`, `butter`, `oven` **KHÔNG bị lọc** và chiếm trọn top-40; còn `proof`
+(2933), `score` (1154), `cream` (2966), `rest` (1539), `roll`, `turn`, `cup` — **đều là glossary
+entry thật của user, đúng nhóm EC-06** — thì **BỊ lọc**. Tăng list lên 10.000 để lọc được `flour`
+làm số term glossary bị giết tăng từ 4/60 lên **12/58**. Không có cỡ list nào đúng.
+
+Expert đề xuất giữ list + thêm `baking_sense_allowlist.txt` (~80 từ ngoại lệ). **Tôi đi xa hơn và
+bỏ hẳn list**, vì 2 lý do:
+1. **Lý do tồn tại của list đã biến mất.** Nó sinh ra để giành chỗ trong 40 slot. Với T1 (không
+   còn trần), một từ generic đứng trong danh sách chỉ tốn của user một lần lướt mắt — trong khi
+   một từ bị list xoá thì **vĩnh viễn không bao giờ được gợi ý**, tức là đúng loại lỗi mà §6.18.1
+   đã xác định là đắt hơn hẳn.
+2. **Nó mâu thuẫn với luật mới của user.** User chốt điều kiện lọc **duy nhất** là "không có
+   trong glossary". Một bộ lọc thứ hai theo "độ phổ thông" là luật thứ hai, và là luật đã được đo
+   là chạy ngược hướng.
+
+**Cái thay thế** (2 thứ, đều rẻ hơn và không xoá nhầm thuật ngữ):
+- **Stoplist hư từ đóng (~200 từ)**: mạo từ, giới từ, liên từ, đại từ, trợ động từ. Dùng cho đúng
+  2 việc: (i) n-gram **không được bắt đầu/kết thúc** bằng hư từ (rule cũ, giữ), (ii) 1-gram **là**
+  hư từ thì bỏ. An toàn tuyệt đối với EC-06 vì `proof`/`score`/`cream`/`rest`/`turn`/`fold`
+  **không phải hư từ** — khác hẳn "3.000 từ phổ thông". Ship tại `data/wordlists/en_function_words.txt`,
+  **Architecture.md/CHANGELOG phải ghi rõ nguồn + ngày lấy** (tinh thần R5-01: kết quả phụ thuộc
+  hoàn toàn vào nội dung file dữ liệu này).
+- **Tần suất nền tiếng Anh dùng làm TÍN HIỆU XẾP HẠNG, tuyệt đối không dùng làm bộ lọc**: ship
+  `data/wordlists/en_freq_top50k.tsv` (word + rank, nguồn công khai phải ghi rõ + ngày lấy). Từ
+  càng phổ thông → `specificity` càng thấp → xếp sau, **nhưng vẫn có mặt trong danh sách**. Đây
+  chính là biến "nhị phân sai" thành "liên tục đúng". Expert đo biến thể này cải thiện recall@500
+  từ 18/60 → 24/60. Nếu file không tồn tại → `specificity = 1.0` cho mọi từ (degrade an toàn, chỉ
+  mất chất lượng sắp xếp, không đổi tập hiển thị).
+
+**Lời đề nghị soạn `baking_sense_allowlist.txt` của Expert: KHÔNG dùng làm escape hatch của bộ
+lọc (vì không còn bộ lọc), nhưng NHẬN làm boost xếp hạng** — nếu Expert soạn, đưa vào
+`data/wordlists/baking_sense_boost.txt`, token nằm trong đó nhân `rank_score × 1.5`. **Optional,
+không chặn v1.**
+
+##### T3. Trọng tâm mới — `glossary_match_forms()`: so khớp glossary phải MẠNH hơn `.lower()`
+
+Đây là **hàm quan trọng nhất của US-20** sau quyết định (b), vì nó là **điều kiện lọc duy nhất**.
+
+```python
+# src/core/glossary_matching.py  (module MỚI, dùng CHUNG — xem cảnh báo Protocol 6 bên dưới)
+def glossary_match_forms(term_en: str) -> set[str]:
+    """Mọi dạng bề mặt mà một entry glossary có thể xuất hiện trong tài liệu."""
+```
+
+Thuật toán chốt (mọi bước đều có ví dụ từ glossary THẬT của user):
+
+| # | Bước | Ví dụ thật |
+|---|---|---|
+| 1 | Tách theo `/` thành các phương án độc lập | `knead / kneading` → `knead`, `kneading`; `baking stone / pizza stone`; `phyllo / filo dough` |
+| 2 | Bỏ phần trong `( … )`, **và** giữ thêm một phương án là chính nội dung trong ngoặc nếu nó ≥3 ký tự và không phải viết tắt thuần | `bloom (chocolate)` → `bloom`; `pound (lb)` → `pound`, `lb`; `Swiss meringue buttercream (SMBC)` → cả cụm dài lẫn `SMBC` |
+| 3 | NFKC normalize; `’`/`‘` → `'`; lowercase; gộp khoảng trắng liên tiếp | `baker’s percentage` ↔ `baker's percentage` |
+| 4 | **Sinh biến thể hình thái** cho mỗi phương án: từ mỗi *base ứng viên* (chính nó, và kết quả bỏ hậu tố `-s`/`-es`/`-ies`/`-ing`/`-ed` nếu còn ≥3 ký tự) sinh tập `{base, base+s, base+es, base+ies, base+ing, base+ed}` kèm xử lý `e` cuối (`bake`→`baking`) và nhân đôi phụ âm (`pit`→`pitting`) | `kneading` → sinh cả `knead`, `kneads`, `kneaded`, `kneading`; `meringue` → `meringues`; `bannetons` → `banneton` |
+
+**Vì sao SINH biến thể (expansion) chứ không CẮT hậu tố (stemming) ứng viên**: cắt hậu tố một
+token bất kỳ là thao tác **mất thông tin và dễ over-stem** trên từ ta không kiểm soát; sinh biến
+thể từ một base **đã biết** thì dạng thừa (`meringueed`) chỉ đơn giản là không bao giờ khớp — vô
+hại. Không cần `nltk`/`spacy` (dependency nặng, và đúng phạm vi Protocol 5 nếu là external model).
+
+**Bất đối xứng rủi ro — cơ sở để chọn "thà gộp nhầm còn hơn bỏ sót"**: gộp nhầm 2 từ khác nghĩa
+chỉ làm **ẩn một gợi ý**; bỏ sót làm **hiện lại một từ user đã có trong glossary**, đúng thứ user
+vừa ra lệnh cấm. Trong ngành bánh, số nhiều **không bao giờ** là term khác
+(`ganache`/`ganaches`, `éclair`/`éclairs`) nên rủi ro thực tế ≈ 0.
+
+**So khớp**: ứng viên bị loại khi **`match_key` của cả cụm** ∈ `existing_forms`. **KHÔNG** so
+substring: `ganache` đã có → `chocolate ganache` **vẫn được gợi ý** (nó là thuật ngữ khác — quy
+tắc cũ của §6.18.2, Expert đồng ý, giữ nguyên).
+
+> **⚠️ Protocol 6 — hàm này BẮT BUỘC dùng chung với đường dịch, không được có bản thứ hai.**
+> Expert phát hiện `GlossaryManager._count_occurrences()` (`src/core/glossary_manager.py:22-26`,
+> **code đang ship**) dùng `re.escape(term_en)` thô để lọc glossary theo tài liệu (§6.6.5, call
+> site `prompt_builder.py:169-171`): trên Figoni chỉ **60/114** entry match, **23 entry dạng
+> `/` `( )` match 0 lần** → 23 entry đó **chưa bao giờ được inject vào prompt dịch**. Đây là bug
+> độc lập với US-20 (PM đã tách task riêng), nhưng **cùng một điểm mù**. Hai chỗ phải gọi **một**
+> `glossary_match_forms()`; nếu Dev viết logic chuẩn hoá lần thứ hai bên trong `term_extractor.py`,
+> Reviewer **reject** (R6-04) — 2 định nghĩa cho "thế nào là cùng một term" chính là cấu hình sinh
+> ra 2 nhánh lệch nhau.
+
+##### T4. Chuẩn hoá text + tokenizer: viết lại bước 1 (đây là tiền đề, sai ở đây thì mọi thứ sau vô nghĩa)
+
+Bằng chứng bác bỏ tokenizer `[A-Za-z][A-Za-z'-]*` của bản gốc (Expert đo trên text thật, và tôi
+xác nhận lại được ngay trong output MinerU thật: dòng 495 của `document.md` có `fl avorings`):
+
+| Hiện tượng | Số đo thật | Hậu quả với spec cũ |
+|---|---|---|
+| Ligature `ﬂ`/`ﬁ` + **một khoảng trắng thật** trong PDF | `ﬂ our` **993 lần**, `ﬂ avor` 638, `ﬁ ne` 196 | `flour` mất 993/1183 lần đếm; **`avor` thành #1 top-40**; 98 ứng viên là mảnh vỡ |
+| Nháy cong `’` vs ASCII `'` | Figoni **287 / 0**; Cauvain 258 / 0 | `baker's` — chính ví dụ của §6.18.1 — **không bao giờ** xuất hiện trên PDF. (Bản OCR MinerU lại ra nháy ASCII → 2 nhánh pipeline cho kết quả khác nhau cho cùng một từ) |
+| Gạch nối ngắt dòng `xxx-\n` | 884 (Figoni) | 121 ứng viên dạng `choco- late`, `ingre- dients` |
+| Chữ Latin có dấu | 135 token: `éclair` 27, `crème` 16, `pâte` 15… | `pâte à choux` → `p te choux`; `crème` → `cr`+`me` → bị rule "<3 ký tự" xoá sạch. **Đúng nhóm YA-4.7** ("rất nhiều thuật ngữ là tiếng Pháp/Ý") |
+| HTML/Markdown (nhánh `parse_only`, EPUB) | bản OCR thật: 160 `<td>`, 53 `<tr>` | top-4 ứng viên là `td td td` (x110), `td tr tr`, `tr tr td`, `td td tr`; `jpg` x16 |
+
+**Bước 1 mới = `normalize_source_text()` rồi mới tokenize**, 7 việc, theo đúng thứ tự:
+1. Strip HTML tag + cú pháp Markdown (ảnh `![](…)`, heading `#`, bảng HTML) — **trước** khi tách
+   câu. Áp cho nguồn `parse_only` (`document.md`) và EPUB.
+2. `unicodedata.normalize("NFKC")` (ﬁ→fi, ﬂ→fl, ﬃ→ffi).
+3. `’`/`‘` → `'`.
+4. **Ghép mảnh ligature**: token lẻ ∈ `{fi, fl, ffi, ffl, ff}` + khoảng trắng + chữ thường → nối
+   (`fl our` → `flour`); token kết thúc bằng `fi`/`fl` + khoảng trắng + mảnh chữ thường → nối
+   (`emulsifi ers` → `emulsifiers`). Sau bước này `flour` = **1040 lần**, đúng thực tế.
+5. Khử gạch nối ngắt dòng: `(?<=[a-z])-\n\s*(?=[a-z])` → `""`.
+6. Tách câu trên **bộ dấu ghi tường minh**: `[.!?;:,()\[\]"“”—•|]` — spec cũ chỉ nói "theo dấu
+   câu", nếu Dev chỉ tách theo `.!?` thì n-gram sẽ vượt dấu phẩy (`flour, water` → `flour water`).
+7. Tokenizer chấp nhận Latin có dấu: `[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']*(?:-[A-Za-zÀ-ÿ']+)*`.
+
+**Test đơn vị bắt buộc** (chuỗi lấy từ số đo thật, không bịa): `ﬂ our`→`flour`,
+`emulsiﬁ ers`→`emulsifiers`, `baker’s`→`baker's`, `choco-\nlate`→`chocolate`, `pâte à choux`
+nguyên vẹn, `<td>flour</td>`→`flour`.
+
+**Nhiễu n-gram: DEMOTE + ẩn mặc định, KHÔNG xoá** (đây là chỗ tôi làm khác đề xuất của Expert).
+Expert đề xuất **lọc bỏ** tên riêng/acronym và n-gram có hư từ ở giữa. Dưới luật mới của user,
+xoá vĩnh viễn một ứng viên vì lý do khác "đã có trong glossary" là thêm một luật thứ hai — và rủi
+ro thật: `Swiss meringue`, `Italian meringue`, `Silpat`, `Fahrenheit` **đều là glossary entry
+thật** và đều là tên riêng viết hoa giữa câu. Vì vậy 4 tín hiệu sau ghi vào `noise_flags`, **demote
+`rank_score` × 0.3**, và UI **ẩn mặc định** (có nút "Hiện thêm N mục nghi nhiễu") — user vẫn lấy
+lại được, không mất vĩnh viễn:
+
+| Flag | Điều kiện | Bắt được (đo thật) |
+|---|---|---|
+| `proper_noun` | tỷ lệ viết hoa **giữa câu** ≥80%, cần ≥3 lần quan sát; hoặc acronym toàn hoa | 221 ứng viên (Figoni) / 102 (Cauvain): `cauvain` x178, `baking problems solved` x129, `blackie academic professional`, `chipping campden` |
+| `stopword_middle` | 3-gram có hư từ ở giữa, **trừ** `{of, à, de, en, au, aux}` | `exercises and experiments` x96, `batters and doughs` x71, `fats and oils` x56 |
+| `fragment_suspect` | token ∈ danh sách mảnh vỡ đã biết, hoặc kết thúc bằng `-` | phòng tuyến hai lớp cho ligature nếu bước 4 sót |
+| `plural_merged` | dòng này là kết quả gộp số ít/số nhiều | 10 cặp trong top-100 Figoni (`flour/flours`, `dough/doughs`…) — gộp thành 1 dòng, **cộng dồn count**, giữ dạng bề mặt xuất hiện nhiều hơn |
+
+##### T5. Khử lồng nhau, xếp hạng, sàn tần suất
+
+- **Bước 4 (khử lồng nhau) — chốt cách đọc: "MAX, không SUM".** Spec cũ mập mờ ("≥80% số lần xuất
+  hiện nằm bên trong **1** n-gram dài hơn"); Dev có thể cài theo "tổng mọi n-gram dài chứa nó" mà
+  không sai chữ. Đo thật: cách "sum" **giết** `gluten` x447, `crumb` x139, `meringue` x116,
+  `crust` x91, `pound`, `ounce` — đúng 6 term glossary 1-gram giá trị nhất, vì mỗi từ đó tham gia
+  hàng chục cụm cộng dồn vượt 80%. **Golden test bắt buộc: `gluten` (x447) phải còn trong pool.**
+- **Term glossary tham gia làm "n-gram dài đã giữ"** dù không được xuất (sửa thứ tự bước 3/4 cũ).
+  Đo thật: `puff pastry` x64 đã có trong glossary → bị xoá ở bước 3 → `puff` x70 không còn gì hấp
+  thụ nó → nổi lên #35. Tương tự `powder` x216 sau khi `baking powder` bị xoá.
+- **Xếp hạng**: `rank_score = log(1 + count) × ngram_weight × specificity × noise_penalty`, với
+  `ngram_weight = 1 + 0.5×(n−1)` (giữ), `specificity` từ T2, `noise_penalty ∈ {1.0, 0.3}`.
+  **Xếp hạng giờ chỉ quyết định THỨ TỰ, không quyết định ai bị loại** — nên không đầu tư thêm
+  (PMI/t-score) trước khi có harness đo.
+- **Sàn tần suất theo ĐỘ DÀI TÀI LIỆU, đếm theo token — KHÔNG theo số trang**:
+
+| Field | Default | Ý nghĩa |
+|---|---|---|
+| `term_extraction_enabled` | `True` | kill switch (giữ nguyên) |
+| `max_suggested_terms_per_job` | **`20_000`** | van chống tràn DB (T1), **không phải** trần chất lượng |
+| `term_min_occurrences` | `3` | áp dụng khi tài liệu ≥ **50.000 token** |
+| `term_min_occurrences_short_doc` | **`2`** | áp dụng khi tài liệu < 50.000 token |
+
+  Expert đề xuất ngưỡng theo **số trang** (≥100 trang). **Tôi đổi sang số token**, vì `total_pages`
+  **là NULL cho EPUB theo đúng thiết kế** (§6.20.6 — không bịa số trang cho định dạng reflow) và
+  cũng NULL cho một số nhánh khác; một ngưỡng dựa vào cột thường xuyên NULL sẽ âm thầm rơi vào
+  nhánh sai. Số token luôn có sẵn vì ta vừa tokenize xong. Cơ sở giữ nguyên: đo thật cho thấy bản
+  OCR 25 trang chỉ có 7 term ≥3 lần nhưng **12 term xuất hiện đúng 1 lần**.
+
+##### T6. Golden metric — điều kiện để lần sau chỉnh ngưỡng còn đo được
+
+`tests/fixtures/term_extraction/` phải chứa **trích đoạn** (không nhúng nguyên sách vào repo)
+Figoni + Cauvain + **1 fixture Markdown có bảng HTML thật** (nhánh `parse_only`, T4 mục 1). Metric
+chốt = **recall so với chính glossary user đã curate**: coi glossary là rỗng, chạy trích xuất, đếm
+xem bao nhiêu term user đã tự tay thêm (và xuất hiện ≥ sàn) có mặt trong pool và ở hạng nào. Mỗi
+lần đổi công thức/ngưỡng phải in bảng recall@40/100/300/500 như T0. Đây là ground truth tốt nhất
+có sẵn vì nó phản ánh gu của **chính user** (YA-4.7), không phải của Tech Lead hay Expert.
+
+##### T7. Những điểm của Expert tôi KHÔNG làm theo (kèm lý do)
+
+| Đề xuất Expert | Quyết định | Lý do |
+|---|---|---|
+| FD-2: giữ `en_common.txt` + thêm `baking_sense_allowlist.txt` | **Làm mạnh hơn: bỏ hẳn list** | Xem T2. Không phải bất đồng về phát hiện (phát hiện đúng 100%), mà là chọn cách sửa triệt để hơn — allowlist là vá lỗ cho một bộ lọc mà lý do tồn tại đã biến mất sau quyết định (b) của user |
+| FD-3 (a)(c): **lọc bỏ** n-gram có hư từ ở giữa và tên riêng | **Đổi thành demote + ẩn mặc định** (T4) | Dưới luật mới, xoá vĩnh viễn vì lý do ngoài "đã có trong glossary" là thêm luật thứ hai; và `Swiss meringue`/`Silpat`/`Fahrenheit` là glossary entry thật lại đúng dạng tên riêng |
+| FD-6: `max_suggested_terms_per_job = 500` (trần lưu) + UI phân trang 40 | **Trần lưu 20.000, UI phân trang 50** | 500 vẫn cắt mất **4.677/5.177** ứng viên của Figoni — vẫn là một con số tuỳ ý, đúng thứ user vừa bác. Giữ trần chỉ để chống tràn |
+| FD-6: sàn tần suất theo số trang | **Đổi sang số token** | `total_pages` NULL cho EPUB theo thiết kế (§6.20.6) |
+| FD-7: PM hỏi user đổi "trần 40" → "pool + phân trang" | **User đã trả lời rồi** (nguồn (b)) | Không hỏi lại |
+| FD-7 (tuỳ chọn): nút trả phí thứ hai "Lọc bằng LLM" chạy trên pool | **KHÔNG làm ở v1** | Trực tiếp mâu thuẫn với luật user vừa chốt: điều kiện lọc **duy nhất** là glossary. Thêm một bộ lọc LLM là đưa lại đúng thứ vừa bị bỏ, lần này còn tốn tiền. (Số giá DeepSeek Expert nêu cũng còn `[CHƯA VERIFY]` phần alias `deepseek-chat`.) |
+| FD-8: PM hỏi lại user về phạm vi BR-TERM-04, kèm số đo 17/40 dòng trùng nhau giữa 2 cuốn | **Đã hỏi, user giữ nguyên per-job** | User trả lời trực tiếp: *"Chỉ gợi ý các từ không có trong glossary"* cho cả câu hỏi về trùng lặp giữa nhiều cuốn. **Rủi ro Expert đo được vẫn ghi nhận nguyên trạng**: top-40 của Figoni và Cauvain (khác tác giả, khác nước, cách nhau 7 năm) trùng **17/40 dòng** — user sẽ gặp lại cùng bộ từ đó ở mọi cuốn nếu không bấm "Thêm". Giảm nhẹ: T1 (không còn top-40 nên 17 dòng đó không còn chiếm 40% màn hình đầu) + BR-TERM-02 (mỗi từ đã "Thêm" biến mất vĩnh viễn). Đường lùi vẫn nguyên: bảng `dismissed_terms(term_en)` riêng, không phá gì đã có |
+
+##### T8. Gate release bổ sung cho US-20
+
+1. **R6-02**: test lineage `pdf_scan` phải assert đọc **đúng `job.ocr_bridge_path`** (đã có ở
+   §6.18.5), **và** test lineage `parse_only` phải assert đọc
+   `Path(job.output_path).parent / "document.md"` — **không** phải `job.output_path` (nay là file
+   `.zip`, S15-4).
+2. **R6-03 live cho nhánh `pdf_scan`** `[CHƯA VERIFY]`: DB hiện chỉ có 9 job `pdf_digital`
+   completed, **không còn `searchable.pdf` nào trên đĩa** → chưa ai đo được text layer của file
+   cầu nối có mang lỗi OCR lặp (kiểu `ganaehe`) hay không. QA **phải** chạy 1 job `pdf_scan` thật
+   và **mở danh sách gợi ý ra xem**, không chỉ tin là có rows.
+3. **Test T3 với glossary THẬT**: assert `pound`, `ounce`, `bloom`, `tempering`, `whipping`,
+   `kneading`, `teaspoon`, `crusts`, `meringues`, `mousses` **KHÔNG** xuất hiện trong danh sách
+   gợi ý khi glossary thật (114 entry) đang được áp — đây là bài kiểm trực tiếp cho luật duy nhất
+   user chốt.
+
+---
+
+### 6.19. US-21 — Hiển thị phiên bản
+
+Backend `GET /api/version` đã có sẵn và **đúng** (`src/api/main.py`, đọc thẳng `pyproject.toml`).
+Không cần thiết kế lại. Chỉ 1 sửa nhỏ bắt buộc và 1 ghi chú UI:
+
+**S21-1 (bắt buộc, YA-5.1 của BA)**: `FastAPI(title="BB-Translation", version="0.1.0", ...)`
+hardcode `0.1.0` và đó chính là số hiển thị trên `/docs` (OpenAPI) — mâu thuẫn với `1.2.7` mà
+`/api/version` trả về. Sửa thành `version=_read_app_version()`. Một nguồn sự thật duy nhất.
+
+**S21-2 (UI)**: nav bar cạnh chữ "BB-Translation" (BA-Q11 phương án B, đúng đề xuất trong PRD).
+4 trang HTML tĩnh lặp nav nguyên si → **1 đoạn JS dùng chung** gọi `/api/version` một lần và điền
+vào `<span id="app-version">` (YA-5.2), không sửa tay từng file. Lỗi mạng hoặc `"unknown"`
+(YA-5.4) → để trống lặng lẽ, **không** để exception JS chặn phần còn lại của trang.
+
+Không có quyết định kiến trúc nào khác cần ghi lại cho US-21.
+
+---
+
+### 6.20. US-22 — Dịch EPUB (THAY THẾ HOÀN TOÀN §6.7)
+
+> **Trạng thái R5-01**: mục này **VERIFIED** — `bilingual_book_maker` đã được cài thật
+> (`bbook-maker==1.1.0` từ PyPI, vào 1 venv riêng ngoài project), đã đọc source đã cài, đã chạy
+> `--help` thật và đã **chạy thật 3 lần** trên 1 file EPUB thật. `ebooklib` đã được cài thật và đã
+> round-trip thật trên cùng file đó. Mọi câu không có trích dẫn nguồn là suy luận thiết kế CỦA
+> CHÚNG TA trên nền sự thật đã verify, không phải giả định về tool.
+>
+> Bản §6.7 cũ **SAI về mặt kết luận thiết kế** dù các tên cờ tình cờ đúng — xem cảnh báo đầu §6.7.
+
+#### 6.20.1. Nguồn xác thực
+
+**Môi trường verify** (2026-09-08):
+- `uv venv --python 3.12` riêng, `uv pip install bbook_maker` → `bbook-maker==1.1.0`, kéo theo
+  `anthropic==1.4.0`, `openai==2.54.0`, `ebooklib==0.20`, `beautifulsoup4==4.15.0`.
+  **Tên package trên PyPI là `bbook_maker`, KHÔNG phải `bilingual_book_maker`** — `uv pip install
+  bilingual_book_maker` báo "not found in the package registry".
+- File EPUB thật dùng để đo: `data/uploads/9d436d7b-…_Baking with Sourdough - Sara Pitzer.epub`
+  (2.017.999 byte, sách dạy làm bánh thật của chính user, đã có sẵn trong repo).
+- Source đọc trực tiếp: `<venv>/lib/python3.12/site-packages/book_maker/{cli.py, loader/epub_loader.py,
+  loader/helper.py, translator/__init__.py, translator/claude_translator.py,
+  translator/chatgptapi_translator.py}`.
+- Đối chiếu thêm: source nhánh `main` trên GitHub (`yihong0618/bilingual_book_maker`,
+  `book_maker/cli.py`, fetch 2026-09-08).
+
+**⚠️ Phát hiện quan trọng về version — bắt buộc PIN**: nhánh `main` trên GitHub **đã đổi CLI hoàn
+toàn** so với bản PyPI 1.1.0. Trên `main`: không còn `--claude_key`/`--openai_key` (gộp thành
+`--key`), có `--api_format {openai,anthropic,gemini,…}`, có `--glossary`, `--parallel-workers`,
+`--quiet`, `--plan-classify`… Bản 1.1.0 trên PyPI **không có** cái nào trong số đó. Bất kỳ tài
+liệu/blog/ký ức nào về CLI của tool này đều có thể đang nói về một trong hai bản khác nhau. Nếu
+sau này quay lại phương án A, **phải pin version và verify lại từ đầu** (Protocol 5 mục 5).
+
+#### 6.20.2. Sự thật đã verify về `bbook-maker==1.1.0`
+
+| # | Sự thật | Nguồn | Hệ quả |
+|---|---|---|---|
+| E-01 | Cờ `--model`, `--claude_key`, `--openai_key`, `--prompt`, `--test`, `--test_num`, `--resume`, `--proxy`, `--api_base`, `--single_translate`, `--only_filelist`, `--exclude_filelist`, `--translate-tags`, `--accumulated_num`, `--use_context`, `--temperature`, `--block_size`, `--model_list`, `--interval` **đều tồn tại** | `bbook_maker --help` chạy thật | §6.7 cũ tình cờ đúng tên cờ |
+| E-02 | `--single_translate` = "output translated book, no bilingual"; cài đặt: `insert_trans()` chèn `<p>` dịch ngay sau `<p>` gốc rồi `p.extract()` xoá bản gốc | `--help` + `loader/helper.py:19-31` | Ra được bản **đơn ngữ** — điểm §6.7 cũ đánh dấu `[CHƯA VERIFY]` |
+| E-03 | `MODEL_DICT` = `{openai, chatgptapi, gpt4, gpt4omini, gpt4o, o1preview, o1, o1mini, o3mini, google, caiyun, deepl, deeplfree, claude, claude-3-5-*, gemini, geminipro, groq, tencentransmart, customapi, xai, qwen, qwen-mt-*}`. **KHÔNG có `deepseek`. KHÔNG có `ollama`** (ollama đi qua `--model chatgptapi --ollama_model <name>`) | `translator/__init__.py:14-42` | **Provider mặc định của app (DeepSeek) không được hỗ trợ native.** Phải lách qua `--model openai --model_list deepseek-chat --api_base https://api.deepseek.com/v1 --openai_key <deepseek key>` |
+| E-04 | Output ghi **cạnh file input**, tên **cố định** `f"{input_stem}_bilingual.epub"` — kể cả khi `--single_translate`. **Không có cờ `--output`** nào | `loader/epub_loader.py:546,551` + `--help` (không có `--output`) | Runner phải copy input vào thư mục tạm riêng mỗi chunk (đúng bài học F9 của pdf2zh) |
+| E-05 | `--only_filelist 'a.html,b.html'`: file **không** nằm trong danh sách thì `process_item()` `return` **mà KHÔNG gọi `new_book.add_item(item)`** | `loader/epub_loader.py:384-387` (đối chiếu: nhánh `exclude_filelist` ở `:388-391` **có** `add_item`) | EPUB output **bị thiếu hẳn** các chương không được chọn → không thể dùng làm cơ chế chunk nếu không tự ghép lại |
+| E-06 | `make_bilingual_book()` bọc toàn bộ trong `except (KeyboardInterrupt, Exception) as e: print(e); … sys.exit(0)` | `loader/epub_loader.py:553-560` | **Mọi lỗi dịch thoát với exit code 0.** Runner kiểm `returncode` sẽ tưởng thành công |
+| E-07 | **Chạy thật**: `bbook_maker --model claude --claude_key sk-ant-fake … --single_translate --test --test_num 2` → **EXIT CODE 0**, stdout in `Messages.create() got an unexpected keyword argument 'temperature'`, không sinh `book_bilingual.epub`, chỉ sinh `book_bilingual_temp.epub` + `.book.temp.bin` + thư mục `log/` | tự chạy, log giữ tại scratchpad | Xác nhận E-06 bằng thực nghiệm. Đồng thời: **đường Claude của tool HỎNG** với `anthropic` SDK hiện tại — `claude_translator.py:101` truyền `temperature=` vào `messages.create()`, mà SDK `anthropic` 1.3.0 (trong `.venv` project) và 1.4.0 (mới nhất) **đều không còn tham số này** (`inspect.signature` kiểm thật). `Requires-Dist: anthropic` **không pin version** → lỗi này sẽ tự tái diễn |
+| E-08 | `ChatGPTAPI.translate()`: `except Exception as e: print(str(e)); return` → trả **`None`** cho từng đoạn lỗi (chỉ `RateLimitError` mới retry, tối đa 3 lần) | `translator/chatgptapi_translator.py:213-216` | Lỗi cấp-đoạn bị nuốt im lặng, không đếm được |
+| E-09 | `insert_trans()`: `if text is None: text = ""` — rồi vẫn chèn `<p>` **rỗng** và (với `--single_translate`) **xoá bản gốc** | `loader/helper.py:19-31` | Kịch bản Bug #5 ở quy mô nguyên cuốn: chương trống, exit 0 |
+| E-10 | `helper.translate_with_backoff` = `@backoff.on_exception(backoff.expo, Exception, …)` **không có `max_tries`/`max_time`** | `loader/helper.py:35-41` | Retry **vô hạn** trên nhánh `--accumulated_num > 1`. Với `--model claude` nó gọi `translate(text, context_flag)` (2 tham số) trong khi `Claude.translate(self, text)` chỉ nhận 1 → `TypeError` mỗi lần → vòng lặp không thoát |
+| E-11 | **Không có bất kỳ token/usage/cost accounting nào** trong toàn package (grep `usage` trên `translator/`, `loader/`, `cli.py`, `utils.py` → 0 kết quả) | grep source đã cài | `cost_source` sẽ mãi là `'estimated'`, y hệt pdf2zh (§6.6.6) |
+| E-12 | `--prompt` nhận chuỗi template / chuỗi JSON / đường dẫn `.txt`/`.json`/`.md`; placeholder là **`{text}`** và **`{language}`**, thay bằng `str.format()` | `cli.py::parse_prompt_arg` + `claude_translator.py:47-52` | Khác pdf2zh (`string.Template`, `${text}`): ở đây mọi dấu `{`/`}` trong glossary phải escape thành `{{`/`}}`. Prompt file của app **không dùng lại được** |
+| E-13 | Trạng thái resume là 1 file **pickle** `.{stem}.temp.bin` cạnh input, chứa list bản dịch theo **chỉ số tuyến tính toàn sách** | `loader/epub_loader.py:115-120, 562-567, 613-618` | Không tương thích với chunk theo `--only_filelist` (chỉ số lệch nhau giữa các lần chạy khác tập file) |
+| E-14 | `--model chatgptapi` với key sai → `set_gpt35_models()` gọi `models.list()` ngay lúc khởi tạo → **exit code 1** kèm traceback thật | tự chạy `--openai_key sk-fake-…` | Đây là nhánh DUY NHẤT fail-fast; nó xảy ra **trước** `make_bilingual_book()` nên không bị `sys.exit(0)` nuốt |
+
+#### 6.20.3. Sự thật đã đo về cấu trúc EPUB thật và về `ebooklib`
+
+| # | Đo được trên file thật | Con số |
+|---|---|---|
+| B-01 | Số `ITEM_DOCUMENT` (tài liệu XHTML) trong cả cuốn | **5** (spine cũng 5) |
+| B-02 | Phân bố ký tự văn bản theo tài liệu | `cover.html` 0 · `title.html` 32 · `copyright.html` 1.438 · **`chapter01.html` 50.899** · `backmatter01.html` 0 |
+| B-03 | Tỉ lệ nội dung nằm trong 1 tài liệu duy nhất | **50.899 / 52.369 = 97,2%** |
+| B-04 | Số đơn vị dịch (`p,h1..h6,li,blockquote,td,th`, bỏ đoạn rỗng/toàn số) | **384** (373 trong đó thuộc `chapter01.html`) |
+| B-05 | `ebooklib==0.20` + `bs4` cài & chạy được trên **Python 3.14.7** (đúng Python của `.venv` project) | PASS |
+| B-06 | `epub.write_epub()` round-trip: **dời toàn bộ thư mục** `ops/…` → `EPUB/…`, đổi tên OPF thành `content.opf`, ghi lại `container.xml`, và **ghi lại toàn bộ XHTML + `toc.ncx`** (bs4/lxml serialize lại) | 28 entry vào / 28 entry ra, ảnh + font + CSS giữ **byte-identical** (20/20), nhưng **mọi đường dẫn đổi** |
+| B-07 | **Ghi đè tại chỗ bằng `zipfile`** (chỉ thay đúng entry XHTML đã dịch, giữ nguyên thứ tự entry, giữ `mimetype` là entry đầu + `ZIP_STORED`) | **27/27 entry còn lại byte-identical**, thứ tự entry giữ nguyên, `ebooklib` đọc lại OK (5 docs, spine 5) |
+| B-08 | Không có `META-INF/encryption.xml` trong file mẫu | không DRM |
+
+~~**B-03 là con số quyết định cả section này.**~~
+
+> **SỬA SAU PHẢN BIỆN DOMAIN EXPERT (2026-09-08) — B-03 KHÔNG được phép là con số quyết định.**
+> Expert tái lập độc lập toàn bộ B-01..B-08 bằng **stdlib** (`zipfile` + `html.parser` +
+> `ElementTree`, không dùng chung code path với tôi) và xác nhận **mọi số đều đúng** (B-03 đo lại
+> = 97,4%, lệch <0,3% do parser khác). **Nhưng** Expert đọc `ops/9781603424073.opf` và tìm ra
+> điều tôi bỏ sót: `<dc:format>35 Pages</dc:format>`, `<dc:publisher>Storey Publishing</dc:publisher>`,
+> mô tả *"Storey's Country Wisdom Bulletins"* — **đây là một bulletin 35 trang, N=1, KHÔNG đại
+> diện cho sách thương mại**. NCX có đúng 1 navPoint nội dung; 34 "chương" thật (công thức) là
+> `<h3>` **bên trong** 1 file XHTML. Một cookbook thương mại 200–400 trang thường tách 1 XHTML
+> mỗi chương — trên sách như vậy `--only_filelist` của phương án A *có thể* chọn từng chương.
+>
+> Tức là **B-03 chỉ chứng minh A thất bại trên file này**, không chứng minh A thất bại nói chung.
+> **Quyết định chọn phương án B KHÔNG đổi** (xem §6.20.4 đã sắp xếp lại thứ tự lý do) — nhưng
+> Dev/QA phải biết ranh giới bằng chứng: mọi con số cấu trúc EPUB trong §6.20.3 là **N=1 trên một
+> bulletin mỏng**. Xem thêm §6.20.11 mục 7 (xin user 1 EPUB sách dày thật trước spike).
+
+#### 6.20.4. So sánh 2 phương án
+
+| Tiêu chí | **A — `bilingual_book_maker` all-in-one** | **B — `ebooklib` parse + Translation Engine nội bộ** |
+|---|---|---|
+| Đơn vị chunk nhỏ nhất khả thi | **1 tài liệu XHTML** (`--only_filelist`, E-05) | **1 nhóm đoạn văn**, ngưỡng theo số ký tự — ta tự quyết |
+| Áp lên sách thật (B-03) | 1 chunk chứa **97,2%** nội dung → Lớp 3 gần như **vô hiệu**, đúng thứ BR-EPUB-02 cấm | 52.369 ký tự → **7 chunk** (ngưỡng 8.000 ký tự), cân đối |
+| Ghép lại sau khi chunk | Phải tự ghép: E-05 nói tài liệu ngoài `--only_filelist` **bị xoá khỏi output** | Không cần ghép EPUB — chỉ gộp mapping `unit_id → text` rồi ghi 1 lần |
+| Resume (BR-CHUNK-05) | Pickle theo chỉ số toàn sách (E-13), **không tương thích** với chunk | Tái dùng nguyên `chunks` table đã có |
+| Cost metering | **Không có gì** (E-11) → `cost_source='estimated'` vĩnh viễn | `provider.translate()` trả token thật → **`cost_source='metered'`** — pipeline ĐẦU TIÊN của dự án làm được |
+| Provider mặc định (DeepSeek) | **Không hỗ trợ native** (E-03), phải lách qua `--model openai --model_list` | Hỗ trợ sẵn từ Increment 3 |
+| Provider Claude | **Hỏng** với SDK hiện tại (E-07), hỏng **im lặng** | Hoạt động (Increment 3, `ClaudeProvider` riêng của app) |
+| Hành vi khi lỗi | **exit 0** (E-06/E-07) + đoạn rỗng thay bản gốc (E-09) + retry vô hạn (E-10) | Exception Python bình thường, đi qua `with_retry` đã có |
+| Glossary injection | Qua `--prompt` `{text}`/`{language}` (E-12) — phải viết prompt builder thứ 2 | `build_system_prompt()` đã có, dùng nguyên |
+| Cancel giữa chừng | Không có (chỉ Ctrl-C) | Tái dùng `cancel_requested` đã verify sống ở QA Vòng 5 |
+| Công phải tự viết | Runner + parse output + prompt builder riêng + tự ghép EPUB từ các phần | ~~Parse XHTML → unit, ghi ngược, chunk plan (~1 module)~~ → **đánh giá lại 2026-09-08: 1 module + contract JSON app↔LLM (X4) + giữ inline markup (X2) + guard bilingual (X3). Phần khó thật nằm ở đó, KHÔNG phải "vài chục dòng BeautifulSoup"** |
+| Rủi ro Protocol 5 tồn dư | Cao — mọi hành vi phụ thuộc 1 tool không pin, đang đổi CLI (§6.20.1) | Thấp — `ebooklib`/`bs4` là thư viện Python thuần, dùng API core |
+
+**4 tiêu chí BỔ SUNG sau phản biện Domain Expert (2026-09-08)** — Expert đọc source A và đo trên
+chính file thật; 3 dòng đầu là **bằng chứng mới chống A**, dòng cuối là **chỗ tôi từng đánh giá B
+quá lạc quan**:
+
+| Tiêu chí (mới) | A | B (spec cũ) | B (sau khi sửa X1/X2) |
+|---|---|---|---|
+| Inline markup trong đoạn (`<strong>`, `<em>`, `<br/>`, `<a id>`) | **Mất hết**: A gán `new_p.string = text`; và A gửi `new_p.text` (`epub_loader.py:156`) — `.text` của bs4 nối string con **không có dấu cách**, trên đoạn nguyên liệu thật ra `'4 cups unbleached white flour2 teaspoons salt2 tablespoons honey…'` | **Mất hết** (spec cũ: "thay nội dung text của node") | Giữ được — gửi inner-HTML |
+| Phân số `<sup>1</sup>/<sub>3</sub>` | **Phá** — A mặc định `exclude_translate_tags="sup"` (`cli.py:288`, `epub_loader.py:55`) | **Phá** (spec cũ mượn đúng rule đó của A) | Đúng — xem X1 + §6.21 |
+| Dịch heading công thức | A mặc định `--translate-tags "p"` → **34 `<h3>` tiêu đề công thức KHÔNG được dịch** | dịch (danh sách tag gồm `h1..h6`) | như B |
+| Chất lượng prompt | `DEFAULT_PROMPT` của A (`chatgptapi_translator.py:69`) là **đúng 1 câu** generic. Luận điểm "cộng đồng đã tối ưu prompt riêng cho EPUB" (nêu trong brief cho Expert) **không có thật** — Expert đọc source xác nhận | `build_system_prompt()` có glossary + unit conversion + typography rules | B hơn hẳn, **với điều kiện** có contract JSON (X4) |
+
+Hệ quả: §6.20.11 mục 6 ("chất lượng dịch khác, không hiển nhiên tốt/xấu hơn") là **quá dè dặt
+theo hướng có lợi cho A** — A không có ưu thế prompt nào. Đã sửa tại chỗ ở mục đó.
+
+**Điều KHÔNG so sánh được (và tại sao nó không cứu được phương án A)**: A có ưu thế thật là "đã
+tối ưu sẵn cho EPUB" — nhưng đọc source rồi thì phần "tối ưu" đó cụ thể là: chọn tag để dịch,
+chèn `<p>` dịch cạnh `<p>` gốc, và giữ item không phải văn bản. Cả ba đều là vài chục dòng
+`BeautifulSoup`. Đây **khác hẳn** lý do §6.6.2 R5 từ chối tự viết cho PDF: ở PDF, phần tự viết là
+**layout engine** (line-breaking, reflow, font fallback, formula placeholder) — hàng tuần công.
+EPUB là HTML reflow, **không có bài toán typeset nào cả**. Sự bất đối xứng đó là lý do quyết định
+ở đây ngược với quyết định ở §6.6.2 mà không hề mâu thuẫn với nó.
+
+##### **QUYẾT ĐỊNH: Phương án B.**
+
+Ba lý do — **THỨ TỰ ĐÃ SẮP XẾP LẠI 2026-09-08 sau phản biện Domain Expert**: bản cũ đặt trọng
+lượng lớn nhất lên B-03 (97,2%), mà đó lại là lý do **yếu nhất về tính tổng quát** (N=1 trên một
+bulletin 35 trang, xem §6.20.3). Lý do thật sự bất biến theo sách là cấu trúc của chính tool A:
+
+1. **A không có cơ chế chunk nào TƯƠNG THÍCH VỚI RESUME — bất kể sách nào.** Cơ chế
+   chọn-một-phần-sách duy nhất của A là document-granular (**E-05**: tài liệu ngoài
+   `--only_filelist` **bị xoá khỏi output**, xác nhận độc lập bởi Expert tại
+   `epub_loader.py:384-391`) → muốn chunk thì phải tự ghép EPUB lại từ N bản output, tức là công
+   ngang với tự viết writer. Cộng thêm **E-13**: trạng thái resume là pickle theo **chỉ số tuyến
+   tính toàn sách** (Expert xác nhận `epub_loader.py:117,565,616` + `_process_paragraph:147-148`)
+   → đổi tập `--only_filelist` là mọi chỉ số lệch. Hai cái này **loại trừ nhau**: A không thể vừa
+   chunk vừa resume, trên bất kỳ cuốn sách nào. Đây là lý do nặng nhất vì nó không phụ thuộc mẫu.
+2. **A hỏng im lặng theo đúng 3 cách dự án này đã bị 3 lần.** exit 0 khi lỗi (E-06, đã chạy thật ở
+   E-07, Expert xác nhận `epub_loader.py:553-560`), đoạn rỗng thay bản gốc (E-09), lỗi cấp đoạn
+   nuốt thành `None` (E-08). Bug #5 và Bug #2 đều là biến thể của đúng một câu: "báo completed,
+   nội dung rỗng".
+3. **B-03 là MINH HOẠ trên chính cuốn sách của user, không phải bằng chứng tổng quát.** Trên file
+   thật này, 97,2% nội dung nằm trong 1 document → Lớp 3 với granularity "gần bằng cả cuốn" chính
+   là kịch bản đã làm mất $6.50, chỉ khác quy mô. Con số đúng (Expert đo lại được 97,4%), nhưng
+   **N=1 trên bulletin 35 trang** — nó chứng minh A thất bại **ở đây**, không chứng minh A thất
+   bại nói chung.
+
+Và một lý do cộng thêm (không phải để bác A, mà để chọn B): **B trả lại nhiều thứ hơn nó lấy** —
+chi phí đo thật (`cost_source='metered'`, lần đầu tiên trong dự án), tái dùng nguyên
+chunk/resume/cancel/cost-gate/glossary, và tạo ra **cặp EN↔VI thật** mà app nhìn thấy được, mở
+khoá EC-20.1 cho US-20 sau này (§6.18.7 mục 2).
+
+Kèm 1 phát hiện làm B rẻ hơn dự kiến: **không cần dùng writer của `ebooklib`.** B-06 cho thấy
+`write_epub()` dời toàn bộ đường dẫn (`ops/` → `EPUB/`) và ghi lại OPF — vẫn mở được nhưng không
+đúng tinh thần "giữ nguyên cấu trúc gốc" của BR-EPUB-01. Cách ghi đè tại chỗ bằng `zipfile`
+(B-07) giữ **27/27** entry còn lại nguyên byte, giữ nguyên thứ tự entry và `mimetype` STORED-đầu-file
+theo đúng OCF spec. Dùng `ebooklib` **chỉ để đọc**, `zipfile` để ghi.
+
+#### 6.20.5. `EpubDocument` — module MỚI `src/services/epub_document.py` (spec cho Dev)
+
+> ### ⚠️ MỤC NÀY ĐÃ BỊ §6.20.12 THAY THẾ MỘT PHẦN (sửa sau phản biện Domain Expert, 2026-09-08)
+>
+> **Còn nguyên hiệu lực**: khung `EpubDocument` (1 loader, nhiều projection), danh sách tag lấy
+> unit, nguyên tắc `unit_id` ổn định/tất định, ghi ngược bằng `zipfile` không dùng
+> `epub.write_epub()`, kiểm DRM ở `POST /api/upload`.
+>
+> **ĐÃ BỊ THAY THẾ — Dev KHÔNG được implement theo bản dưới đây:**
+> - `text: str` (text thuần) → **inner-HTML** (X2, §6.20.12)
+> - rule `extract()` bỏ `sup` → **CẤM** (X1, §6.20.12 + §6.21)
+> - `doc_href` lấy thẳng từ `ebooklib` → **phải join với `opf_dir`** (X6, §6.20.12)
+> - `ordinal` đếm sau khi lọc → **đếm trước khi lọc** (Y3, §6.20.12)
+> - `write_translated()` bước 2/3 → bổ sung parser `xml`, strip `id` bản copy, file tạm (Y1/Y2/Y5)
+
+```python
+@dataclass(frozen=True)
+class EpubUnit:
+    unit_id: str        # ĐỊNH DANH ỔN ĐỊNH, xem dưới
+    doc_href: str       # tên entry trong zip, vd "ops/xhtml/chapter01.html"
+                        # ⚠️ X6: KHÔNG phải item.file_name của ebooklib — xem §6.20.12
+    tag: str            # "p" | "h2" | "li" | ...
+    ordinal: int        # thứ tự trong CHÍNH tài liệu đó, 0-based
+    text: str           # ⚠️ ĐÃ ĐỔI (X2): inner-HTML, KHÔNG phải văn bản thuần đã strip
+
+
+class EpubDrmError(RuntimeError): ...
+class EpubParseError(RuntimeError): ...
+
+
+class EpubDocument:
+    @classmethod
+    def load(cls, path: Path) -> "EpubDocument": ...
+    @property
+    def units(self) -> list[EpubUnit]: ...
+    def full_text(self) -> str: ...          # dùng cho lọc glossary (6.6.5) và US-20
+    @property
+    def total_chars(self) -> int: ...
+    def write_translated(
+        self,
+        translations: dict[str, str],        # unit_id -> văn bản tiếng Việt
+        output_path: Path,
+        bilingual: bool = False,
+    ) -> None: ...
+```
+
+**Quy tắc chọn unit** (dùng CHUNG với §6.15 S15-8, một định nghĩa duy nhất):
+- Duyệt tài liệu theo **thứ tự spine** (không theo thứ tự entry trong zip).
+- Tag lấy: `p, h1, h2, h3, h4, h5, h6, li, blockquote, td, th, dt, dd, figcaption`.
+- ~~Trước khi lấy text, `extract()` bỏ các thẻ con `sup`, `code`, `pre` (giống `exclude_translate_tags`
+  mặc định của bbook_maker, E-01 — ý tưởng đúng, mượn lại).~~ **RULE NÀY BỊ XOÁ HOÀN TOÀN (X1,
+  2026-09-08)** — nó phá định lượng công thức (`<sup>1</sup>/<sub>3</sub> cup` → `/3 cup`, đo trên
+  6/6 dòng nguyên liệu thật). "Ý tưởng đúng, mượn lại" là một đánh giá **sai** của bản gốc: trên
+  sách dạy làm bánh nó là ý tưởng sai. Thay bằng: **giữ nguyên mọi thẻ inline** (X2 — unit là
+  inner-HTML nên `sup`/`sub` đi qua LLM nguyên vẹn, không cần rule nào cả). Xem §6.21.
+- Bỏ unit nếu: rỗng sau `.strip()`, toàn chữ số/khoảng trắng, là URL, hoặc khớp `ISBN`.
+- Node lồng nhau: nếu 1 `li` chứa `p`, chỉ lấy **node ngoài cùng** trong danh sách tag (tránh dịch
+  2 lần cùng nội dung — chính là bug đã có mặt sẵn trong bbook_maker's `filter_nest_list`).
+
+**`unit_id` phải ỔN ĐỊNH và TẤT ĐỊNH** — đây là chốt của resume (BR-CHUNK-05):
+`unit_id = f"{doc_href}#{ordinal}"`, với `ordinal` = chỉ số của node trong danh sách unit **của
+chính tài liệu đó**, theo thứ tự tài liệu. **⚠️ SỬA (Y3, 2026-09-08): `ordinal` phải đếm trên MỌI
+node thuộc danh sách tag — TRƯỚC khi áp các drop rule** (rỗng/toàn số/URL/ISBN), xem §6.20.12 Y3.
+- **KHÔNG** dùng hash nội dung: sau khi dịch, nội dung đổi → resume tra không ra.
+- **KHÔNG** dùng chỉ số tuyến tính toàn sách: chỉ cần đổi bộ lọc tag là mọi id lệch (đây đúng là
+  cách bbook_maker làm, E-13, và đúng lý do resume của nó không chunk được).
+- Bắt buộc có test: `load()` cùng 1 file 2 lần → danh sách `unit_id` **giống hệt** (R6-02).
+
+**`write_translated()` — ghi đè tại chỗ bằng `zipfile`** (B-07):
+1. Nhóm `translations` theo `doc_href`.
+2. Mở zip gốc; với mỗi `doc_href` có bản dịch: parse lại bằng `BeautifulSoup` (**⚠️ Y1: bắt buộc
+   `features="xml"`**, xem §6.20.12), đi đúng danh sách unit theo `ordinal`, và:
+   - `bilingual=False` (BR-EPUB-01 mặc định): thay nội dung của node bằng **fragment HTML đã dịch**
+     (X2), **giữ nguyên tag, class, style**. ~~và các thẻ con đã `extract()` được chèn lại đúng
+     chỗ~~ — không còn `extract()` nào (X1), nên không có gì phải chèn lại.
+   - `bilingual=True`: chèn 1 node **copy** ngay sau node gốc, node copy mang bản dịch (đúng cách
+     `insert_trans` của bbook_maker làm, E-02 — ý tưởng đúng, tự cài). **⚠️ Y2: bản copy phải strip
+     mọi `id`, phải mang `lang="vi"` + `class="bb-vi"`, và `td`/`th` chèn BÊN TRONG ô** — xem
+     §6.20.12 Y2/X3.
+3. Ghi zip mới: `mimetype` là entry **đầu tiên** và **`ZIP_STORED`** (OCF spec), mọi entry khác giữ
+   nguyên `filename` + `date_time` + thứ tự, `ZIP_DEFLATED`. Entry không đổi thì copy nguyên bytes.
+   **⚠️ Y5: ghi ra `<output>.epub.tmp` rồi `os.replace()`**, không ghi thẳng tên thật.
+4. **KHÔNG** gọi `epub.write_epub()`.
+5. **⚠️ Y1 (MỚI): trước khi ghi mỗi XHTML đã sửa, validate `ET.fromstring(output_bytes)`.** Không
+   well-formed → chunk/job `failed` với thông báo rõ. **Tuyệt đối không ghi XHTML hỏng vào EPUB** —
+   reader XHTML strict (Apple Books) hiện **trang trắng, không báo lỗi**: đúng dạng silent failure.
+
+**DRM (EC-22.1 / YA-6.6)**: `load()` raise `EpubDrmError` nếu zip có `META-INF/encryption.xml`
+**và** có ít nhất một `<EncryptedData>` trỏ tới tài nguyên **không phải font** (`.ttf/.otf/.woff*`)
+— vì `encryption.xml` cũng được dùng hợp lệ cho font obfuscation, không chỉ DRM. Kiểm tra này chạy
+ở **`POST /api/upload`** (không đợi tới lúc dịch): reject 400 với đúng câu AC-22.3
+*"File EPUB có DRM, cần gỡ DRM trước khi dịch"*. File mẫu B-08 không có encryption.xml → là
+negative-case fixture sẵn có.
+
+#### 6.20.6. Đơn vị đo "kích thước" cho EPUB, và cost gate
+
+Câu hỏi PM đặt: số chương? tổng ký tự? số từ? — **Cả ba đều cần, cho ba mục đích khác nhau:**
+
+| Đại lượng | Dùng để làm gì | Lưu ở đâu |
+|---|---|---|
+| **Tổng ký tự** (`total_chars`) | Đầu vào công thức ước tính chi phí | không lưu cột riêng; tính lại từ `EpubDocument` |
+| **Số unit** (`len(units)`) | Đơn vị chunk, đơn vị progress, hiển thị UI | **cột mới `Job.total_units`** |
+| **Số request LLM** | `segment_count` của công thức chi phí | tính từ chunk plan |
+| Số chương (`ITEM_DOCUMENT`) | **không dùng** làm đơn vị đo | — |
+
+**`total_pages` giữ NULL cho EPUB.** Không bịa số trang cho một định dạng reflow — đó chính là
+loại "trôi ngữ nghĩa" đã sinh ra Bug #5. `upload.py:127-134` giữ nguyên. UI hiện `-` ở cột số
+trang (đúng AC US-19) và hiện `total_units` ở chỗ riêng nếu muốn.
+
+```python
+# src/models/job.py
+total_units: int | None = Field(default=None)
+# Số đơn vị dịch (đoạn văn/heading/mục list) của 1 job EPUB — thay cho
+# total_pages, vốn vô nghĩa với định dạng reflow. NULL cho mọi job PDF.
+# BREAKING SCHEMA CHANGE (cùng đợt với `finished_at` §6.17.2).
+```
+
+**Cost gate cho EPUB — tái dùng `estimate_job_cost_v2()`, KHÔNG viết công thức thứ hai.**
+`src/core/cost_gate.py::estimate_translation_cost()` hiện hardcode đường PDF
+(`_extract_full_text` → PyMuPDF, `_count_pdf_pages`, `_count_text_segments`). Rẽ nhánh theo
+`file_type` **ở đúng 1 chỗ** — hàm này — rồi gọi **cùng một `estimate_job_cost_v2()`**:
+
+```
+if file_type == epub:
+    doc = EpubDocument.load(file_path)
+    full_text          = doc.full_text()
+    source_text_chars  = doc.total_chars   # ⚠️ X5: ƯỚC THẤP 29% — xem hộp ngay dưới bảng
+    plan               = plan_epub_chunks(doc.units)          # list[EpubChunkPlan]
+    llm_request_count  = sum(len(c.requests) for c in plan)   # SỐ REQUEST, không phải số đoạn
+    segment_count      = llm_request_count
+    total_pages        = None
+    total_units        = len(doc.units)
+else:
+    ... đường PDF hiện tại, không đổi ...
+prompt_text = await build_prompt_text(..., only_terms_present_in=full_text, ...)
+estimate    = estimate_job_cost_v2(source_text_chars, segment_count, prompt_overhead_chars, provider)
+```
+
+> ⚠️ **`segment_count` cho EPUB mang nghĩa KHÁC với PDF — Dev bắt buộc đọc kỹ.**
+> Với pdf2zh/babeldoc, prompt được gửi lại cho **từng đoạn văn** (§6.6.1 F6), nên
+> `segment_count` = số đoạn. Với phương án B, app **tự gộp nhiều unit vào 1 request**, nên overhead
+> prompt trả **1 lần mỗi REQUEST**. Đo trên sách thật (B-04, 384 unit, 52.369 ký tự, prompt
+> overhead 1.800 ký tự, `deepseek-v4-flash`):
+> - nếu dùng nhầm `segment_count = 384` (số đoạn): **185.892 input token**
+> - đúng `segment_count ≈ 18` (số request, gộp ~3.000 ký tự/request): **21.192 input token**
+>
+> Sai lệch **8,8×**. §6.11.6 cho phép ước cao hơn thật nhưng **không** cho phép ước sai bản chất:
+> ước cao 8,8× sẽ khiến cost gate Lớp 2 **chặn nhầm** những cuốn sách hoàn toàn bình thường.
+> `estimate_job_cost_v2()` **không đổi một dòng nào** — chỉ đầu vào `segment_count` khác nghĩa,
+> và đó phải là một biến được đặt tên rõ (`llm_request_count`) chứ không phải một con số truyền thẳng.
+
+> ### ⚠️ X5 — SỬA SAU PHẢN BIỆN DOMAIN EXPERT (2026-09-08): `source_text_chars = doc.total_chars` ƯỚC **THẤP**
+>
+> Đây là vi phạm trực tiếp §6.11.6 ("được ước cao, **cấm** ước thấp"), nằm đúng trên lớp bảo vệ tài
+> chính đã từng để mất $6.50. Expert đo được envelope JSON; **Tech Lead đo lại độc lập và tìm thêm
+> một số hạng thứ hai mà Expert bỏ sót** (Expert chỉ đo trên text thuần, không tính chi phí của
+> chính X2 — chuyển sang inner-HTML).
+>
+> Số đo lại (384 unit thật của `Baking with Sourdough`, `json.dumps(ensure_ascii=False)`, script
+> `envelope.py` trong scratchpad phiên này):
+>
+> | Cấu hình payload | Content chars | Payload chars | Overhead |
+> |---|---|---|---|
+> | `unit_id` dài (`ops/xhtml/chapter01.html#123`) + text thuần | 52.369 | 72.197 | **+37,9%** (khớp +38% Expert đo) |
+> | id ngắn `0..N` + text thuần | 52.369 | 62.627 | **+19,6%** (khớp +20% Expert đo) |
+> | id ngắn + **inner-HTML** (cấu hình THẬT sau X2) | 57.247 | **67.577** | **+29,0% so với `doc.total_chars`** |
+>
+> Riêng việc đổi sang inner-HTML (X2) đã cộng **+9,3%** ký tự nội dung (57.247 vs 52.369) — số hạng
+> này **không có trong phản biện của Expert**, và nếu chỉ áp công thức của Expert thì vẫn còn ước
+> thấp ~9%.
+>
+> **Chốt — 2 hằng số có tên, đặt cạnh `EPUB_CHUNK_CHAR_BUDGET` trong `src/core/chunking.py`:**
+> ```python
+> EPUB_INLINE_MARKUP_FACTOR        = 1.15   # inner-HTML vs text thuần; đo 1.093, làm tròn lên
+> EPUB_JSON_ENVELOPE_CHARS_PER_UNIT = 30    # đo 26,7 ký tự/unit (id ngắn), làm tròn lên
+>
+> source_text_chars = int(doc.total_chars * EPUB_INLINE_MARKUP_FACTOR) \
+>                   + len(doc.units) * EPUB_JSON_ENVELOPE_CHARS_PER_UNIT
+> ```
+> Kiểm chứng trên chính cuốn sách này: `52.369 × 1,15 + 384 × 30 = 71.744` vs payload thật
+> `67.577` → **1,06× — cao hơn thật, đúng chiều §6.11.6 cho phép**. So với `doc.total_chars` trần
+> trụi thì là 1,37×.
+>
+> **Bắt buộc dùng id ngắn `0..N` trong request**, map ngược sang `unit_id` ở phía app (giảm một nửa
+> envelope, và giảm rủi ro model gõ sai một id dài 30 ký tự). Xem X4 (§6.20.12) cho contract.
+>
+> **Không sửa `estimate_job_cost_v2()`.** Nó suy `output_tokens` từ chính `source_text_chars`
+> (`cost_estimator.py:167`), nên `source_text_chars` đã nở 1,37× kéo theo ước output nở 1,37× —
+> trong khi overhead output thật chỉ ~+7% (Expert đo). Tức là ước output **cao hơn thật**, hợp lệ
+> theo §6.11.6. **Reviewer không được "sửa" điểm này thành ước sát hơn** — ước sát ở lớp cost gate
+> là đúng thứ RC-2 của sự cố $6.50.
+
+Sửa kèm (bỏ chặn cứng EPUB đang có):
+- `GET /api/jobs/{id}/cost-estimate` và `POST /api/estimate`: bỏ 2 nhánh `if file_type == "epub":
+  raise 400` (`src/api/routes/jobs.py`), và bỏ điều kiện `if job.total_pages is None: raise 400`
+  → đổi thành: EPUB hợp lệ khi có `total_units`, PDF hợp lệ khi có `total_pages`.
+- `CostEstimateResponse.total_pages` đổi thành `int | None`, thêm `total_units: int | None = None`.
+
+#### 6.20.7. Chunk theo chương — mô hình chốt
+
+**BR-EPUB-02 nói "đơn vị chunk = chương". Thực hiện: chunk = một dãy unit liên tiếp theo thứ tự
+spine, cắt ƯU TIÊN tại ranh giới tài liệu, nhưng KHÔNG bị ràng buộc bởi nó.** B-03 là lý do: một
+"chương" thật có thể là 97% cuốn sách; nếu chunk cứng theo tài liệu thì cơ chế trần chi phí không
+tồn tại trên chính cuốn sách của user.
+
+`src/core/chunking.py` thêm (KHÔNG đụng `calculate_chunks`/`plan_chunks` của PDF):
+
+```python
+EPUB_CHUNK_CHAR_BUDGET = 8_000        # ~7 chunk cho cuốn 52k ký tự (B-04)
+EPUB_REQUEST_CHAR_BUDGET = 3_000      # số ký tự tối đa gộp vào 1 request LLM
+EPUB_UNIT_HARD_MAX_CHARS = 10_000     # MỚI (Y4): unit vượt ngưỡng này -> job failed, xem §6.20.12
+
+@dataclass(frozen=True)
+class EpubChunkPlan:
+    index: int
+    unit_start: int      # chỉ số unit toàn sách, 0-based, INCLUSIVE
+    unit_end: int        # INCLUSIVE
+    requests: list[tuple[int, int]]   # các lát (start, end) trong phạm vi chunk này
+
+def plan_epub_chunks(units, char_budget=EPUB_CHUNK_CHAR_BUDGET,
+                     request_budget=EPUB_REQUEST_CHAR_BUDGET) -> list[EpubChunkPlan]:
+    """Cắt tại ranh giới tài liệu khi tài liệu tiếp theo còn vừa ngân sách;
+    khi 1 tài liệu tự nó vượt ngân sách, cắt tiếp bên trong nó theo đúng ranh
+    giới unit (không bao giờ cắt giữa 1 đoạn văn)."""
+```
+
+> **Z3 (bổ sung sau phản biện Domain Expert 2026-09-08) — gọi đúng tên hai ngân sách, vì chúng
+> phục vụ 2 mục đích khác nhau và Dev rất dễ tưởng là một.**
+> - `EPUB_CHUNK_CHAR_BUDGET = 8.000` là **granularity của checkpoint chi phí (Lớp 3)**, KHÔNG phải
+>   giới hạn context. Ý nghĩa thật: mức "vượt trần" tối đa mà Lớp 3 có thể để lọt = đúng 1 chunk
+>   ≈ $0,003 (DeepSeek) / ≈ $0,05 (Claude Sonnet).
+> - `EPUB_REQUEST_CHAR_BUDGET = 3.000` là **giới hạn kích thước 1 lời gọi LLM**: ≈ 900 token nội
+>   dung + envelope + ~450 token system prompt ≈ 1,4k in / ≈ 2k out — cách xa `max_tokens=8192`
+>   (mặc định của **cả 4 provider**: `claude_provider.py:42`, `openai_provider.py:45`,
+>   `deepseek_provider.py:37`, `gemini_provider.py:39` — tự đọc lại code xác nhận).
+> - Trade-off Expert chỉ ra, ghi lại để đừng quên: 18 request × ~450 token system prompt ≈ 8k token
+>   overhead ≈ **40% token nguồn**. Nếu spike R5-02 cho thấy JSON contract ổn định, **cân nhắc nâng
+>   `EPUB_REQUEST_CHAR_BUDGET` lên 5.000–6.000** để giảm một nửa overhead này. **Không nâng trước
+>   spike** — mỗi lần nâng là tăng lượng nội dung mất khi 1 request hỏng.
+> - Cả 3 hằng số phải nằm ở `Settings` (`.env`), không chôn trong code.
+
+**Không có overlap** (khác BR-CHUNK-03 của PDF). Lý do: overlap của PDF tồn tại vì pdf2zh cắt theo
+**trang**, mà một câu có thể vắt qua 2 trang. Ở EPUB mỗi unit là một đoạn văn **hoàn chỉnh** —
+không có gì bị cắt ngang để phải nối lại. Ghi vào known limitation: bản dịch không thấy ngữ cảnh
+đoạn liền trước ở ranh giới chunk. Nếu về sau thấy cần, thêm `context_units` (gửi kèm làm ngữ
+cảnh, **không** dịch lại) là mở rộng thuần cộng thêm.
+
+**Tái dùng bảng `chunks`, thêm 2 cột thay vì mượn nghĩa `page_start`/`page_end`:**
+
+```python
+# src/models/chunk.py
+page_start: int | None = Field(default=None)   # ĐỔI: nullable (NULL cho EPUB)
+page_end:   int | None = Field(default=None)   # ĐỔI: nullable (NULL cho EPUB)
+unit_start: int | None = Field(default=None)   # MỚI: NULL cho PDF
+unit_end:   int | None = Field(default=None)   # MỚI: NULL cho PDF
+```
+
+Cố ý **không** nhồi chỉ số unit vào `page_start/page_end`. Một cột tên `page_start` mà thực ra
+chứa chỉ số đoạn văn là đúng loại bẫy mà mọi lần đọc code sau này sẽ vấp — và dự án này đã trả giá
+2 lần cho "cùng một biến, hai ý nghĩa" (Bug #5, và `cost_source` ở RC-4).
+
+#### 6.20.8. `EpubTranslateRunner` + luồng `run_job()` cho EPUB (spec cho Dev)
+
+Bỏ `EpubNotSupportedError` ở Step 1. Thay bằng rẽ nhánh **ở đúng 1 chỗ**, giống S15-1:
+
+```
+run_job(job_id):
+    if job.job_type == "parse_only":  return await self.run_parse_only(...)     # §6.15
+    if job.file_type == FileType.EPUB: return await self.run_epub_job(...)      # §6.20
+    # ... Step 1..10 hiện tại, nguyên vẹn, chỉ dành cho PDF
+```
+
+`run_epub_job()` — cùng khung xương với `run_job()` để mọi cơ chế đã verify sống được tái dùng
+nguyên trạng:
+
+| Bước | Nội dung | Tái dùng gì |
+|---|---|---|
+| E1 | `doc = EpubDocument.load(job.file_path)`; `job.total_units = len(doc.units)` | §6.20.5 |
+| E2 | `full_text = doc.full_text()` → lọc glossary theo tài liệu | `build_prompt_snippet(only_terms_present_in=…)` §6.6.5, nguyên vẹn |
+| E3 | `system_prompt = await build_system_prompt(glossary_manager, project_id=job.batch_id)` | `prompt_builder.py` đã có. **KHÔNG** dùng `write_prompt_file()` (đó là contract `${text}` của pdf2zh) |
+| E4 | `plan = plan_epub_chunks(doc.units)` → `_load_or_create_chunks()` | §6.20.7 + hàm resume đã có |
+| E5 | Với mỗi chunk chưa `completed`: `_process_epub_chunk()` | ↓ |
+| E6 | Sau MỖI chunk: `progress_tracker.update()` → **Lớp 3 cost accumulator** → **check `cancel_requested`** | **copy nguyên thứ tự 3 bước của `run_job()` Step 7**, không viết lại |
+| E7 | Gộp mọi `chunk.output_path` (JSON) → `translations: dict[unit_id, str]` | ↓ |
+| E8 | `doc.write_translated(translations, merged_path, bilingual=…)` | §6.20.5 |
+| E9 | **Guard BR-EPUB-05** (mới, xem dưới) | tinh thần BR-OCR-03 |
+| E10 | `job.output_path`, `actual_cost`, `cost_source='metered'`, `finished_at`, `completed` | §6.17.2 |
+
+`_process_epub_chunk()`:
+1. `chunk.status='translating'`.
+2. Với mỗi lát request `(start, end)` trong `chunk.requests` — **tuần tự**:
+   - Dựng payload: JSON array ~~`[{"id": "<unit_id>", "text": "<EN>"}, …]`~~ → **SỬA (X4+X5,
+     2026-09-08): `[{"id": "<i cục bộ 0..N>", "html": "<inner-HTML EN>"}, …]`**, id ngắn cục bộ
+     trong request, app tự map ngược sang `unit_id`. Xem §6.20.12 X4 cho contract đầy đủ.
+   - ~~`result = await with_retry(lambda: provider.translate(payload_json, system_prompt, "en", "vi"))`~~
+     → **SỬA (X4): `system_prompt` phải là `build_epub_batch_prompt(...)`**, KHÔNG phải
+     `build_system_prompt()` trần — bản trần **không có bất kỳ chỉ thị JSON nào** (tự đọc
+     `src/core/prompt_builder.py` xác nhận: 4 chỗ khớp "json" đều là **comment** mô tả contract của
+     babeldoc, do babeldoc tự nối thêm, không phải nội dung app gửi). `with_retry`
+     (`src/utils/retry.py`) và `RateLimitError` đã có từ Increment 3 — **nhưng xem Y6 (§6.20.12):
+     `with_retry` hiện KHÔNG retry lỗi 5xx**, phải sửa trước khi nhánh EPUB dùng nó.
+   - Parse JSON trả về `{"<id>": "<VI inner-HTML>", …}`. **Nếu thiếu id nào** → gọi lại **riêng lẻ**
+     cho đúng các id thiếu (tối đa 1 vòng). **Nếu vẫn thiếu → chunk `failed`.**
+     **TUYỆT ĐỐI KHÔNG ghi chuỗi rỗng cho unit thiếu bản dịch** — đó là đúng E-09, lỗi mà cả
+     phương án A lẫn Bug #5 đều mắc.
+   - Cộng dồn `result.input_tokens`/`output_tokens`/`estimated_cost_usd` **thật**.
+3. Ghi `data/processing/{job_id}/chunk_{i}/units.json` = `{unit_id: vi_text}`; `chunk.output_path`
+   trỏ vào đó (song song với `.pdf` của nhánh PDF → merge/resume/xoá job không cần biết gì mới).
+4. `chunk.api_tokens_used`/`api_cost` = **số đo thật**, không phải `estimate_chunk_cost()`.
+5. `chunk.status='completed'`.
+
+**BR-EPUB-03 (không double-translation)**: phương án B chỉ có **đúng một** điểm gọi LLM
+(`provider.translate()` ở bước 2) và **không dùng `bilingual_book_maker` ở bất kỳ đâu**. Nguyên tắc
+§6.6.2 R1 được thoả một cách hiển nhiên. Reviewer kiểm bằng grep: trong luồng EPUB không được có
+lời gọi subprocess nào.
+
+**`cost_source = 'metered'` cho EPUB** — lần đầu tiên trong dự án. Hệ quả UI (§6.11.4 Lop 0 mục 2):
+job EPUB **không** hiện cảnh báo "ước tính, có thể sai lệch nhiều lần"; job PDF vẫn hiện. Frontend
+đã rẽ theo `cost_source` từ trước, không cần logic mới.
+
+**BR-EPUB-05 (mới — guard chống im lặng ra file rỗng, đề xuất PM bổ sung vào PRD §4.12)**: sau E8,
+mở lại file EPUB **vừa ghi** bằng `EpubDocument.load(merged_path)` và assert:
+- tổng số ký tự > 0, **và**
+- ~~số unit của file output **bằng** số unit của file input (không mất chương)~~, **và**
+- ~~ít nhất 90% unit có nội dung **khác** bản gốc.~~
+
+> ### ⚠️ X3 — SỬA SAU PHẢN BIỆN DOMAIN EXPERT (2026-09-08): guard trên MÂU THUẪN với `bilingual=True`
+>
+> §6.20.11 mục 2 đã chốt **`bilingual=True` là mặc định** cho EPUB. Nhưng `bilingual=True` **chèn
+> thêm** 1 node sau mỗi unit → `load()` file output đếm được **~2×** số unit, và ~50% unit (các bản
+> gốc EN) có nội dung **giống hệt** bản gốc. Guard như viết ở trên sẽ **fail 100% job bilingual**
+> — và hậu quả thực tế còn tệ hơn thế: Dev sẽ "nới" guard cho qua, và ta **mất luôn** lớp bảo vệ
+> duy nhất chặn được lớp lỗi Bug #5. Expert đúng hoàn toàn, tôi không có phản biện nào.
+>
+> **Bản chốt — điều kiện phụ thuộc `bilingual`, và dựa trên MỘT dấu hiệu tường minh:**
+>
+> Điều kiện tiên quyết (Y2): mọi node bản dịch chèn thêm **bắt buộc** mang `lang="vi"` **và**
+> `class="bb-vi"`. Đây không phải để cho đẹp — nó là **thứ duy nhất** làm cho "unit gốc" và "unit
+> dịch" phân biệt được ở lần `load()` sau, tức là thứ làm guard này tồn tại được.
+> `EpubDocument.load()` **bỏ qua** node mang `class="bb-vi"` khi liệt kê `units` (mặc định).
+> Hệ quả tốt kèm theo: upload lại chính file EPUB song ngữ đã dịch sẽ **không dịch đôi**.
+>
+> | Điều kiện | `bilingual=False` | `bilingual=True` |
+> |---|---|---|
+> | tổng ký tự > 0 | ✔ | ✔ |
+> | `len(units_output)` == `len(units_input)` | ✔ (units_output đã bỏ qua `bb-vi`, nhưng ở đây không có) | ✔ (**vì `load()` bỏ qua `bb-vi`** — đây là chỗ dấu hiệu tường minh trả công) |
+> | ≥90% unit khác bản gốc | ✔ | ✖ **thay bằng**: số node `bb-vi` ≥ 90% × `len(units_input)` **VÀ** ≥90% cặp (gốc, `bb-vi` liền sau) có nội dung text **khác nhau** |
+> | XHTML well-formed (Y1) | ✔ | ✔ |
+>
+> Cặp (gốc, `bb-vi`) khác nhau là điều kiện **không thể bỏ**: thiếu nó, một job mà LLM trả nguyên
+> văn tiếng Anh cho mọi unit vẫn qua guard (đủ số node, đủ ký tự) — đúng shape "báo completed, nội
+> dung sai" của Bug #5, chỉ đổi từ "rỗng" sang "chưa dịch".
+
+Không đạt → `job.status='failed'` với thông báo rõ. Đây là bản EPUB của BR-OCR-03, và là điều kiện
+duy nhất chặn được đúng lớp lỗi đã làm ta mất 3 vòng QA ở nhánh PDF scan.
+
+**Concurrency**: v1 **tuần tự** trong mỗi chunk, **không AIMD**. Lý do: AIMD (§6.12) được xây quanh
+`--thread` của pdf2zh và quanh việc *đoán* tín hiệu rate-limit bằng cách grep stdout của subprocess.
+Ở đây app gọi API trực tiếp nên nhận `RateLimitError` **thật** — cơ chế backoff của `with_retry` là
+đủ và đúng hơn. Thêm setting `epub_translate_concurrency: int = 1` (`.env`-only, chưa dùng) làm
+chỗ móc cho tương lai. Known limitation: sách rất lớn sẽ chậm hơn nếu chạy song song được — nhưng
+so với 2.859 giây/25 trang của babeldoc (§6.14.6) thì đây không phải nút thắt của v1.
+
+#### 6.20.9. Data lineage tường minh (Protocol 6 — R6-01)
+
+| Bước | Artifact tạo ra (tên biến/file cụ thể) | Bước sau đọc CHÍNH XÁC cái gì |
+|---|---|---|
+| 1. `POST /api/upload` | `upload.file_path` (`data/uploads/{id}_{name}.epub`), kiểm DRM tại đây | (2) |
+| 2. `EpubDocument.load(job.file_path)` | `doc.units: list[EpubUnit]` (mỗi cái có `unit_id` tất định) | (3), (4), (7) |
+| 3. `doc.full_text()` | `full_text: str` | (4) lọc glossary, (5) ước chi phí |
+| 4. `build_system_prompt(...)` với glossary đã lọc theo `full_text` | `system_prompt: str` | (6) — truyền **thẳng** vào `provider.translate()` |
+| 5. `plan_epub_chunks(doc.units)` | `list[EpubChunkPlan]` với `unit_start`/`unit_end`/`requests` | (6) và `chunks` rows |
+| 6. `_process_epub_chunk()` | `data/processing/{job_id}/chunk_{i}/units.json` = `{unit_id: vi}`; `chunk.api_cost` = **token thật** | (7), và Lớp 3 accumulator |
+| 7. `doc.write_translated(translations, merged_path)` | `data/outputs/{job_id}/translated_vi.epub` | (8) |
+| 8. Guard BR-EPUB-05 | đọc lại **chính `merged_path`**, không phải `translations` trong bộ nhớ | `job.output_path` |
+
+**Hai sợi dây dễ đứt nhất, phải có assertion giá trị cụ thể (R6-02):**
+- **(2) → (7)**: `write_translated()` phải nhận `translations` có key là **`unit_id` sinh từ CÙNG
+  một lần `load()`** với lúc dịch. Nếu Dev `load()` lại lần thứ hai với bộ lọc tag khác, mọi
+  `unit_id` lệch và bản dịch rơi vào hư không — job vẫn "completed", file vẫn mở được, nội dung vẫn
+  tiếng Anh. Đây là **Bug #5 tái sinh dạng EPUB**. Test bắt buộc:
+  `write_translated.assert_called_with(translations=<dict có key khớp đúng doc.units[i].unit_id>, ...)`.
+- **(6) → (7)**: merge phải đọc `chunk.output_path` của **mọi** chunk `completed`, không chỉ chunk
+  vừa chạy — test resume: chạy 2 chunk, giả lập crash, chạy lại, assert file output chứa bản dịch
+  của **cả hai**.
+- **(2) → (7) sợi dây thứ 3, BỔ SUNG sau phản biện (X6, 2026-09-08)**: `doc_href` mà `load()` sinh
+  ra phải là **tên entry có thật trong zip**. Đây là một Bug #5 dạng EPUB đã đóng gói sẵn: nếu Dev
+  dùng thẳng `item.file_name` của `ebooklib`, vòng ghi so `info.filename == doc_href` sẽ **không
+  khớp entry nào**, mọi entry được copy nguyên → **output == input**, `status='completed'`, file mở
+  được, nội dung nguyên tiếng Anh. **Test bắt buộc (R6-02), assert giá trị cụ thể**:
+  `assert all(u.doc_href in zipfile.ZipFile(path).namelist() for u in doc.units)` trên file EPUB
+  thật. Xem §6.20.12 X6 cho cách dựng `doc_href` đúng.
+- **(4) → (6) sợi dây thứ 4, BỔ SUNG (X4)**: `system_prompt` truyền vào `provider.translate()`
+  phải là kết quả của `build_epub_batch_prompt()` (có contract JSON), **không** phải
+  `build_system_prompt()` trần. Test assert **nội dung**: chuỗi prompt thật gửi đi phải chứa marker
+  contract JSON, không chỉ `assert translate.awaited`.
+
+#### 6.20.10. Gate release (Protocol 5 R5-03 + Protocol 6 R6-03)
+
+Bắt buộc trước `ready_for_release` cho US-22:
+1. **R5-02 (Dev spike, làm TRƯỚC khi implement đầy đủ)**: `ebooklib` + `bs4` + `markdownify` cài vào
+   `.venv` thật của project, `EpubDocument.load()` + `write_translated()` chạy trên file EPUB thật
+   trong `data/uploads/`, assert lại **B-07** (27/27 entry byte-identical, thứ tự entry giữ nguyên,
+   `mimetype` đầu file + STORED). Nếu số đo khác §6.20.3 → escalate Tech Lead, **không** tự sửa
+   thiết kế.
+
+   **THỨ TỰ BẮT BUỘC trong spike (bổ sung sau phản biện Domain Expert 2026-09-08)** — 6 bước dưới
+   đây phải xanh TRƯỚC khi viết implementation đầy đủ; mỗi bước là 1 điểm chặn X/Y đã biết, làm sai
+   thứ tự thì lỗi chỉ lộ ra sau khi đã code xong:
+
+   | # | Bước | Kỳ vọng (số đo đã có, Dev phải tái lập) |
+   |---|---|---|
+   | a | `doc_href` ∈ `zip.namelist()` cho **100%** unit (X6) | 5/5 document. Đo trước khi sửa: `item.file_name` **0/5**; sau khi join `opf_dir`: **5/5** |
+   | b | Round-trip `chapter01.html` qua parser `xml` → `ET.fromstring()` OK (Y1) | 5/5 XHTML well-formed; `viewBox` **không** bị hạ thành `viewbox` |
+   | c | 6 dòng `<sup>1</sup>/<sub>3</sub>` ra đúng (X1, §6.21) | `1/3 cup soy grits` ×5 **và** `1 1/3 cups unbleached white flour` ×1 — **không** phải `11/3` |
+   | d | Đoạn nguyên liệu 4 `<br/>` ra đúng 4 dòng + giữ bold (X2) | inner-HTML giữ nguyên `<strong>…</strong><br/>×3` |
+   | e | 1 request THẬT tới DeepSeek với payload JSON → **capture golden fixture** (X4) | `tests/fixtures/epub_llm/deepseek_batch_response_*.json`. **Cấm viết mock tay** — định dạng output LLM là external contract theo tinh thần Protocol 5 |
+   | f | So ước tính (đã có X5) với `actual_cost` metered | tỉ lệ **≥ 1,0×** (được cao, cấm thấp — §6.11.6) |
+2. **R5-03 (live, không mock)**: 1 job EPUB thật, provider thật (DeepSeek — rẻ nhất, đã verify sống
+   nhiều lần), chạy hết. Xác nhận `cost_source='metered'` và `actual_cost` là **số đo thật khác 0**
+   (đây là điểm khác biệt lớn nhất so với PDF; nếu nó ra `'estimated'` thì thiết kế đã bị hiểu sai).
+3. **R6-03 (E2E xuyên suốt, kiểm NỘI DUNG output)**: **mở file `.epub` output ra**, đọc lại bằng
+   `EpubDocument`, xác nhận có **tiếng Việt thật, đúng nghĩa** trong ít nhất 3 chương/đoạn khác
+   nhau — không chỉ tin `status='completed'`. Đây đúng cách QA Vòng 3 tìm ra Bug #5.
+4. **Cost gate sống**: hạ `max_cost_per_job_usd` xuống dưới ước tính đã biết của file đó → xác nhận
+   **HTTP 402** và **không có `Job` row nào được tạo** (đếm bằng SQL, đúng cách QA Vòng 7 đã làm).
+   Rồi `confirm_cost=true` + trần thấp → xác nhận job dừng ở `cost_capped` **giữa chừng**, tức
+   **`chunk_index > 0`** — đây chính là điều BR-EPUB-02 yêu cầu và là điều phương án A không làm được.
+5. **DRM**: upload 1 file EPUB có `META-INF/encryption.xml` (tự dựng bằng `zipfile`) → xác nhận
+   400 với đúng câu tiếng Việt của AC-22.3, và file mẫu thật (B-08, không DRM) vẫn qua bình thường.
+6. **Mở bằng reader THẬT (bổ sung sau phản biện Domain Expert 2026-09-08)** — bước 3 ở trên đọc lại
+   bằng chính `EpubDocument`, tức là **app tự chấm điểm bài của app**; đúng thứ phản biện US-16 v2
+   đã chỉ ra là không đủ. QA phải mở file output bằng **Apple Books hoặc Calibre viewer** và kiểm
+   bằng mắt **1 công thức có phân số + danh sách nguyên liệu**: phân số phải là `1/3`/`1 1/3` (X1),
+   4 nguyên liệu phải nằm **4 dòng** và còn in đậm (X2), bản VI nằm ngay dưới bản EN (bilingual).
+   Trang trắng = triệu chứng XHTML không well-formed (Y1) — reader strict không báo lỗi.
+7. **`epubcheck` nếu cài được** — bắt `duplicate id` (Y2: bản copy phải strip `id`; file thật có
+   **32 unit** chứa `<a id="page_N"/>`) và well-formedness. `⚠️ ASSUMED, chưa verify`: chưa ai kiểm
+   `epubcheck` có cài được trên máy này không. **Không cài được → không chặn release**, nhưng QA
+   phải ghi rõ trong `test-report.md`: *"release blocked pending live verification: epubcheck"* nếu
+   mục 6 cũng không chạy được (R5-03).
+
+#### 6.20.11. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)
+
+> **PM/user đã chốt (2026-09-08, qua AskUserQuestion, xem project_state.json)**: mục 1 và 2
+> dưới đây ĐÃ CÓ quyết định — giữ nguyên phần phân tích của Tech Lead làm hồ sơ, nhưng Dev
+> triển khai theo quyết định cuối trong dòng "→ CHỐT" của từng mục, không phải theo đề xuất
+> nghiêng-về ban đầu.
+
+1. **Thêm 3 cột DB → phải xoá/tạo lại DB dev.** `Job.finished_at` (§6.17.2), `Job.total_units`
+   (§6.20.6), `Chunk.unit_start`/`unit_end` + đổi `Chunk.page_start`/`page_end` thành nullable
+   (§6.20.7), cộng bảng mới `suggested_terms` (§6.18.3). Đây là tiền lệ đã có nhiều lần trong dự án
+   (`SQLModel.metadata.create_all()` không thêm cột vào bảng đã tồn tại), nhưng **user sẽ mất lịch
+   sử job hiện có**. Cần xác nhận: xoá DB dev, hay Dev viết 1 script migration `ALTER TABLE` nhỏ để
+   giữ lịch sử? Tech Lead nghiêng về **script migration** lần này, vì tab Lịch sử vừa được đầu tư
+   thêm tính năng ở chính đợt này (US-19) — xoá sạch lịch sử ngay khi vừa làm nó đẹp hơn là một
+   trải nghiệm tệ.
+   → **CHỐT: viết migration script (`ALTER TABLE`), KHÔNG xoá DB.** Xác nhận có dữ liệu thật cần
+   giữ (`sqlite3 data/bb_translation.db "SELECT COUNT(*) FROM jobs, glossary_entries"` → 10 job đã
+   dịch, 114 glossary entry đã curate, đo trực tiếp 2026-09-08) — đủ giá trị thực tế để bắt buộc
+   theo hướng migration, không phải chỉ là sở thích. Dev phải viết script `ALTER TABLE` cho đúng 4
+   thay đổi liệt kê ở trên trước khi chạm `SQLModel.metadata.create_all()`.
+2. **`bilingual` cho EPUB** — `_OUTPUT_MODE_MAP` hiện có `monolingual`/`bilingual`, và §6.20.5 hỗ
+   trợ cả hai với chi phí gần bằng 0. Nhưng PRD US-22 chỉ nói "output là 1 file `.epub` đã dịch".
+   BA cũng đã hỏi (BA-Q6 câu phụ) và **chưa có câu trả lời**. Đề xuất: **bật `bilingual` cho EPUB
+   luôn** (nó chỉ là chèn thêm `<p>` thay vì thay thế, không thêm chi phí LLM nào). Cần user xác nhận.
+   → **CHỐT: bật `bilingual=True` mặc định cho EPUB.** Cập nhật PRD US-22 tương ứng (xem PRD.md).
+3. **`EPUB_CHUNK_CHAR_BUDGET = 8.000` là con số CHỌN, chưa được kiểm chứng ở quy mô lớn.** Đo trên
+   đúng 1 cuốn (B-04) cho 7 chunk — hợp lý cho việc chặn chi phí. Nhưng N=1, giống hệt tình trạng
+   hằng số AIMD của babeldoc (xem `blockers` trong `project_state.json`). Đây là setting `.env`
+   chỉnh được, không phải hằng số chôn trong code; ghi nhận là ⚠️ chưa kiểm chứng trên sách lớn.
+4. **US-15 nhánh EPUB phụ thuộc §6.20** (S15-8). Nếu PM muốn US-15 ra trước US-22, nhánh EPUB của
+   US-15 phải hoãn và trả 400 rõ ràng. Cần PM chốt thứ tự increment.
+5. **`--single_translate`/Calibre/`ebook-convert` chính thức RA KHỎI scope.** Không cài Calibre,
+   không có đường EPUB→PDF ở đợt này (BR-EPUB-01). Nếu sau này mở lại, 6 cờ `ebook-convert` trong
+   §6.7 cũ **chưa từng được verify** và phải làm lại từ đầu theo R5-01.
+6. **Rủi ro tồn dư của phương án B cần PM biết**: bản dịch EPUB đi qua **prompt của chính app**,
+   nghĩa là chất lượng dịch EPUB sẽ **khác** chất lượng dịch PDF (PDF đi qua prompt của
+   pdf2zh/babeldoc với ràng buộc riêng của chúng). ~~Không tốt hơn hay xấu hơn một cách hiển nhiên —
+   chỉ là **khác**~~ → **SỬA 2026-09-08 sau phản biện Domain Expert: câu này quá dè dặt theo hướng
+   có lợi cho phương án A, và sai với bằng chứng.** Expert đọc source A: `DEFAULT_PROMPT` của A
+   (`chatgptapi_translator.py:69`) là **đúng 1 câu generic**, không có glossary, không có unit
+   conversion, không có typography rule. **A không có ưu thế prompt nào** — luận điểm "cộng đồng đã
+   tối ưu prompt riêng cho EPUB" (nêu trong brief) là **không có thật**. Rủi ro tồn dư thật của B
+   nằm ở chỗ khác và đã được đóng ở §6.20.12: **contract JSON app↔LLM (X4)** — đây mới là phần app
+   lần đầu tự chịu trách nhiệm, và là phần babeldoc đã phải viết cả một "mandatory per-paragraph
+   JSON output contract" để giải. Đề nghị QA đọc kỹ nội dung 1 chương ở gate R6-03 (mục 3 của
+   §6.20.10) **và mở bằng reader thật** (mục 6, mới), không chỉ đếm ký tự.
+7. **[MỚI, cần PM xin user] Z1 — chỉ có đúng 1 file EPUB thật để làm bằng chứng.** Toàn bộ số đo
+   §6.20.3 là **N=1 trên một bulletin 35 trang** (§6.20.3 đã ghi), và Expert xác nhận đây là file
+   EPUB thật **duy nhất** trên máy (`~/Downloads/…Sourdough….epub` **byte-identical** với bản trong
+   `data/uploads/`, `cmp` xác nhận). Hệ quả cụ thể: **Y2 và Y4 hiện là phòng thủ lý thuyết** — file
+   mẫu có **0 `<table>`**, **0 `<ol>`/`<ul>`**, max unit chỉ **989 ký tự**, nên các rule cho bảng
+   lồng, list lồng và unit quá khổ **chưa từng chạm dữ liệu thật lần nào**. Đề nghị PM xin user
+   **≥1 EPUB cookbook dày thật** (nhiều chương) TRƯỚC spike R5-02, để Dev đo: số XHTML, có `<table>`
+   không, nested list, max unit, SVG có text, EPUB3 `nav.xhtml`. **Không chặn v1** (guard X3 + Y4
+   fail rõ ràng thay vì hỏng im lặng), nhưng nếu không có file này thì `EPUB_CHUNK_CHAR_BUDGET`,
+   `EPUB_UNIT_HARD_MAX_CHARS` và toàn bộ Y2 phải vào known limitations của PRD với nhãn
+   **⚠️ N=1, chưa kiểm chứng trên sách thương mại**.
+
+#### 6.20.12. Final Decision sau phản biện Domain Expert (2026-09-08)
+
+**Tác giả**: Tech Lead — thiết kế, KHÔNG implement.
+**Quan hệ tài liệu**: mục này **thay thế (supersede)** các phần của §6.20.5 / §6.20.6 / §6.20.7 /
+§6.20.8 / §6.20.9 / §6.20.10 đã được đánh dấu ⚠️ tại chỗ. Mọi phần khác của §6.20 **giữ nguyên
+hiệu lực**. Khi mâu thuẫn, **mục này thắng**.
+
+**Hướng kiến trúc KHÔNG đổi**: Phương án B (`ebooklib` đọc + Translation Engine nội bộ + `zipfile`
+ghi) đứng vững sau phản biện. Expert tự đối chiếu 7/14 claim `bbook_maker` vào source thật và toàn
+bộ 8 số đo B-01..B-08 — tất cả đúng. Không mở lại phương án A.
+
+##### Ranh giới bằng chứng (ai đã verify cái gì)
+
+| Nhóm | Ai đo | Tech Lead có đo lại không |
+|---|---|---|
+| B-01..B-08, E-03/05/06/09/10/11/13 | Expert, bằng stdlib + đọc source, **không dùng chung code path** với Tech Lead | Không — lặp lần 3 không tạo thêm thông tin |
+| X1 (`sup` phá phân số), X2 (census inline markup), X6 (`doc_href`) | Expert đo trước | **CÓ, đo lại độc lập** — xem bảng dưới, và tìm thêm 3 điều Expert bỏ sót |
+| X5 (envelope JSON) | Expert đo trên text thuần | **CÓ, đo lại + mở rộng** — Expert thiếu số hạng inner-HTML (§6.20.6) |
+| X4 (không có contract JSON), Y6 (`with_retry` không retry 5xx) | Expert đọc code | **CÓ, tự đọc lại** `prompt_builder.py`, `openai_provider.py:66-93`, `retry.py:14-22` — xác nhận đúng |
+
+**Ba điều Expert BỎ SÓT, Tech Lead tìm thêm khi tự đo (đây là lý do phải đo lại, không chỉ đọc):**
+
+| # | Phát hiện mới | Số đo |
+|---|---|---|
+| N-1 | **Đề xuất sửa X1 của Expert (dùng `markdownify` mặc định) vẫn SAI ở ca hỗn số.** Expert chỉ đo dòng phân số thuần. Trên dòng thật `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour`, `markdownify` mặc định cho ra **`11/3 cups`** — mười một phần ba thay vì một-và-một-phần-ba, **sai 8,25×** lượng bột. Cùng lớp lỗi với `/3 cup` mà Expert bác bỏ, chỉ khác cơ chế | tự chạy `markdownify==1.2.3` trên 6 dòng thật; 5/6 đúng, **1/6 sai**. Xem §6.21 |
+| N-2 | **X2 (inner-HTML) có chi phí tiền bạc mà không ai tính**: nội dung gửi đi tăng **+9,3%** (57.247 vs 52.369 ký tự). Cộng với envelope thì tổng ước thấp là **29,0%**, không phải 19,6% như công thức của Expert | §6.20.6, bảng 3 dòng |
+| N-3 | **Y1 (parser `xml`) đòi thêm dependency `lxml` — chưa có trong `.venv` project.** `BeautifulSoup(..., "xml")` không dùng được nếu thiếu `lxml` | tự dựng venv sạch chỉ có `beautifulsoup4==4.15.0` → `FeatureNotFound: Couldn't find a tree builder with the features you requested: xml`. Kiểm `.venv` project: **không có `lxml`, `bs4`, `ebooklib`, `markdownify`** |
+
+##### X1 — `extract()` bỏ `<sup>` — GIẢI QUYẾT
+
+**Chấp nhận hoàn toàn phát hiện của Expert, nhưng KHÔNG dùng cách sửa của Expert** (xem N-1).
+
+- **Nhánh dịch EPUB (§6.20)**: rule `extract()` bị **xoá**, và không thay bằng rule nào cả — vì X2
+  đã chuyển unit sang inner-HTML, `<sup>`/`<sub>` đi qua LLM **nguyên vẹn** rồi được ghi lại
+  nguyên vẹn. Fidelity = 100%, không cần chuyển đổi biểu diễn. Đây là lý do X1 và X2 phải sửa
+  **cùng một lúc**: sửa riêng X1 (bỏ `extract`) mà vẫn lấy text thuần thì `get_text()` vẫn cho ra
+  `1/3` dính liền số nguyên → vẫn ra `11/3`.
+- **Nhánh Markdown parse-only (§6.15 nhánh EPUB)**: ở đó **buộc** phải chiếu HTML → text, nên phải
+  có quy tắc chuyển đổi tường minh. Toàn bộ quy tắc đó nằm ở **§6.21** (mục dùng chung, vì nó là
+  yêu cầu xuyên suốt của user 2026-09-08 về công thức toán/lý/hoá, không riêng công thức bánh).
+- **Prompt (X4) phải nói rõ**: không được đổi/xoá `<sup>`/`<sub>` và không được đổi con số. Rule
+  "BẤT BIẾN NỘI DUNG" của `build_system_prompt()` chỉ có nghĩa khi LLM **nhìn thấy** thứ cần giữ.
+
+##### X2 — Inner-HTML thay vì text thuần — GIẢI QUYẾT
+
+Số đo tự tái lập trên `ops/xhtml/chapter01.html`: **373 unit, 263 unit (70%) có ít nhất 1 thẻ con**;
+phân bố `{strong: 214, a: 32, em: 26, br: 6, sup: 6, sub: 6, small: 1}` (Expert đo 273/383 = 71% —
+lệch nhỏ do khác rule đếm node lồng, kết luận giống hệt).
+
+Ca tệ nhất, đo trên đoạn thật:
+```
+RAW  : <p class="blockquote"><strong>4 cups unbleached white flour</strong><br/><strong>2 teaspoons salt</strong><br/>…
+get_text(" ", strip=True) → '4 cups unbleached white flour 2 teaspoons salt 2 tablespoons honey 4 cups potato water'
+```
+4 nguyên liệu gộp thành 1 dòng, mất bold. **Đây chính xác là Bug #7** (line-break/list bị gộp) —
+lỗi vừa tốn 8 vòng QA + 6 lần review để đóng ở nhánh PDF — tái sinh ở EPUB ngay increment đầu tiên,
+trên đúng nội dung quan trọng nhất của sách bánh.
+
+**Chốt**: `EpubUnit.text` = inner-HTML (`"".join(str(c) for c in node.children)`). Ghi ngược: parse
+fragment bản dịch bằng bs4 rồi `node.clear()` + append children của fragment.
+
+**TỪ CHỐI phương án giảm scope của Expert** (`get_text("\n")` + tái tạo `<br/>`): nó cứu được dòng
+nhưng vẫn mất 214 `<strong>` — tức là vẫn là một bản "nửa nạc nửa mỡ" của đúng lỗi vừa sửa xong ở
+PDF, và sẽ phải làm lại lần thứ hai. Chi phí thật của bản đầy đủ là +9,3% token (N-2), đã tính vào
+X5. Không có lý do kỹ thuật để làm nửa vời.
+
+##### X3 — Guard BR-EPUB-05 vs `bilingual=True` — GIẢI QUYẾT tại §6.20.8 (bảng 4 điều kiện)
+
+##### X4 — Contract JSON app↔LLM — GIẢI QUYẾT (thiết kế mới, chưa từng có)
+
+Xác nhận độc lập: `build_system_prompt()` **không có chỉ thị JSON nào**; 4 chỗ khớp "json" trong
+`src/core/prompt_builder.py` (dòng 27, 241, 244, 246) đều là **comment** mô tả contract mà
+*babeldoc* tự nối thêm phía sau. `OpenAIProvider.translate()` gửi user message
+`f"Translate from {source_lang} to {target_lang}:\n\n{text}"` (`openai_provider.py:66-72`). Tức là
+"Parse JSON trả về" ở §6.20.8 bản gốc là một **mong muốn**, không phải contract.
+
+**Ràng buộc kiến trúc phải tôn trọng**: `provider.translate(text, glossary_prompt, src, tgt)` là
+interface chung của **cả 5 provider** (Increment 3, đã verify sống). **Không đổi signature** cho
+riêng EPUB — đổi là phải sửa 5 file provider và phá lại thứ đã verify. Hệ quả: contract JSON phải
+nằm **hoàn toàn trong system prompt**, và payload đi vào tham số `text` (sẽ bị prefix
+`"Translate from en to vi:\n\n"` — vô hại, thậm chí có lợi vì nó nói đúng việc cần làm).
+
+**`build_epub_batch_prompt(glossary_prompt: str) -> str`** — hàm MỚI trong `prompt_builder.py`,
+3 phần nối nhau:
+
+1. `glossary_prompt` hiện có (glossary + unit conversion + typography) — **không sửa một chữ**.
+2. **Khối contract** (mới), nêu tường minh 6 điều:
+   - Input là JSON array `[{"id": "0", "html": "…"}, …]`; `id` là chuỗi chứa số.
+   - Output **phải** là JSON object `{"0": "…", "1": "…"}` — **đúng và đủ mọi `id`** đã nhận, không
+     thêm id lạ, không bọc trong markdown code fence, không kèm lời dẫn.
+   - Chỉ dịch **text node**; **giữ nguyên từng thẻ HTML inline** (`strong, em, b, i, sup, sub, br,
+     a, span, small`) đúng số lượng và đúng vị trí tương đối.
+   - **Không đổi, không làm tròn, không chuyển đổi bất kỳ CON SỐ nào**; `<sup>`/`<sub>` giữ nguyên
+     là `<sup>`/`<sub>` (X1, §6.21).
+   - Không dịch nội dung trong `<code>`/`<pre>`.
+   - Nếu 1 mục không dịch được → trả **nguyên văn bản gốc** cho id đó; **tuyệt đối không trả chuỗi
+     rỗng** (E-09 — đây đúng cách phương án A và Bug #5 hỏng).
+3. **Đúng 1 cặp ví dụ** (one-shot) có đủ: 1 thẻ inline, 1 con số, 1 `<sup>`/`<sub>`.
+
+**Parser trả về (`parse_epub_batch_response`)** — phải chịu được thực tế, không chỉ trường hợp đẹp:
+strip markdown code fence (```` ```json ````), strip khoảng trắng/lời dẫn trước-sau, chấp nhận `id`
+kiểu `str` lẫn `int`, và **validate**: đủ id, không id lạ, mỗi value non-empty. Thiếu id → gọi lại
+riêng lẻ đúng các id thiếu (tối đa 1 vòng) → vẫn thiếu → **chunk `failed`**, không ghi rỗng.
+
+**Golden fixture bắt buộc (Protocol 5 tinh thần)**: định dạng output của LLM là **external
+contract** — không do team kiểm soát. `tests/fixtures/epub_llm/deepseek_batch_response_*.json` phải
+được **capture từ request thật** ở spike R5-02 bước (e). **Mock viết tay theo thiết kế này = test
+tự xác nhận giả định**, đúng thứ Protocol 5 tồn tại để chặn (bài học MinerU).
+
+**DeepSeek JSON mode** (`response_format={"type": "json_object"}`): `⚠️ ASSUMED, chưa verify` — nếu
+Dev verify được ở spike thì thêm tham số **optional** vào provider; **không bắt buộc**, và contract
+trong prompt vẫn phải đủ mạnh để chạy đúng khi không có JSON mode (4 provider còn lại).
+
+##### X5 — Ước tính chi phí — GIẢI QUYẾT tại §6.20.6 (2 hằng số + bảng đo lại)
+
+##### X6 — `doc_href` (ebooklib ≠ zip) — GIẢI QUYẾT
+
+Tự chạy `ebooklib==0.20` trên chính file EPUB thật, xác nhận Expert đúng và bổ sung cách sửa đã đo:
+
+```
+container.xml → rootfile/@full-path = 'ops/9781603424073.opf' → opf_dir = 'ops'
+item.file_name (5 document) có trong zip.namelist() as-is : 0/5
+posixpath.normpath(posixpath.join(opf_dir, item.file_name)) : 5/5
+book.opf_dir                                               : KHÔNG TỒN TẠI (AttributeError)
+```
+
+**Chốt cho `EpubDocument.load()`**:
+```python
+full_path = re.search(r'full-path="([^"]+)"', zf.read("META-INF/container.xml").decode()).group(1)
+opf_dir   = posixpath.dirname(full_path)                       # 'ops' — có thể là '' nếu OPF ở gốc
+doc_href  = posixpath.normpath(posixpath.join(opf_dir, item.file_name))
+```
+`opf_dir` rỗng (OPF nằm ở gốc zip) là hợp lệ và `join`/`normpath` xử lý đúng — **không** hardcode
+`"ops/"`. Test bắt buộc ở §6.20.9 (sợi dây thứ 3).
+
+##### Y1..Y8 — chấp nhận toàn bộ, với 3 điều chỉnh
+
+| # | Nội dung | Quyết định |
+|---|---|---|
+| **Y1** | Parser XHTML: dùng `features="xml"`; fallback `html.parser` chỉ khi XML parse fail; validate `ET.fromstring()` trên output trước khi ghi | **NHẬN** + **N-3**: phải thêm **`lxml`** vào `pyproject.toml` (bs4 "xml" không chạy nếu thiếu — tự verify bằng venv sạch). Lý do kỹ thuật: `html.parser` hạ `viewBox` → `viewbox`, hỏng SVG trong trang có cả SVG lẫn text |
+| **Y2** | Quy tắc chèn bản dịch khi `bilingual=True`: (a) strip mọi `id` trong bản copy (file thật có **32 unit** chứa `<a id="page_N"/>` → duplicate id = epubcheck error + page-list trỏ sai); (b) `td`/`th`: chèn `<br/><span lang="vi" class="bb-vi">…</span>` **bên trong ô**, không `insert_after` (tạo ô mới, phá số cột); (c) `bilingual=False`: chỉ thay text node, **không đụng element con** (nếu không sẽ mất 10 `<img>` nằm trong `<p>`); (d) `li > ul` lồng: lấy **innermost** block có text trực tiếp | **NHẬN toàn bộ**. Thêm ràng buộc của X3: bản copy **bắt buộc** mang `lang="vi"` + `class="bb-vi"` — đây là dấu hiệu mà guard BR-EPUB-05 dựa vào, không phải trang trí |
+| **Y3** | `ordinal` đếm trên **mọi** node thuộc tag list **trước** khi lọc (drop rule không làm lệch id); `units.json` lưu `{unit_id: {"src_sha1": …, "vi": …}}`, merge kiểm hash, lệch → chunk `failed` | **NHẬN**. Đây là ca nguy hiểm hơn cả rỗng: sửa 1 drop rule ở version sau làm resume **dán bản dịch vào sai đoạn**. Spec cũ bác "hash làm **key**" — vẫn đúng; "hash làm **check**" là chuyện khác và cần thiết |
+| **Y4** | Unit quá khổ: > `EPUB_REQUEST_CHAR_BUDGET` → gửi **một mình**; > `EPUB_UNIT_HARD_MAX_CHARS = 10_000` → job `failed` nêu đúng `unit_id`, không cắt câu ở v1 | **NHẬN**. Cơ sở ngưỡng: `max_tokens=8192` ở **cả 4 provider** (tự đọc code xác nhận, §6.20.7 Z3); VI ≈ 1,16× ký tự EN, ~2 ký tự/token → unit > ~13.000 ký tự EN làm output **cụt** → JSON hỏng → retry lẻ vẫn cụt → chunk fail không lối thoát. 10.000 là ngưỡng có biên. **⚠️ chưa chạm dữ liệu thật** (max unit của file mẫu = 989 ký tự) — xem §6.20.11 mục 7 |
+| **Y5** | Ghi qua `.epub.tmp` + `os.replace()` | **NHẬN** — 2 dòng, đóng hẳn ca "zip cụt bị resume ghi đè" |
+| **Y6** | `with_retry` không retry 5xx: `_TRANSIENT_ERRORS = (RateLimitError, TimeoutError, ConnectionError)` (`retry.py:14-18`), còn `openai.APIError` (gồm `InternalServerError`, `APIConnectionError`, `APITimeoutError`) bị map thành `TranslationProviderError` (`openai_provider.py:80-81`) → **không retry** | **NHẬN, và nâng lên BẮT BUỘC trước khi nhánh EPUB dùng `with_retry`**. Nhánh PDF ít lộ vì pdf2zh/babeldoc tự retry bên trong; nhánh EPUB gọi API trực tiếp ~200 request tuần tự cho sách 600k ký tự → 1 lỗi 502 làm job `failed`. Resumable nên không mất tiền, nhưng đây là lỗi hạ tầng bình thường không được phép giết job. **Sửa ở tầng provider** (map 5xx/connection/timeout của SDK sang lớp transient), **không** nới `_TRANSIENT_ERRORS` thành `Exception` — nới rộng là đúng bẫy retry-vô-hạn E-10 của phương án A |
+| **Y7** | Known limitations: NCX `navLabel` / EPUB3 `nav.xhtml` ngoài spine và `<title>` **không được dịch** → mục lục trong reader vẫn tiếng Anh; `<dc:language>` giữ `en`; tài liệu ngoài spine không dịch | **NHẬN** — ghi vào PRD known limitations. Không chặn v1, nhưng user **sẽ** hỏi ngay lần mở đầu tiên |
+| **Y8** | Rule ISBN đang bỏ **cả đoạn** (`copyright.html` có `<p>Baking with sourdough / by Sara Pitzer<br/>…<br/>ISBN 978-…</p>`) | **NHẬN, sửa cho chặt**: rule là **"unit CHỈ chứa ISBN"** (sau khi strip tag, phần còn lại khớp ISBN + khoảng trắng), **không** phải "chứa ISBN". Đoạn trên có tên sách/tác giả → **phải được dịch** |
+
+##### Z1..Z3
+
+- **Z1** (N=1, xin thêm EPUB dày) → chuyển thành **§6.20.11 mục 7**, việc của PM/user.
+- **Z2** (bổ sung 4 dòng vào bảng so sánh, bỏ ngầm định "prompt cộng đồng") → **đã làm** tại
+  §6.20.4 bảng "4 tiêu chí BỔ SUNG" + §6.20.11 mục 6.
+- **Z3** (gọi đúng tên 2 ngân sách) → **đã làm** tại §6.20.7.
+
+##### Điểm của Expert tôi KHÔNG làm theo (kèm lý do)
+
+| Đề xuất Expert | Quyết định | Lý do |
+|---|---|---|
+| §6 mục 3(c): kỳ vọng spike "6 dòng `<sup>` ra đúng `1/3`" | **Siết chặt hơn**: 5 dòng ra `1/3` **và** 1 dòng ra `1 1/3` | N-1: chính `markdownify` mà Expert đề xuất cho ra `11/3` ở dòng hỗn số. Kỳ vọng như Expert viết sẽ **pass** cho một implementation vẫn sai |
+| X2 "phương án tối thiểu nếu PM muốn giảm scope": `get_text("\n")` + tái tạo `<br/>` | **Từ chối phương án giảm scope** | Cứu dòng nhưng mất 214 `<strong>` — nửa nạc nửa mỡ của đúng Bug #7 vừa đóng, sẽ phải làm lại lần 2. Chi phí bản đầy đủ đã đo được là +9,3% token |
+| FD X5(b): `EPUB_JSON_ENVELOPE_CHARS_PER_UNIT = 26` | **Đổi thành 30, và thêm `EPUB_INLINE_MARKUP_FACTOR = 1.15`** | 26 là số đo trần trụi (26,7 làm tròn **xuống**) và thiếu hẳn số hạng inner-HTML (N-2). Công thức của Expert vẫn ước thấp ~9% — vi phạm §6.11.6 ở đúng lớp bảo vệ tài chính mà chính Expert đang bảo vệ |
+| Y1: "fallback `html.parser` khi XML parse fail" | **Nhận, nhưng thêm điều kiện** | Fallback chỉ được dùng khi **output sau fallback vẫn qua `ET.fromstring()`**. Fallback im lặng sang parser hạ-chữ-hoa-attribute là cách hỏng SVG mà không ai biết |
+
+##### Trạng thái §6.20 sau mục này
+
+**Đủ điều kiện giao Dev**, với 2 điều kiện đi kèm: (a) spike R5-02 chạy đúng thứ tự 6 bước a→f của
+§6.20.10 mục 1 **trước** khi viết implementation đầy đủ; (b) `lxml` + `ebooklib` + `bs4` +
+`markdownify` được thêm vào `pyproject.toml` và **pin version** trong cùng commit đầu tiên.
+
+---
+
+### 6.21. Giữ chuẩn công thức toán/lý/hoá khi chiếu sang Markdown (yêu cầu xuyên suốt của user, 2026-09-08)
+
+**Phạm vi**: mục này là **quy tắc dùng chung** cho mọi chỗ app chuyển nội dung có số mũ / chỉ số
+dưới / phân số sang Markdown hoặc text thuần — cụ thể là §6.15 (US-15 Markdown parse-only, cả nhánh
+PDF lẫn nhánh EPUB) và §6.20 (US-22 dịch EPUB). Nó tồn tại vì **cùng một lỗi đã xuất hiện độc lập ở
+cả hai thiết kế**, ở cùng một tầng dùng chung (`EpubDocument` / trích xuất HTML) — sửa một chỗ mà
+không sửa chỗ kia là đúng cấu hình sinh ra 2 nhánh lệch nhau mà Protocol 6 tồn tại để chặn.
+
+**Yêu cầu gốc của user (2026-09-08)**: *"công thức toán/lý/hoá (không chỉ công thức bánh) phải giữ
+chuẩn, không gây hiểu lầm — số mũ, chỉ số dưới, phân số phải giữ đúng ký hiệu"*.
+
+#### 6.21.1. Nguyên tắc: 3 đích khác nhau, 3 cơ chế khác nhau
+
+Điều quan trọng nhất phải hiểu trước khi đọc phần còn lại: **"giữ chuẩn" không có nghĩa là "cùng
+một biểu diễn ở mọi nơi"** — nó có nghĩa là **không mất thông tin và không gây hiểu lầm** ở đích
+đang xét.
+
+| Đích | Có giữ được thẻ HTML không? | Cơ chế | Fidelity |
+|---|---|---|---|
+| **EPUB → EPUB** (US-22, §6.20) | **CÓ** — output cũng là XHTML | **Không chuyển đổi gì cả**: unit là inner-HTML, `<sup>`/`<sub>` đi qua LLM nguyên vẹn (X2), prompt cấm sửa (X4) | 100% |
+| **EPUB → Markdown** (US-15 nhánh EPUB, §6.15 S15-8) | **KHÔNG** — Markdown không có `<sup>`/`<sub>` | Chuẩn hoá tường minh theo §6.21.2 **trước khi** gọi `markdownify` | Không mất thông tin, không nhập nhằng |
+| **PDF → Markdown** (US-15 nhánh PDF, §6.15) | Không áp dụng — MinerU tự sinh Markdown, app không kiểm soát tầng này | Không thể sửa ở app → xử lý bằng **chọn `parse_method` đúng** (§6.21.3) | Có giới hạn đã đo, xem L-4 |
+
+#### 6.21.2. Quy tắc chuẩn hoá `<sup>`/`<sub>` cho đích Markdown (spec cho Dev)
+
+##### Vì sao KHÔNG được dùng hành vi mặc định của `markdownify`
+
+`markdownify==1.2.3` (bản đã cài để spike, `mdspike` venv) định nghĩa:
+`sub_symbol = ''` và `sup_symbol = ''` ở `markdownify/__init__.py:195-196`, dùng bởi
+`convert_sub`/`convert_sup` (`:722`, `:724`). Nghĩa là **mặc định nó XOÁ dấu hiệu sup/sub và dán
+nội dung dính vào text xung quanh**. Tự chạy thật:
+
+| Input HTML | `markdownify` mặc định | Đánh giá |
+|---|---|---|
+| `<sup>1</sup>/<sub>3</sub> cup soy grits` | `1/3 cup soy grits` | ✅ đúng (may mắn) |
+| `1<sup>1</sup>/<sub>3</sub> cups flour` | **`11/3 cups flour`** | ❌ **SAI 8,25×** — hỗn số thành phân số ảo |
+| `x<sup>2</sup> + y<sup>3</sup> - 5x<sup>-1</sup>` | **`x2 + y3 - 5x-1`** | ❌ **SAI** — x² thành "x2", số mũ âm thành phép trừ |
+| `H<sub>2</sub>O, CO<sub>2</sub>, Ca(OH)<sub>2</sub>` | `H2O, CO2, Ca(OH)2` | ⚠️ tạm chấp nhận cho hoá học, nhưng nhập nhằng |
+| `network.<sup>12</sup>` (footnote) | `network.12` | ❌ chú thích dính vào câu thành số |
+
+Đặt cạnh rule cũ của §6.20.5 (`extract()` bỏ `sup`) trên **6 dòng nguyên liệu thật** của
+`ops/xhtml/chapter01.html`:
+
+| Cách làm | Kết quả trên 6 dòng thật | Đúng |
+|---|---|---|
+| `extract()` (spec cũ) | `/ 3 cup soy grits` ×5, `1 / 3 cups unbleached white flour` ×1 | **0/6** |
+| `markdownify` mặc định (đề xuất của Expert) | `1/3 cup …` ×5, **`11/3 cups …`** ×1 | **5/6** |
+| **Chuẩn hoá §6.21.2 (chốt)** | `1/3 cup …` ×5, **`1 1/3 cups …`** ×1 | **6/6** |
+
+Ngoài ra: đặt hành vi đúng của app phụ thuộc vào **giá trị mặc định của một option trong thư viện
+bên thứ ba** là đúng loại rủi ro Protocol 5 nói tới — `sup_symbol` đổi mặc định ở version sau là
+output của ta đổi im lặng. Cách chốt dưới đây **xử lý xong `sup`/`sub` TRƯỚC khi `markdownify`
+nhìn thấy chúng**, nên độc lập hoàn toàn với option của thư viện.
+
+##### `normalize_sup_sub(soup)` — chạy trên soup, TRƯỚC `markdownify`
+
+Đặt tại `src/services/epub_document.py` (dùng bởi `to_markdown()`), hoặc module riêng nếu sau này
+có consumer thứ hai. Sau khi chạy, **không còn thẻ `sup`/`sub` nào** trong soup.
+
+**Bước 1 — Phân số (ưu tiên cao nhất, chạy trước)**
+Mẫu: `<sup>N</sup>` + text node **chỉ chứa** `/` hoặc `⁄` (U+2044) + `<sub>M</sub>`, với `N`, `M`
+đều là chuỗi chữ số. → thay cả 3 node bằng **một** text node `"N/M"`.
+**Bắt buộc — guard hỗn số (đây là chỗ cách của Expert hỏng)**: nếu ký tự ngay trước `<sup>` là một
+**chữ số**, chèn thêm **một dấu cách** trước phân số → `1<sup>1</sup>/<sub>3</sub>` ra
+`1 1/3`, **không** phải `11/3`.
+
+**Bước 2 — Mọi `<sup>`/`<sub>` còn lại**
+Với nội dung `c` (đã strip):
+- Nếu `c` khớp `[0-9+\-=()]+` (thuần số/dấu) **hoặc** là **đúng 1 chữ cái**, **và** mọi ký tự của
+  `c` đều có ký tự Unicode super/subscript tương ứng → dùng **Unicode**.
+- Ngược lại → dùng dạng ASCII tường minh `^(c)` cho sup, `_(c)` cho sub. Nếu `c` đã bắt đầu bằng
+  `(` và kết thúc bằng `)` thì không bọc thêm ngoặc (`(n-1)` → `^(n-1)`, không phải `^((n-1))`).
+
+Bảng ánh xạ Unicode (đủ cho toàn bộ hoá học phổ thông và số mũ số học):
+```
+sup: 0123456789+-=()ni  →  ⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ
+sub: 0123456789+-=()aeoxhklmnpst  →  ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ
+```
+
+**Kết quả đã chạy thật của quy tắc trên** (prototype `supsub_design.py`, scratchpad phiên này —
+Dev không dùng lại code này, chỉ dùng làm bảng kỳ vọng cho test):
+
+| Input | Output | Ghi chú |
+|---|---|---|
+| `<sup>1</sup>/<sub>3</sub> cup soy grits` | `1/3 cup soy grits` | phân số |
+| `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour` | `1 1/3 cups unbleached white flour` | **hỗn số — ca N-1** |
+| `Area = x<sup>2</sup> + y<sup>3</sup> - 5x<sup>-1</sup>` | `Area = x² + y³ - 5x⁻¹` | số mũ, kể cả mũ âm |
+| `H<sub>2</sub>O, CO<sub>2</sub>, Ca(OH)<sub>2</sub>, SO<sub>4</sub><sup>2-</sup>` | `H₂O, CO₂, Ca(OH)₂, SO₄²⁻` | hoá học, kể cả ion |
+| `network.<sup>12</sup>` | `network.¹²` | chú thích **phân biệt được** với số thường |
+| `x<sup>a+b</sup>`, `V<sub>total</sub>` | `x^(a+b)`, `V_(total)` | không map được → ASCII tường minh |
+| `10<sup>-6</sup> mol` | `10⁻⁶ mol` | |
+
+**Vì sao chọn Unicode làm mặc định** (user để Tech Lead tự quyết, nêu 2 phương án):
+Markdown thuần **không có** cú pháp sup/sub (CommonMark không có; `^…^`/`~…~` là mở rộng riêng của
+Pandoc, hiển thị nguyên văn ở mọi renderer khác). Vì vậy Unicode là biểu diễn **duy nhất** vừa đúng
+về mặt thị giác ở mọi renderer, vừa không mất thông tin, vừa ngắn. Dạng `^`/`_` được giữ lại **đúng
+cho những ca Unicode không biểu diễn nổi** — nơi mà "dài dòng nhưng rõ ràng" tốt hơn "ngắn nhưng
+sai".
+
+**Một setting duy nhất, `.env`-only** (không đưa vào `SETTINGS_DB_OVERRIDABLE_FIELDS` — đây là lựa
+chọn biểu diễn, không phải tham số vận hành):
+
+| Field | Default | Ý nghĩa |
+|---|---|---|
+| `markdown_supsub_style` | `"unicode"` | `"unicode"` = bảng trên. `"pandoc"` = `x^2^` / `H~2~O` (cho user nào render bằng Pandoc). **Quy tắc phân số ở Bước 1 GIỐNG NHAU ở cả 2 chế độ** — phân số không phải là sup/sub, nó là một con số |
+
+##### Tác động chéo sang §6.18 (US-20) — đã kiểm, KHÔNG cần sửa §6.18
+
+Chọn Unicode làm biểu diễn mặc định nghĩa là `document.md` của nhánh `parse_only` sẽ chứa `²`, `₂`
+… — mà chính file đó là `source_text` của US-20 (§6.18.5 dòng `parse_only`). Đã kiểm: bước 2 của
+`normalize_source_text()` (§6.18.8 T4) là `unicodedata.normalize("NFKC")`, và NFKC **tự** hạ các ký
+tự này về chữ số thường (tự chạy: `'x²'→'x2'`, `'H₂O'→'H2O'`, `'network.¹²'→'network.12'`). Nên
+tokenizer của US-20 không nhìn thấy ký tự lạ nào và **không cần rule mới**. Ghi lại ở đây để
+Reviewer không phải tự suy ra, và để nếu sau này `markdown_supsub_style` đổi sang `"pandoc"` thì
+biết ngay chỗ phải kiểm lại (`^`/`~` **không** bị NFKC xử lý).
+
+#### 6.21.3. Nhánh PDF: app KHÔNG kiểm soát được tầng này — xử lý bằng `parse_method`
+
+Ở nhánh PDF, Markdown do **MinerU** sinh ra; app không có chỗ nào để chèn `normalize_sup_sub()`.
+Giới hạn đã đo (L-4, §6.15.5, số đo của Expert trên cùng một file qua cả 2 mode):
+
+```
+Cùng dòng công thức trong Figoni:
+  parse_method="ocr" → "= scale readability × 10"     (ĐÚNG)
+  parse_method="txt" → "  scale readability - 10"     (SAI: '=' mất, '×' thành '-')
+```
+
+Nguyên nhân: font ký hiệu trong text layer không map Unicode; OCR đọc từ pixel nên đúng. Đây
+**không** phải bug của app và không sửa được ở app.
+
+**Chốt — thêm tham số `parse_method` override cho `parse_only`** (mở rộng nhỏ, S15 bản gốc không
+có): `POST /api/jobs` nhận thêm field optional `parse_method ∈ {auto, txt, ocr}`, mặc định `auto` =
+mapping theo `file_type` như S15 đã chốt (`pdf_digital`→`txt`, `pdf_scan`→`ocr`). MinerU hỗ trợ cả
+3 (§6.9.2). UI: 1 checkbox *"Tài liệu nhiều công thức toán/hoá — ưu tiên độ chính xác ký hiệu
+(chậm hơn)"* → gửi `parse_method="ocr"`.
+**Lưu ý bắt buộc đi kèm**: khi user ép `ocr` cho một file `pdf_digital`, rule S15-6 vẫn giữ nguyên
+— `ocr_confidence` **ép `None` theo `file_type`**, không theo `parse_method`. Nếu Dev đổi rule
+S15-6 sang rẽ theo `parse_method`, cột `jobs.ocr_confidence` lại mang 2 ý nghĩa, đúng thứ S15-6
+tồn tại để chặn.
+
+#### 6.21.4. Gate bắt buộc (§6.15.6 mục 5 trỏ tới đây)
+
+5 case dưới đây phải xanh trước khi US-15 hoặc US-22 được `ready_for_release`. Mỗi case là một lỗi
+**đã đo được trên dữ liệu thật**, không phải case tưởng tượng.
+
+| # | Case | Kỳ vọng | Chặn cái gì |
+|---|---|---|---|
+| F-1 | 5 dòng `<sup>1</sup>/<sub>3</sub> cup …` của `chapter01.html` | `1/3 cup …` | rule `extract()` cũ (ra `/ 3 cup`) |
+| F-2 | Dòng `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour` | **`1 1/3 cups …`** | `markdownify` mặc định (ra `11/3`) — **case quan trọng nhất, và là case duy nhất phân biệt được thiết kế đúng với đề xuất của Expert** |
+| F-3 | `x<sup>2</sup>`, `10<sup>-6</sup>` | `x²`, `10⁻⁶` | mất số mũ (ra `x2`, `10-6` — đọc thành phép trừ) |
+| F-4 | `H<sub>2</sub>O`, `Ca(OH)<sub>2</sub>`, `SO<sub>4</sub><sup>2-</sup>` | `H₂O`, `Ca(OH)₂`, `SO₄²⁻` | mất chỉ số dưới |
+| F-5 | **US-22**: dịch 1 chunk chứa 6 dòng `<sup>` rồi mở lại file EPUB output | 6 dòng vẫn có **đúng 6 `<sup>` và 6 `<sub>`**, con số không đổi | LLM tự ý "dọn dẹp" markup; và rule `extract()` nếu Dev quên xoá |
+
+F-5 phải chạy **trên file EPUB output thật**, không phải trên chuỗi trả về của LLM — đúng tinh thần
+R6-03 ("mở file ra xem chữ thật"). Đây cũng là case duy nhất bắt được nếu `write_translated()` ghi
+đúng nhưng LLM sửa markup.
+
+---
 
 ## 7. Docker Setup
 

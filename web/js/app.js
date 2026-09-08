@@ -13,12 +13,15 @@ const PDF_FILE_TYPES = new Set(["pdf_digital", "pdf_scan"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "cost_capped"]);
 // Nhiem vu 1b: trang thai con "song" — khoi phuc lai list nay khi index.html
 // load (F5/chuyen tab quay lai), khong chi dua vao state trong bo nho Alpine.
+// US-15 S15-12: "parsing" (job_type=parse_only) PHAI nam trong day — thieu
+// no, job dang parse (co the toi ~25 phut) bien mat khoi UI sau F5.
 const RESTORABLE_STATUSES = [
   "queued",
   "chunking",
   "translating",
   "post_processing",
   "merging",
+  "parsing",
   "completed",
   "cancelled",
   "cost_capped",
@@ -29,12 +32,15 @@ const RESTORABLE_STATUSES = [
 // gpt-4o-mini).
 const EXPENSIVE_OPENAI_MODELS = new Set(["gpt-4o"]);
 // Nhiem vu 3: trang thai duoc coi la "dang chay", hien nut "Dung".
+// US-15 S15-12/S15-13: "parsing" cung phai dung duoc (Dung -> cancel_requested
+// -> _poll_until_done() ngung cho MinerU, job chuyen "cancelled").
 const CANCELLABLE_STATUSES = new Set([
   "queued",
   "chunking",
   "translating",
   "post_processing",
   "merging",
+  "parsing",
 ]);
 
 function translationApp() {
@@ -165,6 +171,9 @@ function translationApp() {
         translating: "bg-amber-100 text-amber-700",
         post_processing: "bg-amber-100 text-amber-700",
         merging: "bg-amber-100 text-amber-700",
+        // US-15: MinerU dang chay cho job_type=parse_only — cung mau "dang
+        // xu ly" nhu translating/post_processing/merging.
+        parsing: "bg-amber-100 text-amber-700",
         chunking: "bg-blue-100 text-blue-700",
         queued: "bg-blue-100 text-blue-700",
       };
@@ -206,6 +215,10 @@ function translationApp() {
             job_type: "translate",
             provider,
             output_mode: lastOutputMode || "monolingual",
+            // Architecture.md 6.21.3: checkbox "uu tien do chinh xac ky
+            // hieu" — chi co y nghia khi job_type === "parse_only", gui
+            // parse_method="ocr" trong createJob() ben duoi khi bat.
+            parse_force_ocr: false,
             costEstimate: null,
             job: null,
           });
@@ -282,6 +295,10 @@ function translationApp() {
         body: JSON.stringify({
           file_id: f.file_id,
           job_type: f.job_type,
+          // Architecture.md 6.21.3: chi gui khi that su can ep "ocr" — bo
+          // qua (undefined, JSON.stringify tu drop key) trong moi truong
+          // hop khac de backend dung mac dinh "auto" cua no.
+          parse_method: f.job_type === "parse_only" && f.parse_force_ocr ? "ocr" : undefined,
           provider: f.job_type === "translate" ? f.provider : null,
           output_mode: f.output_mode,
           force,

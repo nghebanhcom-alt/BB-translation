@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,16 @@ class MinerUTimeoutError(MinerUError):
 
 class MinerUUnavailableError(MinerUError):
     """Raised when `/health` reports 503, or the service cannot be reached at all."""
+
+
+class MinerUCancelledError(MinerUError):
+    """Raised by `_poll_until_done()` when the caller's `should_cancel`
+    callback reports the user asked to stop mid-poll (US-15 §6.15.3 S15-13).
+    MinerU has no verified server-side cancel endpoint (Architecture.md 6.9.2
+    lists none) — `⚠️ ASSUMED` the submitted task keeps running remotely;
+    accepted because it's local compute at $0 cost and the caller only stops
+    WAITING on it, it doesn't try to kill it.
+    """
 
 
 @dataclass(frozen=True)
@@ -105,7 +116,16 @@ class MinerURunner:
         lang: str = "en",
         start_page_id: int | None = None,
         end_page_id: int | None = None,
+        task_timeout_seconds: float | None = None,
+        should_cancel: Callable[[], Awaitable[bool]] | None = None,
     ) -> MinerUResult:
+        """`task_timeout_seconds` overrides `self._task_timeout_seconds` for
+        THIS call only (US-15 S15-14: `parse_only` scales the budget with
+        page count instead of the fixed 3600s constant `_build_ocr_bridge()`
+        uses). `should_cancel`, if given, is polled once per poll iteration
+        (S15-13) — returning `True` raises `MinerUCancelledError` instead of
+        continuing to wait.
+        """
         output_dir.mkdir(parents=True, exist_ok=True)
 
         task_id = await self._submit_task(
@@ -115,7 +135,7 @@ class MinerURunner:
             start_page_id=start_page_id,
             end_page_id=end_page_id,
         )
-        await self._poll_until_done(task_id)
+        await self._poll_until_done(task_id, task_timeout_seconds, should_cancel)
         payload = await self._fetch_result(task_id)
 
         entry = self._select_result_entry(payload.get("results") or {}, file_path.name)
@@ -178,12 +198,26 @@ class MinerURunner:
             raise MinerUError(f"MinerU /tasks response missing task_id: {payload}")
         return task_id
 
-    async def _poll_until_done(self, task_id: str) -> None:
+    async def _poll_until_done(
+        self,
+        task_id: str,
+        task_timeout_seconds: float | None = None,
+        should_cancel: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
         interval = self._poll_initial_seconds
         elapsed = 0.0
+        timeout = (
+            task_timeout_seconds if task_timeout_seconds is not None else self._task_timeout_seconds
+        )
 
         async with httpx.AsyncClient(timeout=self._request_timeout_seconds) as client:
             while True:
+                if should_cancel is not None and await should_cancel():
+                    raise MinerUCancelledError(
+                        f"MinerU task {task_id} bi huy theo yeu cau nguoi dung (task co the van "
+                        "dang chay o server MinerU — chua verify co API huy task hay khong)"
+                    )
+
                 try:
                     response = await client.get(f"{self._base_url}/tasks/{task_id}")
                 except httpx.HTTPError as exc:
@@ -206,10 +240,10 @@ class MinerURunner:
                 if status == "failed":
                     raise MinerUError(f"MinerU task {task_id} failed: {payload.get('error')}")
 
-                if elapsed >= self._task_timeout_seconds:
+                if elapsed >= timeout:
                     raise MinerUTimeoutError(
                         f"MinerU task {task_id} did not complete within "
-                        f"{self._task_timeout_seconds}s (last status: {status})"
+                        f"{timeout}s (last status: {status})"
                     )
 
                 queued_ahead = payload.get("queued_ahead")

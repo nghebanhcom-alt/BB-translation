@@ -61,6 +61,9 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     ("chunks", "thread_used", "INTEGER"),
     ("chunks", "rate_limit_hits", "INTEGER"),
     ("jobs", "chunk_size_used", "INTEGER"),
+    # Architecture.md 6.21.3 (US-15 parse_method override): 'txt'/'ocr' da
+    # resolve, khong bao gio 'auto' — xem src/models/job.py.
+    ("jobs", "parse_method", "TEXT"),
 ]
 
 

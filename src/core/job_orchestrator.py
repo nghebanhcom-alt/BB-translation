@@ -16,7 +16,10 @@ Architecture.md 6.6.2 (R1-R5) and docs/CHANGELOG.md "Increment 4 — Fix Round
 
 import asyncio
 import logging
+import os
 import shutil
+import zipfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,7 +62,13 @@ from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
 from src.services.layout_qa import persist_findings
 from src.services.mineru_det_probe import probe_and_flag_rotated_text
-from src.services.mineru_runner import MinerUError, MinerURunner, MinerUUnavailableError
+from src.services.mineru_runner import (
+    MinerUCancelledError,
+    MinerUError,
+    MinerUResult,
+    MinerURunner,
+    MinerUUnavailableError,
+)
 from src.services.pdf2zh_runner import Pdf2zhError, Pdf2zhRunner, Pdf2zhTimeoutError
 from src.services.pdf2zh_service_map import (
     Pdf2zhService,
@@ -90,7 +99,30 @@ class BatchNotFoundError(ValueError):
 
 
 class EpubNotSupportedError(NotImplementedError):
-    """EPUB pipeline (bilingual_book_maker) is out of scope for this increment."""
+    """Raised when a job's pipeline path for EPUB isn't implemented yet —
+    either the full translate pipeline (bilingual_book_maker was rejected,
+    see US-22/Architecture.md 6.20 for the replacement design) or the
+    Markdown parse-only projection (`EpubDocument.to_markdown()`, US-15's
+    §6.15.3 S15-8, out of scope for this increment). The caller's message
+    says which.
+    """
+
+
+class ParseOnlyEmptyOutputError(RuntimeError):
+    """US-15 §6.15.3 S15-5 — BR-OCR-03's sibling guard for the parse-only
+    pipeline: MinerU returned a Markdown file with zero readable characters
+    (after `.strip()`) — the job must fail loudly instead of reporting
+    "completed" over nothing (Bug #5's exact shape, applied here).
+    """
+
+
+class ParseOnlyZipGuardError(RuntimeError):
+    """US-15 §6.15.4 lineage step 5 (added after Domain Expert review of
+    S15-3): the eagerly-built ZIP artifact must be re-opened and checked
+    against what was actually written to disk before the job is allowed to
+    report "completed" — never trust the in-memory belief that the write
+    succeeded.
+    """
 
 
 class Pdf2zhEmptyOutputError(RuntimeError):
@@ -254,7 +286,18 @@ class JobOrchestrator:
         if job is None:
             raise JobNotFoundError(f"Job {job_id} khong ton tai")
 
-        # Step 1: reject EPUB (chua implement).
+        # US-15 S15-1 (Architecture.md 6.15.3): re theo job_type TRUOC, roi
+        # moi re theo file_type. Thu tu goc ("Step 1" duoi day tung reject
+        # EPUB truoc MOI nhanh khac) khien 1 job parse_only tren file EPUB
+        # chet oan du nhanh parse chang lien quan gi toi bilingual_book_maker
+        # — day la ly do S15 goc bi phat hien la sai kien truc. `run_parse_only()`
+        # la HAM RIENG, khong nhoi `if job_type == ...` rai rac vao 10 Step
+        # duoi day (cung ly ly do 6.14.7 chon engine 1 lan duy nhat: moi cho
+        # re nhanh la 1 co hoi de 2 luong lech nhau, dung kieu Bug #5).
+        if job.job_type == "parse_only":
+            return await self.run_parse_only(job, db_session)
+
+        # Step 1: reject EPUB (chua implement, luong translate).
         if job.file_type == FileType.EPUB:
             raise EpubNotSupportedError(
                 "EPUB pipeline (bilingual_book_maker) chua duoc implement trong increment nay"
@@ -629,6 +672,281 @@ class JobOrchestrator:
             actual_cost=job.actual_cost,
         )
 
+    async def run_parse_only(self, job: Job, db_session: AsyncSession) -> JobResult:
+        """US-15 (Architecture.md 6.15.3): Markdown parse-only — runs the
+        Parsing Engine (MinerU) only, skips Translation Engine, Glossary
+        injection and Unit Conversion entirely (BR-PARSE-01). Only the PDF
+        branch (`pdf_digital`/`pdf_scan`) is implemented — the EPUB branch
+        depends on `EpubDocument.to_markdown()` (US-22, §6.15.3 S15-8), out
+        of scope for this increment.
+        """
+        if job.file_type == FileType.EPUB:
+            # S15-8 "he qua thu tu lam viec": API layer (create_job()/
+            # create_batch() in src/api/routes/jobs.py) already rejects
+            # job_type=parse_only + file_type=epub with HTTP 400 BEFORE any
+            # Job row is created — that is the primary guard. This is a
+            # second, defensive layer only (e.g. a Job row created by some
+            # future/other path) so such a job can never silently "run" or
+            # hang for up to `mineru_task_timeout_seconds`.
+            raise EpubNotSupportedError(
+                "Markdown parse-only cho EPUB chua duoc ho tro, se co khi tinh nang dich "
+                "EPUB hoan thien (Architecture.md 6.15.3 S15-8)."
+            )
+
+        file_path = Path(job.file_path)
+
+        if job.total_pages is None:
+            job.total_pages = _count_pdf_pages(file_path)
+            db_session.add(job)
+            await db_session.commit()
+
+        # S15-9 (YA-7.3): parse_only cho CA pdf_digital cung bat buoc MinerU
+        # dang chay — fail SOM voi thong bao ro rang thay vi de user cho het
+        # timeout (duoi day) trong vo ich. Cung mau hinh nhu guard
+        # `_mineru_runner is None` cua `_build_ocr_bridge()` — khong duoc
+        # chay tiep khi khong co MinerU (Bug #5's class of error).
+        if self._mineru_runner is None:
+            raise MinerUUnavailableError(
+                "File can MinerU de parse nhung MinerU chua duoc cau hinh (MINERU_ENDPOINT)"
+            )
+        await self._mineru_runner.health()
+
+        job.status = "parsing"
+        job.started_at = job.started_at or datetime.now(UTC)
+        # Architecture.md 6.21.3: `job.parse_method` is normally already
+        # resolved at job-creation time (POST /api/jobs's `_resolve_parse_method()`
+        # — "auto" mapped to file_type ONCE, or an explicit user override
+        # like forcing "ocr" on a pdf_digital file for L-4). This is only a
+        # fallback for a Job row that reached here without going through
+        # that path (an older row created before this column existed, or a
+        # Job built directly in a test) — same original S15 mapping as
+        # before, now persisted so it never has to be recomputed again for
+        # THIS job (a retry reuses the exact value written here).
+        job.parse_method = job.parse_method or (
+            "txt" if job.file_type == FileType.PDF_DIGITAL else "ocr"
+        )
+        db_session.add(job)
+        await db_session.commit()
+
+        parse_method = job.parse_method
+        # S15-14: hang so 3600s co dinh khong hop ly cho moi file — do that
+        # 89s/25 trang (~3.6s/trang, Architecture.md 6.15.3 S15-14) => sach
+        # 415 trang ~25 phut. He so 6 = 3.6 x ~1.65 bien an toan.
+        timeout_seconds = max(600.0, job.total_pages * 6.0)
+
+        async def _should_cancel() -> bool:
+            # S15-13: doc lai tu DB moi vong poll — 1 request KHAC (POST
+            # .../cancel) co the da dat co nay trong luc task nay dang cho
+            # MinerU tra ket qua (co the toi ~25 phut).
+            await db_session.refresh(job)
+            return job.cancel_requested
+
+        try:
+            result = await self._run_parse_only_pipeline(
+                job, file_path, parse_method, timeout_seconds, _should_cancel, db_session
+            )
+        except MinerUCancelledError:
+            job.status = "cancelled"
+            db_session.add(job)
+            await db_session.commit()
+            await self._broadcast_job_cancelled(job, 0, 1)
+            return JobResult(
+                job_id=job.id,
+                status="cancelled",
+                output_path=job.output_path,
+                bilingual_path=None,
+                actual_cost=job.actual_cost,
+            )
+        except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7/8
+            job.status = "failed"
+            job.error_message = str(exc)
+            db_session.add(job)
+            await db_session.commit()
+            await self._broadcast_job_failed(job, 0, 1)
+            return JobResult(
+                job_id=job.id,
+                status="failed",
+                output_path=job.output_path,
+                bilingual_path=None,
+                actual_cost=job.actual_cost,
+                error_message=job.error_message,
+            )
+
+        return result
+
+    async def _run_parse_only_pipeline(
+        self,
+        job: Job,
+        file_path: Path,
+        parse_method: str,
+        timeout_seconds: float,
+        should_cancel: Callable[[], Awaitable[bool]],
+        db_session: AsyncSession,
+    ) -> JobResult:
+        """The part of `run_parse_only()` that runs once the job is already
+        `status="parsing"` — kept as a separate method so `run_parse_only()`
+        can wrap it in ONE try/except (mirrors `run_job()` Step 7/8's shape:
+        once a job has started mutating state, failures are caught locally
+        and turned into a graceful JobResult, not left to propagate).
+        """
+        processing_dir = self._processing_dir / job.id / "parse_output"
+
+        # S15-6 (rewritten after Domain Expert review — the original spec was
+        # WRONG): `parse_method="txt"` does NOT mean `quality.confidence is
+        # None`. MinerU 3.4.5 assigns `score=1.0` to every text-layer span in
+        # txt mode (verified live against Figoni 1-25p — see
+        # tests/fixtures/mineru/parse_only_txt_figoni25/) — a number, not a
+        # real OCR quality signal. `jobs.ocr_confidence` has exactly ONE
+        # meaning everywhere else in the app ("OCR recognition confidence"),
+        # so this branch must NEVER let a txt-mode value reach it — record
+        # only for pdf_scan (real OCR), force None for pdf_digital below.
+        ocr_result = await self._run_mineru_and_record_quality(
+            job,
+            file_path,
+            processing_dir,
+            parse_method=parse_method,
+            task_timeout_seconds=timeout_seconds,
+            should_cancel=should_cancel,
+            record_confidence=(job.file_type == FileType.PDF_SCAN),
+        )
+
+        if job.file_type == FileType.PDF_DIGITAL:
+            job.ocr_confidence = None
+            job.ocr_dropped_spans = None
+
+        markdown_text = ocr_result.markdown_path.read_text(encoding="utf-8")
+        if len(markdown_text.strip()) == 0:
+            raise ParseOnlyEmptyOutputError(
+                f"MinerU parse ra Markdown rong (0 ky tu doc duoc) cho file '{job.filename}' "
+                "— job that bai thay vi tra ve file rong (tuong duong BR-OCR-03 cho nhanh parse)."
+            )
+
+        # Buoc 2 (Architecture.md 6.15.4 lineage): copy tu data/processing/
+        # sang data/outputs/{job_id}/ — TU DAY VE SAU chi doc/ghi trong thu
+        # muc nay, khong quay lai doc `ocr_result.markdown_path`/`images_dir`.
+        output_dir = self._output_dir / job.id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        final_md_path = output_dir / "document.md"
+        final_md_path.write_text(markdown_text, encoding="utf-8")
+
+        final_images_dir = output_dir / "images"
+        final_images_dir.mkdir(exist_ok=True)
+        image_files: list[Path] = []
+        if ocr_result.images_dir.exists():
+            for image_file in sorted(ocr_result.images_dir.iterdir()):
+                if image_file.is_file():
+                    target = final_images_dir / image_file.name
+                    shutil.copyfile(image_file, target)
+                    image_files.append(target)
+
+        # Buoc 3 (guard S15-5): doc lai CHINH file `document.md` vua ghi o
+        # Buoc 2 — khong tin bien `markdown_text` trong bo nho (dung tinh
+        # than R6-02 rut ra tu Bug #5: assert/guard tren artifact THAT).
+        if len(final_md_path.read_text(encoding="utf-8").strip()) == 0:
+            raise ParseOnlyEmptyOutputError(
+                "document.md rong sau khi ghi vao data/outputs — job that bai."
+            )
+
+        # Buoc 4 (S15-3, ZIP EAGER trong luc xu ly job, KHONG lazy trong
+        # download.py): danh sach file TUONG MINH, khong os.walk() thu muc
+        # dich — walk la duong duy nhat khien zip tu nen chinh no (ly do 2
+        # trong phan bien cua Domain Expert, Architecture.md 6.15.3 S15-3).
+        zip_path = output_dir / "parse_result.zip"
+        tmp_zip_path = output_dir / "parse_result.zip.tmp"
+        with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(final_md_path, arcname="document.md")
+            for image_file in image_files:
+                zf.write(image_file, arcname=f"images/{image_file.name}")
+        os.replace(tmp_zip_path, zip_path)  # khong bao gio ton tai zip do mang ten that
+
+        # Buoc 5 (guard ZIP, them sau phan bien cua Domain Expert): mo lai
+        # CHINH file zip vua ghi, khong tin trang thai trong bo nho.
+        with zipfile.ZipFile(zip_path) as zf:
+            bad_entry = zf.testzip()
+            names = zf.namelist()
+            images_in_zip = sum(1 for name in names if name.startswith("images/"))
+        if bad_entry is not None or "document.md" not in names or images_in_zip != len(image_files):
+            raise ParseOnlyZipGuardError(
+                "ZIP output bi loi sau khi dong goi (testzip/thieu document.md/lech so anh "
+                f"— zip co {images_in_zip} entry images/, thu muc co {len(image_files)} file) "
+                "— job that bai."
+            )
+
+        job.output_path = str(zip_path)
+        # S15-14: 0.0 la so do THAT (khong goi LLM nao) — dung "metered" chu
+        # khong phai "estimated" de frontend khong hien canh bao "uoc tinh co
+        # the sai lech" cho 1 con so chac chan bang 0.
+        job.actual_cost = 0.0
+        job.cost_source = "metered"
+        job.status = "completed"
+        job.progress = 1.0
+        job.completed_at = datetime.now(UTC)
+        db_session.add(job)
+        await db_session.commit()
+
+        if self._progress_broadcaster is not None:
+            # Architecture.md 5.2 "job_completed" event shape (same as
+            # run_job() Step 10) — frontend's WS handler only branches on
+            # `type`, so reusing the shape needs no frontend-side special case.
+            await self._progress_broadcaster(
+                job.id,
+                {
+                    "type": "job_completed",
+                    "job_id": job.id,
+                    "output_path": job.output_path,
+                    "actual_cost": job.actual_cost,
+                    "cost_source": job.cost_source,
+                },
+            )
+
+        return JobResult(
+            job_id=job.id,
+            status="completed",
+            output_path=job.output_path,
+            bilingual_path=None,
+            actual_cost=job.actual_cost,
+        )
+
+    async def _run_mineru_and_record_quality(
+        self,
+        job: Job,
+        file_path: Path,
+        output_dir: Path,
+        *,
+        parse_method: str = "ocr",
+        task_timeout_seconds: float | None = None,
+        should_cancel: Callable[[], Awaitable[bool]] | None = None,
+        record_confidence: bool = True,
+    ) -> MinerUResult:
+        """US-15 §6.15.3 S15-13: THE single call site for "submit a MinerU
+        parse/OCR task and write jobs.ocr_confidence/ocr_dropped_spans + emit
+        the US-11 warning" — shared by `_build_ocr_bridge()` (translate,
+        pdf_scan, always `parse_method="ocr"`, no custom timeout/cancel) and
+        `_run_parse_only_pipeline()` (both `parse_method` values, per-page
+        timeout, cancel support). One definition means the two call sites
+        cannot silently drift the way Bug #5's OCR-to-translation wiring did.
+
+        `record_confidence=False` (S15-6, `run_parse_only()`'s pdf_digital
+        branch): the caller still gets back the real `MinerUResult` (it needs
+        `quality` for its own guard checks upstream) but this helper does NOT
+        write `ocr_result.quality` onto `job` — the caller is responsible for
+        explicitly forcing the field to `None` itself, so a confidence number
+        with no real OCR behind it can never leak through this shared path
+        onto `jobs.ocr_confidence`.
+        """
+        ocr_result = await self._mineru_runner.parse_document(
+            file_path,
+            output_dir,
+            parse_method=parse_method,
+            task_timeout_seconds=task_timeout_seconds,
+            should_cancel=should_cancel,
+        )
+        if record_confidence:
+            job.ocr_confidence = ocr_result.quality.confidence
+            job.ocr_dropped_spans = ocr_result.quality.dropped_span_count
+            await self._emit_ocr_warning_if_low(job)
+        return ocr_result
+
     async def _build_ocr_bridge(self, job: Job, file_path: Path, db_session: AsyncSession) -> Path:
         """Architecture.md 6.10.5: OCR the scan (or reuse a prior run's
         result, BR-CHUNK-05) and turn it into a searchable-PDF bridge. Returns
@@ -655,14 +973,17 @@ class JobOrchestrator:
             await self._run_rotated_text_probe(job, file_path, ocr_dir / "middle.json", db_session)
             return Path(job.ocr_bridge_path)
 
-        ocr_result = await self._mineru_runner.parse_document(file_path, ocr_dir)
         # `quality.confidence` is `None` when no span went through OCR at all
         # (e.g. an image-only page) — a valid state, not an error
         # (Architecture.md 6.9.5). `jobs.ocr_confidence` stores NULL then.
-        job.ocr_confidence = ocr_result.quality.confidence
-        job.ocr_dropped_spans = ocr_result.quality.dropped_span_count
-
-        await self._emit_ocr_warning_if_low(job)
+        # US-15 S15-13: THE single call site for "submit a MinerU task +
+        # write jobs.ocr_confidence/ocr_dropped_spans + emit the US-11
+        # warning" — shared with `run_parse_only()`'s pdf_scan branch below,
+        # so the two flows cannot silently drift on how OCR quality gets
+        # recorded (Bug #5's class of error).
+        ocr_result = await self._run_mineru_and_record_quality(
+            job, file_path, ocr_dir, parse_method="ocr"
+        )
 
         if ocr_result.middle_json_path is None:
             raise MinerUError(

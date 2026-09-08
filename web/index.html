@@ -87,6 +87,13 @@
             </div>
           </div>
 
+          <div class="mb-2" x-show="!f.job && f.job_type === 'parse_only'">
+            <label class="flex items-center gap-2 text-xs text-gray-600">
+              <input type="checkbox" x-model="f.parse_force_ocr" />
+              Tài liệu nhiều công thức toán/hoá — ưu tiên độ chính xác ký hiệu (chậm hơn)
+            </label>
+          </div>
+
           <div x-show="f.costEstimate" class="text-xs text-gray-500 mb-2 bg-amber-50 border border-amber-200 rounded p-2">
             <p>
               Ước tính: $<span x-text="f.costEstimate?.estimated_cost_usd?.toFixed(2)"></span>
@@ -107,15 +114,18 @@
           <p x-show="f.jobError" x-text="f.jobError" class="text-xs text-red-600 mb-2"></p>
 
           <!-- Progress -->
-          <div x-show="f.job && ['queued','translating','post_processing','merging','chunking'].includes(f.job.status)">
+          <div x-show="f.job && ['queued','translating','post_processing','merging','chunking','parsing'].includes(f.job.status)">
             <div class="w-full bg-gray-200 rounded-full h-2 mb-1">
               <div class="bg-amber-600 h-2 rounded-full transition-all"
                    :style="`width: ${f.job?.progress_percent || 0}%`"></div>
             </div>
             <p class="text-xs text-gray-500">
               <span x-show="!f.job?.cancel_requested">
-                <span x-text="f.job?.progress_percent || 0"></span>% ·
-                chunk <span x-text="f.job?.current_chunk ?? '-'"></span>/<span x-text="f.job?.total_chunks ?? '-'"></span>
+                <span x-show="f.job?.status === 'parsing'">Đang parse (MinerU) — có thể mất vài phút đến ~25 phút với sách dày...</span>
+                <span x-show="f.job?.status !== 'parsing'">
+                  <span x-text="f.job?.progress_percent || 0"></span>% ·
+                  chunk <span x-text="f.job?.current_chunk ?? '-'"></span>/<span x-text="f.job?.total_chunks ?? '-'"></span>
+                </span>
               </span>
               <span x-show="f.job?.cancel_requested" class="text-amber-700">Đang dừng (sau khi xong chunk hiện tại)...</span>
             </p>
@@ -131,13 +141,15 @@
           </p>
 
           <div class="mt-2 flex gap-2" x-show="f.job?.status === 'completed'">
-            <a :href="`/api/jobs/${f.job.id}/download`" class="text-sm text-amber-700 underline">Tải bản VI</a>
-            <a x-show="f.job?.bilingual_path" :href="`/api/jobs/${f.job.id}/download?format=bilingual`"
+            <a :href="`/api/jobs/${f.job.id}/download`" class="text-sm text-amber-700 underline"
+               x-text="f.job_type === 'parse_only' ? 'Tải Markdown (.zip)' : 'Tải bản VI'"></a>
+            <a x-show="f.job_type !== 'parse_only' && f.job?.bilingual_path" :href="`/api/jobs/${f.job.id}/download?format=bilingual`"
                class="text-sm text-amber-700 underline">Tải bản song ngữ</a>
           </div>
 
           <button x-show="['failed', 'cancelled', 'cost_capped'].includes(f.job?.status)" @click="retryJob(f)"
-                  class="text-sm text-amber-700 underline mt-1">Tiếp tục dịch</button>
+                  class="text-sm text-amber-700 underline mt-1"
+                  x-text="f.job_type === 'parse_only' ? 'Chạy lại' : 'Tiếp tục dịch'"></button>
         </div>
       </template>
 

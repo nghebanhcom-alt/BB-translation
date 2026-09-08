@@ -7,6 +7,9 @@ function historyApp() {
     limit: 20,
     offset: 0,
     statusFilter: "",
+    // US-15 S15-7/BR-PARSE-04: mac dinh chi hien job dich, khong tron voi
+    // job parse_only vao "translation history".
+    jobTypeFilter: "translate",
     // US moi (2026-09-06): "+ Glossary" tren tung job — modal them 1 entry.
     addGlossaryJob: null,
     glossaryDraft: { term_en: "", term_vi: "" },
@@ -21,6 +24,8 @@ function historyApp() {
         // distinct from both an error (failed) and a user action (cancelled).
         cost_capped: "bg-purple-100 text-purple-700",
         translating: "bg-amber-100 text-amber-700",
+        // US-15: MinerU dang chay cho job_type=parse_only.
+        parsing: "bg-amber-100 text-amber-700",
         queued: "bg-blue-100 text-blue-700",
       };
       return map[status] || "bg-gray-100 text-gray-600";
@@ -68,6 +73,7 @@ function historyApp() {
     async load() {
       const params = new URLSearchParams({ limit: String(this.limit), offset: String(this.offset) });
       if (this.statusFilter) params.set("status", this.statusFilter);
+      if (this.jobTypeFilter) params.set("job_type", this.jobTypeFilter);
       const res = await fetch(`/api/jobs?${params}`);
       const body = await res.json();
       this.jobs = body.jobs;

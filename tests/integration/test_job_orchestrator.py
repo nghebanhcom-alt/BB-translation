@@ -1,4 +1,5 @@
 import json
+import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -10,7 +11,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.config import Settings
-from src.core.job_orchestrator import JobOrchestrator
+from src.core.job_orchestrator import EpubNotSupportedError, JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
 from src.models.layout_qa import LayoutQaFinding
@@ -20,6 +21,7 @@ from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
 from src.services.layout_qa import ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK, LayoutQaFindingData
 from src.services.mineru_det_probe import MineruDetProbeUnavailableError
 from src.services.mineru_runner import (
+    MinerUCancelledError,
     MinerUResult,
     MinerURunner,
     MinerUUnavailableError,
@@ -27,6 +29,13 @@ from src.services.mineru_runner import (
 )
 from src.services.pdf2zh_runner import Pdf2zhError, Pdf2zhResult, Pdf2zhRunner
 from src.services.pdf2zh_service_map import Pdf2zhServiceMapper, UnsupportedForPdfPipelineError
+
+#: US-15: golden fixture directory (Protocol 5 mục 3), captured from a real
+#: live MinerURunner.parse_document(parse_method="txt") run against MinerU
+#: 3.4.5 — see tests/fixtures/mineru/parse_only_txt_figoni25/README.md.
+_PARSE_ONLY_FIXTURE_DIR = (
+    Path(__file__).resolve().parent.parent / "fixtures" / "mineru" / "parse_only_txt_figoni25"
+)
 
 TOTAL_PAGES = 90
 # fitz.open().new_page() with no explicit size defaults to A4 (Rect(0,0,595,842)) —
@@ -1154,3 +1163,541 @@ async def test_pdf_scan_det_probe_disabled_by_flag(
 
     assert result.status == "completed"
     probe_spy.assert_not_awaited()
+
+
+# --- US-15 (Architecture.md 6.15.3) — Markdown parse-only, PDF branch -----
+
+
+async def _create_parse_only_job(
+    session: AsyncSession,
+    source_pdf: Path,
+    file_type: str = "pdf_digital",
+    parse_method: str | None = None,
+) -> Job:
+    """`parse_method=None` (default) mirrors a Job row that never went
+    through `POST /api/jobs`'s `_resolve_parse_method()` — exercises
+    `run_parse_only()`'s fallback mapping (unchanged S15 behaviour). Pass an
+    explicit `"txt"`/`"ocr"` to simulate a job created WITH a resolved
+    override already on it (Architecture.md 6.21.3), same as
+    `Job.chunk_size_used` never being "auto" in the DB.
+    """
+    job = Job(
+        filename="book.pdf",
+        file_path=str(source_pdf),
+        file_size=source_pdf.stat().st_size,
+        file_hash="deadbeef-parse",
+        file_type=file_type,
+        job_type="parse_only",
+        parse_method=parse_method,
+        model="deepseek",
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+def _fake_mineru_runner_for_parse_only(
+    *,
+    markdown_text: str = "# Chuong 1\n\nNoi dung mau.\n",
+    n_images: int = 2,
+    confidence: float = 0.997628187250996,
+    ocr_span_count: int = 1004,
+    dropped_span_count: int = 6,
+    capture_calls: list[dict] | None = None,
+    health_error: Exception | None = None,
+) -> MinerURunner:
+    """US-15 parse-only fixture: unlike `_fake_mineru_runner()` above (built
+    for the translate/OCR-bridge tests, which only needs a placeholder
+    `document.md` and no image files), this writes REAL Markdown content and
+    REAL image files, since S15-3's ZIP packaging step reads them off disk.
+    `capture_calls` records every `parse_document()` kwargs dict — used for
+    R6-02-style assertions on `parse_method`/`task_timeout_seconds`, not
+    just `assert_awaited()`.
+    """
+    runner = AsyncMock(spec=MinerURunner)
+
+    if health_error is not None:
+        runner.health.side_effect = health_error
+    else:
+        runner.health.return_value = {"status": "healthy"}
+
+    async def _parse_document(file_path, output_dir, **kwargs):
+        if capture_calls is not None:
+            capture_calls.append(kwargs)
+
+        should_cancel = kwargs.get("should_cancel")
+        if should_cancel is not None and await should_cancel():
+            raise MinerUCancelledError("cancelled mid-poll (fake)")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / "document.md"
+        markdown_path.write_text(markdown_text, encoding="utf-8")
+        images_dir = output_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        for i in range(n_images):
+            (images_dir / f"img{i}.jpg").write_bytes(b"\xff\xd8\xff fake jpeg bytes")
+
+        return MinerUResult(
+            markdown_path=markdown_path,
+            images_dir=images_dir,
+            quality=OcrQuality(
+                confidence=confidence,
+                ocr_span_count=ocr_span_count,
+                dropped_span_count=dropped_span_count,
+                source="middle_json_span_scores",
+            ),
+            task_id="fake-parse-task-id",
+            middle_json_path=None,
+        )
+
+    runner.parse_document.side_effect = _parse_document
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_pdf_digital_completes_and_forces_ocr_confidence_none(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-6 (rewritten after Domain Expert review): `parse_method="txt"`
+    does NOT mean the runner returns `confidence is None` (MinerU 3.4.5
+    assigns `score=1.0` to text-layer spans) — `run_parse_only()` must
+    explicitly FORCE `ocr_confidence`/`ocr_dropped_spans` to `None` for
+    `pdf_digital` regardless of what the runner reports. Also covers
+    S15-3/S15-4 (eager ZIP, explicit file list) and S15-14 (`cost_source=
+    "metered"`, `actual_cost=0.0`, `completed_at` set, floor-timeout branch
+    of S15-14: 5 pages -> `max(600, 5*6) == 600`).
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 5)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    calls: list[dict] = []
+    mineru_runner = _fake_mineru_runner_for_parse_only(
+        markdown_text="# Chuong 1\n\nNoi dung mau.\n", n_images=2, capture_calls=calls
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert result.bilingual_path is None
+    zip_path = Path(result.output_path)
+    assert zip_path.name == "parse_result.zip"
+    assert zip_path.exists()
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        assert names == {"document.md", "images/img0.jpg", "images/img1.jpg"}
+        assert zf.read("document.md").decode("utf-8") == "# Chuong 1\n\nNoi dung mau.\n"
+        assert zf.testzip() is None
+
+    await session.refresh(job)
+    assert job.status == "completed"
+    # THE assertion S15-6 exists for: forced None despite the fake runner
+    # "reporting" 0.9976.
+    assert job.ocr_confidence is None
+    assert job.ocr_dropped_spans is None
+    assert job.actual_cost == 0.0
+    assert job.cost_source == "metered"
+    assert job.completed_at is not None
+    assert job.progress == pytest.approx(1.0)
+
+    assert len(calls) == 1
+    assert calls[0]["parse_method"] == "txt"
+    assert calls[0]["task_timeout_seconds"] == pytest.approx(600.0)  # S15-14 floor
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_pdf_scan_records_real_ocr_confidence(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-6's OTHER branch: `pdf_scan` (`parse_method="ocr"`) DOES record
+    the runner's real confidence/dropped-span-count — only `pdf_digital` is
+    forced to `None`."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 5)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_scan")
+
+    calls: list[dict] = []
+    mineru_runner = _fake_mineru_runner_for_parse_only(
+        confidence=0.55, dropped_span_count=9, capture_calls=calls
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    await session.refresh(job)
+    assert job.ocr_confidence == pytest.approx(0.55)
+    assert job.ocr_dropped_spans == 9
+
+    assert len(calls) == 1
+    assert calls[0]["parse_method"] == "ocr"
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_pdf_digital_ocr_override_still_forces_confidence_none(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Architecture.md 6.21.3 (§6.21.3's explicit warning, mirrored in
+    CLAUDE.md Protocol 5/6): a user CAN override `parse_method` to `"ocr"`
+    for a `pdf_digital` file (to read math/chem symbols correctly instead of
+    the text-layer font-mapping bug, L-4) — but the S15-6 rule that forces
+    `jobs.ocr_confidence`/`ocr_dropped_spans` to `None` for `pdf_digital`
+    MUST stay keyed off `job.file_type`, NOT `job.parse_method`. This is the
+    exact regression the brief warned about: if S15-6's branch were
+    accidentally changed to check `parse_method == "ocr"` instead of
+    `file_type == FileType.PDF_DIGITAL`, this test would catch it —
+    `ocr_confidence` would leak the fake runner's 0.81 instead of staying
+    `None`. R6-02: assert the concrete persisted value, not just that
+    `parse_document()` was awaited.
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 5)
+    # Simulates a Job row created via POST /api/jobs with
+    # {"job_type": "parse_only", "parse_method": "ocr"} on a pdf_digital
+    # upload — `_resolve_parse_method()` already wrote "ocr" onto the row
+    # (not "auto"), same as `Job.chunk_size_used` never storing "auto".
+    job = await _create_parse_only_job(
+        session, source_pdf, file_type="pdf_digital", parse_method="ocr"
+    )
+
+    calls: list[dict] = []
+    mineru_runner = _fake_mineru_runner_for_parse_only(
+        confidence=0.81, dropped_span_count=3, capture_calls=calls
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    await session.refresh(job)
+
+    # The override itself DID take effect: MinerU was actually called with
+    # "ocr", not silently coerced back to the file_type default ("txt").
+    assert len(calls) == 1
+    assert calls[0]["parse_method"] == "ocr"
+    assert job.parse_method == "ocr"
+
+    # THE regression assertion: still forced None, exactly like the
+    # un-overridden pdf_digital case — file_type, not parse_method, decides
+    # this.
+    assert job.ocr_confidence is None
+    assert job.ocr_dropped_spans is None
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_pdf_digital_forces_none_using_golden_mineru_fixture(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Protocol 5 mục 3 (golden file, NOT a hand-typed mock): loads the REAL
+    `middle.json` captured from a live `MinerURunner.parse_document(
+    parse_method="txt")` run against MinerU 3.4.5 (Figoni 1-25p —
+    tests/fixtures/mineru/parse_only_txt_figoni25/), fed through the REAL
+    `MinerURunner._compute_quality()` (not a hardcoded number) to get the
+    exact confidence a real run produces. A test that hand-typed
+    `OcrQuality(confidence=None, ...)` would pass "for the wrong reason" —
+    exactly the Protocol 5 failure mode this fixture exists to catch.
+    """
+    middle = json.loads((_PARSE_ONLY_FIXTURE_DIR / "middle.json").read_text(encoding="utf-8"))
+    real_quality = MinerURunner._compute_quality(middle)
+    assert real_quality.confidence == pytest.approx(0.997628187250996)
+    assert real_quality.ocr_span_count == 1004
+    assert real_quality.source == "middle_json_span_scores"
+
+    markdown_text = (_PARSE_ONLY_FIXTURE_DIR / "document.md").read_text(encoding="utf-8")
+
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 25)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    runner = AsyncMock(spec=MinerURunner)
+    runner.health.return_value = {"status": "healthy"}
+
+    async def _parse_document(file_path, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / "document.md"
+        markdown_path.write_text(markdown_text, encoding="utf-8")
+        images_dir = output_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        return MinerUResult(
+            markdown_path=markdown_path,
+            images_dir=images_dir,
+            quality=real_quality,
+            task_id="cdbd0988-1182-456d-bf23-791e03490bc6",
+            middle_json_path=None,
+        )
+
+    runner.parse_document.side_effect = _parse_document
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    await session.refresh(job)
+    assert job.ocr_confidence is None  # forced None despite the golden fixture's real 0.9976
+    assert job.ocr_dropped_spans is None
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_data_lineage_processing_to_outputs_to_zip(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Architecture.md 6.15.4 lineage table, rows (1)->(2) and (2)->(4)
+    (Protocol 6 R6-02): the exact path MinerU wrote to under
+    `data/processing/`, the exact path `document.md` gets copied to under
+    `data/outputs/`, and the exact bytes inside `parse_result.zip` must all
+    agree with each other — not just "MinerU was awaited" / "a zip exists
+    somewhere"."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    mineru_runner = _fake_mineru_runner_for_parse_only(markdown_text="# Doc\n\nNoi dung that.\n")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+    assert result.status == "completed"
+
+    # (1): MinerU wrote into data/processing/{job_id}/parse_output/.
+    expected_processing_md = tmp_path / "processing" / job.id / "parse_output" / "document.md"
+    assert expected_processing_md.exists()
+    assert expected_processing_md.read_text(encoding="utf-8") == "# Doc\n\nNoi dung that.\n"
+
+    # (2): copied into data/outputs/{job_id}/document.md — the ONLY thing
+    # later steps (guard, zip) are allowed to read from here on.
+    expected_output_md = tmp_path / "outputs" / job.id / "document.md"
+    assert expected_output_md.exists()
+    assert expected_output_md.read_text(encoding="utf-8") == "# Doc\n\nNoi dung that.\n"
+
+    # (4): job.output_path is exactly this zip, and the document.md entry
+    # inside it is byte-identical to (2) — not re-derived from (1) or from
+    # an in-memory string.
+    assert result.output_path == str(tmp_path / "outputs" / job.id / "parse_result.zip")
+    with zipfile.ZipFile(result.output_path) as zf:
+        assert zf.read("document.md") == expected_output_md.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_empty_markdown_fails_job(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-5 — BR-OCR-03's sibling guard for the parse branch: a Markdown
+    file with 0 readable characters (after strip()) must fail the job, not
+    report "completed" over nothing (Bug #5's exact shape)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    mineru_runner = _fake_mineru_runner_for_parse_only(markdown_text="   \n\t  \n")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "failed"
+    assert "rong" in result.error_message
+
+    await session.refresh(job)
+    assert job.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_zip_guard_fails_job_on_corrupt_zip(
+    session: AsyncSession, tmp_path: Path, mocker
+) -> None:
+    """§6.15.4 lineage step 5 (new guard added after Domain Expert review of
+    S15-3): re-opening the just-written ZIP and finding it broken must fail
+    the job — proves the guard is load-bearing, not decorative."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    mineru_runner = _fake_mineru_runner_for_parse_only()
+    mocker.patch("zipfile.ZipFile.testzip", return_value="images/broken.jpg")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "failed"
+    assert "ZIP" in result.error_message
+
+    await session.refresh(job)
+    assert job.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_cancelled_via_should_cancel_callback(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-13: `cancel_requested` (set by `POST /api/jobs/{id}/cancel` while
+    MinerU is mid-poll) must reach `MinerURunner.parse_document()`'s
+    `should_cancel` callback and result in `status="cancelled"` — NOT
+    "failed" — with the job resumable/retryable exactly like a cancelled
+    translate job.
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+    job.cancel_requested = True
+    session.add(job)
+    await session.commit()
+
+    calls: list[dict] = []
+    mineru_runner = _fake_mineru_runner_for_parse_only(capture_calls=calls)
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "cancelled"
+    assert calls[0]["should_cancel"] is not None
+
+    await session.refresh(job)
+    assert job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_mineru_unavailable_raises_before_touching_job_status(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-9 (YA-7.3): parse_only for pdf_digital ALSO requires MinerU to be
+    reachable — health() failing must raise loudly (same uncaught-exception
+    shape `_build_ocr_bridge()` already uses for `mineru_runner is None`,
+    Architecture.md 6.10.5/BR-OCR-01) rather than let a job silently sit for
+    up to the full timeout. Job status must be untouched — the API layer's
+    `_run_job_background()` wrapper is what turns this into "failed".
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+    status_before = job.status
+
+    mineru_runner = _fake_mineru_runner_for_parse_only(
+        health_error=MinerUUnavailableError("MinerU khong ket noi duoc (fake)")
+    )
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with pytest.raises(MinerUUnavailableError):
+        await orchestrator.run_job(job.id, session)
+
+    mineru_runner.parse_document.assert_not_awaited()
+    await session.refresh(job)
+    assert job.status == status_before
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_epub_raises_without_calling_mineru(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-8 "he qua thu tu lam viec": the EPUB branch of parse-only is out
+    of scope for this increment. `create_job()`/`create_batch()` already
+    block this at the API layer (HTTP 400, no Job row) — this is the second,
+    defensive layer inside `JobOrchestrator` itself, for a Job row that
+    reaches `run_job()` some other way. Must raise WITHOUT ever calling
+    MinerU (no 3600s hang, no wasted OCR compute).
+    """
+    epub_path = tmp_path / "book.epub"
+    epub_path.write_bytes(b"fake epub bytes")
+    job = await _create_parse_only_job(session, epub_path, file_type="epub")
+
+    mineru_runner = _fake_mineru_runner_for_parse_only()
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with pytest.raises(EpubNotSupportedError):
+        await orchestrator.run_job(job.id, session)
+
+    mineru_runner.health.assert_not_awaited()
+    mineru_runner.parse_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_parse_only_timeout_scales_with_page_count(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """S15-14: `mineru_task_timeout_seconds=3600` fixed for every file was
+    measured to be wrong (89s/25p live run ~= 3.6s/page -> a 415-page book
+    needs ~25 min, and a 418-page/277MB book sits right at the 3600s wall).
+    `parse_only`'s timeout must be `max(600, total_pages * 6)`, not the
+    fixed constant `_build_ocr_bridge()` uses for translate/pdf_scan.
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 200)  # -> max(600, 200*6) == 1200
+    job = await _create_parse_only_job(session, source_pdf, file_type="pdf_digital")
+
+    calls: list[dict] = []
+    mineru_runner = _fake_mineru_runner_for_parse_only(capture_calls=calls)
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        mineru_runner=mineru_runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert calls[0]["task_timeout_seconds"] == pytest.approx(1200.0)
+
+    await session.refresh(job)
+    assert job.total_pages == 200

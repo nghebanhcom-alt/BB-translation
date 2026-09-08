@@ -73,6 +73,17 @@ class Job(SQLModel, table=True):
     # resume dung so cu (BR-CHUNK-05). Chi them cot o task nay; logic gan gia
     # tri cold-start/warm cho field nay la task 6.12.7 rieng, NGOAI PHAM VI —
     # None la gia tri mac dinh hop le cho toi khi task do implement.
+    parse_method: str | None = Field(default=None)
+    # 'txt' | 'ocr' — CHI co y nghia khi job_type=parse_only (Architecture.md
+    # 6.21.3). Luu gia tri DA RESOLVE THAT su dung (cung pattern voi
+    # chunk_size_used o tren): "auto" (request-level, JobCreateRequest o
+    # src/api/routes/jobs.py) khong bao gio duoc ghi vao cot nay — resolve
+    # theo file_type xay ra 1 LAN, hoac o create_job() luc tao Job (duong di
+    # binh thuong), hoac trong JobOrchestrator.run_parse_only() lam fallback
+    # cho Job row cu/tao truc tiep khong qua API (vd test) chua co gia tri.
+    # Ghi lai 1 lan roi giu nguyen qua cac lan retry (BR-CHUNK-05-style) —
+    # user ep "ocr" cho 1 file pdf_digital khong the tu doi lai "txt" giua
+    # chung job do retry.
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)

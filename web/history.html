@@ -20,15 +20,25 @@
   <main class="max-w-5xl mx-auto p-6" x-data="historyApp()" x-init="load()">
     <div class="flex justify-between items-center mb-4">
       <h1 class="text-xl font-bold">Lịch sử dịch (US-12)</h1>
-      <select x-model="statusFilter" @change="load()" class="border rounded px-2 py-1 text-sm">
-        <option value="">Tất cả trạng thái</option>
-        <option value="completed">Hoàn thành</option>
-        <option value="failed">Thất bại</option>
-        <option value="translating">Đang dịch</option>
-        <option value="queued">Đang chờ</option>
-        <option value="cancelled">Đã dừng</option>
-        <option value="cost_capped">Dừng do vượt trần chi phí</option>
-      </select>
+      <div class="flex gap-2">
+        <!-- US-15 S15-7/BR-PARSE-04: job parse_only KHÔNG tính vào "translation
+             history" — mặc định chỉ hiện job dịch, chọn riêng để xem job parse. -->
+        <select x-model="jobTypeFilter" @change="offset = 0; load()" class="border rounded px-2 py-1 text-sm">
+          <option value="translate">Bản dịch</option>
+          <option value="parse_only">Chỉ xuất Markdown</option>
+          <option value="">Tất cả loại</option>
+        </select>
+        <select x-model="statusFilter" @change="load()" class="border rounded px-2 py-1 text-sm">
+          <option value="">Tất cả trạng thái</option>
+          <option value="completed">Hoàn thành</option>
+          <option value="failed">Thất bại</option>
+          <option value="translating">Đang dịch</option>
+          <option value="parsing">Đang parse</option>
+          <option value="queued">Đang chờ</option>
+          <option value="cancelled">Đã dừng</option>
+          <option value="cost_capped">Dừng do vượt trần chi phí</option>
+        </select>
+      </div>
     </div>
 
     <table class="w-full bg-white border rounded text-sm">
@@ -56,8 +66,9 @@
             </td>
             <td class="p-2 text-gray-500" x-text="formatCost(job)"></td>
             <td class="p-2 text-right whitespace-nowrap">
-              <a x-show="job.status === 'completed'" :href="`/api/jobs/${job.id}/download`" class="text-amber-700 underline text-xs mr-2">Tải VI</a>
-              <a x-show="job.status === 'completed' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs mr-2">Tải song ngữ</a>
+              <a x-show="job.status === 'completed'" :href="`/api/jobs/${job.id}/download`" class="text-amber-700 underline text-xs mr-2"
+                 x-text="job.job_type === 'parse_only' ? 'Tải Markdown' : 'Tải VI'"></a>
+              <a x-show="job.status === 'completed' && job.job_type !== 'parse_only' && job.bilingual_path" :href="`/api/jobs/${job.id}/download?format=bilingual`" class="text-amber-700 underline text-xs mr-2">Tải song ngữ</a>
               <button @click="openAddGlossary(job)" class="text-amber-700 underline text-xs mr-2">+ Glossary</button>
               <button @click="deleteJob(job)" class="text-red-600 underline text-xs">Xoá</button>
             </td>

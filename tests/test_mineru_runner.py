@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from src.services.mineru_runner import (
+    MinerUCancelledError,
     MinerUError,
     MinerURunner,
     MinerUTimeoutError,
@@ -290,6 +291,68 @@ async def test_task_timeout_raises_mineru_timeout_error(
 
     with pytest.raises(MinerUTimeoutError):
         await runner.parse_document(sample_pdf, tmp_path / "output")
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_seconds_override_applies_only_to_this_call(
+    tmp_path: Path, sample_pdf: Path, mocker
+) -> None:
+    """US-15 S15-14: `parse_document(task_timeout_seconds=...)` must
+    override the constructor's `_task_timeout_seconds` for THIS call only —
+    the mechanism `run_parse_only()` uses to scale the budget with page
+    count instead of the fixed 3600s constant `_build_ocr_bridge()` uses.
+    Constructed with a generous 3600s default so the timeout observed here
+    can ONLY come from the per-call override, not the constructor default.
+    """
+    submit_response = _FakeResponse(202, {"task_id": "task-1", "status": "pending"})
+    status_response = _FakeResponse(200, {"status": "processing", "queued_ahead": 0})
+    client = _ScriptedAsyncClient([("POST", submit_response)] + [("GET", status_response)] * 50)
+    mocker.patch("httpx.AsyncClient", return_value=client)
+    mocker.patch("asyncio.sleep", new=AsyncMock())
+
+    runner = MinerURunner(
+        base_url="http://localhost:8010",
+        task_timeout_seconds=3600.0,
+        poll_initial_seconds=2.0,
+        poll_max_seconds=2.0,
+    )
+
+    with pytest.raises(MinerUTimeoutError, match="5.0s"):
+        await runner.parse_document(sample_pdf, tmp_path / "output", task_timeout_seconds=5.0)
+
+
+@pytest.mark.asyncio
+async def test_should_cancel_callback_raises_cancelled_error_mid_poll(
+    tmp_path: Path, sample_pdf: Path, mocker
+) -> None:
+    """US-15 S15-13: `should_cancel` is checked once per poll iteration —
+    when it returns `True`, polling must stop with `MinerUCancelledError`
+    instead of continuing to wait (or silently swallowing the request)."""
+    submit_response = _FakeResponse(202, {"task_id": "task-1", "status": "pending"})
+    # Never "completed" — if should_cancel() weren't checked, this would
+    # eventually hit MinerUTimeoutError instead of MinerUCancelledError.
+    status_response = _FakeResponse(200, {"status": "processing", "queued_ahead": 0})
+    client = _ScriptedAsyncClient([("POST", submit_response)] + [("GET", status_response)] * 50)
+    mocker.patch("httpx.AsyncClient", return_value=client)
+    mocker.patch("asyncio.sleep", new=AsyncMock())
+
+    call_count = {"n": 0}
+
+    async def _should_cancel() -> bool:
+        call_count["n"] += 1
+        return call_count["n"] >= 2  # let the first poll happen, cancel on the second
+
+    runner = MinerURunner(
+        base_url="http://localhost:8010",
+        task_timeout_seconds=3600.0,
+        poll_initial_seconds=1.0,
+        poll_max_seconds=1.0,
+    )
+
+    with pytest.raises(MinerUCancelledError):
+        await runner.parse_document(sample_pdf, tmp_path / "output", should_cancel=_should_cancel)
+
+    assert call_count["n"] >= 2
 
 
 @pytest.mark.asyncio

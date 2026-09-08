@@ -16,6 +16,16 @@ from src.models.job import Job
 
 router = APIRouter()
 
+#: US-15 S15-3 (Architecture.md 6.15.3, sua sau phan bien Domain Expert):
+#: MIME suy tu duoi file thay vi hardcode "application/pdf" (P-05) — endpoint
+#: nay khong can biet gi ve job_type, chi can biet duoi file thuc te tren
+#: dia (`.zip` cho parse_only, `.pdf` cho translate).
+_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".epub": "application/epub+zip",
+}
+
 
 @router.get("/{job_id}/download")
 async def download_job_result(
@@ -52,11 +62,17 @@ async def download_job_result(
     timestamp_source = job.completed_at or job.updated_at
     timestamp_suffix = f"_{timestamp_source.strftime('%Y%m%d-%H%M%S')}" if timestamp_source else ""
 
+    # US-15 S15-3: job parse_only tai ve la "{stem}_markdown_{timestamp}.zip"
+    # — nhat quan voi pattern "_vi"/"_bilingual" + timestamp da co san.
+    if job.job_type == "parse_only":
+        label = "markdown"
+    else:
+        label = "bilingual" if format == "bilingual" else "vi"
+
+    media_type = _MEDIA_TYPES.get(result_path.suffix.lower(), "application/octet-stream")
+
     return FileResponse(
         result_path,
-        filename=(
-            f"{Path(job.filename).stem}_{'bilingual' if format == 'bilingual' else 'vi'}"
-            f"{timestamp_suffix}{result_path.suffix}"
-        ),
-        media_type="application/pdf",
+        filename=f"{Path(job.filename).stem}_{label}{timestamp_suffix}{result_path.suffix}",
+        media_type=media_type,
     )

@@ -1,0 +1,20 @@
+{
+  "parse_method": "txt",
+  "elapsed_s": 89.0,
+  "task_id": "cdbd0988-1182-456d-bf23-791e03490bc6",
+  "markdown_path": "/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/bb6eecef-c929-4946-84d5-375bde5e3612/scratchpad/mineru_txt_figoni25/document.md",
+  "markdown_chars": 54243,
+  "markdown_lines": 660,
+  "images_written": 23,
+  "image_refs_in_md": 16,
+  "html_tables": 7,
+  "pipe_table_rows": 0,
+  "h1": 6,
+  "h2": 43,
+  "h3": 0,
+  "confidence": 0.997628187250996,
+  "ocr_span_count": 1004,
+  "quality_source": "middle_json_span_scores",
+  "middle_json": "/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/bb6eecef-c929-4946-84d5-375bde5e3612/scratchpad/mineru_txt_figoni25/middle.json",
+  "image_refs_missing_on_disk": []
+}

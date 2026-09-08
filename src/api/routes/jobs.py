@@ -21,6 +21,7 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
@@ -68,6 +69,12 @@ def _schedule_background(coro) -> None:
 class JobCreateRequest(BaseModel):
     file_id: str
     job_type: str = "translate"  # translate | parse_only
+    # Architecture.md 6.21.3: CHI co y nghia khi job_type=parse_only. "auto"
+    # (mac dinh) = mapping theo file_type nhu S15 goc da chot (pdf_digital ->
+    # "txt", pdf_scan -> "ocr"). "txt"/"ocr" ep tuong minh, dung cho vd file
+    # pdf_digital nhieu cong thuc toan/hoa can OCR de doc dung ky hieu (L-4,
+    # font text-layer khong map Unicode dung).
+    parse_method: Literal["auto", "txt", "ocr"] = "auto"
     provider: str | None = None
     output_mode: str = "monolingual"  # monolingual | bilingual
     glossary_project_id: str | None = None
@@ -260,6 +267,42 @@ async def _reject_deepl_for_pdf(job_type: str, provider: str, file_type: str) ->
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _reject_epub_parse_only(job_type: str, file_type: str) -> None:
+    """US-15 §6.15.3 S15-8 "he qua thu tu lam viec": nhanh EPUB cua US-15
+    phu thuoc `EpubDocument.to_markdown()` (US-22, chua implement trong
+    increment nay). Phai fail RO RANG bang HTTP 400 TRUOC KHI tao Job row —
+    khong duoc de 1 job "parse" file EPUB roi fail im lang/treo trong
+    `JobOrchestrator.run_parse_only()` (co 1 luoi an toan thu 2 o do, nhung
+    day moi la noi chan chinh theo dung thiet ke).
+    """
+    if job_type == "parse_only" and file_type == "epub":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Chua ho tro xuat Markdown cho EPUB, se co khi tinh nang dich EPUB hoan thien."
+            ),
+        )
+
+
+def _resolve_parse_method(requested: str, file_type: str) -> str:
+    """Architecture.md 6.21.3: resolve `JobCreateRequest.parse_method`
+    (`auto`/`txt`/`ocr`) into the value actually written to
+    `Job.parse_method` and passed to MinerU. `auto` (default) maps by
+    `file_type` — same mapping S15 originally hardcoded in
+    `JobOrchestrator.run_parse_only()` (`pdf_digital`->`txt`,
+    `pdf_scan`->`ocr`). `txt`/`ocr` pass through UNCHANGED as an explicit
+    user override (e.g. forcing `ocr` on a `pdf_digital` file to read
+    math/chem symbols correctly instead of the text-layer font-mapping bug,
+    §6.21.3 L-4) — resolved once here, at job creation, so a later retry of
+    the SAME job reuses this exact choice (BR-CHUNK-05-style resumability,
+    same pattern as `Job.chunk_size_used`) instead of recomputing "auto" and
+    silently losing the override.
+    """
+    if requested != "auto":
+        return requested
+    return "txt" if file_type == "pdf_digital" else "ocr"
+
+
 def _resolve_provider_or_400(provider_name: str, settings: Settings):
     try:
         return ProviderFactory.create(provider_name, settings)
@@ -319,9 +362,19 @@ async def _find_completed_duplicate(session: SessionDep, file_hash: str) -> Job 
     re-uploaded while a previous job is still `translating`/`failed` should
     not block a new attempt.
     """
+    # S15-10 (Architecture.md 6.15.3, phat hien boi Domain Expert): PHAI loc
+    # them Job.job_type == "translate" — mot job `parse_only` da `completed`
+    # KHONG duoc tinh la "da dich roi" khi so trung file_hash (frontend se
+    # hien "da dich, tai ve?" voi link tai la ZIP Markdown, dung kieu "cung 1
+    # bien, hai y nghia" da gay Bug #5). Khong dedupe rieng cho parse_only o
+    # v1 — chi phi = $0, chay lai vo hai, them nhanh la them be mat loi.
     statement = (
         select(Job)
-        .where(Job.file_hash == file_hash, Job.status == "completed")
+        .where(
+            Job.file_hash == file_hash,
+            Job.status == "completed",
+            Job.job_type == "translate",
+        )
         .order_by(Job.completed_at.desc())
         .limit(1)
     )
@@ -421,24 +474,6 @@ async def _run_batch_background(batch_id: str) -> None:
             logger.exception("Batch %s crashed in background task", batch_id)
 
 
-def _mark_parse_only_unsupported(job: Job) -> None:
-    """`JobOrchestrator.run_job()` (Increment 4) only implements the
-    `translate` flow — Markdown parse-only (US-15, Architecture.md 6.8) needs
-    its own MinerU-only branch that does not exist yet. Rather than silently
-    leaving a `parse_only` job stuck at `status="created"` forever, or
-    changing `JobOrchestrator`'s architecture from this increment (out of
-    scope — see the "KHONG lam" list), it is marked `failed` immediately with
-    a clear reason so `GET /api/jobs/{id}` reports something honest. See
-    docs/CHANGELOG.md "Increment 5" — known limitation, not a bug.
-    """
-    job.status = "failed"
-    job.error_message = (
-        "job_type=parse_only chua duoc JobOrchestrator ho tro (Increment 5 chi lap API "
-        "cho luong translate; Markdown parse-only can 1 nhanh MinerU-only rieng, xem "
-        "Architecture.md 6.8 va docs/CHANGELOG.md Increment 5)."
-    )
-
-
 @router.post("", response_model=JobCreateResponse, status_code=202)
 async def create_job(
     request: JobCreateRequest, session: SessionDep, response: Response
@@ -452,6 +487,8 @@ async def create_job(
         raise HTTPException(
             status_code=400, detail="job_type phai la 'translate' hoac 'parse_only'"
         )
+
+    _reject_epub_parse_only(request.job_type, upload.file_type)
 
     if request.job_type == "translate" and not request.force:
         duplicate = await _find_completed_duplicate(session, upload.file_hash)
@@ -496,6 +533,12 @@ async def create_job(
         file_hash=upload.file_hash,
         file_type=upload.file_type,
         job_type=request.job_type,
+        # Architecture.md 6.21.3: resolved once here (see
+        # _resolve_parse_method docstring) — None for job_type=translate,
+        # where the field has no meaning.
+        parse_method=_resolve_parse_method(request.parse_method, upload.file_type)
+        if request.job_type == "parse_only"
+        else None,
         total_pages=upload.page_count,
         model=provider_name,
         estimated_cost=cost_estimate.estimate.estimated_cost_usd
@@ -506,12 +549,10 @@ async def create_job(
     await session.commit()
     await session.refresh(job)
 
-    if request.job_type == "parse_only":
-        _mark_parse_only_unsupported(job)
-        session.add(job)
-        await session.commit()
-        return JobCreateResponse(job_id=job.id, status=job.status)
-
+    # S15-2 (mo rong sau phan bien Domain Expert): parse_only di CUNG duong
+    # voi translate tu day tro di — "queued" + chay nen qua JobOrchestrator
+    # (gio da co nhanh run_parse_only()), khong con can ham
+    # _mark_parse_only_unsupported() danh fail ngay nhu truoc nua.
     job.status = "queued"
     session.add(job)
     await session.commit()
@@ -523,7 +564,11 @@ async def create_job(
 
 @router.get("", response_model=JobListResponse)
 async def list_jobs(
-    session: SessionDep, status: str | None = None, limit: int = 50, offset: int = 0
+    session: SessionDep,
+    status: str | None = None,
+    job_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> JobListResponse:
     count_statement = select(func.count()).select_from(Job)
     list_statement = select(Job).order_by(Job.created_at.desc())
@@ -540,6 +585,15 @@ async def list_jobs(
         elif statuses:
             count_statement = count_statement.where(Job.status.in_(statuses))
             list_statement = list_statement.where(Job.status.in_(statuses))
+
+    if job_type is not None:
+        # US-15 S15-7 / BR-PARSE-04: job parse_only KHONG duoc tinh vao
+        # "translation history" (US-12) — khong tach bang rieng (nhan doi
+        # progress/cancel/delete/WebSocket cho 1 khac biet thuan trinh bay),
+        # chi them 1 param loc giong het "status" o tren. Tab Lich su mac
+        # dinh loc job_type=translate; khu vuc parse dung job_type=parse_only.
+        count_statement = count_statement.where(Job.job_type == job_type)
+        list_statement = list_statement.where(Job.job_type == job_type)
 
     total_result = await session.exec(count_statement)
     total = total_result.one()
@@ -582,27 +636,33 @@ async def retry_job(
                 f"job nay dang '{job.status}'"
             ),
         )
-    if job.job_type == "parse_only":
-        raise HTTPException(status_code=400, detail="parse_only chua duoc ho tro, khong the retry")
-
-    # Architecture.md 6.11.7 #2 ("POST /api/jobs/{id}/retry chay lai khong
-    # qua gate chi phi" — HO, explicitly called out) + 6.11.4 Lop 3 ("retry
-    # PHAI di qua lai Lop 2 gate truoc khi resume"): a retry must never be
-    # able to bypass the cap that a `cost_capped`/prior gate rejection put in
-    # place, or the gate is decorative.
-    confirm_cost = request.confirm_cost if request is not None else False
-    settings = await get_effective_settings(session)
-    provider = _resolve_provider_or_400(job.model, settings)
-    await _enforce_cost_gate(
-        session,
-        job.file_path,
-        provider,
-        settings,
-        job.batch_id,
-        confirm_cost,
-        scope="retry job nay",
-        job_cap_override=job.cost_cap_usd,
-    )
+    # S15-11 (Architecture.md 6.15.3, phat hien boi Domain Expert): TRUOC
+    # DAY endpoint nay chan cung parse_only (400) VA ep vo dieu kien qua
+    # provider/cost-gate — mau thuan truc tiep voi S15-9 (fail som khi
+    # MinerU chua chay): tao job -> fail som dung thiet ke -> user bat
+    # MinerU -> bam "Chay lai" -> 400, job chet vinh vien, phai upload lai.
+    # parse_only khong co cost gate o bat ky buoc nao (BR-PARSE-01, chi phi
+    # $0) nen bo qua _resolve_provider_or_400/_enforce_cost_gate — giong het
+    # create_job() da lam cho luong tao moi.
+    if job.job_type == "translate":
+        # Architecture.md 6.11.7 #2 ("POST /api/jobs/{id}/retry chay lai khong
+        # qua gate chi phi" — HO, explicitly called out) + 6.11.4 Lop 3 ("retry
+        # PHAI di qua lai Lop 2 gate truoc khi resume"): a retry must never be
+        # able to bypass the cap that a `cost_capped`/prior gate rejection put
+        # in place, or the gate is decorative.
+        confirm_cost = request.confirm_cost if request is not None else False
+        settings = await get_effective_settings(session)
+        provider = _resolve_provider_or_400(job.model, settings)
+        await _enforce_cost_gate(
+            session,
+            job.file_path,
+            provider,
+            settings,
+            job.batch_id,
+            confirm_cost,
+            scope="retry job nay",
+            job_cap_override=job.cost_cap_usd,
+        )
 
     job.status = "queued"
     job.error_message = None
@@ -652,6 +712,11 @@ _ACTIVE_JOB_STATUSES = {
     "translating",
     "post_processing",
     "merging",
+    # US-15 S15-12 [BLOCKING]: "parsing" (job_type=parse_only, MinerU dang
+    # chay, co the toi ~25 phut) PHAI nam trong day — thieu no, user xoa
+    # duoc job dang chay va DELETE se rmtree(data/processing/{job_id}) trong
+    # luc MinerU dang ghi document.md/images/ vao dung thu muc do.
+    "parsing",
 }
 
 
@@ -827,6 +892,7 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
 
     for upload in uploads:
         await _reject_deepl_for_pdf(request.job_type, provider_name, upload.file_type)
+        _reject_epub_parse_only(request.job_type, upload.file_type)
 
     if request.job_type == "translate":
         # Architecture.md 6.11.4 Lop 2 + 6.11.7 #1: "max_concurrent_files=3
@@ -872,8 +938,14 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
         session, request.glossary_project_id, len(uploads), request.output_mode, provider_name
     )
 
+    # S15-2 (mo rong sau phan bien Domain Expert, Architecture.md 6.15.3):
+    # BAN GOC cua S15-2 chi noi ve `create_job` — Dev chi sua o do thi batch
+    # parse_only van chet (`_mark_parse_only_unsupported()` + batch danh
+    # "failed" o duoi day). Ca 2 job_type gio di CUNG duong: "queued" +
+    # 1 lan `_schedule_background(_run_batch_background(...))` duy nhat —
+    # `BatchOrchestrator.run_batch()` goi `JobOrchestrator.run_job()` cho
+    # tung job, va `run_job()` tu re nhanh parse_only/translate (S15-1).
     job_ids: list[str] = []
-    parse_only_jobs: list[Job] = []
     for upload in uploads:
         job = Job(
             batch_id=batch.id,
@@ -886,24 +958,12 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
             total_pages=upload.page_count,
             model=provider_name,
         )
-        if request.job_type == "parse_only":
-            _mark_parse_only_unsupported(job)
-            parse_only_jobs.append(job)
-        else:
-            job.status = "queued"
+        job.status = "queued"
         session.add(job)
         job_ids.append(job.id)
 
     await session.commit()
 
-    if request.job_type == "translate":
-        _schedule_background(_run_batch_background(batch.id))
-        batch_status = "processing"
-    else:
-        batch.status = "failed"
-        batch.failed_files = len(parse_only_jobs)
-        session.add(batch)
-        await session.commit()
-        batch_status = batch.status
+    _schedule_background(_run_batch_background(batch.id))
 
-    return BatchCreateResponse(batch_id=batch.id, job_ids=job_ids, status=batch_status)
+    return BatchCreateResponse(batch_id=batch.id, job_ids=job_ids, status="processing")

@@ -2146,3 +2146,144 @@ quan 3 trang xác nhận không đảo màu/corrupt. Nhánh `pdf2zh` xác nhận
 code lẫn test tự chạy lại. File production gốc không bị đụng trong suốt quá trình QA test (MD5
 khớp trước/sau). Không có bug mới, không có bug blocking.
 
+## US-15 — Markdown parse-only, nhánh PDF (born-digital + scan) + `parse_method` override (2026-09-08)
+
+### Phạm vi
+
+Test US-15 nhánh **PDF** (born-digital + `parse_method` override theo §6.21.3) — vừa qua 2 lượt
+Dev + 1 lượt Reviewer APPROVE (`docs/review-report.md` section "Review US-15 — Markdown parse-only,
+nhánh PDF..."). Đã đọc trước: `docs/PRD.md` US-15 (§3) + BR-PARSE-01..06 (§4.8), `docs/Architecture.md`
+§6.15 toàn bộ + §6.21, `docs/review-report.md` section mới nhất, `docs/CHANGELOG.md` 2 entry mới nhất.
+
+**Không test nhánh EPUB của US-15** (`file_type=epub` + `job_type=parse_only`) — theo đúng thiết kế
+S15-8, nhánh này CHƯA implement ở round này (phụ thuộc §6.20/US-22 chưa xong), chỉ cần trả 400 rõ
+ràng — đã verify đúng ở kịch bản 7 dưới đây. §6.21.4 case F-1..F-4 (chuẩn hoá `<sup>`/`<sub>` qua
+`normalize_sup_sub()`) **không áp dụng cho round này** — cơ chế đó chỉ dùng ở nhánh EPUB→Markdown,
+chưa tồn tại trong code. Chỉ case liên quan tới nhánh PDF (L-4/formula qua `parse_method`) được test.
+
+### Phát hiện môi trường quan trọng TRƯỚC khi test (phải xử lý trước khi kết quả có ý nghĩa)
+
+**Server đang chạy lúc bắt đầu phiên QA là STALE (code cũ, trước fix)**: `ps aux` cho thấy tiến
+trình `uvicorn` khởi động lúc 12:42PM, KHÔNG có `--reload`, trong khi `src/api/routes/jobs.py` /
+`src/core/job_orchestrator.py` có mtime 20:20 (sau khi Dev/Reviewer hoàn tất). Gọi thử
+`POST /api/jobs` với `job_type=parse_only` trên server cũ trả về đúng lỗi CŨ đã bị Protocol 5/6 fix
+từ trước ("job_type=parse_only chua duoc JobOrchestrator ho tro... Increment 5...") — nếu không
+phát hiện và restart server, TOÀN BỘ kết quả QA phía dưới sẽ sai (test lại đúng bug đã fix, không
+test được code thật). Đã kill process cũ, khởi động lại qua `uv run uvicorn ... --host 0.0.0.0
+--port 8000` (không `--reload`) — xác nhận lại bằng cách gọi cùng request, nhận đúng `status=
+"queued"` thay vì lỗi cũ.
+
+**Phát hiện thứ 2 (ảnh hưởng phương pháp test, không phải bug của US-15)**: server chạy `--reload`
+(qua `.claude/launch.json`/`preview_start`) theo dõi thay đổi file trên TOÀN BỘ working directory,
+bao gồm `.claude/worktrees/strange-napier-988bad/` — 1 git worktree khác đang có session Dev/Bug #8
+sửa file song song. Mỗi lần session đó lưu file, uvicorn `--reload` restart server, **giết luôn
+background task của job `parse_only` đang chạy dở** (asyncio task chết theo process, không có cơ
+chế phục hồi) — xem Bug QA-15-2 ở mục Bug list bên dưới, đây chính là cách phát hiện ra bug đó.
+Đã chuyển sang chạy server ổn định KHÔNG `--reload` (`nohup uv run uvicorn ... &`) cho phần còn lại
+của phiên test để tránh nhiễu.
+
+### Kịch bản test
+
+| # | Kịch bản | Kết quả | Ghi chú |
+|---|---|---|---|
+| 1 | Golden path PDF born-digital (upload thật → `POST /api/jobs job_type=parse_only` → chờ MinerU thật → download → giải nén → đọc `document.md`) | **PASS** | File thật `data/uploads/0f92a0d4-...-Figoni...-1-25.pdf` (692336 bytes, 25 trang, born-digital). Job hoàn tất sau ~90s (khớp ước tính 3,6s/trang). `actual_cost=0.0`, `cost_source="metered"`, `ocr_confidence=NULL`. Không có log gọi LLM provider nào (`preview_logs` search "translate"/"deepseek" → 0 kết quả). ZIP tải về đúng `content-type: application/zip`, tên `figoni_25_markdown_20260908-133814.zip` (đúng pattern `{stem}_markdown_{timestamp}.zip`). Giải nén: `document.md` (54KB, 660 dòng) + `images/` (23 file — khớp đúng L-5 "23 ghi/16 tham chiếu"). Nội dung đọc được thật (heading, đoạn văn, ảnh SHA-256 `.jpg` mở được bằng `file`). Xác nhận **đúng 3 known limitation đã đo trước trong Architecture.md xuất hiện y hệt trên dữ liệu thật**: (a) 7 bảng dạng HTML `<table>` (L-1); (b) list 2 cột bị trộn thứ tự `1,2,17,3,18,19,4,...` trong Markdown thô (L-3); (c) heading dính chữ `CHAPTER 4SENSORY PROPERTIESOF FOOD` (L-7) — đây là bằng chứng độc lập xác nhận Architecture.md/Reviewer mô tả đúng thực tế, không phải bug mới |
+| 2 | `parse_method` override (`ocr` ép cho file `pdf_digital`) — xác nhận `jobs.ocr_confidence` vẫn NULL | **PASS** | Tạo job với `parse_method="ocr"` trên cùng file born-digital. Chạy chậm hơn rõ rệt (121s vs 90s ở kịch bản 1 — khớp kỳ vọng "chậm hơn" của OCR). Query trực tiếp SQLite (không tin qua API): `SELECT parse_method, ocr_confidence FROM jobs WHERE id=...` → `parse_method='ocr'` (override có hiệu lực thật) nhưng `ocr_confidence` là NULL (rỗng) — đúng S15-6 (rẽ theo `file_type`, không theo `parse_method`). **Bằng chứng thêm giá trị thật**: mở `document.md` của job này, dòng công thức đọc đúng `"Smallest quantity to be weighed = scale readability × 10"` (dấu `=` và `×` còn nguyên) — trong khi cùng dòng đó ở kịch bản 1 (`parse_method=txt` mặc định) đọc SAI thành `"Smallest quantity to be weighed  scale readability - 10"` (mất `=`, `×` thành `-`) — khớp CHÍNH XÁC với L-4 đã đo trong Architecture.md §6.15.5/§6.21.3, và xác nhận tính năng override thực sự giải quyết đúng vấn đề nó sinh ra để giải quyết |
+| 3 | Duplicate detection theo `job_type` | **PASS** | File test (hash `efd4f6...329f4`) trùng hash với 1 job `translate` đã `completed` sẵn có trong DB từ trước (`803fce52-...`). Tạo 2 job `parse_only` trên file_id có cùng hash → cả 2 lần `duplicate_of: null`, `status: "queued"` (KHÔNG bị chặn dạng `200 duplicate_found`) — đúng chiều "đã dịch xong 1 file → parse_only mới KHÔNG bị coi là trùng" mà brief yêu cầu. Chiều ngược lại (parse_only completed → translate mới không bị coi trùng) không test lại ở tầng E2E thật (tránh phát sinh chi phí LLM thật ngoài dự tính) — dựa vào bằng chứng Reviewer đã tự đọc trực tiếp test `test_create_job_reports_duplicate_of_completed_job_with_same_hash` (gọi qua `TestClient` + đọc lại DB thật, không phải mock thuần) xác nhận cả 2 chiều đều đúng; QA tự chạy lại test này (xem mục "Regression" bên dưới), PASS |
+| 4 | Retry sau khi fail | **PASS** | Set tạm `MINERU_ENDPOINT=http://localhost:19999` (sai) trong `.env`, restart server, tạo job `parse_only` → fail nhanh (~5s) với message rõ ràng `"MinerU unreachable at http://localhost:19999: All connection attempts failed"` (đúng S15-9, không timeout 3600s). Khôi phục `.env` về endpoint đúng, restart server, gọi `POST /api/jobs/{id}/retry` → `200 {"status":"queued"}` (không còn bị chặn 400 như bug cũ S15-11). Job retry chạy lại và **hoàn tất thành công** (~117s, `status=completed`, output hợp lệ) |
+| 5 | Cancel giữa chừng | **PASS** | Tạo job mới, đợi status chuyển `parsing`, gọi `POST /api/jobs/{id}/cancel` → `cancel_requested=true` ngay. Poll tiếp: job chuyển `status=cancelled` trong vòng ~5s (đúng thiết kế "kiểm tra mỗi vòng poll" của S15-13, không phải đợi tới hết 3600s hay hết chunk) |
+| 6 | UI (`web/index.html`) | **PASS, có 1 bug non-blocking** | Mở qua Browser pane thật. Xác nhận: dropdown "Chỉ xuất Markdown (không dịch)" tồn tại và được nhớ đúng theo file; checkbox "Tài liệu nhiều công thức toán/hoá — ưu tiên độ chính xác ký hiệu (chậm hơn)" xuất hiện đúng cho `job_type=parse_only`; khi job đang `status=parsing`, UI hiện badge "parsing" (không phải "translating") + thông báo riêng "Đang parse (MinerU) — có thể mất vài phút đến ~25 phút với sách dày..." (chụp màn hình xác nhận trực tiếp, không chỉ đọc DOM ẩn) + progress bar; job `completed` chỉ hiện link "Tải Markdown (.zip)", KHÔNG hiện "Tải bản song ngữ" (xác nhận qua `get_page_text` trên nhiều job thật, kể cả so sánh chéo với job `translate` thật có hiện link song ngữ đúng); nút retry cho job `parse_only` hiện đúng nhãn "Chạy lại" (không phải "Tiếp tục dịch"). **1 bug tìm thấy**: xem Bug QA-15-1 bên dưới (dòng mô tả job `cancelled` dùng chữ "dịch" cho cả job parse_only) |
+| 7 | EPUB + `parse_only` → phải trả 400 rõ ràng (chưa implement nhánh EPUB) | **PASS** | Upload lại `data/uploads/9d436d7b-...-Sourdough...epub` (chỉ tạo bản upload mới qua API, KHÔNG đụng file mẫu gốc) → `POST /api/jobs job_type=parse_only` → `400 {"detail":"Chua ho tro xuat Markdown cho EPUB, se co khi tinh nang dich EPUB hoan thien."}` — đúng S15-8, không tạo `Job` row (không có job nào bị bỏ lại) |
+| — | `GET /api/jobs?job_type=parse_only` / `job_type=translate` filter (S15-7/BR-PARSE-04) | **PASS** | Filter trả đúng số lượng theo từng loại; trang Lịch sử (`history.html`) mặc định vẫn ở tab "Bản dịch" (9 job `translate`), có tab riêng "Chỉ xuất Markdown" và option "Đang parse" trong filter trạng thái — đúng BR-PARSE-04 (không trộn parse vào translation history) |
+
+### Bug list
+
+**Bug QA-15-1 [non-blocking, UI copy]** — `web/index.html:137`: dòng mô tả trạng thái `cancelled`
+hard-code chữ **"dịch"** cho MỌI job type: `"Đã dừng theo yêu cầu — có thể tiếp tục dịch từ chỗ dở
+dang."`. Với job `job_type=parse_only` bị cancel, dòng này vẫn hiện y hệt — gây hiểu lầm nhẹ ("tiếp
+tục dịch" cho 1 job không hề dịch). Khác với nút retry ngay bên dưới (`:150-152`) và link tải
+(`:144-145`) đã rẽ đúng theo `f.job_type`, dòng `:137` (và tương tự dòng cost_capped `:138-141`,
+dù dòng này thực tế không bao giờ xảy ra cho `parse_only` vì cost gate bị skip hoàn toàn) bị bỏ sót
+khi Dev áp dụng rẽ nhánh `job_type` cho các dòng trạng thái khác trong cùng khối. Tái hiện: tạo job
+`parse_only`, cancel giữa chừng, mở UI → thấy đúng text trên. Đề xuất sửa: thêm
+`x-text="f.job_type === 'parse_only' ? 'Đã dừng theo yêu cầu — có thể chạy lại.' : '...tiếp tục
+dịch...'"` cùng pattern với dòng `:152`.
+
+**Bug QA-15-2 [non-blocking, phát hiện ngoài ý muốn qua phương pháp test, KHÔNG phải lỗi logic
+US-15]** — job `parse_only` bị kẹt vĩnh viễn ở status `"parsing"` nếu tiến trình server chết/restart
+giữa lúc đang chạy (background asyncio task bị giết theo process, không có cơ chế phát hiện/phục
+hồi "orphaned job"). Hậu quả: `retry_job()` từ chối (400 — chỉ nhận `failed`/`cancelled`/
+`cost_capped`, không nhận `parsing`); `DELETE /api/jobs/{id}` cũng từ chối (400 — đúng guard
+S15-12 chặn xoá job đang active, nhưng guard này không phân biệt "đang chạy thật" với "đã chết
+nhưng còn treo status"); `POST .../cancel` set được `cancel_requested=true` nhưng KHÔNG có tác dụng
+vì không còn task nào đọc cờ đó — status đứng yên mãi ở `"parsing"`. Job trở thành "zombie" không
+thể thao tác qua API, phải sửa tay DB mới dọn được (QA đã làm vậy để dọn dẹp job test của chính
+mình). **Đánh giá phạm vi**: đây nhiều khả năng KHÔNG phải lỗi riêng của US-15 — cùng cơ chế
+"không có orphan-recovery" nhiều khả năng cũng áp dụng cho status `"translating"` từ trước (S15-12
+review-report.md mục 4 ghi rõ `cancel_job()` cố ý "không đụng" logic cũ cho các status active khác,
+kế thừa nguyên trạng). Nguyên nhân gây ra tình huống này trong phiên QA là do `--reload` bắt thay
+đổi file từ 1 worktree khác (xem mục "Phát hiện môi trường" ở trên), không phải do lỗi code US-15
+tự nó. Ghi lại vì: (a) MinerU thật có thể chạy tới ~25 phút (S15-14), khoảng thời gian đủ dài để 1
+lần crash/restart/deploy thật trong môi trường production gặp đúng tình huống này; (b) không có
+bug tương đương nào được ghi nhận trước đó cho status `"translating"` trong `docs/test-report.md`
+— có thể đây là lỗ hổng chung của kiến trúc job lifecycle chưa từng bị test trúng, không riêng
+US-15. Đề xuất: cân nhắc thêm 1 cơ chế "startup reconciliation" (khi app khởi động lại, quét job
+đang ở status active mà không có task nào đang chạy tương ứng → set về `failed` với message rõ,
+cho phép retry) — nên là 1 task riêng, không chặn release US-15 vì cần crash thật mới kích hoạt
+được, xác suất thấp trong vận hành bình thường (không `--reload` chạy chung với worktree khác).
+
+### Regression — tự chạy lại
+
+```
+$ uv run pytest -q -k "parse_only or parse_method"
+17 passed, 448 deselected, 55 warnings in 2.41s
+```
+
+Khớp đúng số Dev/Reviewer đã báo cáo (10 test `test_job_orchestrator.py` + 2 test
+`test_mineru_runner.py` + phần còn lại rải ở `test_upload_and_job_flow.py`/
+`test_estimate_and_cancel_api.py`/`test_delete_and_download_naming.py`).
+
+### Dọn dẹp sau test
+
+Đã xoá toàn bộ 6 job test (`DELETE /api/jobs/{id}`, tất cả trả `204`) và 2 upload test (`DELETE
+/api/upload/{file_id}`, `204`) qua đúng API của app (không sửa tay DB, trừ duy nhất 1 job zombie ở
+Bug QA-15-2 — sửa tay `status` sang `cancelled` chỉ để có thể `DELETE` được, cũng đã xoá xong).
+Xác nhận lại sau dọn: `SELECT COUNT(*) FROM jobs` = **9** (khớp đúng số ban đầu, toàn bộ `job_type=
+translate`), `SELECT COUNT(*) FROM glossary_entries` = **114** (không đổi), `data/uploads/` không
+còn file test nào (`grep 81a094d8|80a91570|figoni_25` → rỗng), `data/outputs/` và `data/processing/`
+đều chỉ còn đúng 9 thư mục khớp 9 job gốc. 2 file mẫu EPUB được lệnh giữ nguyên
+(`9d436d7b-...-Sourdough...epub`, `sample2_Bread-A-Global-History.epub`) xác nhận KHÔNG bị đụng
+(mtime không đổi). Khôi phục `.env` về đúng nội dung gốc (không còn dòng `MINERU_ENDPOINT` ghi đè).
+
+### R5-03 / R6-03 gate
+
+**R5-03 (đã đóng từ trước, tái xác nhận)**: MinerU 3.4.5 thật, gọi trực tiếp qua `run_parse_only()`
+của app thật (không qua script rời) — cả 2 mode `txt` (kịch bản 1) và `ocr` (kịch bản 2) đều đã có
+ít nhất 1 lần gọi thật trong chính phiên QA này, không chỉ tin lại lần chạy trước của Domain Expert.
+
+**R6-03 (đã đóng)**: tải ZIP thật, giải nén thật, đọc `document.md` thật — xác nhận có chữ đọc
+được, đếm và mở ảnh thật (`file images/*.jpg` → JPEG hợp lệ), kiểm 1 bảng HTML thật và xác nhận
+list 2 cột bị trộn thứ tự trong Markdown thô (L-3) — không chỉ tin `status=completed`.
+
+**§6.21.4 (formula preservation, phạm vi PDF)**: case duy nhất áp dụng cho round này (formula qua
+`parse_method`, không phải `normalize_sup_sub` — xem "Phạm vi" ở trên) đã verify PASS ở kịch bản 2,
+có so sánh trực tiếp cùng 1 dòng công thức giữa 2 mode trên cùng 1 file.
+
+### KẾT LUẬN
+
+**ready_for_release: YES** cho US-15 nhánh PDF (born-digital + scan qua mapping mặc định + override
+`parse_method`).
+
+Tất cả 7 kịch bản chính + 1 kịch bản phụ (filter `job_type`) đều PASS qua E2E thật (server thật,
+MinerU thật, không mock), khớp đúng thiết kế Architecture.md §6.15/§6.21 và đúng những gì Reviewer
+đã APPROVE ở tầng đọc code. 3 known limitation đã tài liệu hoá trước (L-1 bảng HTML, L-3 list 2 cột
+trộn thứ tự, L-7 heading dính chữ) tái hiện y hệt trên dữ liệu thật — xác nhận tài liệu đúng, không
+phải bug mới, KHÔNG được coi là bug khi release. 2 bug mới phát hiện đều **non-blocking**: Bug
+QA-15-1 (UI copy sai chữ cho job cancelled) nên sửa ở lượt Dev tiếp theo chạm `web/index.html`
+nhưng không cần round riêng; Bug QA-15-2 (zombie job sau crash server) là lỗ hổng kiến trúc chung
+có khả năng đã tồn tại từ trước US-15 (không riêng tính năng này), đề xuất tách thành task backlog
+riêng ("startup reconciliation cho job đang active"), không chặn release US-15. Regression suite
+đầy đủ khớp đúng số Dev/Reviewer báo cáo. Dọn dẹp xong, môi trường trả về trạng thái sạch như trước
+khi QA bắt đầu.
+
+**Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-15 nhánh PDF trong
+session này.

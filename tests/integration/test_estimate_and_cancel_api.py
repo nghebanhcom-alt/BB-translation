@@ -67,7 +67,13 @@ def _job_row_count() -> int:
     return asyncio.run(_count())
 
 
-async def _insert_job(status: str, cancel_requested: bool = False, tmp_path: Path | None = None) -> str:
+async def _insert_job(
+    status: str,
+    cancel_requested: bool = False,
+    tmp_path: Path | None = None,
+    job_type: str = "translate",
+    model: str = "ollama",
+) -> str:
     # Architecture.md 6.11.4 Lop 2: POST /api/jobs/{id}/retry now runs a real
     # cost-gate estimate (PyMuPDF text extraction over `file_path`), so this
     # fixture needs an actual readable PDF on disk instead of a fake path —
@@ -88,7 +94,8 @@ async def _insert_job(status: str, cancel_requested: bool = False, tmp_path: Pat
             file_size=file_path.stat().st_size,
             file_hash="deadbeef",
             file_type="pdf_digital",
-            model="ollama",
+            job_type=job_type,
+            model=model,
             status=status,
             cancel_requested=cancel_requested,
         )
@@ -207,4 +214,45 @@ def test_retry_still_rejects_a_non_terminal_job(client: TestClient) -> None:
     job_id = asyncio.run(_insert_job(status="translating"))
 
     response = client.post(f"/api/jobs/{job_id}/retry")
+    assert response.status_code == 400
+
+
+def test_retry_accepts_failed_parse_only_job_without_cost_gate(client: TestClient) -> None:
+    """US-15 S15-11 regression (Architecture.md 6.15.3, found by Domain
+    Expert): `retry_job()` used to unconditionally reject `parse_only`
+    (400) AND run every retry through `_resolve_provider_or_400` +
+    `_enforce_cost_gate` — directly contradicting S15-9's own design ("fail
+    fast when MinerU isn't running, let the user retry once it's up"): a
+    parse_only job would fail fast as designed, then be permanently stuck
+    (400 forever on retry), forcing a fresh upload. `model=
+    "totally-bogus-provider"` here would fail `_resolve_provider_or_400`
+    if that code path still ran — proving the cost gate is actually
+    skipped for parse_only, not just that the 400 rejection was removed.
+    """
+    job_id = asyncio.run(
+        _insert_job(status="failed", job_type="parse_only", model="totally-bogus-provider")
+    )
+
+    response = client.post(f"/api/jobs/{job_id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+
+    detail = client.get(f"/api/jobs/{job_id}").json()
+    assert detail["job_type"] == "parse_only"
+    assert detail["status"] == "queued"
+    assert detail["error_message"] is None
+
+
+def test_retry_translate_job_still_goes_through_cost_gate(client: TestClient) -> None:
+    """Companion negative test: a `translate` retry with the same bogus
+    `model` must still be rejected — proves the skip above is scoped to
+    `job_type == "parse_only"`, not a blanket removal of the cost gate.
+    """
+    job_id = asyncio.run(
+        _insert_job(status="failed", job_type="translate", model="totally-bogus-provider")
+    )
+
+    response = client.post(f"/api/jobs/{job_id}/retry")
+
     assert response.status_code == 400
