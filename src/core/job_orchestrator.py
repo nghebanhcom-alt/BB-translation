@@ -15,7 +15,9 @@ Architecture.md 6.6.2 (R1-R5) and docs/CHANGELOG.md "Increment 4 — Fix Round
 """
 
 import asyncio
+import json
 import logging
+import math
 import os
 import shutil
 import zipfile
@@ -29,7 +31,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from src.core.chunking import plan_chunks
+from src.core.chunking import EpubChunkPlan, plan_chunks, plan_epub_chunks
 from src.core.concurrency_controller import (
     ADAPTIVE_THREAD_FLOOR,
     BABELDOC_THREAD_FLOOR,
@@ -44,7 +46,9 @@ from src.core.glossary_manager import GlossaryManager
 from src.core.ocr_warning import build_ocr_warning
 from src.core.progress_tracker import BroadcastFn, ProgressTracker
 from src.core.prompt_builder import (
+    build_epub_batch_prompt,
     build_system_prompt,
+    parse_epub_batch_response,
     write_babeldoc_prompt_file,
     write_prompt_file,
 )
@@ -60,6 +64,7 @@ from src.postprocess.image_compress import compress_pdf_images
 from src.postprocess.rotated_text_overlay import overlay_rotated_text
 from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
+from src.services.epub_document import EpubDocument, count_bb_vi_pairs
 from src.services.layout_qa import persist_findings
 from src.services.mineru_det_probe import probe_and_flag_rotated_text
 from src.services.mineru_runner import (
@@ -99,12 +104,31 @@ class BatchNotFoundError(ValueError):
 
 
 class EpubNotSupportedError(NotImplementedError):
-    """Raised when a job's pipeline path for EPUB isn't implemented yet —
-    either the full translate pipeline (bilingual_book_maker was rejected,
-    see US-22/Architecture.md 6.20 for the replacement design) or the
-    Markdown parse-only projection (`EpubDocument.to_markdown()`, US-15's
-    §6.15.3 S15-8, out of scope for this increment). The caller's message
-    says which.
+    """Raised when a job's pipeline path for EPUB isn't implemented yet.
+
+    US-22 buoc 2/3 (Architecture.md 6.20.8) da implement pipeline dich THAT
+    (`run_epub_job()`) — `run_job()` KHONG con raise loi nay cho nhanh
+    translate nua. Van con dung DUY NHAT cho nhanh Markdown parse-only
+    (`EpubDocument.to_markdown()`, US-15's §6.15.3 S15-8), van ngoai pham vi
+    (buoc 3/3 hoac sau). The caller's message says which.
+    """
+
+
+class EpubBatchTranslationError(RuntimeError):
+    """US-22 buoc 2/3 (Architecture.md 6.20.8/6.20.12 X4): sau 1 vong goi lai
+    RIENG LE cho tung id thieu, van con it nhat 1 unit khong co ban dich.
+    E-09's exact shape (bilingual_book_maker/Bug #5): TUYET DOI khong duoc
+    ghi chuoi rong cho unit thieu — chunk phai that bai ro rang thay vi vay.
+    """
+
+
+class EpubEmptyOutputError(RuntimeError):
+    """BR-EPUB-05 (Architecture.md 6.20.8 + X3 guard sua sau phan bien Domain
+    Expert): file EPUB output vua ghi khong qua duoc it nhat 1 trong cac dieu
+    kien guard (tong ky tu > 0, so unit khop, noi dung thuc su khac ban goc
+    — tuy `bilingual`). Day la ban EPUB cua BR-OCR-03/Pdf2zhEmptyOutputError
+    — Bug #5's exact symptom ("completed" + noi dung khong dung), ap dung cho
+    dinh dang EPUB.
     """
 
 
@@ -200,6 +224,76 @@ def _count_text_segments(file_path: Path, page_start: int, page_end: int) -> int
             blocks = doc[page_num].get_text("blocks")
             count += sum(1 for block in blocks if block[4].strip())
     return max(count, 1)
+
+
+def _check_epub_output_guard(
+    source_doc: EpubDocument, merged_path: Path, *, bilingual: bool
+) -> None:
+    """BR-EPUB-05 (Architecture.md 6.20.8, sua tai X3 sau phan bien Domain
+    Expert 2026-09-08) — ban EPUB cua BR-OCR-03/`Pdf2zhEmptyOutputError`.
+
+    Doc LAI CHINH `merged_path` vua ghi (khong tin `translations` con trong
+    bo nho — R6-02) qua 1 lan `EpubDocument.load()` MOI (rieng biet voi
+    `source_doc`, vi `load()` cua chinh no da tu bo qua node `class="bb-vi"`
+    — day la ly do X3 chon `bilingual=True` KHONG lam guard nay vo hieu: so
+    unit doc lai van khop so unit goc).
+
+    4 dieu kien theo dung bang X3 (Architecture.md 6.20.12):
+    - `bilingual=False`: tong ky tu > 0, so unit khop, >=90% unit khac ban goc.
+    - `bilingual=True`: tong ky tu > 0, so unit khop (nho `load()` bo qua
+      bb-vi), so node `bb-vi` >= 90% so unit goc, VA >=90% cap (goc, bb-vi
+      lien sau) co noi dung khac nhau — dieu kien CUOI la thu KHONG THE BO:
+      thieu no, 1 job LLM tra nguyen van tieng Anh cho moi unit van qua
+      guard (du so node/du ky tu) — dung shape "completed, noi dung sai"
+      cua Bug #5, chi doi tu "rong" sang "chua dich".
+    """
+    guard_doc = EpubDocument.load(merged_path)
+
+    if guard_doc.total_chars <= 0:
+        raise EpubEmptyOutputError(
+            f"File dich '{merged_path.name}' khong con ky tu nao doc duoc — "
+            "job that bai thay vi tra ve file rong (BR-EPUB-05)."
+        )
+
+    if len(guard_doc.units) != len(source_doc.units):
+        raise EpubEmptyOutputError(
+            f"File dich '{merged_path.name}' co {len(guard_doc.units)} unit, khac "
+            f"{len(source_doc.units)} unit cua file goc — co the da mat noi dung "
+            "khi ghi (BR-EPUB-05)."
+        )
+
+    # Issue #3 (US-22 Buoc 2/3, vong 1/3 review): `int()` LUON truncate ve
+    # phia 0, khong phai lam tron dung nghia "toi thieu 90%" -- vd N=384:
+    # `int(384*0.9)=345` cho phep guard pass khi chi 345/384=89.84% (< 90%
+    # yeu cau thuc). `math.ceil()` moi dam bao nguong LUON >= 90% that su.
+    min_required = max(1, math.ceil(len(source_doc.units) * 0.9))
+
+    if not bilingual:
+        differing = sum(
+            1
+            for orig, new in zip(source_doc.units, guard_doc.units, strict=True)
+            if orig.text.strip() != new.text.strip()
+        )
+        if differing < min_required:
+            raise EpubEmptyOutputError(
+                f"Chi {differing}/{len(source_doc.units)} unit khac noi dung ban goc — "
+                "duoi 90% yeu cau, co the LLM da tra ve nguyen van tieng Anh (BR-EPUB-05)."
+            )
+        return
+
+    bb_vi_count, differing_pairs = count_bb_vi_pairs(merged_path)
+    if bb_vi_count < min_required:
+        raise EpubEmptyOutputError(
+            f"File dich chi co {bb_vi_count}/{len(source_doc.units)} node ban dich "
+            '(lang="vi" + class="bb-vi") — duoi 90% yeu cau, co the da mat noi dung '
+            "khi ghi (BR-EPUB-05)."
+        )
+    if differing_pairs < min_required:
+        raise EpubEmptyOutputError(
+            f"Chi {differing_pairs}/{bb_vi_count} cap (ban goc, ban dich) khac noi dung "
+            "nhau — duoi 90% yeu cau, co the LLM da tra ve nguyen van tieng Anh "
+            "(BR-EPUB-05)."
+        )
 
 
 class JobOrchestrator:
@@ -323,11 +417,13 @@ class JobOrchestrator:
         if job.job_type == "parse_only":
             return await self.run_parse_only(job, db_session)
 
-        # Step 1: reject EPUB (chua implement, luong translate).
+        # Step 1 (US-22 buoc 2/3, Architecture.md 6.20.8): EPUB co pipeline
+        # RIENG (khong dung bilingual_book_maker o bat ky dau — BR-EPUB-03),
+        # tach het khoi Step 2..10 duoi day (chi danh cho PDF) giong het cach
+        # `run_parse_only()` da tach o tren — moi cho re nhanh la 1 co hoi de
+        # 2 luong lech nhau (6.14.7).
         if job.file_type == FileType.EPUB:
-            raise EpubNotSupportedError(
-                "EPUB pipeline (bilingual_book_maker) chua duoc implement trong increment nay"
-            )
+            return await self.run_epub_job(job, db_session)
 
         file_path = Path(job.file_path)
 
@@ -687,6 +783,253 @@ class JobOrchestrator:
 
         if self._progress_broadcaster is not None:
             # Architecture.md 5.2 "job_completed" event shape.
+            await self._progress_broadcaster(
+                job.id,
+                {
+                    "type": "job_completed",
+                    "job_id": job.id,
+                    "output_path": job.output_path,
+                    "actual_cost": job.actual_cost,
+                    "cost_source": job.cost_source,
+                },
+            )
+
+        return JobResult(
+            job_id=job.id,
+            status="completed",
+            output_path=job.output_path,
+            bilingual_path=job.bilingual_path,
+            actual_cost=job.actual_cost,
+        )
+
+    async def run_epub_job(self, job: Job, db_session: AsyncSession) -> JobResult:
+        """US-22 buoc 2/3 (Architecture.md 6.20.8, sua boi 6.20.12): dich EPUB
+        qua chinh Translation Engine noi bo — KHONG dung bilingual_book_maker
+        o bat ky dau (BR-EPUB-03). Cung khung xuong voi `run_job()`'s Step 7
+        (progress_tracker -> Lop 3 cost accumulator -> cancel check, COPY
+        NGUYEN thu tu, khong viet lai logic moi) de moi co che da verify song
+        (resume BR-CHUNK-05, cost gate Lop 3, cancel) duoc tai su dung nguyen
+        trang cho EPUB.
+        """
+        file_path = Path(job.file_path)
+
+        # E1 (Architecture.md 6.20.8/6.20.9 buoc 2): `load()` DUY NHAT MOT
+        # LAN — moi buoc sau (payload dich, merge, guard BR-EPUB-05) deu doc
+        # lai CHINH `doc` nay. R6-02 soi day (2)->(7): load() lan thu hai voi
+        # bo loc/trang thai khac se lam unit_id lech, Bug #5 tai sinh dang EPUB.
+        doc = EpubDocument.load(file_path)
+        if job.total_units is None:
+            job.total_units = len(doc.units)
+            db_session.add(job)
+            await db_session.commit()
+
+        # E2/E3 (Architecture.md 6.20.9 bang dong 3/4, §6.11.6): glossary
+        # PHAI duoc loc theo `full_text` truoc khi build system prompt, cung
+        # 1 co che loc voi `cost_gate.py::_estimate_epub_translation_cost()`
+        # (goi `glossary_manager.build_prompt_snippet(only_terms_present_in=...)`
+        # qua `build_prompt_text()`) — neu khong Lop 2 uoc chi phi tren tap
+        # glossary da loc trong khi prompt THAT gui di khong loc, co the uoc
+        # THAP hon request that (vi pham "cam uoc thap"). Fix: truyen thang
+        # `doc.full_text()` (CUNG mot lan `load()` o buoc E1 phia tren, khong
+        # load() lai) vao `build_system_prompt()` qua tham so
+        # `only_terms_present_in` (them moi, xem prompt_builder.py) +
+        # `max_glossary_entries` lay tu CUNG settings PDF dang dung
+        # (`self._settings.max_glossary_entries_in_prompt`) de khop dung cap
+        # ma `cost_gate.py` da dung khi uoc.
+        glossary_manager = GlossaryManager(db_session)
+        base_system_prompt = await build_system_prompt(
+            glossary_manager,
+            project_id=job.batch_id,
+            only_terms_present_in=doc.full_text(),
+            max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
+        )
+        system_prompt = build_epub_batch_prompt(base_system_prompt)
+
+        # E4: plan_epub_chunks() + resume-aware Chunk rows (BR-CHUNK-05).
+        chunk_plan = plan_epub_chunks(
+            doc.units,
+            char_budget=self._settings.epub_chunk_char_budget,
+            request_budget=self._settings.epub_request_char_budget,
+        )
+        chunks = await self._load_or_create_epub_chunks(job, chunk_plan, db_session)
+        plan_by_index: dict[int, EpubChunkPlan] = {p.index: p for p in chunk_plan}
+
+        job.status = "translating"
+        job.started_at = job.started_at or datetime.now(UTC)
+        db_session.add(job)
+        await db_session.commit()
+
+        # Out-of-band -> khong con out-of-band cho EPUB: day CHINH LA provider
+        # goi that (khong co bilingual_book_maker/pdf2zh o giua) — nhung van
+        # tai su dung provider_factory injection giong PDF (test co the mock).
+        pricing_provider = self._provider or self._provider_factory.create(
+            job.model, self._settings
+        )
+
+        progress_tracker = ProgressTracker(broadcaster=self._progress_broadcaster)
+        total_chunks = len(chunks)
+
+        # E5/E6: voi moi chunk chua completed — COPY NGUYEN thu tu 3 buoc cua
+        # run_job() Step 7 (progress -> Lop 3 -> cancel) sau MOI chunk.
+        for position, chunk in enumerate(chunks, start=1):
+            if chunk.status != "completed":
+                try:
+                    await self._process_epub_chunk(
+                        job,
+                        chunk,
+                        doc,
+                        plan_by_index[chunk.chunk_index],
+                        system_prompt,
+                        pricing_provider,
+                        db_session,
+                    )
+                except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7
+                    chunk.status = "failed"
+                    chunk.error_message = str(exc)
+                    chunk.retry_count += 1
+                    db_session.add(chunk)
+
+                    job.status = "failed"
+                    job.error_message = f"Chunk {chunk.chunk_index} that bai: {exc}"
+                    job.finished_at = datetime.now(
+                        UTC
+                    )  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+                    db_session.add(job)
+                    await db_session.commit()
+
+                    await self._broadcast_job_failed(job, position, total_chunks)
+
+                    return JobResult(
+                        job_id=job.id,
+                        status="failed",
+                        output_path=job.output_path,
+                        bilingual_path=job.bilingual_path,
+                        actual_cost=job.actual_cost,
+                        error_message=job.error_message,
+                    )
+
+            await progress_tracker.update(job.id, position, total_chunks, db_session)
+
+            # Financial Safety Lop 3 (Architecture.md 6.11.4), y het Step 7
+            # cua run_job() — KHAC 1 diem CO CHU DICH: `chunk.api_cost` o day
+            # la chi phi THAT (tu `TranslationResult`, khong phai
+            # `estimate_chunk_cost()`), nen `cost_source` duoi day la
+            # "metered" thay vi "estimated" — dung voi ban chat cua con so.
+            completed_cost = sum(c.api_cost or 0.0 for c in chunks[:position])
+            effective_cap = (
+                job.cost_cap_usd
+                if job.cost_cap_usd is not None
+                else self._settings.max_cost_per_job_usd
+            )
+            if self._settings.cost_cap_enabled and completed_cost > effective_cap:
+                job.actual_cost = completed_cost
+                job.cost_source = "metered"
+                job.status = "cost_capped"
+                job.error_message = (
+                    f"Job dung o chunk {chunk.chunk_index}: chi phi THAT tich luy "
+                    f"${completed_cost:.4f} da vuot tran ${effective_cap:.2f}. Cac chunk da "
+                    "dich duoc giu nguyen — tang tran trong Settings roi bam Retry de chay tiep."
+                )
+                job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+                db_session.add(job)
+                await db_session.commit()
+
+                await self._broadcast_job_cost_capped(job, position, total_chunks)
+
+                return JobResult(
+                    job_id=job.id,
+                    status="cost_capped",
+                    output_path=job.output_path,
+                    bilingual_path=job.bilingual_path,
+                    actual_cost=job.actual_cost,
+                    error_message=job.error_message,
+                )
+
+            await db_session.refresh(job)
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+                db_session.add(job)
+                await db_session.commit()
+
+                await self._broadcast_job_cancelled(job, position, total_chunks)
+
+                return JobResult(
+                    job_id=job.id,
+                    status="cancelled",
+                    output_path=job.output_path,
+                    bilingual_path=job.bilingual_path,
+                    actual_cost=job.actual_cost,
+                )
+
+        # E7: gop MOI chunk `completed` (khong chi cac chunk vua chay o vong
+        # nay — R6-02 soi day (6)->(7): resume phai doc lai chunk da xong tu
+        # truoc, khong chi chunk moi).
+        job.status = "merging"
+        db_session.add(job)
+        await db_session.commit()
+
+        translations: dict[str, str] = {}
+        for db_chunk in chunks:
+            if db_chunk.status == "completed" and db_chunk.output_path:
+                chunk_translations = json.loads(
+                    Path(db_chunk.output_path).read_text(encoding="utf-8")
+                )
+                translations.update(chunk_translations)
+
+        # E8: `bilingual=True` mac dinh cho EPUB (CHOT, Architecture.md
+        # 6.20.11 muc 2 — PM/user da xac nhan qua AskUserQuestion). Chua co
+        # duong UI nao cho phep chon monolingual rieng cho EPUB o buoc nay
+        # (bang task, buoc 3/3 moi lam UI) nen hardcode True thay vi doc
+        # `Batch.output_mode` (mac dinh "vi_only" cho CA PDF lan EPUB o tang
+        # API — dung nguyen no se lam EPUB thanh monolingual-by-default,
+        # nguoc voi CHOT nay).
+        bilingual = True
+        merged_path = self._output_dir / job.id / "translated_vi.epub"
+        merged_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            doc.write_translated(translations, merged_path, bilingual=bilingual)
+            # E9 — Guard BR-EPUB-05 (X3): doc lai CHINH `merged_path` vua ghi,
+            # KHONG tin `translations` con trong bo nho.
+            _check_epub_output_guard(doc, merged_path, bilingual=bilingual)
+        except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7/8
+            job.status = "failed"
+            job.error_message = str(exc)
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+            db_session.add(job)
+            await db_session.commit()
+
+            await self._broadcast_job_failed(job, total_chunks, total_chunks)
+
+            return JobResult(
+                job_id=job.id,
+                status="failed",
+                output_path=job.output_path,
+                bilingual_path=job.bilingual_path,
+                actual_cost=job.actual_cost,
+                error_message=job.error_message,
+            )
+
+        job.output_path = str(merged_path)
+
+        # E10: `cost_source='metered'` — lan dau tien trong du an, chi phi
+        # THAT tu `TranslationResult` cua tung request, khong phai uoc tinh
+        # hau-render nhu PDF (Architecture.md 6.20.8).
+        job.actual_cost = sum(c.api_cost or 0.0 for c in chunks)
+        job.cost_source = "metered"
+        job.status = "completed"
+        job.progress = 1.0
+        job.current_chunk = total_chunks
+        job.total_chunks = total_chunks
+        job.completed_at = datetime.now(UTC)
+        job.finished_at = job.completed_at  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+        db_session.add(job)
+        await db_session.commit()
+
+        if self._progress_broadcaster is not None:
+            # Architecture.md 5.2 "job_completed" event shape (same as PDF's
+            # run_job() Step 10).
             await self._progress_broadcaster(
                 job.id,
                 {
@@ -1367,6 +1710,100 @@ class JobOrchestrator:
         db_session.add(chunk)
         await db_session.commit()
 
+    async def _process_epub_chunk(
+        self,
+        job: Job,
+        chunk: Chunk,
+        doc: EpubDocument,
+        chunk_plan: EpubChunkPlan,
+        system_prompt: str,
+        pricing_provider: TranslationProvider,
+        db_session: AsyncSession,
+    ) -> None:
+        """US-22 buoc 2/3 (Architecture.md 6.20.8 `_process_epub_chunk()`).
+        Moi lat request trong `chunk_plan.requests` chay TUAN TU (khong AIMD
+        — app goi API TRUC TIEP, nhan `RateLimitError` THAT qua `with_retry`,
+        khac PDF phai *doan* tin hieu tu stdout subprocess, Architecture.md
+        6.20.8 "Concurrency"). Id ngan cuc bo `0..N` trong TUNG request
+        (X4/X5) — map nguoc sang `unit_id` that ngay tai day, KHONG bao gio
+        ghi id ngan vao `translations`/`units.json`.
+        """
+        chunk.status = "translating"
+        chunk.started_at = datetime.now(UTC)
+        db_session.add(chunk)
+        await db_session.commit()
+
+        units = doc.units
+        translations: dict[str, str] = {}
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost = 0.0
+
+        for start, end in chunk_plan.requests:
+            slice_units = units[start : end + 1]
+            payload = [{"id": str(i), "html": u.text} for i, u in enumerate(slice_units)]
+            expected_ids = {str(i) for i in range(len(slice_units))}
+            payload_json = json.dumps(payload, ensure_ascii=False)
+
+            result = await with_retry(
+                lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
+            )
+            total_input_tokens += result.input_tokens
+            total_output_tokens += result.output_tokens
+            total_cost += result.estimated_cost_usd
+            parsed = parse_epub_batch_response(result.text, expected_ids)
+
+            # X4 (Architecture.md 6.20.12): id thieu -> goi lai RIENG LE, toi
+            # da 1 vong. E-09: TUYET DOI khong ghi chuoi rong cho id thieu.
+            missing_ids = expected_ids - parsed.keys()
+            for local_id in sorted(missing_ids):
+                unit = slice_units[int(local_id)]
+                single_payload = json.dumps(
+                    [{"id": local_id, "html": unit.text}], ensure_ascii=False
+                )
+                retry_result = await with_retry(
+                    lambda p=single_payload: pricing_provider.translate(
+                        p, system_prompt, "en", "vi"
+                    )
+                )
+                total_input_tokens += retry_result.input_tokens
+                total_output_tokens += retry_result.output_tokens
+                total_cost += retry_result.estimated_cost_usd
+                retry_parsed = parse_epub_batch_response(retry_result.text, {local_id})
+                if local_id in retry_parsed:
+                    parsed[local_id] = retry_parsed[local_id]
+
+            still_missing = expected_ids - parsed.keys()
+            if still_missing:
+                missing_unit_ids = [slice_units[int(i)].unit_id for i in sorted(still_missing)]
+                raise EpubBatchTranslationError(
+                    f"Chunk {chunk.chunk_index}: thieu ban dich cho {len(missing_unit_ids)} "
+                    f"unit sau 1 vong goi lai rieng le (vd '{missing_unit_ids[0]}') — "
+                    "TUYET DOI khong ghi chuoi rong, chunk that bai (E-09)."
+                )
+
+            for local_id, vi_html in parsed.items():
+                unit = slice_units[int(local_id)]
+                translations[unit.unit_id] = vi_html
+
+        # F9 (chung bai hoc voi pdf2zh_runner): 1 thu muc rieng cho MOI chunk.
+        chunk_dir = self._processing_dir / job.id / f"chunk_{chunk.chunk_index}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        units_json_path = chunk_dir / "units.json"
+        units_json_path.write_text(
+            json.dumps(translations, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        chunk.output_path = str(units_json_path)
+        # Chi phi THAT tu TranslationResult (khong phai estimate_chunk_cost())
+        # — day chinh la diem `cost_source='metered'` bat nguon tu (6.20.8).
+        chunk.api_tokens_used = total_input_tokens + total_output_tokens
+        chunk.api_cost = total_cost
+        chunk.status = "completed"
+        chunk.completed_at = datetime.now(UTC)
+        db_session.add(chunk)
+        await db_session.commit()
+
     def _thread_floor(self, engine: str, provider: str) -> int:
         """Architecture.md 6.14.5: babeldoc dung floor RIENG (=
         ceil(floor_pdf2zh / 2)) vi don vi `rate_limit_hits` cua no khac pdf2zh
@@ -1475,6 +1912,36 @@ class JobOrchestrator:
                 page_end=plan.page_end,
                 overlap_start=plan.overlap_start,
                 overlap_end=plan.overlap_end,
+            )
+            for plan in chunk_plan
+        ]
+        for db_chunk in chunks:
+            db_session.add(db_chunk)
+        await db_session.commit()
+        for db_chunk in chunks:
+            await db_session.refresh(db_chunk)
+        return chunks
+
+    async def _load_or_create_epub_chunks(
+        self, job: Job, chunk_plan: list[EpubChunkPlan], db_session: AsyncSession
+    ) -> list[Chunk]:
+        """EPUB tuong duong cua `_load_or_create_chunks()` — dung
+        `unit_start`/`unit_end` (NULL `page_start`/`page_end`) thay vi trang
+        PDF (Architecture.md 6.20.7). BR-CHUNK-05 resume: neu `job` da co
+        Chunk row (chay lai sau crash/cancel), TAI SU DUNG nguyen, khong tao
+        lai — cung logic voi ban PDF.
+        """
+        result = await db_session.exec(select(Chunk).where(Chunk.job_id == job.id))
+        existing = list(result.all())
+        if existing:
+            return sorted(existing, key=lambda c: c.chunk_index)
+
+        chunks = [
+            Chunk(
+                job_id=job.id,
+                chunk_index=plan.index,
+                unit_start=plan.unit_start,
+                unit_end=plan.unit_end,
             )
             for plan in chunk_plan
         ]

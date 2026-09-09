@@ -20,20 +20,30 @@ from pathlib import Path
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from src.core.chunking import (
+    EPUB_INLINE_MARKUP_FACTOR,
+    EPUB_JSON_ENVELOPE_CHARS_PER_UNIT,
+    plan_epub_chunks,
+)
 from src.core.config import Settings
 from src.core.cost_estimator import CostEstimate, estimate_job_cost_v2
 from src.core.glossary_manager import GlossaryManager
 from src.core.job_orchestrator import _count_pdf_pages, _count_text_segments, _extract_full_text
 from src.core.prompt_builder import build_prompt_text
+from src.services.epub_document import EpubDocument
 from src.services.translation import TranslationProvider
 
 
 @dataclass
 class DetailedCostEstimate:
     estimate: CostEstimate
-    total_pages: int
+    #: Architecture.md 6.20.6 (US-22 buoc 2/3): NULL cho EPUB — dinh dang
+    #: reflow khong co "trang", bia so gia se lap lai chinh loai loi da sinh
+    #: ra Bug #5. `total_units` la dai luong tuong duong cho EPUB.
+    total_pages: int | None
     segment_count: int
     prompt_overhead_chars: int
+    total_units: int | None = None
 
 
 @dataclass
@@ -49,9 +59,16 @@ async def estimate_translation_cost(
     db_session: AsyncSession,
     batch_id: str | None,
     max_glossary_entries: int,
+    file_type: str = "pdf_digital",
 ) -> DetailedCostEstimate:
     """`estimate_job_cost_v2()` fed with real measurements from `file_path`
-    (Architecture.md 6.11.5 data lineage steps 1-4).
+    (Architecture.md 6.11.5 data lineage steps 1-4 for PDF; 6.20.6 for EPUB).
+
+    `file_type` re nhanh o DUNG 1 CHO (Architecture.md 6.20.6: "Ren nhanh
+    theo file_type o dung 1 cho — ham nay — roi goi CUNG MOT
+    estimate_job_cost_v2()") — KHONG viet cong thuc chi phi thu hai. Default
+    "pdf_digital" giu nguyen hanh vi cu cho moi call site chua duoc cap nhat
+    truyen file_type rieng.
 
     NOTE — known gap (mirrors the accepted, documented gap in Architecture.md
     6.11.7 #3): for a `pdf_scan` file, `file_path` has no text layer yet (OCR
@@ -62,6 +79,11 @@ async def estimate_translation_cost(
     actually protects scan jobs; this pre-flight estimate protects born-digital
     jobs at full strength, and scan jobs only after the first chunk.
     """
+    if file_type == "epub":
+        return await _estimate_epub_translation_cost(
+            file_path, provider, db_session, batch_id, max_glossary_entries
+        )
+
     full_text = _extract_full_text(file_path)
     glossary_manager = GlossaryManager(db_session)
     prompt_text = await build_prompt_text(
@@ -86,6 +108,55 @@ async def estimate_translation_cost(
         total_pages=total_pages,
         segment_count=segment_count,
         prompt_overhead_chars=prompt_overhead_chars,
+        total_units=None,
+    )
+
+
+async def _estimate_epub_translation_cost(
+    file_path: Path,
+    provider: TranslationProvider,
+    db_session: AsyncSession,
+    batch_id: str | None,
+    max_glossary_entries: int,
+) -> DetailedCostEstimate:
+    """Architecture.md 6.20.6 nhanh EPUB — goi CUNG `estimate_job_cost_v2()`
+    voi 2 dau vao khac PDF:
+    - `source_text_chars`: `doc.total_chars` UOC THAP 29,0% neu dung thang
+      (X5) — nhan `EPUB_INLINE_MARKUP_FACTOR` + cong envelope JSON/unit.
+    - `segment_count`: SO REQUEST LLM (`sum(len(c.requests) for c in plan)`),
+      KHONG PHAI so unit — lech 8,8x da do duoc neu dung nham (6.20.6).
+    """
+    doc = EpubDocument.load(file_path)
+    full_text = doc.full_text()
+
+    glossary_manager = GlossaryManager(db_session)
+    prompt_text = await build_prompt_text(
+        glossary_manager,
+        project_id=batch_id,
+        only_terms_present_in=full_text,
+        max_glossary_entries=max_glossary_entries,
+    )
+    prompt_overhead_chars = max(len(prompt_text) - len("${text}"), 0)
+
+    plan = plan_epub_chunks(doc.units)
+    llm_request_count = sum(len(c.requests) for c in plan)
+    source_text_chars = (
+        int(doc.total_chars * EPUB_INLINE_MARKUP_FACTOR)
+        + len(doc.units) * EPUB_JSON_ENVELOPE_CHARS_PER_UNIT
+    )
+
+    estimate = estimate_job_cost_v2(
+        source_text_chars=source_text_chars,
+        segment_count=llm_request_count,
+        prompt_overhead_chars=prompt_overhead_chars,
+        provider=provider,
+    )
+    return DetailedCostEstimate(
+        estimate=estimate,
+        total_pages=None,
+        segment_count=llm_request_count,
+        prompt_overhead_chars=prompt_overhead_chars,
+        total_units=len(doc.units),
     )
 
 

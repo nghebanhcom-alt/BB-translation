@@ -22,6 +22,12 @@ class Job(SQLModel, table=True):
     job_type: str = Field(default="translate")
     # translate | parse_only — section 6.8 Markdown parse-only mode
     total_pages: int | None = Field(default=None)
+    total_units: int | None = Field(default=None)
+    # Architecture.md 6.20.6 (US-22 buoc 2/3): so don vi dich (doan van/heading/
+    # muc list, tu EpubDocument.units) cua 1 job EPUB — thay cho total_pages
+    # (vo nghia voi dinh dang reflow, giu NULL cho EPUB dung nhu thiet ke).
+    # NULL cho moi job PDF. Cot moi, them qua `_NEW_NULLABLE_COLUMNS`
+    # (src/models/database.py) — GIU DU LIEU DB hien co, khong xoa/tao lai.
     status: str = Field(default="created")
     # created | queued | chunking | translating |
     # post_processing | merging | completed | failed | cancelled | cost_capped

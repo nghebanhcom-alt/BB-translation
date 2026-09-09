@@ -567,6 +567,115 @@ def test_write_translated_bilingual_preserves_original_units_on_reload(
     assert chapter_raw.count("bb-vi") == 373  # so unit cua chapter01.html
 
 
+def test_mark_bb_vi_preserves_preexisting_class_string_under_xml_parser(
+    tmp_path: Path,
+) -> None:
+    """Regression cho bug BLOCKING tim boi Reviewer (US-22 Buoc 2/3, vong 1/3)
+    + 1 lop sau hon Dev tu phat hien khi viet lai fix (chua tung duoc noi
+    trong review-report.md, xem ghi chu (2b) o duoi):
+
+    (a) `_mark_bb_vi()` (bug goc Reviewer tim): voi builder XML
+    (`features="xml"`, dung CHINH cho EpubDocument theo Y1), bs4 tra
+    `node.get("class")` la 1 CHUOI (khong phai list) khi node goc DA CO SAN
+    attribute class -- rat pho bien trong EPUB dan trang that (vd
+    `chapter01.html` cua chinh file mau Sourdough co san `class="noindent"`
+    tren hau het `<p>`). Code cu lam `[*existing, "bb-vi"]` tren 1 chuoi se
+    unpack thanh TUNG KY TU (`"noindent"` -> `['n','o','i',...]`), hong
+    attribute class thanh vd `class="n o i n d e n t bb-vi"`.
+
+    (b) `count_bb_vi_pairs()` (lop bug THU HAI, KHONG nam trong review-report
+    goc -- Dev tu phat hien khi verify lai fix (a) tren file that, xem
+    CHANGELOG): ngay ca SAU KHI (a) da sua dung (class ghi ra dung
+    `class="noindent bb-vi"`), `soup.find_all(class_="bb-vi")` cua bs4 4.15
+    VAN KHONG khop duoc node nay khi doc lai qua builder XML -- tu verify
+    truc tiep: `BeautifulSoup('<p class="noindent bb-vi">x</p>',
+    "xml").find_all(class_="bb-vi")` tra ve RONG. Ly do: bs4 chi thu ghep lai
+    "ca chuoi" khi gia tri GOC la 1 LIST nhieu phan tu; voi builder XML, gia
+    tri doc lai LUON la 1 chuoi don (`isinstance(..., list)` False), nen
+    nhanh ghep-lai-roi-so-sanh khong bao gio kich hoat -- so khop that bai
+    cho MOI node co >1 class (da so unit cua sach that). Fix: thay
+    `find_all(class_=...)` bang `_find_bb_vi_nodes()` (predicate callable
+    dung `_node_classes()` da chuan hoa), khong dua vao hanh vi noi bo nay
+    cua bs4.
+
+    Test nay dung CHINH file EPUB that (khong phai fixture tu dung, dung
+    `_build_minimal_epub` khong co class tren node goc nen KHONG bat duoc ca
+    2 lop bug tren -- day chinh xac la ly do 12 test cu lot qua no)."""
+    from src.core.job_orchestrator import _check_epub_output_guard
+    from src.services.epub_document import _find_bb_vi_nodes, count_bb_vi_pairs
+
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out_bilingual.epub"
+
+    source_doc = EpubDocument.load(src)
+    # Dich "that" toan bo 384 unit -- noi dung khac han ban goc, giong dung
+    # kich ban live-verify cua Reviewer.
+    translations = {u.unit_id: f"VI:{u.text}" for u in source_doc.units}
+    source_doc.write_translated(translations, out, bilingual=True)
+
+    # (1) Node goc chapter01.html PHAI co san class that (vd "noindent") --
+    # xac nhan kich ban that su cham vao nhanh bug, khong phai gia dinh suong.
+    original_raw = zipfile.ZipFile(src).read("ops/xhtml/chapter01.html").decode("utf-8")
+    assert 'class="noindent"' in original_raw
+
+    # (2) class attribute sau khi chen bb-vi phai la list dung chuan
+    # ("noindent bb-vi"), KHONG bi tach ky tu ("n o i n d e n t bb-vi").
+    out_raw = zipfile.ZipFile(out).read("ops/xhtml/chapter01.html").decode("utf-8")
+    assert 'class="noindent bb-vi"' in out_raw
+    assert "n o i n d e n t" not in out_raw
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(out_raw, "xml")
+    # (2b) tai hien CHINH lop bug thu hai: filter mac dinh cua bs4 phai FAIL
+    # tren dung node nay (khang dinh chu dong bug (b) van con that neu ai do
+    # lo hoan doi _find_bb_vi_nodes() lai thanh find_all(class_=...) don gian).
+    assert soup.find_all(class_="bb-vi") == []
+    marked_noindent_nodes = [
+        node for node in _find_bb_vi_nodes(soup) if "noindent" in node.get("class", [])
+    ]
+    assert marked_noindent_nodes, "khong tim thay node bb-vi nao ke thua class=noindent tu ban goc"
+    classes = marked_noindent_nodes[0].get("class")
+    assert isinstance(classes, str)  # xml builder van tra chuoi khi doc lai
+    assert classes == "noindent bb-vi"
+
+    # (3) count_bb_vi_pairs() -- doc CHINH BANG _find_bb_vi_nodes() ma guard
+    # dung -- phai dem DUNG 384/384, khong phai 0/384.
+    total, differing = count_bb_vi_pairs(out)
+    assert total == len(source_doc.units) == 384
+    assert differing == len(source_doc.units)
+
+    # (4) Guard BR-EPUB-05 (X3, nhanh bilingual=True) phai PASS, khong raise.
+    _check_epub_output_guard(source_doc, out, bilingual=True)
+
+
+def test_check_epub_output_guard_threshold_uses_ceil_not_truncate(tmp_path: Path) -> None:
+    """Regression cho issue #3 (US-22 Buoc 2/3, vong 1/3 review): code cu
+    dung `int(len(units) * 0.9)` -- TRUNCATE ve phia 0 -- cho file Sourdough
+    that (384 unit): `int(384*0.9)=345`, tuc guard PASS khi chi 345/384 =
+    89.84% unit khac ban goc, THAP HON 90% yeu cau thuc su (Architecture.md
+    6.20.12 X3 "ngưỡng ≥90%"). Dich CHINH XAC 345/384 unit that (giu nguyen
+    39 unit con lai, khac nguyen van tieng Anh) -- day la ca bien ranh gioi
+    THAT su ma code cu se cho pass sai. `math.ceil(384*0.9)=346` moi la
+    nguong dung -- 345 < 346 nen guard PHAI raise."""
+    from src.core.job_orchestrator import EpubEmptyOutputError, _check_epub_output_guard
+
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    source_doc = EpubDocument.load(src)
+    assert len(source_doc.units) == 384  # gia dinh nen cua ca bien ranh gioi nay
+
+    translated_units = source_doc.units[:345]
+    translations = {u.unit_id: f"VI:{u.text}" for u in translated_units}
+    source_doc.write_translated(translations, out, bilingual=False)
+
+    with pytest.raises(EpubEmptyOutputError, match=r"345/384"):
+        _check_epub_output_guard(source_doc, out, bilingual=False)
+
+
 def test_write_translated_bilingual_strips_ids_no_duplicates(tmp_path: Path) -> None:
     """Y2(a): file that co 32 unit chua <a id="page_N"/> — ban copy chen
     them KHONG duoc mang id nao, neu khong se tao duplicate id (epubcheck)."""

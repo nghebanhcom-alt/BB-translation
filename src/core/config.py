@@ -280,6 +280,12 @@ class Settings(BaseSettings):
     epub_chunk_char_budget: int = 8_000
     epub_request_char_budget: int = 3_000
     epub_unit_hard_max_chars: int = 10_000
+    # Architecture.md 6.20.8: "chi la cho moc cho tuong lai" — buoc 2/3 nay
+    # (`_process_epub_chunk()`) chay TUAN TU trong 1 chunk du bao nhieu, gia
+    # tri nay CHUA duoc doc o dau ca. Ly do khong AIMD cho EPUB: app goi API
+    # truc tiep (nhan RateLimitError THAT qua with_retry()), khac PDF/pdf2zh
+    # phai *doan* tin hieu rate-limit tu stdout subprocess.
+    epub_translate_concurrency: int = 1
 
 
 @lru_cache

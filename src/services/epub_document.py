@@ -192,9 +192,25 @@ class EpubUnit:
     text: str
 
 
-def _has_bb_vi_class(node: Tag) -> bool:
+def _node_classes(node: Tag) -> list[str]:
+    """Chuẩn hoá `node.get("class")` về `list[str]`, bất kể bs4 trả `list`
+    (builder HTML coi `class` là multi-valued attribute) hay `str` (builder
+    XML — `features="xml"`, dùng CHÍNH cho `EpubDocument` theo Y1 — KHÔNG coi
+    `class` multi-valued, trả nguyên chuỗi vd `"noindent"`). Bug đã tái hiện
+    trên file EPUB thật (Reviewer, vòng 1/3 US-22 Bước 2/3): unpack `*existing`
+    trên 1 chuỗi tách thành TỪNG KÝ TỰ (`"noindent"` -> `['n','o','i',...]`),
+    hỏng attribute `class` trên MỌI node gốc có sẵn class thật (rất phổ biến
+    trong EPUB dàn trang thật, vd `class="noindent"`), khiến guard BR-EPUB-05
+    fail 0/384 dù đã dịch đầy đủ. Dùng helper này ở MỌI chỗ đọc/ghi `class`
+    trong module để không tái diễn lệch giả định."""
     classes = node.get("class") or []
-    return _BB_VI_CLASS in classes
+    if isinstance(classes, str):
+        return classes.split()
+    return list(classes)
+
+
+def _has_bb_vi_class(node: Tag) -> bool:
+    return _BB_VI_CLASS in _node_classes(node)
 
 
 def _in_bb_vi_subtree(node: Tag) -> bool:
@@ -341,7 +357,7 @@ def _strip_ids(node: Tag) -> None:
 
 def _mark_bb_vi(node: Tag) -> None:
     node["lang"] = _BB_VI_LANG
-    existing = node.get("class") or []
+    existing = _node_classes(node)
     if _BB_VI_CLASS not in existing:
         node["class"] = [*existing, _BB_VI_CLASS]
 
@@ -655,6 +671,75 @@ class EpubDocument:
                     out_zf.writestr(new_info, data)
 
         tmp_path.replace(output_path)
+
+
+def _find_bb_vi_nodes(root: Tag | BeautifulSoup) -> list[Tag]:
+    """`soup.find_all(class_=_BB_VI_CLASS)` KHONG dang tin cay khi node co
+    NHIEU class (vd `class="noindent bb-vi"`) duoi builder XML: bs4 (4.15)
+    chi coi `class` la multi-valued attribute cho builder HTML — voi builder
+    XML, gia tri tra ve la 1 CHUOI DUY NHAT, va `_attribute_match()` cua bs4
+    chi thu khop lai "ca chuoi noi lien" khi gia tri GOC la list nhieu phan
+    tu (`len(attr_values) != 1`) — 1 chuoi don (du chua nhieu tu cach nhau
+    boi khoang trang) khong bao gio kich hoat nhanh do, nen so khop THAT BAI
+    du node co dung class "bb-vi" nam trong đó. Tu verify truc tiep:
+    `BeautifulSoup('<p class="noindent bb-vi">x</p>', "xml").find_all(class_="bb-vi")`
+    tra ve RONG. Dung `_node_classes()` (da chuan hoa str/list) qua callable
+    predicate de tranh phu thuoc hanh vi noi bo nay cua bs4."""
+    return [
+        node for node in root.find_all(True) if _BB_VI_CLASS in _node_classes(node)
+    ]
+
+
+def count_bb_vi_pairs(path: Path) -> tuple[int, int]:
+    """BR-EPUB-05 guard, nhanh `bilingual=True` (X3, Architecture.md
+    6.20.12) — dung boi `job_orchestrator._check_epub_output_guard()`. Mo
+    LAI file EPUB `path` (khong tin trang thai trong bo nho — R6-02) va dem:
+    (a) tong so node mang `class="bb-vi"` — day la DAU HIEU TUONG MINH duy
+    nhat phan biet "unit goc" / "unit dich" o lan `load()` sau (X3); (b)
+    trong so do, bao nhieu node co noi dung KHAC voi phan "goc" tuong ung.
+
+    2 hinh dang bb-vi ma `_apply_translation()` sinh ra (phai xu ly rieng):
+    - `td`/`th` (Y2(b)): ban dich la 1 `<span class="bb-vi">` CHEN BEN TRONG
+      CHINH o do (sau 1 `<br/>`) — khong phai node anh em. "Ban goc" de so
+      sanh la phan con lai cua o SAU KHI bo `<br/>` + span do.
+    - Moi tag khac (Y2): ban dich la 1 `copy_node` CUNG TEN TAG, duoc
+      `node.insert_after(copy_node)` — "ban goc" la node ANH EM (Tag) ngay
+      TRUOC no trong cay (bo qua NavigableString/Comment xen giua).
+    """
+    total = 0
+    differing = 0
+    with zipfile.ZipFile(path) as zf:
+        for name in zf.namelist():
+            if not name.lower().endswith((".xhtml", ".html", ".htm")):
+                continue
+            soup, _parser_used = _parse_xhtml(zf.read(name))
+            for node in _find_bb_vi_nodes(soup):
+                total += 1
+                if (
+                    node.name == "span"
+                    and node.parent is not None
+                    and node.parent.name
+                    in (
+                        "td",
+                        "th",
+                    )
+                ):
+                    parent_clone = copy.deepcopy(node.parent)
+                    for marked in _find_bb_vi_nodes(parent_clone):
+                        prev_sibling = marked.previous_sibling
+                        marked.decompose()
+                        if isinstance(prev_sibling, Tag) and prev_sibling.name == "br":
+                            prev_sibling.decompose()
+                    original_text = parent_clone.get_text(" ", strip=True)
+                else:
+                    sibling = node.previous_sibling
+                    while sibling is not None and not isinstance(sibling, Tag):
+                        sibling = sibling.previous_sibling
+                    original_text = sibling.get_text(" ", strip=True) if sibling is not None else ""
+                translated_text = node.get_text(" ", strip=True)
+                if original_text.strip() != translated_text.strip():
+                    differing += 1
+    return total, differing
 
 
 def _check_drm(zf: zipfile.ZipFile, names: set[str]) -> None:

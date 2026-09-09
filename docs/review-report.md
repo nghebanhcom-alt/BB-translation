@@ -7426,3 +7426,654 @@ tạm phần fix, xác nhận test regression fail đúng, rồi khôi phục �
 song, không tái hiện được khi chạy lại).
 
 ---
+
+# Review Report — US-22 Dịch EPUB, Bước 2/3: Translation Engine thật + cost-gate
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-09
+- **Circuit breaker Dev↔Reviewer (US-22 Bước 2/3)**: vòng 1/3
+- **Phạm vi review**: nối `EpubDocument` (đã APPROVE ở Bước 1/3) vào Translation Engine thật +
+  cost-gate — 2 entry CHANGELOG "US-22 Dịch EPUB — Bước 2/3" + "fix E2: lọc glossary theo
+  `full_text`". Đọc toàn bộ Architecture.md §6.20.6-6.20.9, §6.20.12 (X3/X4/X5/Y6), PRD US-22/
+  BR-EPUB-01..06, và source code thật (`job_orchestrator.py`, `cost_gate.py`, `prompt_builder.py`,
+  `retry.py`, 5 provider, `epub_document.py::count_bb_vi_pairs()`, models, `jobs.py` routes, toàn
+  bộ test mới + golden fixture).
+
+## Verdict: REJECT
+
+Lý do: **1 blocking issue nghiêm trọng, live-verify được trên chính file EPUB thật duy nhất của dự
+án** — guard BR-EPUB-05 (nhánh `bilingual=True`, mặc định hardcode cho EPUB) **luôn luôn fail** trên
+mọi job dịch thật, kể cả khi bản dịch hoàn toàn đúng và đã tốn tiền thật. Đây chính xác là lớp bảo
+vệ mà PM yêu cầu đánh giá nghiêm ngặt nhất (mục 5 trong brief) — và nó không hoạt động như thiết kế
+trên dữ liệu thật, theo hướng ngược lại với Bug #5 (thay vì "completed" trên nội dung sai, ở đây là
+"failed" trên nội dung ĐÚNG và đã trả tiền). Kèm 1 issue trung bình (Y6 chưa đóng hoàn toàn cho
+DeepL) và 1 issue nhỏ (ngưỡng 90% của guard bị làm tròn xuống). Phần còn lại của bước 2/3 — cost
+gate EPUB (X5), contract JSON (X4), data lineage (R6-02), retry 5xx cho 4/5 provider, golden
+fixture, migration DB — đều đúng thiết kế, tự verify được bằng số đo thật, xem "Điểm đạt" bên dưới.
+
+---
+
+## Blocking issues (bắt buộc sửa trước khi merge)
+
+### 1. `_mark_bb_vi()` làm hỏng attribute `class` dưới parser XML → guard BR-EPUB-05 (nhánh `bilingual=True`) luôn fail trên EPUB thật
+
+**File**: `src/services/epub_document.py`, hàm `_mark_bb_vi()` (dòng 342-346):
+
+```python
+def _mark_bb_vi(node: Tag) -> None:
+    node["lang"] = _BB_VI_LANG
+    existing = node.get("class") or []
+    if _BB_VI_CLASS not in existing:
+        node["class"] = [*existing, _BB_VI_CLASS]
+```
+
+**Nguyên nhân gốc**: `EpubDocument` dùng parser `"xml"` (`features="xml"`, lxml) làm parser CHÍNH
+theo đúng Y1 — và với builder XML, BeautifulSoup **không** coi `class` là multi-valued attribute
+(đó là hành vi riêng của HTML builder). Nghĩa là `node.get("class")` trả về một **chuỗi** (vd
+`"noindent"`), không phải list (vd `["noindent"]"`). Khi `_mark_bb_vi()` chạy
+`[*existing, _BB_VI_CLASS]` trên một **chuỗi**, Python unpack chuỗi thành TỪNG KÝ TỰ:
+`[*"noindent", "bb-vi"]` → `['n','o','i','n','d','e','n','t','bb-vi']` — serialize ra
+`class="n o i n d e n t bb-vi"`. Đây không phải suy diễn — đã tự verify trực tiếp bằng
+`BeautifulSoup(..., "xml")` (xem log dưới).
+
+**Live-verify trên chính file EPUB thật duy nhất của dự án** (không chỉ đọc code — đúng yêu cầu
+"tự chạy thử" ở mục 5 của brief):
+
+```python
+from src.services.epub_document import EpubDocument, count_bb_vi_pairs
+from src.core.job_orchestrator import _check_epub_output_guard, EpubEmptyOutputError
+
+doc = EpubDocument.load(SRC)  # ...Baking with Sourdough - Sara Pitzer.epub, file thật trong data/uploads/
+translations = {u.unit_id: f"VI:{u.text}" for u in doc.units}  # bản dịch giả nhưng HOÀN TOÀN khác bản gốc
+doc.write_translated(translations, out, bilingual=True)
+_check_epub_output_guard(doc, out, bilingual=True)
+```
+
+Kết quả thật:
+
+```
+src.core.job_orchestrator.EpubEmptyOutputError: File dich chi co 0/384 node ban dich
+(lang="vi" + class="bb-vi") — duoi 90% yeu cau, co the da mat noi dung khi ghi (BR-EPUB-05).
+```
+
+Guard fail **0/384** dù **toàn bộ 384 unit đều đã được "dịch"** (nội dung khác hẳn bản gốc, có tiền
+tố `"VI:"` để phân biệt). Kiểm tra trực tiếp trong file zip vừa ghi:
+
+```
+<p class="n o i n d e n t bb-vi" lang="vi">VI:...</p>
+<h2 class="h 2 bb-vi" lang="vi">VI:Baking with Sourdough</h2>
+```
+
+— chuỗi `"bb-vi"` **có mặt** trong file (nên `EpubDocument.load()` gián tiếp vẫn đếm đúng
+`len(units)` vì `_has_bb_vi_class()` dùng `in` trên chuỗi = substring match, tình cờ vẫn khớp), nhưng
+`count_bb_vi_pairs()` — dùng `soup.find_all(class_=_BB_VI_CLASS)`, một phép so khớp CÓ CẤU TRÚC của
+BeautifulSoup — **không khớp** một attribute value đã bị hỏng thành `"n o i n d e n t bb-vi"` (khác
+hẳn chuỗi chính xác `"bb-vi"`). Đối chiếu với file gốc: `chapter01.html` có sẵn các class
+`noindent/indent/indent1/indent2/blockquote/right/image/...` trên hầu như MỌI `<p>` — nên bug này
+áp dụng cho **100% unit** của cuốn sách thật duy nhất hiện có, không phải một ca hiếm.
+
+**Vì sao lọt qua toàn bộ 12 test mới**: `_build_epub()` trong
+`tests/integration/test_epub_translate_runner.py` dựng EPUB tổng hợp với `<p>Chapter 0 paragraph
+0: ...</p>` — **không có attribute `class` nào cả** trên các `<p>` gốc. Với node KHÔNG có `class`,
+`node.get("class")` trả về `None` → `existing = None or [] = []` (list rỗng, không phải chuỗi) →
+`[*[], "bb-vi"]` hoạt động đúng. Bug chỉ lộ ra khi node gốc **đã có sẵn** attribute `class` — đúng
+tình trạng của mọi EPUB được dàn trang thật (kể cả file mẫu chính thức của Architecture.md §6.20.3).
+Đây là đúng dạng lỗi mà Protocol 6/Bug #5 tồn tại để chặn: dữ liệu test tổng hợp "tự nhất quán với
+chính nó" nhưng không đại diện cấu trúc thật.
+
+**Hậu quả**: `bilingual=True` là giá trị HARDCODE mặc định duy nhất hiện có cho EPUB (§6.20.11 mục
+2, CHỐT). Với guard fail như trên, **mọi job dịch EPUB thật trên cuốn sách mẫu hiện có sẽ luôn kết
+thúc `job.status='failed'`** ngay sau khi đã tốn tiền thật cho toàn bộ các chunk (Lớp 3
+`chunk.api_cost` đã cộng dồn xong trước khi guard chạy ở bước E9) — người dùng trả tiền, nhận về
+"failed", không phải EPUB dịch được. Đây là biến thể ngược của chính Bug #5 mà BR-EPUB-05 được sinh
+ra để chặn: thay vì "completed" trên nội dung rỗng/sai, ở đây là **"failed" trên nội dung ĐÚNG**.
+Không thể APPROVE tính năng "chạm chi phí thật lần đầu tiên" khi lớp guard tài chính/chất lượng
+then chốt nhất chưa từng chạy đúng trên dữ liệu thật.
+
+**Gợi ý hướng sửa** (Dev tự quyết định, không phải chỉ thị bắt buộc theo đúng cách): chuẩn hoá
+`existing` về `list[str]` trước khi unpack, vd:
+
+```python
+existing = node.get("class") or []
+if isinstance(existing, str):
+    existing = existing.split()
+```
+
+— và nên audit thêm mọi chỗ khác trong module này/`count_bb_vi_pairs()` có giả định `class` luôn là
+list (builder HTML) trong khi code chạy trên builder XML, vì đây rất có thể không phải chỗ duy nhất
+mắc giả định này. Sau khi sửa, **bắt buộc chạy lại đúng kịch bản live-verify ở trên trên chính file
+EPUB thật** (không chỉ test tổng hợp không có `class`) trước khi báo lại Reviewer.
+
+---
+
+## Issues cần sửa (không chặn merge nhưng phải theo dõi)
+
+### 2. Y6 chưa đóng hoàn toàn cho DeepL — `ConnectionException` không bao phủ lỗi 5xx thật từ server
+
+**File**: `src/services/deepl_provider.py`, dòng 81-89 + comment liên quan.
+
+Comment trong code khẳng định: *"`deepl.ConnectionException` gồm cả lỗi kết nối/timeout/5xx"* — đã
+tự đọc source `deepl==1.32.0` (`http_client.py:186-197` + `translator.py:_raise_for_status`,
+dòng 170-242) để verify claim này và **không đúng**:
+
+- `ConnectionException` **chỉ** được raise ở tầng transport (`http_client.py`) khi **không nhận
+  được response nào cả** — `requests.exceptions.ConnectionError`/`Timeout`/`RequestException`
+  (DNS fail, refused, timeout truyền tải...).
+- Một response **có** status code 5xx thật từ server DeepL (500/502/503...) đi qua
+  `_raise_for_status()` (`translator.py`) — hàm này chỉ xử lý cứng một số status code cụ thể
+  (400/401/403/404/429/503-với-`downloading_document`), còn lại (kể cả 503 khi không
+  `downloading_document`, và MỌI 5xx khác như 500/502) rơi vào nhánh `else` cuối cùng và raise
+  **`DeepLException`** thường (`should_retry=True` cho 503, nhưng cờ này **không được** provider
+  code đọc) — **không phải** `ConnectionException`.
+- Provider code hiện tại: `except deepl.ConnectionException: → ConnectionError (transient)`, rồi
+  `except deepl.DeepLException: → TranslationProviderError (permanent)`. Một 502/503 THẬT từ server
+  DeepL rơi đúng vào nhánh permanent — **chính xác loại lỗi hạ tầng bình thường mà Y6 được viết ra
+  để sửa, không được sửa cho provider này**.
+
+**Vì sao trong phạm vi**: `DeepL` không bị chặn cho EPUB (`_reject_deepl_for_pdf()` chỉ áp dụng khi
+`file_type in _PDF_FILE_TYPES`, EPUB không nằm trong danh sách đó — tự đọc `src/api/routes/jobs.py`
+dòng 302-315 xác nhận) — nên user có thể chọn DeepL làm provider cho 1 job EPUB ~vài trăm request
+tuần tự, và gặp đúng kịch bản Y6 mô tả ("1 lỗi 502 làm job failed") mà CHANGELOG khai là đã đóng cho
+"cả 5 provider" — thực tế chỉ đóng cho 4/5.
+
+**Đề xuất**: bắt 5xx thật từ `DeepLException` cụ thể hơn — vd kiểm `exc.http_status_code >= 500`
+(field này tồn tại trên `DeepLException`, xác nhận qua `_raise_for_status` truyền `http_status_code=`
+cho mọi nhánh) trước khi map, thay vì dựa hoàn toàn vào `ConnectionException`.
+
+### 3. Ngưỡng "≥90%" của guard BR-EPUB-05 bị làm tròn XUỐNG do `int()`, không phải `ceil()`
+
+**File**: `src/core/job_orchestrator.py`, dòng 264: `min_required = max(1, int(len(source_doc.units) * 0.9))`.
+
+`int()` truncate về phía 0, nên với N=384 (sách mẫu thật): `384*0.9=345.6` → `min_required=345` →
+guard pass khi `differing>=345`, tức **345/384=89.84%**, thấp hơn 90% yêu cầu. Với N nhỏ hơn lệch
+càng nặng — tự tính: N=11 → ngưỡng thực tế chỉ 81.8%; N=2 → 50%. Đây là sai lệch thật so với đặc tả
+"≥90%" (Architecture.md 6.20.12 X3), dù nhỏ và không đủ nghiêm trọng để tự nó block release — nhưng
+đáng sửa cùng lúc với issue #1 vì cùng 1 hàm, dùng `math.ceil` hoặc so sánh phân số trực tiếp
+(`differing * 10 < len(source_doc.units) * 9`) thay vì `int()`.
+
+---
+
+## Điểm đã tự verify ĐÚNG (không chỉ tin lời Dev)
+
+### A. Y6 — retry 5xx cho 4/5 provider (openai/claude/gemini/ollama)
+
+Tự đọc source đã cài (`openai==3.7.0`, `anthropic`, `google-api-core`, `httpx`) để verify từng claim
+trong comment code — không suy đoán:
+
+- **OpenAI/Claude**: xác nhận bằng `inspect.getmro()` — `APITimeoutError` là con của
+  `APIConnectionError`; thứ tự `except` (Timeout trước Connection trước InternalServerError trước
+  APIError) đúng. Đọc trực tiếp `openai/_client.py::_make_status_error()` xác nhận
+  `status_code >= 500` → LUÔN `InternalServerError`, không có class 5xx riêng nào khác — claim
+  trong comment code ("InternalServerError dùng cho MỌI 5xx không có class riêng") **đúng 100%**.
+- **Gemini**: xác nhận `DeadlineExceeded` là con của `ServerError` (qua `GatewayTimeout`) — thứ tự
+  bắt `DeadlineExceeded` trước `ServerError` là bắt buộc và đã đúng.
+- **Ollama**: xác nhận `httpx.TimeoutException` là con của `httpx.HTTPError` (qua `TransportError`),
+  thứ tự bắt đúng; nhánh `status_code >= 500` riêng biệt hợp lý cho REST API không dùng SDK exception.
+- **KHÔNG** có provider nào nới `_TRANSIENT_ERRORS` thành bắt hết `Exception` — đúng yêu cầu tránh
+  bẫy retry-vô-hạn của E-10 (đã grep xác nhận `src/utils/retry.py` không đổi).
+- `deepseek_provider.py` đúng là không cần sửa (kế thừa `OpenAIProvider.translate()` nguyên vẹn).
+
+Riêng **DeepL** không đạt — xem issue #2.
+
+### B. Cost gate EPUB (X5) — công thức đúng, không ước thấp
+
+Tự tính lại công thức trên chính file `Baking with Sourdough - Sara Pitzer.epub` thật (không tin số
+trong Architecture.md, tự đo lại bằng script):
+
+```
+doc.total_chars = 53.135, len(units) = 384
+source_text_chars (theo công thức) = int(53135*1.15) + 384*30 = 72.625
+payload JSON thật (id ngắn + inner-HTML, dựng lại đúng chunk plan) = 67.029 ký tự
+tỉ lệ ước/thật = 1,083x — CAO HƠN thật, đúng chiều §6.11.6 cho phép (không ước thấp)
+```
+
+Khớp code `cost_gate.py::_estimate_epub_translation_cost()` triển khai đúng chữ công thức
+Architecture.md 6.20.6 (X5): `int(doc.total_chars * EPUB_INLINE_MARKUP_FACTOR) + len(doc.units) *
+EPUB_JSON_ENVELOPE_CHARS_PER_UNIT`. `llm_request_count = sum(len(c.requests) for c in plan)` — tự
+verify ra **21** request cho 384 unit (KHÔNG PHẢI 384) — đúng cảnh báo tránh lệch 8,8x. Cũng xác
+nhận `estimate_job_cost_v2()` không bị sửa (grep `cost_estimator.py` không đổi) — chỉ đầu vào khác,
+đúng nguyên tắc "1 công thức duy nhất" của Architecture.md.
+
+### C. Contract JSON app↔LLM (X4)
+
+`build_epub_batch_prompt()` có đủ 6 điều + đúng 1 ví dụ one-shot (đọc trực tiếp
+`prompt_builder.py:409-433`). `parse_epub_batch_response()` xử lý đúng: strip markdown fence, id
+str/int đều nhận (ép `str(key)`), value rỗng/không phải string bị coi là thiếu (không default rỗng),
+JSON hỏng hoàn toàn → `{}` (mọi id coi như thiếu, đi qua đúng 1 đường xử lý "thiếu" thống nhất).
+`_process_epub_chunk()` (`job_orchestrator.py:1737-1778`): id thiếu → gọi lại lẻ đúng 1 vòng (vòng
+`for local_id in sorted(missing_ids)`, không đệ quy) → còn thiếu → `EpubBatchTranslationError`,
+**không** ghi chuỗi rỗng vào `translations` — khớp đúng E-09/X4 điểm 6.
+
+### D. Golden fixture (X4/Protocol 5 mục 3)
+
+Đọc `tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_5units.json` +
+`README.md` — có `input_tokens=1456`, `output_tokens=459`, `estimated_cost_usd=0.00062326` (số lẻ
+đặc trưng của phép tính thật, không phải số tròn của Dev tự bịa), `raw_response_text` là 1 chuỗi
+JSON DUY NHẤT không format đẹp (khớp cách 1 API thật trả về, không phải JSON Python
+`json.dumps(indent=2)` mà Dev tự viết tay sẽ có). Dòng hỗn số `1<sup>1</sup>/<sub>3</sub>` được giữ
+đúng (không gộp sai `11/3` — đúng ca N-1 Tech Lead cảnh báo). `tests/test_epub_batch_golden_fixture.py`
+chạy `parse_epub_batch_response()` trên CHÍNH `raw_response_text` này — xác nhận qua đọc code, không
+phải mock viết tay.
+
+### E. Guard BR-EPUB-05 — logic bảng X3 đúng thiết kế (ngoại trừ bug #1)
+
+`_check_epub_output_guard()` triển khai ĐÚNG 4 điều kiện theo bảng X3 (tổng ký tự>0, số unit khớp,
+điều kiện riêng theo `bilingual`), bao gồm điều kiện "KHÔNG THỂ BỎ" — so sánh nội dung cặp
+(gốc, bb-vi) khác nhau, không chỉ đếm số node — đúng như Architecture.md nhấn mạnh. `EpubDocument.load()`
+bỏ qua subtree `class="bb-vi"` khi liệt kê units (`_in_bb_vi_subtree`) — xác nhận qua đọc code VÀ
+qua test thật (`len(guard_doc.units) == len(source_doc.units)` pass trong live-verify ở trên, dù
+guard tổng thể fail vì lý do #1). Nếu không có bug #1, thiết kế bảng 4-điều-kiện đúng tinh thần yêu
+cầu.
+
+### F. 4 sợi dây data lineage (§6.20.9) — có test R6-02 cụ thể, không chỉ `assert_called()`
+
+Đọc `tests/integration/test_epub_translate_runner.py` (512 dòng, 8 test) xác nhận đủ:
+- **(2)→(7) unit_id**: `test_run_epub_job_unit_id_lineage_maps_translation_to_correct_paragraph` —
+  dịch 1 unit cụ thể thành marker độc nhất, assert marker nằm ĐÚNG file/vị trí, KHÔNG có ở nơi khác.
+- **(6)→(7) resume**: `test_run_epub_job_resume_merges_translations_from_all_completed_chunks` —
+  giả lập crash ở chunk 2, resume, assert cả 2 chunk (chunk 1 từ lần chạy trước + chunk 2 lần chạy
+  sau) đều có mặt trong output cuối.
+- **(2)→(7) doc_href** (X6, đã APPROVE ở Bước 1/3, không phá lại ở Bước 2/3): không có thay đổi nào
+  trong diff bước 2/3 chạm tới `EpubDocument.load()`'s `doc_href` construction — grep xác nhận.
+- **(4)→(6) system_prompt chứa marker JSON**: `test_run_epub_job_sends_system_prompt_with_json_contract_marker`
+  assert `"BB-EPUB-JSON-CONTRACT-X4" in system_prompt` cho MỌI lời gọi thật gửi tới `provider.translate()`.
+
+Riêng fix E2 (glossary lọc theo `full_text`) có test bổ sung
+`test_run_epub_job_filters_glossary_by_full_text_matching_cost_gate` — assert 2 lớp (tham số truyền
+vào `build_system_prompt()` VÀ nội dung `system_prompt` thật: term xuất hiện trong tài liệu còn lại,
+term không xuất hiện bị lọc bỏ) — đúng R6-02, không chỉ tin lời gọi hàm đúng tham số.
+
+### G. BR-EPUB-03 — không double-translation
+
+Grep `run_epub_job()`/`_process_epub_chunk()`: không có `subprocess`/`bilingual_book_maker`/`bbook`
+nào trong luồng EPUB. Điểm gọi LLM duy nhất là `pricing_provider.translate()`.
+
+### H. Migration DB (§6.20.11 mục 1, CHỐT)
+
+`src/models/database.py::_migrate_chunks_unit_columns()` + `_add_missing_columns()` là `ALTER TABLE`
+thật (rebuild-table pattern cho đổi NOT NULL→nullable, add-column đơn giản cho cột mới), có kiểm tra
+idempotent (`PRAGMA table_info` trước khi đổi), giữ dữ liệu cũ (`INSERT INTO ... SELECT`) — đúng
+CHỐT "viết migration script, KHÔNG xoá DB" mà PM/user đã quyết.
+
+### I. 3 điểm Dev tự nêu — đánh giá
+
+1. **`only_terms_present_in`/`max_glossary_entries` thêm vào `build_system_prompt()`**: mở rộng an
+   toàn, backward-compatible — default `None`/`80` giữ nguyên hành vi cũ cho caller hiện có
+   (`overlay_rotated_text`), chỉ EPUB truyền filter mới. Đã tự verify bằng test riêng (mục F) rằng
+   filter có tác dụng thật, không chỉ đúng tham số. Đồng ý đây không phải thay đổi kiến trúc ngoài
+   thẩm quyền Dev — Dev báo cáo đúng cách (phát hiện premise PM sai, không âm thầm implement theo
+   premise đó) đúng tinh thần Protocol 1 mở rộng.
+2. **`max_glossary_entries` cap khớp `cost_gate.py`**: hợp lý — nếu không khớp thì đúng loại lệch
+   Lớp 2/prompt thật mà E2 vừa sửa xong sẽ tái diễn ở tham số khác.
+3. **Guard `td`/`th`**: thiết kế của Dev trong `count_bb_vi_pairs()` (so sánh phần còn lại của ô sau
+   khi bỏ `<br/>`+span) đúng tinh thần X3/Y2(b) — nhưng KHÔNG có dữ liệu thật để chạm tới nhánh này
+   (file mẫu duy nhất có 0 `<table>`, đúng Z1 đã ghi trong Architecture.md). Không phản đối thiết kế,
+   nhưng ghi nhận cùng nhóm rủi ro với issue #1: code path xử lý `class`/`bb-vi` marker CHƯA từng
+   chạy đúng trên dữ liệu thật — nên đây cũng là ứng viên cần audit lại sau khi sửa issue #1 (dùng
+   `soup.new_tag("span")` nên KHÔNG bị bug #1 trực tiếp, nhưng nên re-test cùng lúc để chắc chắn).
+
+### J. Regression suite — tự chạy độc lập 2+ lần
+
+```
+uv run ruff check src/ tests/            → All checks passed! (2 lần)
+uv run pytest tests/ -q                  → 671 passed, 0 failed (lần 1, 106.13s)
+uv run pytest tests/ -q                  → 671 passed, 0 failed (lần 2, 119.24s)
+uv run pytest tests/test_rotated_text_overlay.py -q → 13 passed (chạy riêng, xác nhận không nhiễu)
+```
+
+**Không tái hiện được** hiện tượng "3 failed" mà Dev ghi nhận trong CHANGENOG (2 lần) — khớp kết
+luận của Dev rằng đó là nhiễu môi trường tạm thời (nhiều session chạy song song), không phải do thay
+đổi của US-22 Bước 2/3. Đồng ý với claim (d) trong "3 điểm chưa rõ ràng" — không cần điều tra sâu
+hơn.
+
+---
+
+## R5-04 checklist
+
+**External contract verified against real source**:
+- Luồng dịch EPUB gọi trực tiếp `provider.translate()` (contract đã verify sống từ Increment 3):
+  **N/A** cho phần này, đúng như brief đã định trước.
+- Định dạng response JSON của DeepSeek cho batch contract mới (X4): **YES** — golden fixture capture
+  từ 1 lần gọi thật (`tests/fixtures/epub_llm/`, README ghi rõ ngày/model/chi phí/input thật), không
+  phải mock viết tay. Xem mục D.
+- SDK exception hierarchy của 5 provider (Y6): **YES** cho openai/anthropic/google-api-core/httpx —
+  tự `inspect.getmro()` + đọc source cài thật trong `.venv`. **NO/sai một phần** cho `deepl` — xem
+  issue #2 (Reviewer tự đọc source `deepl==1.32.0`, phát hiện claim trong comment code không khớp
+  hành vi SDK thật).
+
+---
+
+## Kết luận US-22 Bước 2/3 — VÒNG 1/3
+
+**REJECT.**
+
+- **1 blocking issue** (mục 1): guard BR-EPUB-05 nhánh `bilingual=True` — mặc định hardcode duy nhất
+  hiện có cho EPUB — luôn fail trên dữ liệu thật do lỗi xử lý attribute `class` dưới parser XML
+  trong `_mark_bb_vi()`. Live-verify trực tiếp trên file EPUB thật duy nhất của dự án: 0/384 unit
+  được guard nhận diện đúng dù đã dịch đầy đủ. Đây là lớp bảo vệ tài chính/chất lượng quan trọng
+  nhất của tăng lượng này (PM brief mục 5) — không thể approve khi nó không hoạt động trên dữ liệu
+  thật, đặc biệt khi hậu quả là job bị đánh "failed" SAU KHI đã tốn tiền thật cho toàn bộ chunk.
+- 2 issue cần sửa cùng đợt (không tự nó blocking nhưng nên gộp vào cùng 1 vòng sửa vì cùng vùng
+  code/cùng lớp guard): Y6 chưa đóng cho DeepL (issue #2), ngưỡng 90% bị làm tròn xuống (issue #3).
+- Phần còn lại (cost gate X5, contract JSON X4, data lineage R6-02, golden fixture, migration DB, 4/5
+  provider Y6, BR-EPUB-03) đều đạt chất lượng tốt, tự verify được bằng số đo/lệnh chạy thật — không
+  chỉ đọc tĩnh code hay tin lời khai CHANGELOG.
+- Regression suite: 671/671 pass, chạy độc lập 2 lần, không tái hiện nhiễu Dev từng ghi nhận.
+
+**Yêu cầu Dev**: sửa issue #1 (bắt buộc), audit các chỗ khác trong `epub_document.py` có giả định
+tương tự về `class` là list, sửa issue #2 và #3, rồi chạy lại CHÍNH kịch bản live-verify guard trên
+file EPUB thật (không chỉ test tổng hợp không có `class` attribute) trước khi gửi lại Reviewer.
+
+**Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng cho US-22 Bước 2/3.**
+
+---
+
+# Review Report — US-22 Dịch EPUB, Bước 2/3: Translation Engine thật + cost-gate — VÒNG 2/3 (Dev↔Reviewer, Protocol 3)
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-09
+- **Circuit breaker Dev↔Reviewer (US-22 Bước 2/3)**: **vòng 2/3** — xem ghi chú quan trọng về đánh
+  số vòng ngay dưới đây.
+
+## ⚠️ Ghi chú quan trọng — lệch số vòng so với brief PM
+
+Brief PM cho lần review này ghi "vòng 3/3 (VÒNG CUỐI)". Tự kiểm tra lại trước khi review (đọc toàn
+bộ `docs/review-report.md` + `docs/CHANGELOG.md`, không tin nguyên văn brief theo đúng tinh thần
+"Protocol 1 mở rộng — gắn nhãn verify" của CLAUDE.md) cho thấy: section review gần nhất cho "US-22
+Bước 2/3" (ngay phía trên section này) tự ghi rõ **"VÒNG 1/3"** ở cả tiêu đề lẫn dòng kết luận cuối
+("Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng"), và chính CHANGELOG entry mới nhất Dev viết cũng
+tự gọi đây là **"vòng 2/3 Dev↔Reviewer... giới hạn cuối là vòng 3/3"** (dòng 6685 + 6830-6831
+`docs/CHANGELOG.md`). Không tìm thấy bất kỳ section "VÒNG 2/3" nào khác cho riêng "Bước 2/3" (2 kết
+quả `grep "vòng 2/3"` khác chỉ thuộc về US-17+US-18 và US-22 **Bước 1/3** — bước khác, đã APPROVE).
+
+**Kết luận của Reviewer**: đây thực chất là **VÒNG 2/3**, không phải vòng cuối. Review này được ghi
+đúng số **VÒNG 2/3** trong tiêu đề — không tự ý dùng số "3/3" mà brief đưa vì không khớp bằng chứng
+trong chính 2 file handoff chuẩn (Protocol 1) của dự án. Đề nghị PM xác nhận lại cách đếm trước khi
+báo cáo lên circuit breaker, để tránh 2 hệ quả xấu: (a) dừng pipeline oan nếu APPROVE giả sử đây là
+vòng cuối trong khi thực ra còn 1 vòng nữa nếu cần, hoặc (b) tính sai nếu REJECT — Dev vẫn còn đúng
+1 vòng nữa (vòng 3/3 thật), không phải "hết vòng, phải escalate" như brief ngụ ý.
+
+## Phạm vi review
+
+3 điểm Reviewer REJECT ở vòng 1/3 (guard BR-EPUB-05 `class`, Y6 DeepL 5xx, ngưỡng `int()`→ceil) +
+1 phát hiện mới ngoài yêu cầu Dev tự báo cáo (bug JSON "trailing garbage" trong
+`parse_epub_batch_response()`, bắt được khi Dev chạy live E2E full-book). Đọc toàn bộ diff (`git
+diff` từ HEAD — commit gần nhất `636e046` không liên quan tăng lượng này, nên diff phản ánh đúng
+toàn bộ thay đổi chưa commit của cả vòng 1/3 lẫn vòng 2/3 gộp lại), CHANGELOG entry tương ứng, và tự
+chạy lại **mọi** kịch bản verify — không tin lại bất kỳ số liệu nào Dev báo cáo.
+
+## 1. Bug chính (issue #1, guard BR-EPUB-05 + lớp bug thứ 2 `count_bb_vi_pairs`) — ĐÃ SỬA, tự verify ĐỘC LẬP
+
+**Xác nhận hành vi gốc của bs4 trước khi tin bất kỳ giải thích nào** (không đọc code rồi suy diễn):
+
+```python
+>>> BeautifulSoup('<p class="noindent">x</p>', "xml").find('p').get('class')
+'noindent'          # str, KHÔNG PHẢI list — xác nhận độc lập root cause
+>>> BeautifulSoup('<p class="noindent bb-vi">x</p>', "xml").find_all(class_='bb-vi')
+[]                  # RỖNG — xác nhận độc lập "lớp bug thứ 2" Dev tự phát hiện
+>>> BeautifulSoup('<p class="bb-vi">x</p>', "xml").find_all(class_='bb-vi')
+[<p class="bb-vi">x</p>]   # 1-class thì khớp — giải thích đúng vì sao 12 test cũ (không có
+                            # class gốc) không bắt được bug này
+```
+
+Cả 2 claim trong CHANGENOG (lớp 1: unpack chuỗi hỏng attribute; lớp 2: `find_all(class_=...)` của
+bs4 không khớp multi-class string dưới builder XML) đều **đúng 100%**, tự verify bằng script riêng,
+không phải đọc lại lời Dev.
+
+**Grep xác nhận không còn lời gọi `find_all(class_=...)` sống nào trong module** (chỉ còn trong
+docstring giải thích) — mọi điểm đọc/ghi `class` đã quy về `_node_classes()` duy nhất, đúng yêu cầu
+"audit thêm mọi chỗ khác" của vòng 1/3.
+
+**Tự chạy lại CHÍNH kịch bản live-verify của vòng 1/3, trên chính file EPUB thật đã dùng lúc REJECT**
+(`data/uploads/9d436d7b-...-Sourdough...epub`, KHÔNG dùng lại script cũ của Dev — tự viết script
+riêng):
+
+```
+units: 384
+GUARD PASSED
+count_bb_vi_pairs total/differing: 384 384
+sample p tag: <p class="noindent bb-vi" lang="vi">
+```
+
+`class="noindent bb-vi"` nguyên vẹn (không còn `"n o i n d e n t bb-vi"`), guard PASS đúng nghĩa,
+384/384 unit được đếm đúng — bug chính (0/384 lúc REJECT) đã hết, live trên đúng file đã tái hiện
+bug ở vòng 1/3.
+
+**Phát hiện thêm (Reviewer, không nằm trong yêu cầu Dev báo cáo)**: dự án thực ra có **file EPUB
+thật thứ hai** trong `data/uploads/` — `sample2_Bread-A-Global-History.epub` (8,3MB, mtime 2026-09-08
+20:33, tức SAU thời điểm Architecture.md §6.20.11 mục 7 (Z1) ghi "chỉ có đúng 1 file EPUB thật" —
+file này rất có thể là kết quả PM đã xin thêm user theo đúng đề nghị Z1, nhưng chưa ai cập nhật lại
+ghi chú Z1/round review trước để phản ánh việc này). File này có **12 `<table>`** trong XHTML thật
+— đúng loại dữ liệu mà mục "I.3" của vòng 1/3 review ghi nhận là "CHƯA có dữ liệu thật để chạm
+nhánh `td`/`th` của `count_bb_vi_pairs()`". Tự chạy lại đúng kịch bản guard trên file NÀY:
+
+```
+units: 866   (tag breakdown: {'p': 806, 'td': 36, 'h1': 1, 'h2': 14, 'h3': 9})
+GUARD PASSED
+count_bb_vi_pairs total/differing: 866 866
+```
+
+36 unit thật có `tag == "td"` — xác nhận nhánh `td`/`th` (chèn `<span class="bb-vi">` bên trong ô,
+so sánh "bản gốc" bằng cách bỏ `<br/>`+span) **đã thực sự chạy qua dữ liệu thật lần đầu tiên**, không
+còn là "phòng thủ lý thuyết chưa kiểm chứng" như ghi nhận ở vòng 1/3 — kết quả đúng (866/866, không
+crash, không đếm sai). Đây là tin tốt, không phải blocking mới — nhưng đáng ghi vào non-blocking để
+PM biết cập nhật lại Z1/Architecture.md (dữ liệu N=1 đã thành N=2, ít nhất 1 file có bảng thật) và
+để QA biết dùng file này cho R6-03 nếu cần phủ thêm nhánh `td`/`th`.
+
+**Kết luận mục 1**: issue #1 (blocking chính của vòng 1/3) **ĐÃ SỬA ĐÚNG**, tự verify độc lập trên cả
+2 file EPUB thật hiện có trong dự án, không chỉ tin lại số liệu Dev báo cáo.
+
+## 2. Y6 DeepL — 5xx tách đúng thành transient, không nới quá tay cho 4xx
+
+Tự đọc trực tiếp source `deepl==1.32.0` đã cài (không tin lại comment code, dù comment đúng):
+
+```python
+# deepl/exceptions.py — DeepLException.__init__
+def __init__(self, message, should_retry=False, http_status_code=None): ...
+# ConnectionException KHÔNG set http_status_code (giữ None mặc định) — subclass DeepLException
+# nhưng chỉ raise ở tầng transport, xác nhận qua http_client.py
+```
+
+```python
+# deepl/translator.py::_raise_for_status() — đọc toàn bộ nhánh if/elif
+# 403/456(quota)/404(not found, gồm nhánh glossary riêng)/400/429/503 co class rieng;
+# 503 khong "downloading_document" -> DeepLException(http_status_code=503, should_retry=True);
+# MOI status khac (500, 502, ...) roi vao nhanh `else` cuoi -> DeepLException(http_status_code=<code>)
+```
+
+Khớp 100% với comment Dev viết trong `deepl_provider.py`. Đọc code hiện tại (`src/services/
+deepl_provider.py` dòng 78-107): thứ tự except **đúng** — `AuthorizationException` →
+`TooManyRequestsException` → `ConnectionException` (transient, transport) →
+`DeepLException` (fallback, kiểm `http_status_code >= 500` mới transient, còn lại/ `None`
+permanent). Vì Python except khớp theo thứ tự viết và mọi exception con đều bắt trước lớp cha
+`DeepLException`, không có rủi ro exception cụ thể bị nuốt nhầm bởi nhánh chung.
+
+Grep xác nhận `ConnectionError` nằm trong `_TRANSIENT_ERRORS` của `src/utils/retry.py` (dòng 17) —
+fix này thực sự kích hoạt retry, không chỉ đổi tên exception suông.
+
+3 test mới (`test_deepl_translate_5xx_is_transient`, `_4xx_stays_permanent`,
+`_exception_without_status_code_stays_permanent`) — đọc trực tiếp, đúng 3 nhánh cần phủ (5xx / 4xx
+giữ permanent / `http_status_code=None` không crash `None >= 500`). **Đạt.**
+
+## 3. Ngưỡng ≥90% — `math.ceil()` đúng, tự tính tay ca biên
+
+`min_required = max(1, math.ceil(len(source_doc.units) * 0.9))`. Tự tính tay, không tin lại:
+
+- N=384 (Sourdough thật): `384*0.9=345.6` → `ceil=346` → `346/384=90.104...%` ✅ ≥90% thật sự (so
+  với `int()` cũ: 345/384=89.84%, SAI — đúng bug đã ghi nhận vòng 1/3).
+- N=866 (Bread-A-Global-History): `866*0.9=779.4` → `ceil=780` → `780/866=90.069...%` ✅.
+- N=11 (ca biên vòng 1/3 nêu): `11*0.9=9.9` → `ceil=10` → `10/11=90.9%` ✅ (so với `int()` cũ:
+  9/11=81.8%, sai nặng hơn).
+- N=1: `max(1, ceil(0.9))=max(1,1)=1` → 1/1=100% — vẫn đúng biên dưới (không chia cho 0, không âm).
+
+Test mới `test_check_epub_output_guard_threshold_uses_ceil_not_truncate` dùng đúng 345/384 unit thật
+của Sourdough (biên chính xác mà `int()` cũ sẽ PASS sai) — assert guard RAISE đúng ở ngưỡng mới.
+**Đạt.**
+
+## 4. Bug MỚI — JSON "trailing garbage" (`parse_epub_batch_response()`) — đánh giá kỹ theo yêu cầu PM (rủi ro tài chính)
+
+**Câu hỏi PM đặt ra**: cách sửa (phục hồi phần JSON hợp lệ trước vị trí lỗi khi `msg == "Extra
+data"`) có mở lỗ hổng nào không — cụ thể có thể "phục hồi nhầm" 1 JSON thực sự hỏng/bị cắt cụt
+thành có vẻ hợp lệ nhưng THIẾU DỮ LIỆU hay không?
+
+**Tự verify bằng thực nghiệm trực tiếp trên `json` module chuẩn** (không suy đoán):
+
+```python
+json.loads('{"0": "abc"}"')            # Extra data tại pos=12, text[:12] = '{"0": "abc"}' (ĐỦ, hợp lệ)
+json.loads('{"0": "abc"}')[:-1]... # (thiếu dấu đóng)  -> "Expecting ',' delimiter", KHÔNG PHẢI "Extra data"
+json.loads('{"0": "abc')             # (cắt cụt giữa string) -> "Unterminated string", KHÔNG PHẢI "Extra data"
+json.loads('{"0": "abc"} extra prose') # Extra data tại pos=13, text[:13] vẫn là JSON hợp lệ đầy đủ
+json.loads('{"0":"abc"}{"1":"def"}')  # Extra data — chỉ phục hồi được OBJECT ĐẦU, object thứ 2 mất
+```
+
+**Kết luận: an toàn, không mở lỗ hổng.** Cơ chế `json.JSONDecodeError` của Python module chuẩn chỉ
+raise `msg == "Extra data"` khi decoder đã **parse xong hoàn chỉnh, hợp lệ 1 giá trị JSON top-level**
+tại vị trí `[0:exc.pos)`, RỒI MỚI gặp thêm ký tự thừa sau đó — đây là tính chất nội tại của thuật
+toán decode (parse trước, phát hiện "extra" sau), không phải giả định của Dev. Một JSON thực sự
+CẮT CỤT/thiếu (do hết `max_tokens`, mất kết nối giữa chừng...) KHÔNG BAO GIỜ hoàn tất parse một giá
+trị top-level trước khi hết chuỗi — nó luôn dừng ở lỗi khác ("Expecting ',' delimiter",
+"Unterminated string", "Expecting value", "Expecting ':' delimiter"...), các lỗi này **không** khớp
+`msg == "Extra data"` nên rơi thẳng vào nhánh `else: return {}` cũ, không bị nới lỏng. Trường hợp
+biên duy nhất đáng chú ý (2 object JSON hợp lệ dính liền nhau) chỉ phục hồi được object ĐẦU — object
+thứ 2 bị mất hoàn toàn, nhưng hệ quả là các id trong đó bị coi "thiếu" và đi qua đúng đường xử lý
+"thiếu → retry lẻ" sẵn có (X4) — không phải "âm thầm chấp nhận dữ liệu sai/thiếu mà không ai biết",
+tương đương hệt như nếu response đó bị coi hỏng hoàn toàn.
+
+Đọc code (`src/core/prompt_builder.py::parse_epub_batch_response()`) khớp đúng phân tích trên:
+except cụ thể `exc.msg == "Extra data" and exc.pos > 0`, thử `json.loads(text[:exc.pos])`, nếu BẢN
+THÂN phần đó cũng lỗi (`except (JSONDecodeError, TypeError)`) mới trả `{}` — không có nhánh nào khác
+nới lỏng.
+
+**Golden fixture** (`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_trailing_garbage.json`
++ README): đọc trực tiếp — `raw_response_text` capture từ 1 lần gọi DeepSeek thật (chi phí
+`estimated_cost_usd=0.00045232`, khớp Protocol 5 mục 3, không phải chuỗi viết tay), tự chạy
+`json.loads()` thô trên đúng chuỗi này xác nhận **thật sự fail** với `"Extra data"` — không phải
+fixture đã bị "dọn sạch" trước khi lưu (test `test_raw_response_text_is_genuinely_malformed_before_parser_fix`
+xác nhận đúng tiền đề này). 3 test bổ sung (`test_epub_batch_prompt.py`) phủ thêm ca tổng hợp: 1 ký
+tự thừa, prose thừa nhiều id, và JSON cắt cụt THẬT SỰ vẫn phải trả `{}` — đọc trực tiếp xác nhận ca
+cắt cụt vẫn đúng hành vi cũ, không bị nới.
+
+**Kết luận mục 4: fix an toàn, không mở lỗ hổng tài chính mới, đủ chặt cho đúng 1 dạng lỗi cụ thể đã
+quan sát được, golden fixture đúng chuẩn Protocol 5.**
+
+## 5. Live E2E full-book Dev tự báo cáo (`actual_cost=0.07637542`, 384/384, `status=completed`)
+
+**Không tìm thấy bằng chứng nào lưu lại** cho lần chạy này:
+
+- `data/bb_translation.db` (đường dẫn DB thật của app, xác nhận qua `.env`/`config.py` —
+  KHÔNG PHẢI `data/outputs/bb_translation.db`, 1 file rỗng gây nhầm lẫn nằm cạnh đó) chỉ có **10
+  job, toàn bộ `file_type='pdf_digital'`, không có job EPUB nào** — job gần nhất `2026-09-09
+  05:54:27`. Không có bản ghi nào khớp cost `0.07637542`.
+- `data/outputs/` không có file `.epub` nào (`find` xác nhận).
+- Không có test nào trong suite gọi API thật cho `run_epub_job()` full-book (toàn bộ
+  `tests/integration/test_epub_translate_runner.py` dùng `_FakeEpubProvider`, không mạng thật).
+
+Nói cách khác: claim `actual_cost=$0.07637542`/384-384/`completed` **chỉ tồn tại dưới dạng text
+trong CHANGENOG**, không có artifact nào để đối chiếu trực tiếp — đúng loại rủi ro mà PM yêu cầu
+đánh giá kỹ ("đọc kỹ log/test Dev để lại và đánh giá độ tin cậy").
+
+**Không thể tái hiện chính xác con số đó** (Dev không giữ lại file/DB), nên thay vào đó Reviewer tự
+chạy 1 live E2E ĐỘC LẬP của riêng mình — quy mô nhỏ hơn nhiều (1 EPUB tự dựng, 2 unit, có sẵn
+`class="noindent"` để re-test đúng bug chính, ~0,03 cent USD) — qua ĐÚNG `JobOrchestrator.run_epub_job()`
+thật, provider DeepSeek thật, KHÔNG mock, DB/thư mục riêng (không đụng dữ liệu thật của app):
+
+```
+JobResult(status='completed', actual_cost=0.00030734, error_message=None)
+job.total_units: 2
+output OEBPS/chap0.xhtml:
+  <p class="noindent">Preheat the oven to 450F.</p>
+  <p class="noindent bb-vi" lang="vi">Làm nóng lò ở 230°C.</p>
+  <p class="noindent">Mix <strong>2 cups</strong> flour with 1<sup>1</sup>/<sub>3</sub> tsp salt.</p>
+  <p class="noindent bb-vi" lang="vi">Trộn <strong>240g</strong> bột mì với 1<sup>1</sup>/<sub>3</sub> tsp muối.</p>
+```
+
+Xác nhận: `class="noindent bb-vi"` nguyên vẹn (bug chính không tái phát trên pipeline ĐẦY ĐỦ, không
+chỉ script cô lập ở mục 1), `job.status='completed'` với chi phí thật > 0, nội dung tiếng Việt THẬT
+(không phải "VI:" giả — DeepSeek còn tự quy đổi đơn vị 450F→230°C, 2 cups→240g, đúng tinh thần
+"unit conversion fallback" mô tả trong Architecture.md), số `1<sup>1</sup>/<sub>3</sub>` giữ nguyên
+không gộp sai.
+
+**Đánh giá độ tin cậy claim gốc của Dev**: không thể xác nhận CHÍNH XÁC con số `$0.07637542`/384 unit
+Dev báo cáo (không còn artifact), nhưng **cơ chế mà claim đó mô tả (toàn bộ pipeline `run_epub_job()`
+chạy thật, real cost, real Vietnamese, guard PASS) đã được Reviewer tự chứng minh là THẬT SỰ hoạt
+động đúng**, độc lập, trên đúng code path — không chỉ tin lại lời khai. Coi đây là **corroborated
+bằng cơ chế, không corroborated bằng con số cụ thể** — ghi vào non-blocking, đề nghị QA (R6-03: bắt
+buộc ≥1 live E2E full-chain trước release, kiểm nội dung thật không chỉ status) tự chạy lại full-book
+1 lần nữa trước khi duyệt release, và Dev/PM nên giữ lại artifact (job DB thật hoặc ít nhất output
+file) cho lần chạy "live E2E" tiếp theo thay vì để trôi mất — không phải vì nghi ngờ Dev nói dối, mà
+vì 1 claim tài chính quan trọng không nên chỉ tồn tại dưới dạng text không thể kiểm chứng lại.
+
+## 6. Regression — tự chạy độc lập 2+ lần
+
+```
+uv run ruff check src/ tests/     → All checks passed! (đúng, chạy riêng)
+uv run pytest tests/ -q           → 682 passed, 0 failed  (lần 1, 90.90s)
+uv run pytest tests/ -q           → 682 passed, 0 failed  (lần 2, 90.70s, độc lập hoàn toàn)
+uv run pytest tests/test_rotated_text_overlay.py -q → 13 passed (chạy CÔ LẬP riêng, không nhiễu)
+```
+
+682 = 671 (baseline vòng 1/3, Reviewer tự xác nhận) + 11 test mới — khớp đúng con số Dev báo cáo.
+**Xác nhận: `test_rotated_text_overlay.py` KHÔNG còn fail** (Dev báo "hết cả fail cũ", tự verify độc
+lập 2 lần suite đầy đủ + 1 lần chạy cô lập riêng file này — không phải hiện tượng tạm thời biến mất,
+vì đã lặp lại đủ số lần để loại trừ flake môi trường).
+
+## R5-04 checklist
+
+**External contract verified against real source**:
+- `deepl_provider.py` (nhánh 5xx mới, mục 2 ở trên): **YES** — Reviewer tự đọc trực tiếp source
+  `deepl==1.32.0` đã cài trong `.venv` (`exceptions.py`, `translator.py::_raise_for_status`), không
+  chỉ tin lại comment code Dev viết (dù comment khớp 100% với source thật).
+- `parse_epub_batch_response()` (mục 4): **N/A cho phần "external SDK contract"** (đây là app tự
+  parse JSON, không gọi SDK bên thứ 3) nhưng **YES cho phần "Extra data luôn đi kèm JSON hợp lệ đã
+  parse xong"** — verify bằng thực nghiệm trực tiếp `json` module chuẩn của Python (stdlib, không
+  phải "external tool" theo nghĩa Protocol 5, nhưng vẫn tự chạy thử thay vì suy đoán).
+- Golden fixture trailing-garbage: **YES** — response thật từ DeepSeek, Protocol 5 mục 3, chi phí
+  thật > 0 là bằng chứng.
+
+## Non-blocking suggestions
+
+1. **Cập nhật Architecture.md §6.20.11 mục 7 (Z1)**: ghi "chỉ có đúng 1 file EPUB thật" đã STALE —
+   `data/uploads/sample2_Bread-A-Global-History.epub` (866 unit, có bảng thật, mtime SAU ngày ghi
+   Z1) đã có sẵn trong dự án và đã tự verify hoạt động đúng ở mục 1 trên. Nên chính thức đưa vào làm
+   fixture thường trực (test/golden fixture) thay vì chỉ nằm im trong `data/uploads/`.
+2. **Giữ lại artifact cho live E2E tài chính quan trọng**: xem mục 5 — đề nghị 1 quy ước nhỏ (không
+   cần Architecture.md, chỉ là thói quen làm việc): mọi lần chạy `run_epub_job()`/`run_job()` thật
+   để verify 1 fix quan trọng nên giữ lại output file + note job id trong DB thật (hoặc chụp lại
+   trước khi dọn), để Reviewer/QA vòng sau đối chiếu được số liệu chính xác, không chỉ tin text.
+3. **3 điểm "chưa rõ ràng" Dev nêu ở entry CHANGELOG vòng 1/3** (E2/E3 mâu thuẫn nội bộ glossary lọc,
+   thiết kế `td`/`th` guard, Y4 thiếu WS broadcast riêng) — đã được Reviewer vòng 1/3 đánh giá đồng ý
+   (mục I, "Điểm đã tự verify ĐÚNG"), không cần lặp lại ở vòng này; ghi chú lại đây chỉ để PM biết
+   những điểm này vẫn còn là quyết định mở (đặc biệt điểm 2 — nay đã có dữ liệu thật để kiểm chứng
+   thiết kế `td`/`th`, xem mục 1 ở trên, kết quả ĐÚNG).
+
+## Kết luận US-22 Bước 2/3 — VÒNG 2/3
+
+**APPROVE.**
+
+- **3 điểm blocking/cần sửa của vòng 1/3 đều đã sửa đúng**, tự verify độc lập (không tin lại lời
+  Dev) bằng: đọc trực tiếp source bs4 4.15.0 + `deepl` 1.32.0 đã cài, tự viết script live-verify
+  riêng chạy trên CẢ 2 file EPUB thật hiện có trong dự án (bao gồm 1 file trước đây bị bỏ sót, có
+  bảng thật — xác nhận thêm nhánh `td`/`th` trước đây "chưa kiểm chứng" nay đã đúng trên dữ liệu
+  thật), tính tay ca biên ngưỡng 90%.
+- **Bug MỚI Dev tự phát hiện (JSON trailing garbage)** — đánh giá kỹ theo đúng yêu cầu PM (rủi ro
+  tài chính): fix AN TOÀN, verify bằng thực nghiệm trực tiếp cơ chế `JSONDecodeError` của Python,
+  không có đường nào "phục hồi nhầm" JSON thực sự thiếu/cắt cụt thành dữ liệu giả hợp lệ. Golden
+  fixture đúng chuẩn Protocol 5 mục 3.
+- **Live E2E full-book Dev báo cáo**: không còn artifact để đối chiếu con số chính xác — Reviewer tự
+  chạy 1 live E2E độc lập (quy mô nhỏ, chi phí thật ~0,03 cent) qua đúng `run_epub_job()` để xác nhận
+  CƠ CHẾ hoạt động đúng thật sự (không chỉ tin lời khai) — ghi non-blocking để QA re-run full-book
+  trước release theo đúng R6-03, và đề nghị PM/Dev giữ artifact cho các lần verify tài chính sau này.
+- Regression: 682/682 pass, chạy độc lập 2 lần đầy đủ + 1 lần cô lập riêng `test_rotated_text_overlay.py`
+  — xác nhận hết fail cũ, không phải hiện tượng tạm thời.
+
+**⚠️ Về đếm vòng (xem ghi chú đầu section)**: Reviewer đánh giá đây là **VÒNG 2/3 thật sự** (không
+phải vòng 3/3 như brief PM ghi), dựa trên bằng chứng trực tiếp từ chính 2 file handoff chuẩn của dự
+án (`review-report.md` section trước tự ghi "VÒNG 1/3", `CHANGELOG.md` entry Dev tự ghi "vòng 2/3").
+Vì kết quả là **APPROVE**, sự khác biệt về số vòng ở đây không dẫn tới hệ quả xấu ngay lập tức (không
+cần escalate dù đếm theo cách nào) — nhưng đề nghị PM xác nhận lại cách đếm trước khi cập nhật
+`project_state.json`/báo cáo circuit breaker, để tránh lệch số cho các tăng lượng sau.
+
+**Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng cho US-22 Bước 2/3 (theo cách đếm của Reviewer) —
+KHÔNG PHẢI 3/3.**
+
+---

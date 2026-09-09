@@ -30,6 +30,60 @@ from src.core.config import get_settings
 from src.models.job import Job
 
 
+def _build_valid_epub(path: Path) -> Path:
+    """1 EPUB toi thieu nhung hop le ve OCF (mimetype STORED dau file,
+    container.xml + OPF + spine dung), khac synthetic `book.epub` cua
+    `test_estimate_rejects_malformed_epub()` (thieu rootfile). Cung
+    khuon voi `_build_minimal_epub()` trong tests/test_epub_document.py,
+    duplicate co chu dich — file test nay tu quan ly fixture rieng, dung
+    convention da co cua module (xem docstring dau file)."""
+    import zipfile
+
+    container_xml = (
+        '<?xml version="1.0"?>\n'
+        '<container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+        '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+        'media-type="application/oebps-package+xml"/></rootfiles></container>'
+    )
+    opf = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" '
+        'unique-identifier="bookid">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:title>Test Book</dc:title><dc:language>en</dc:language>"
+        '<dc:identifier id="bookid">urn:uuid:test-book</dc:identifier>'
+        "</metadata>"
+        '<manifest><item id="chap1" href="chap1.xhtml" '
+        'media-type="application/xhtml+xml"/>'
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>'
+        '<spine toc="ncx"><itemref idref="chap1"/></spine></package>'
+    )
+    ncx = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+        '<head><meta name="dtb:uid" content="urn:uuid:test-book"/></head>'
+        "<docTitle><text>Test Book</text></docTitle>"
+        '<navMap><navPoint id="np1" playOrder="1"><navLabel><text>Chapter 1</text>'
+        '</navLabel><content src="chap1.xhtml"/></navPoint></navMap></ncx>'
+    )
+    xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<head><title>Chapter 1</title></head>"
+        "<body><p>2 cups flour, 1 tsp salt, 350F oven.</p></body></html>"
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        mimetype_info = zipfile.ZipInfo("mimetype")
+        mimetype_info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(mimetype_info, "application/epub+zip")
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/toc.ncx", ncx)
+        zf.writestr("OEBPS/chap1.xhtml", xhtml)
+    return path
+
+
 def _make_pdf_bytes(n_pages: int = 3) -> bytes:
     doc = fitz.open()
     for i in range(n_pages):
@@ -142,9 +196,12 @@ def test_estimate_unknown_file_id_returns_404(client: TestClient) -> None:
     assert _job_row_count() == 0
 
 
-def test_estimate_rejects_epub(client: TestClient, tmp_path) -> None:
-    # A minimal valid EPUB is annoying to synthesize; reuse detect_file_type's
-    # own contract instead — upload a .epub with the zip magic bytes.
+def test_estimate_rejects_malformed_epub(client: TestClient, tmp_path) -> None:
+    """Architecture.md 6.20.6 (US-22 buoc 2/3): EPUB khong con bi chan cung o
+    day nua (bo 2 nhanh `if file_type == "epub": raise 400` cu) — nhung 1
+    EPUB khong doc duoc (thieu `<rootfile full-path=...>` trong
+    container.xml) van phai tra 400 qua `EpubParseError` ->
+    `_estimate_translation_cost_or_400()`, khong phai 500 tho."""
     import zipfile
 
     epub_path = tmp_path / "book.epub"
@@ -162,6 +219,29 @@ def test_estimate_rejects_epub(client: TestClient, tmp_path) -> None:
 
     response = client.post("/api/estimate", json={"file_id": file_id, "provider": "ollama"})
     assert response.status_code == 400
+    assert _job_row_count() == 0
+
+
+def test_estimate_accepts_valid_epub(client: TestClient, tmp_path) -> None:
+    """Architecture.md 6.20.6: a well-formed EPUB now estimates successfully
+    (no total_pages, but total_units + a real, non-zero cost estimate) —
+    this is the exact case the 2 hard-coded 400s used to block outright."""
+    epub_path = _build_valid_epub(tmp_path / "book.epub")
+
+    upload_response = client.post(
+        "/api/upload",
+        files={"file": ("book.epub", epub_path.read_bytes(), "application/epub+zip")},
+    )
+    assert upload_response.status_code == 200
+    assert upload_response.json()["page_count"] is None
+    file_id = upload_response.json()["file_id"]
+
+    response = client.post("/api/estimate", json={"file_id": file_id, "provider": "ollama"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_pages"] is None
+    assert body["total_units"] == 1
+    assert body["estimated_input_tokens"] > 0
     assert _job_row_count() == 0
 
 

@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-09-09T05:12:56.305220+00:00",
+  "source_book": "9d436d7b-e91e-4198-a12b-a2150f7dd362_Baking with Sourdough - Sara Pitzer.epub",
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "unit_ids_in_order": [
+    "ops/xhtml/chapter01.html#16",
+    "ops/xhtml/chapter01.html#17",
+    "ops/xhtml/chapter01.html#18",
+    "ops/xhtml/chapter01.html#87",
+    "ops/xhtml/chapter01.html#288"
+  ],
+  "local_id_to_unit_id": {
+    "0": "ops/xhtml/chapter01.html#16",
+    "1": "ops/xhtml/chapter01.html#17",
+    "2": "ops/xhtml/chapter01.html#18",
+    "3": "ops/xhtml/chapter01.html#87",
+    "4": "ops/xhtml/chapter01.html#288"
+  },
+  "request_payload": [
+    {
+      "id": "0",
+      "html": "<a id=\"page_4\"/>STARTING FROM SCRATCH"
+    },
+    {
+      "id": "1",
+      "html": "<strong>4 cups unbleached white flour</strong><br/><strong>2 teaspoons salt</strong><br/><strong>2 tablespoons honey</strong><br/><strong>4 cups potato water</strong>"
+    },
+    {
+      "id": "2",
+      "html": "Mix all the ingredients together in a large, non-metal container. The container should be large enough to allow the mixture to more than double in bulk. Let the mixture stand, loosely covered, in a warm place (about 85°F is ideal). In two or three days either the mixture will begin to froth, expand, and smell sour, or it will mold and smell worse. If the first happens, you have captured wild yeast and created your own starter. Let it season a couple of days in the refrigerator and then try baking with it to see if you like its flavor. (You may not. Some yeasts will leaven but they taste terrible.)"
+    },
+    {
+      "id": "3",
+      "html": "<strong><sup>1</sup>/<sub>3</sub> cup soy grits</strong>"
+    },
+    {
+      "id": "4",
+      "html": "<strong>1<sup>1</sup>/<sub>3</sub> cups unbleached white flour</strong>"
+    }
+  ],
+  "system_prompt_marker_check": true,
+  "raw_response_text": "{\"0\": \"<a id=\\\"page_4\\\"/>BẮT ĐẦU TỪ CON SỐ KHÔNG\", \"1\": \"<strong>4 cups bột mì trắng chưa tẩy trắng</strong><br/><strong>2 teaspoons muối</strong><br/><strong>2 tablespoons mật ong</strong><br/><strong>4 cups nước khoai tây</strong>\", \"2\": \"Trộn tất cả các nguyên liệu lại với nhau trong một hộp đựng lớn, không làm bằng kim loại. Hộp đựng phải đủ lớn để hỗn hợp có thể nở ra gấp đôi thể tích. Để hỗn hợp đứng yên, đậy nắp lỏng, ở nơi ấm áp (khoảng 85°F là lý tưởng). Trong hai hoặc ba ngày, hỗn hợp sẽ bắt đầu sủi bọt, nở ra và có mùi chua, hoặc nó sẽ bị mốc và có mùi tệ hơn. Nếu điều đầu tiên xảy ra, bạn đã thu được men tự nhiên và tạo ra men cái của riêng mình. Hãy để nó lên men trong vài ngày trong tủ lạnh rồi thử nướng bánh với nó để xem bạn có thích hương vị của nó không. (Có thể bạn sẽ không thích. Một số loại men có thể làm nở bánh nhưng chúng có vị rất tệ.)\", \"3\": \"<strong><sup>1</sup>/<sub>3</sub> cup hạt đậu nành nghiền</strong>\", \"4\": \"<strong>1<sup>1</sup>/<sub>3</sub> cups bột mì trắng chưa tẩy trắng</strong>\"}",
+  "input_tokens": 1456,
+  "output_tokens": 459,
+  "estimated_cost_usd": 0.00062326,
+  "provider_name_reported": "deepseek"
+}

@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-09-09T06:26:33.465740+00:00",
+  "source_book": "9d436d7b-e91e-4198-a12b-a2150f7dd362_Baking with Sourdough - Sara Pitzer.epub",
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "unit_ids_in_order": [
+    "ops/xhtml/chapter01.html#13"
+  ],
+  "local_id_to_unit_id": {
+    "0": "ops/xhtml/chapter01.html#13"
+  },
+  "request_payload": [
+    {
+      "id": "0",
+      "html": "Two simpler ways of creating a starter are now possible. One is to use commercial yeast, growing it in flour and water and essentially letting it become wild again; the other is to buy a culture from long established vendor. Specialty and natural food stores often sell them, or you could try looking online. Sourdoughs International (208-382-4828; <a class=\"nounder\" href=\"http://www.sourdo.com\">www.sourdo.com</a>) in Cascade, Idaho, carries starters from around the world. King Arthur Flour (800-827-6836; <a class=\"nounder\" href=\"http://www. kingarthurflour.com\">www. kingarthurflour.com</a>) carries French and New England sourdough starters, and for taste of authentic Oregon Trail sourdough, contact the friends of the late Carl Griffith, an enthusiast who shared his family’s starter throughout his lifetime (<a class=\"nounder\" href=\"http://home.att. net/~carlsfriends;CarlsFriends@att.net\">http://home.att. net/~carlsfriends;CarlsFriends@att.net</a>)."
+    }
+  ],
+  "raw_response_text": "{\"0\": \"Hai cách đơn giản hơn để tạo ra một loại men khởi đầu (starter) hiện nay là có thể thực hiện được. Một là sử dụng men thương mại, nuôi nó trong bột mì và nước, và về cơ bản để nó trở lại trạng thái hoang dã; cách còn lại là mua một nền văn hóa men từ một nhà cung cấp lâu đời. Các cửa hàng thực phẩm đặc sản và tự nhiên thường bán chúng, hoặc bạn có thể thử tìm kiếm trực tuyến. Sourdoughs International (208-382-4828; <a class=\\\"nounder\\\" href=\\\"http://www.sourdo.com\\\">www.sourdo.com</a>) ở Cascade, Idaho, cung cấp các loại men khởi đầu từ khắp nơi trên thế giới. King Arthur Flour (800-827-6836; <a class=\\\"nounder\\\" href=\\\"http://www. kingarthurflour.com\\\">www. kingarthurflour.com</a>) cung cấp các loại men khởi đầu chua kiểu Pháp và New England, và để có hương vị đích thực của men chua Oregon Trail, hãy liên hệ với bạn bè của cố Carl Griffith, một người đam mê đã chia sẻ men khởi đầu của gia đình ông trong suốt cuộc đời của mình (<a class=\\\"nounder\\\" href=\\\"http://home.att. net/~carlsfriends;CarlsFriends@att.net\\\">http://home.att. net/~carlsfriends;CarlsFriends@att.net</a>).\"}\"",
+  "json_decode_error_before_fix": "Extra data at pos 1098",
+  "system_prompt_marker_check": true,
+  "input_tokens": 796,
+  "output_tokens": 420,
+  "estimated_cost_usd": 0.00045232000000000003,
+  "parsed_after_trailing_garbage_fix": {
+    "0": "Hai cách đơn giản hơn để tạo ra một loại men khởi đầu (starter) hiện nay là có thể thực hiện được. Một là sử dụng men thương mại, nuôi nó trong bột mì và nước, và về cơ bản để nó trở lại trạng thái hoang dã; cách còn lại là mua một nền văn hóa men từ một nhà cung cấp lâu đời. Các cửa hàng thực phẩm đặc sản và tự nhiên thường bán chúng, hoặc bạn có thể thử tìm kiếm trực tuyến. Sourdoughs International (208-382-4828; <a class=\"nounder\" href=\"http://www.sourdo.com\">www.sourdo.com</a>) ở Cascade, Idaho, cung cấp các loại men khởi đầu từ khắp nơi trên thế giới. King Arthur Flour (800-827-6836; <a class=\"nounder\" href=\"http://www. kingarthurflour.com\">www. kingarthurflour.com</a>) cung cấp các loại men khởi đầu chua kiểu Pháp và New England, và để có hương vị đích thực của men chua Oregon Trail, hãy liên hệ với bạn bè của cố Carl Griffith, một người đam mê đã chia sẻ men khởi đầu của gia đình ông trong suốt cuộc đời của mình (<a class=\"nounder\" href=\"http://home.att. net/~carlsfriends;CarlsFriends@att.net\">http://home.att. net/~carlsfriends;CarlsFriends@att.net</a>)."
+  },
+  "note": "Bat gap that su khi chay live E2E full-book cho US-22 Buoc 2/3 (khong nam trong review-report goc): raw_response_text la 1 JSON object HOP LE nhung co 1 dau `\"` THUA ngay sau dau `}` dong (trailing garbage) -- json.loads() that bai voi loi 'Extra data'. Tai hien DETERMINISTIC 2 lan lien tiep qua run_job() day du, va lan thu 3 (capture fixture nay) khi goi rieng le unit nay -- khong phai flake ngau nhien. parse_epub_batch_response() da sua de thu parse lai phan JSON truoc vi tri loi 'Extra data' thay vi coi ca phan hoi la hong hoan toan."
+}

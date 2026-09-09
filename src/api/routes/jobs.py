@@ -31,7 +31,12 @@ from src.api.deps import SessionDep
 from src.api.routes.upload import UploadNotFoundError, resolve_upload
 from src.api.websocket import connection_manager
 from src.core.config import Settings, get_effective_settings
-from src.core.cost_gate import check_cap, estimate_translation_cost, gate_error_detail
+from src.core.cost_gate import (
+    DetailedCostEstimate,
+    check_cap,
+    estimate_translation_cost,
+    gate_error_detail,
+)
 from src.core.job_orchestrator import BatchOrchestrator, JobOrchestrator
 from src.core.ocr_warning import build_ocr_warning
 from src.core.term_extraction_service import TermExtractionSourceError, extract_and_store_terms
@@ -41,6 +46,7 @@ from src.models.database import get_session_factory
 from src.models.job import Job
 from src.models.overflow import OverflowReport
 from src.models.suggested_term import SuggestedTerm
+from src.services.epub_document import EpubDrmError, EpubParseError
 from src.services.mineru_runner import MinerURunner
 from src.services.pdf2zh_service_map import Pdf2zhServiceMapper, UnsupportedForPdfPipelineError
 from src.services.provider_factory import ProviderConfigError, ProviderFactory, UnknownProviderError
@@ -155,6 +161,10 @@ class JobDetail(BaseModel):
     # US-19 (Architecture.md 6.17.3) — backward-compatible, tat ca optional
     # (cung ky luat voi ocr_confidence/cancel_requested o tren).
     total_pages: int | None = None
+    # Architecture.md 6.20.6 (US-22 buoc 2/3) — backward-compatible, optional
+    # cung ky luat voi total_pages o tren. NULL cho moi job PDF, co gia tri
+    # cho job EPUB translate.
+    total_units: int | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     duration_seconds: float | None = None
@@ -189,7 +199,11 @@ class CancelResponse(BaseModel):
 
 
 class CostEstimateResponse(BaseModel):
-    total_pages: int
+    # Architecture.md 6.20.6: NULL cho EPUB (dinh dang reflow, khong co
+    # "trang" — bia so gia se lap lai chinh loai loi da sinh ra Bug #5).
+    total_pages: int | None
+    # MOI (6.20.6) — dai luong tuong duong cho EPUB. NULL cho PDF.
+    total_units: int | None = None
     estimated_input_tokens: int
     estimated_output_tokens: int
     estimated_cost_usd: float
@@ -278,6 +292,7 @@ def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
         ocr_warning=ocr_warning,
         cancel_requested=job.cancel_requested,
         total_pages=job.total_pages,
+        total_units=job.total_units,
         started_at=job.started_at,
         finished_at=job.finished_at,
         duration_seconds=duration_seconds,
@@ -343,6 +358,38 @@ def _resolve_provider_or_400(provider_name: str, settings: Settings):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+async def _estimate_translation_cost_or_400(
+    session: SessionDep,
+    file_path: str,
+    provider,
+    settings: Settings,
+    batch_id: str | None,
+    file_type: str,
+):
+    """Thin wrapper around `estimate_translation_cost()` (Architecture.md
+    6.20.6) that turns a malformed/DRM'd EPUB into the SAME HTTP 400 contract
+    every other reject path in this module already follows, instead of a raw
+    500 — `EpubDocument.load()` raises `EpubDrmError`/`EpubParseError` for
+    exactly those cases (§6.20.5 DRM check), and nothing upstream of this
+    call site catches them otherwise.
+    """
+    try:
+        return await estimate_translation_cost(
+            Path(file_path),
+            provider,
+            session,
+            batch_id,
+            settings.max_glossary_entries_in_prompt,
+            file_type=file_type,
+        )
+    except EpubDrmError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EpubParseError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"File EPUB khong doc duoc: {exc}"
+        ) from exc
+
+
 async def _enforce_cost_gate(
     session: SessionDep,
     file_path: str,
@@ -351,6 +398,7 @@ async def _enforce_cost_gate(
     batch_id: str | None,
     confirm_cost: bool,
     scope: str,
+    file_type: str = "pdf_digital",
     job_cap_override: float | None = None,
 ):
     """Architecture.md 6.11.4 Lop 2 pre-flight gate — call BEFORE creating any
@@ -359,12 +407,8 @@ async def _enforce_cost_gate(
     or the caller explicitly opted in with `confirm_cost=True` for this one
     call (RC-3 fix: no cap existed anywhere before this).
     """
-    detailed = await estimate_translation_cost(
-        Path(file_path),
-        provider,
-        session,
-        batch_id,
-        settings.max_glossary_entries_in_prompt,
+    detailed = await _estimate_translation_cost_or_400(
+        session, file_path, provider, settings, batch_id, file_type
     )
     cap = job_cap_override if job_cap_override is not None else settings.max_cost_per_job_usd
     result = check_cap(detailed.estimate, cap, settings)
@@ -571,6 +615,7 @@ async def create_job(
             request.glossary_project_id,
             request.confirm_cost,
             scope="job nay",
+            file_type=upload.file_type,
         )
 
     batch = await _resolve_batch(
@@ -592,6 +637,10 @@ async def create_job(
         if request.job_type == "parse_only"
         else None,
         total_pages=upload.page_count,
+        # Architecture.md 6.20.6: total_units chi co y nghia khi job_type ==
+        # "translate" (cost_estimate chi duoc tinh o nhanh do) VA file_type ==
+        # "epub" — cost_estimate.total_units la None cho PDF, dung nguyen.
+        total_units=cost_estimate.total_units if request.job_type == "translate" else None,
         model=provider_name,
         estimated_cost=cost_estimate.estimate.estimated_cost_usd
         if request.job_type == "translate"
@@ -864,12 +913,15 @@ async def get_cost_estimate(job_id: str, session: SessionDep) -> CostEstimateRes
     job = await session.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job khong ton tai")
+    # Architecture.md 6.20.6: EPUB hop le khi co total_units (khong bao gio
+    # co total_pages — dinh dang reflow, xem CostEstimateResponse). PDF van
+    # doi hoi total_pages nhu cu.
     if job.file_type == "epub":
-        raise HTTPException(
-            status_code=400,
-            detail="Uoc tinh chi phi cho EPUB chua duoc ho tro (pipeline EPUB chua implement)",
-        )
-    if job.total_pages is None:
+        if job.total_units is None:
+            raise HTTPException(
+                status_code=400, detail="Job chua co total_units, khong the uoc tinh"
+            )
+    elif job.total_pages is None:
         raise HTTPException(status_code=400, detail="Job chua co total_pages, khong the uoc tinh")
 
     settings = await get_effective_settings(session)
@@ -877,12 +929,8 @@ async def get_cost_estimate(job_id: str, session: SessionDep) -> CostEstimateRes
 
     # Architecture.md 6.11.4 Lop 1 point 1: this endpoint must route through
     # estimate_job_cost_v2(), not the deprecated estimate_job_cost() (RC-2).
-    detailed = await estimate_translation_cost(
-        Path(job.file_path),
-        provider,
-        session,
-        job.batch_id,
-        settings.max_glossary_entries_in_prompt,
+    detailed = await _estimate_translation_cost_or_400(
+        session, job.file_path, provider, settings, job.batch_id, job.file_type
     )
     estimate = detailed.estimate
 
@@ -892,6 +940,7 @@ async def get_cost_estimate(job_id: str, session: SessionDep) -> CostEstimateRes
 
     return CostEstimateResponse(
         total_pages=job.total_pages,
+        total_units=detailed.total_units,
         estimated_input_tokens=estimate.estimated_input_tokens,
         estimated_output_tokens=estimate.estimated_output_tokens,
         estimated_cost_usd=estimate.estimated_cost_usd,
@@ -914,12 +963,9 @@ async def estimate_cost_without_job(
     except UploadNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if upload.file_type == "epub":
-        raise HTTPException(
-            status_code=400,
-            detail="Uoc tinh chi phi cho EPUB chua duoc ho tro (pipeline EPUB chua implement)",
-        )
-    if upload.page_count is None:
+    # Architecture.md 6.20.6: EPUB hop le khong can page_count (luon NULL cho
+    # EPUB, xem upload.py) — chi PDF moi doi hoi page_count.
+    if upload.file_type != "epub" and upload.page_count is None:
         raise HTTPException(
             status_code=400, detail="Khong xac dinh duoc so trang cua file, khong the uoc tinh"
         )
@@ -930,17 +976,19 @@ async def estimate_cost_without_job(
 
     # Architecture.md 6.11.4 Lop 1 point 1: route through estimate_job_cost_v2()
     # (RC-2 fix), not the deprecated page-count-only estimate_job_cost().
-    detailed = await estimate_translation_cost(
-        Path(upload.file_path),
-        provider,
+    detailed = await _estimate_translation_cost_or_400(
         session,
+        upload.file_path,
+        provider,
+        settings,
         request.glossary_project_id,
-        settings.max_glossary_entries_in_prompt,
+        upload.file_type,
     )
     estimate = detailed.estimate
 
     return CostEstimateResponse(
         total_pages=upload.page_count,
+        total_units=detailed.total_units,
         estimated_input_tokens=estimate.estimated_input_tokens,
         estimated_output_tokens=estimate.estimated_output_tokens,
         estimated_cost_usd=estimate.estimated_cost_usd,
@@ -977,6 +1025,12 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
         await _reject_deepl_for_pdf(request.job_type, provider_name, upload.file_type)
         _reject_epub_parse_only(request.job_type, upload.file_type)
 
+    # dict[file_id, DetailedCostEstimate] — chi duoc dien khi job_type ==
+    # "translate" (nhanh duoi). Job creation loop (cuoi ham) doc no de biet
+    # `total_units` cho EPUB (None cho moi upload khi parse_only, hoac khi
+    # upload la PDF).
+    estimates_by_file_id: dict[str, DetailedCostEstimate] = {}
+
     if request.job_type == "translate":
         # Architecture.md 6.11.4 Lop 2 + 6.11.7 #1: "max_concurrent_files=3
         # gioi han file, KHONG gioi han tien" was flagged as an open hole —
@@ -985,14 +1039,16 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
         provider = _resolve_provider_or_400(provider_name, settings)
         total_estimated = 0.0
         for upload in uploads:
-            detailed = await estimate_translation_cost(
-                Path(upload.file_path),
-                provider,
+            detailed = await _estimate_translation_cost_or_400(
                 session,
+                upload.file_path,
+                provider,
+                settings,
                 request.glossary_project_id,
-                settings.max_glossary_entries_in_prompt,
+                upload.file_type,
             )
             total_estimated += detailed.estimate.estimated_cost_usd
+            estimates_by_file_id[upload.file_id] = detailed
 
         batch_cap = settings.max_cost_per_batch_usd
         batch_exceeded = settings.cost_cap_enabled and total_estimated > batch_cap
@@ -1039,6 +1095,14 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
             file_type=upload.file_type,
             job_type=request.job_type,
             total_pages=upload.page_count,
+            # Architecture.md 6.20.6: chi co gia tri khi job_type=="translate"
+            # VA file la EPUB — `estimates_by_file_id` rong o moi truong hop
+            # khac (`.get()` tra None), cung nghia voi `create_job()` o tren.
+            total_units=(
+                estimates_by_file_id[upload.file_id].total_units
+                if upload.file_id in estimates_by_file_id
+                else None
+            ),
             model=provider_name,
         )
         job.status = "queued"

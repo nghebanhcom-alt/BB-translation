@@ -31,6 +31,8 @@ split from Architecture.md 6.6.2 R1/R3:
   (root-cause investigation, 2026-09-05).
 """
 
+import json
+import re
 from pathlib import Path
 
 from src.core.glossary_manager import GlossaryManager
@@ -76,10 +78,28 @@ _TYPOGRAPHY_RULES = (
 
 
 async def build_system_prompt(
-    glossary_manager: GlossaryManager, project_id: str | None = None
+    glossary_manager: GlossaryManager,
+    project_id: str | None = None,
+    only_terms_present_in: str | None = None,
+    max_glossary_entries: int = 80,
 ) -> str:
-    """Trả về full system prompt string ghép glossary + unit conversion + style rules."""
-    glossary_snippet = await glossary_manager.build_prompt_snippet(project_id=project_id)
+    """Trả về full system prompt string ghép glossary + unit conversion + style rules.
+
+    `only_terms_present_in`/`max_glossary_entries` mirror `build_prompt_text()`'s
+    glossary filter (Architecture.md 6.6.5/6.20.9 sợi dây thứ 4): khi được truyền
+    (full EN text của tài liệu), glossary chỉ giữ lại entry thực sự xuất hiện
+    trong `only_terms_present_in`, cap ở `max_glossary_entries`. Mặc định
+    `None` giữ nguyên hành vi CŨ (glossary KHÔNG lọc) cho các caller hiện có
+    (`overlay_rotated_text`'s `glossary_prompt`) — chỉ EPUB (`run_epub_job()`)
+    truyền `only_terms_present_in` để khớp đúng cách `cost_gate.py` đã lọc khi
+    ước chi phí Lớp 2 (§6.11.6: prompt thật và prompt dùng để ước chi phí phải
+    cùng một tập glossary, nếu không Lớp 2 có thể ước THẤP hơn thật).
+    """
+    glossary_snippet = await glossary_manager.build_prompt_snippet(
+        project_id=project_id,
+        only_terms_present_in=only_terms_present_in,
+        max_entries=max_glossary_entries,
+    )
     if not glossary_snippet:
         glossary_snippet = "(Khong co glossary entry nao duoc cau hinh.)"
 
@@ -356,3 +376,144 @@ async def write_babeldoc_prompt_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+# === EPUB batch JSON contract app<->LLM (Architecture.md 6.20.12 X4) ===
+#
+# Neither pdf2zh's `${text}` template NOR babeldoc's own per-paragraph JSON
+# contract applies here — US-22 (buoc 2/3) calls `provider.translate()`
+# DIRECTLY (Architecture.md 6.20.4: "khong dung bilingual_book_maker o bat ky
+# dau"), and `provider.translate(text, glossary_prompt, src, tgt)`'s
+# signature is a FIXED cross-provider interface (Increment 3, 5 providers) —
+# it CANNOT be changed just for EPUB. So the JSON contract below lives
+# ENTIRELY inside the `glossary_prompt`/`system_prompt` argument; the actual
+# payload (the JSON array of units to translate) goes into `text`, which every
+# provider prefixes with "Translate from {src} to {tgt}:\n\n" — harmless, and
+# arguably helpful since it states the task plainly.
+#
+# `build_epub_batch_prompt()` does NOT call `build_system_prompt()` itself —
+# the caller (Job Orchestrator) already has ITS OWN `glossary_prompt` (from
+# `build_system_prompt()`, filtered to this EPUB's `full_text()`) and passes
+# it straight through UNCHANGED, per Architecture.md 6.20.12 X4: "glossary_prompt
+# hien co — khong sua mot chu".
+
+#: Literal marker a test can `in`-check for in the exact string handed to
+#: `provider.translate()` (R6-02, Architecture.md 6.20.9 sợi dây thứ 4) —
+#: proof the REAL system_prompt sent for an EPUB chunk came from THIS
+#: function, not the bare `build_system_prompt()` (which has no JSON
+#: instruction at all — verified: none of prompt_builder.py's other "json"
+#: hits are app-authored content, they're comments describing babeldoc's OWN
+#: contract).
+EPUB_BATCH_CONTRACT_MARKER = "BB-EPUB-JSON-CONTRACT-X4"
+
+_EPUB_BATCH_CONTRACT = f"""
+{EPUB_BATCH_CONTRACT_MARKER}
+Ban se nhan 1 JSON array cac doi tuong dang {{"id": "<so>", "html": "<doan HTML can dich>"}}.
+Tra ve DUY NHAT 1 JSON object dang {{"<id>": "<ban dich tieng Viet>", ...}}:
+1. Object tra ve phai co DAY DU va DUNG moi "id" da nhan duoc trong array dau vao — khong duoc \
+thieu id nao, khong duoc them id la khong co trong dau vao.
+2. TUYET DOI KHONG boc JSON trong markdown code fence (vi du ```json), va KHONG kem theo bat ky \
+loi dan/giai thich nao khac ngoai chinh JSON object do.
+3. Chi dich phan TEXT; GIU NGUYEN tung the HTML inline sau day dung nguyen ten, dung so luong va \
+dung vi tri tuong doi so voi ban goc: strong, em, b, i, sup, sub, br, a, span, small.
+4. TUYET DOI KHONG doi, khong lam tron, khong chuyen doi bat ky CON SO nao trong "html". The \
+<sup>/<sub> (dung cho phan so, vi du <sup>1</sup>/<sub>3</sub>) phai giu nguyen la <sup>/<sub>, \
+khong duoc rut gon/gop lai.
+5. KHONG dich noi dung nam trong the <code> hoac <pre> — giu nguyen nhu ban goc.
+6. Neu 1 muc khong the dich duoc, tra ve NGUYEN VAN "html" cua chinh muc do cho dung "id" ay — \
+TUYET DOI KHONG tra ve chuoi rong cho bat ky "id" nao.
+""".strip()
+
+_EPUB_BATCH_ONE_SHOT_EXAMPLE = (
+    "Vi du (co the inline, con so, va phan so <sup>/<sub>):\n"
+    'Dau vao: [{"id": "0", "html": "<strong>2 cups</strong> flour, '
+    '1<sup>1</sup>/<sub>3</sub> tsp salt, bake at 350F."}]\n'
+    'Dau ra: {"0": "<strong>2 cups</strong> bot mi, '
+    '1<sup>1</sup>/<sub>3</sub> tsp muoi, nuong o 350F."}'
+)
+
+
+def build_epub_batch_prompt(glossary_prompt: str) -> str:
+    """Architecture.md 6.20.12 X4 — noi `glossary_prompt` HIEN CO (khong sua
+    1 chu) voi khoi contract JSON + 1 vi du one-shot. Dung cho MOI request
+    LLM cua US-22 buoc 2/3 (`_process_epub_chunk()`), thay `build_system_prompt()`
+    tran (khong co chi thi JSON nao — xac nhan lai o docstring section nay).
+    """
+    sections = [glossary_prompt, _EPUB_BATCH_CONTRACT, _EPUB_BATCH_ONE_SHOT_EXAMPLE]
+    return "\n\n".join(sections)
+
+
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+class EpubBatchResponseError(ValueError):
+    """Raised only when the caller cannot proceed at all (currently unused —
+    `parse_epub_batch_response()` is deliberately tolerant, see its
+    docstring — kept as a named exception for a future stricter mode)."""
+
+
+def parse_epub_batch_response(raw_text: str, expected_ids: set[str]) -> dict[str, str]:
+    """Architecture.md 6.20.12 X4 — parse the LLM's reply to an
+    `build_epub_batch_prompt()`-shaped request. MUST tolerate a real-world
+    imperfect reply, not just the happy path (this exact tolerance is why
+    Protocol 5 requires a GOLDEN FIXTURE captured from a real call —
+    `tests/fixtures/epub_llm/` — rather than a hand-written mock of what we
+    assume the model does):
+    - strips a ```` ```json ... ``` ```` fence and surrounding whitespace/prose
+      if present;
+    - a value that is missing, not a string, or empty after `.strip()` is
+      treated exactly like a MISSING id (never returned) — Architecture.md
+      6.20.12 X4 point 6: "tuyet doi khong tra chuoi rong", so an empty
+      string reaching this far must be re-requested exactly like an absent
+      key, not written into `translations`;
+    - an id NOT in `expected_ids` is silently dropped (a model hallucinating
+      an extra id is not, by itself, a reason to fail the whole batch — the
+      caller only cares whether every EXPECTED id got a usable value);
+    - a response that isn't valid JSON at all (or whose top level isn't a
+      JSON object) returns `{}` — every id counts as missing, so the caller's
+      existing "missing id -> retry individually, still missing -> chunk
+      failed" path (Architecture.md 6.20.8) handles it uniformly instead of
+      needing a separate "totally malformed" branch;
+    - a reply that is a genuinely well-formed JSON object plus TRAILING
+      GARBAGE after the closing `}` (Dev tu bat gap that su khi chay live E2E
+      US-22 Buoc 2/3, khong nam trong review-report goc: DeepSeek tra ve
+      thua 1 dau `"` sau `}` dung 1 lan, deterministic, cho 1 unit chua nhieu
+      `<a href>` voi thuoc tinh da escape `\"` — vi du raw text:
+      `{"0": "...</a>)."}"`  — `json.loads` fail voi "Extra data" tai vi tri
+      NGAY SAU `}` hop le) van duoc CHAP NHAN bang cach parse lai dung phan
+      truoc vi tri loi — day la 1 loai "real-world imperfect reply" khac,
+      cung tinh than voi viec strip code fence o tren, KHONG phai noi long
+      validation cho JSON THAT SU hong (vd thieu dong ngoac, cat cut giua
+      chung — nhung truong hop do van raise JSONDecodeError voi msg khac
+      "Extra data" hoac fail lai o lan thu 2, roi ve `{}` nhu cu).
+
+    Returns only `{id: text}` pairs that passed validation — the caller
+    computes `expected_ids - returned.keys()` to find what still needs a
+    single-id retry.
+    """
+    text = _CODE_FENCE_RE.sub("", raw_text.strip()).strip()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        if isinstance(exc, json.JSONDecodeError) and exc.msg == "Extra data" and exc.pos > 0:
+            try:
+                data = json.loads(text[: exc.pos])
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        else:
+            return {}
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, str] = {}
+    for key, value in data.items():
+        str_key = str(key)
+        if str_key not in expected_ids:
+            continue
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped:
+            continue
+        result[str_key] = value
+    return result

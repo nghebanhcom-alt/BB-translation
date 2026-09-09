@@ -70,6 +70,17 @@ class GeminiProvider:
             raise AuthenticationError(f"Gemini permission denied: {exc}") from exc
         except (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests) as exc:
             raise RateLimitError(f"Gemini rate limit exceeded: {exc}") from exc
+        except google_exceptions.DeadlineExceeded as exc:
+            # Y6 (Architecture.md 6.20.12): DeadlineExceeded la con chau cua
+            # GatewayTimeout/ServerError (bat o nhanh duoi) — phai bat rieng
+            # TRUOC de map dung sang TimeoutError thay vi ConnectionError.
+            raise TimeoutError(f"Gemini request timed out: {exc}") from exc
+        except google_exceptions.ServerError as exc:
+            # ServerError la lop cha chung cho MOI loi 5xx cua google-api-core
+            # (InternalServerError/BadGateway/ServiceUnavailable/GatewayTimeout)
+            # — truoc day bi GoogleAPICallError o nhanh duoi bat het thanh
+            # TranslationProviderError (permanent), chan with_retry() retry.
+            raise ConnectionError(f"Gemini server error (5xx): {exc}") from exc
         except google_exceptions.GoogleAPICallError as exc:
             raise TranslationProviderError(f"Gemini API error: {exc}") from exc
 

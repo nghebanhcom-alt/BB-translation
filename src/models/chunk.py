@@ -14,8 +14,18 @@ class Chunk(SQLModel, table=True):
     id: str = Field(default_factory=_uuid, primary_key=True)
     job_id: str = Field(foreign_key="jobs.id", index=True)
     chunk_index: int
-    page_start: int
-    page_end: int
+    # Architecture.md 6.20.7 (US-22 buoc 2/3): page_start/page_end doi thanh
+    # NULLABLE (NULL cho chunk EPUB) thay vi muon nghia sang chi so unit —
+    # "cung 1 bien, hai y nghia" da la nguyen nhan Bug #5 va RC-4 cua
+    # cost_source. unit_start/unit_end la 2 cot MOI (NULL cho chunk PDF).
+    # Rebuild bang qua `_migrate_chunks_unit_columns()`
+    # (src/models/database.py) cho DB dev hien co — GIU DU LIEU, khong xoa.
+    page_start: int | None = Field(default=None)
+    page_end: int | None = Field(default=None)
+    unit_start: int | None = Field(default=None)
+    # chi so unit TOAN SACH, 0-based, INCLUSIVE (EpubChunkPlan.unit_start)
+    unit_end: int | None = Field(default=None)
+    # INCLUSIVE (EpubChunkPlan.unit_end)
     overlap_start: int | None = Field(default=None)
     overlap_end: int | None = Field(default=None)
     status: str = Field(default="pending")

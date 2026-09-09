@@ -78,7 +78,30 @@ class DeepLProvider:
             raise AuthenticationError(f"DeepL authentication failed: {exc}") from exc
         except deepl.TooManyRequestsException as exc:
             raise RateLimitError(f"DeepL rate limit exceeded: {exc}") from exc
+        except deepl.ConnectionException as exc:
+            # Y6 (Architecture.md 6.20.12): deepl.ConnectionException CHI bao
+            # phu loi tang transport (khong nhan duoc response nao ca —
+            # requests.exceptions.ConnectionError/Timeout/RequestException).
+            # 1 response THAT voi status 5xx tu server DeepL KHONG di qua day
+            # — no roi vao nhanh DeepLException duoi day (xem comment o do).
+            raise ConnectionError(f"DeepL connection failed: {exc}") from exc
         except deepl.DeepLException as exc:
+            # Reviewer (US-22 Buoc 2/3, vong 1/3) tu doc source deepl==1.32.0
+            # (`http_client.py::_raise_for_status`, `translator.py`) xac nhan:
+            # 1 response 5xx THAT tu server DeepL (500/502/503 khong phai
+            # "downloading_document"...) khong co exception class rieng —
+            # roi vao nhanh `else` cuoi cung cua `_raise_for_status()`, raise
+            # `DeepLException` thuong voi `http_status_code=<ma loi>`. Truoc
+            # fix nay, moi DeepLException deu bi map thanh
+            # TranslationProviderError (permanent) — dung 1 loi ha tang binh
+            # thuong (vd DeepL tra 502 tam thoi) ma Y6 duoc viet ra de sua,
+            # nhung KHONG duoc sua cho DeepL. Dung `http_status_code` (field
+            # co tren MOI DeepLException, tu xac nhan qua doc source) de tach
+            # 5xx that thanh transient, giu nguyen 4xx (400/401/403/404/429 —
+            # da co except rieng o tren — con lai vd 400 khong ro) la permanent.
+            status_code = getattr(exc, "http_status_code", None)
+            if status_code is not None and status_code >= 500:
+                raise ConnectionError(f"DeepL server error ({status_code}): {exc}") from exc
             raise TranslationProviderError(f"DeepL API error: {exc}") from exc
 
         input_tokens = max(1, len(text) // _CHARS_PER_TOKEN_ESTIMATE)

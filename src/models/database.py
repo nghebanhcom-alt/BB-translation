@@ -68,6 +68,12 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     # Architecture.md 6.17.2 (US-19, BR-HIST-01/02): moc KET THUC chung cho
     # MOI trang thai cuoi cua job — xem docstring day du o src/models/job.py.
     ("jobs", "finished_at", "DATETIME"),
+    # Architecture.md 6.20.6 (US-22 buoc 2/3) — xem docstring day du o
+    # src/models/job.py. `chunks.unit_start`/`unit_end` KHONG o day — chung
+    # can `_migrate_chunks_unit_columns()` duoi day (rebuild bang, vi
+    # page_start/page_end doi NOT NULL -> nullable, SQLite khong ALTER duoc
+    # constraint nay bang ADD COLUMN don thuan).
+    ("jobs", "total_units", "INTEGER"),
 ]
 
 
@@ -115,12 +121,45 @@ async def _migrate_concurrency_state_engine_key(conn) -> None:
     await conn.execute(text("DROP TABLE concurrency_state_old"))
 
 
+async def _migrate_chunks_unit_columns(conn) -> None:
+    """Architecture.md 6.20.7 (US-22 buoc 2/3): `chunks.page_start`/`page_end`
+    doi thanh NULLABLE (NULL cho chunk EPUB) va them 2 cot moi (nullable)
+    `unit_start`/`unit_end` (NULL cho chunk PDF). Khac `_add_missing_columns`
+    o tren — RELAX mot rang buoc NOT NULL da co, ma SQLite khong `ALTER TABLE
+    ... ADD COLUMN` lam duoc (cung han che da ghi o
+    `_migrate_concurrency_state_engine_key` cho PK). Dung LAI dung pattern
+    "rebuild bang" cua ham do: doi ten bang cu, de `create_all()` dung
+    `Chunk` model HIEN TAI dung bang moi, copy MOI cot ma bang cu THAT SU CO
+    (doc dong tu PRAGMA truoc khi doi ten, khong hardcode danh sach — mien
+    nhiem voi bat ky cot nao tu increment truoc da/chua duoc them), roi xoa
+    bang cu. Idempotent: no-op ngay khi `page_start` da nullable (ke ca DB
+    hoan toan moi, noi `create_all()` o tren da dung schema moi tu dau).
+    """
+    result = await conn.execute(text("PRAGMA table_info(chunks)"))
+    rows = result.all()
+    if not rows:
+        return  # bang chua ton tai — create_all() o tren se tao no
+
+    # index 1 = ten cot, index 3 = co "NOT NULL" (1) hay khong (0).
+    page_start_row = next((row for row in rows if row[1] == "page_start"), None)
+    if page_start_row is None or page_start_row[3] == 0:
+        return  # da nullable (hoac cot khong ton tai vi ly do khac) — xong
+
+    old_column_names = [row[1] for row in rows]
+    await conn.execute(text("ALTER TABLE chunks RENAME TO chunks_old"))
+    await conn.run_sync(SQLModel.metadata.create_all)
+    col_list = ", ".join(old_column_names)
+    await conn.execute(text(f"INSERT INTO chunks ({col_list}) SELECT {col_list} FROM chunks_old"))
+    await conn.execute(text("DROP TABLE chunks_old"))
+
+
 async def init_db() -> None:
     """Create tables and enable WAL mode. Idempotent — safe to call on every startup."""
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await _migrate_concurrency_state_engine_key(conn)
+        await _migrate_chunks_unit_columns(conn)
         await _add_missing_columns(conn)
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         # BR-GLOSS-02: case-insensitive EN term matching.

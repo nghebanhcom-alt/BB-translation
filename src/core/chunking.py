@@ -127,6 +127,23 @@ EPUB_REQUEST_CHAR_BUDGET = 3_000
 #: chi 989 ky tu), xem Architecture.md 6.20.11 muc 7.
 EPUB_UNIT_HARD_MAX_CHARS = 10_000
 
+#: X5 (Architecture.md 6.20.6/6.20.12, US-22 buoc 2/3) — `doc.total_chars`
+#: (text thuan qua bs4) UOC THAP chi phi that gui cho LLM 29,0% neu dung
+#: thang, vi pham §6.11.6 ("duoc uoc cao, CAM uoc thap"). Hai so hang bi
+#: thieu, do that tren 384 unit cua "Baking with Sourdough":
+#:   1. X2 chuyen unit sang inner-HTML (khong phai text thuan) — content
+#:      chars 57.247 vs 52.369 (+9,3%, N-2 — Expert KHONG do so hang nay).
+#:      1.15 lam tron LEN tu 1.093 do duoc.
+#:   2. Envelope JSON (`{"id": "...", "html": "..."}` cho id ngan 0..N) cong
+#:      them ~26,7 ky tu/unit do duoc, lam tron LEN thanh 30.
+#: Kiem chung: 52.369 * 1.15 + 384 * 30 = 71.744 vs payload that 67.577 ->
+#: 1.06x — cao hon that, dung chieu §6.11.6 cho phep. Dat CANH
+#: EPUB_CHUNK_CHAR_BUDGET nhu Architecture.md yeu cau ("2 hang so co ten,
+#: dat canh EPUB_CHUNK_CHAR_BUDGET"). KHONG sua estimate_job_cost_v2() —
+#: chi doi dau vao source_text_chars cua no (cost_gate.py).
+EPUB_INLINE_MARKUP_FACTOR = 1.15
+EPUB_JSON_ENVELOPE_CHARS_PER_UNIT = 30
+
 _TAG_RE = re.compile(r"<[^>]+>")
 
 

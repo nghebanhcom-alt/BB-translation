@@ -77,6 +77,16 @@ class ClaudeProvider:
             raise AuthenticationError(f"Claude authentication failed: {exc}") from exc
         except anthropic.RateLimitError as exc:
             raise RateLimitError(f"Claude rate limit exceeded: {exc}") from exc
+        except anthropic.APITimeoutError as exc:
+            # Y6 (Architecture.md 6.20.12) — same fix as openai_provider.py:
+            # anthropic.APIError la lop cha chung, truoc day bat het thanh
+            # TranslationProviderError (permanent), chan with_retry() retry
+            # 1 timeout binh thuong tren nhanh EPUB (~200 request tuan tu).
+            raise TimeoutError(f"Claude request timed out: {exc}") from exc
+        except anthropic.APIConnectionError as exc:
+            raise ConnectionError(f"Claude connection failed: {exc}") from exc
+        except anthropic.InternalServerError as exc:
+            raise ConnectionError(f"Claude server error (5xx): {exc}") from exc
         except anthropic.APIError as exc:
             raise TranslationProviderError(f"Claude API error: {exc}") from exc
 

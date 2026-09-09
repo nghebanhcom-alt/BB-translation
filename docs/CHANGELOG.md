@@ -6598,3 +6598,237 @@ khác — có thêm bước `insert_text_origin_fix`):
 
 Không tính vào giới hạn Protocol 3 (không phải vòng sửa lỗi sau reject — 2 vòng Reviewer đã hoàn tất
 ở worktree gốc trước khi merge).
+
+---
+
+## 2026-09-09 — US-22 Bước 2/3 (EPUB Translation Engine) fix E2: lọc glossary theo `full_text`
+
+PM giao bổ sung nhỏ: chính Dev tự nêu ở lần trước (xem mục "3 điểm chưa rõ ràng" cuối phần US-22
+Bước 2/3 phía trên) rằng E2 (Architecture.md §6.20.9 dòng 3/4) yêu cầu glossary phải được lọc theo
+`full_text` trước khi build system prompt cho nhánh EPUB, nhưng
+`run_epub_job()` gọi `build_system_prompt(glossary_manager, project_id=job.batch_id)` KHÔNG truyền
+bộ lọc — khác `cost_gate.py::_estimate_epub_translation_cost()` (có lọc qua `build_prompt_text(...,
+only_terms_present_in=full_text)`) — vi phạm §6.11.6 (prompt thật gửi đi và prompt dùng ước chi phí
+Lớp 2 phải cùng một tập glossary, nếu không Lớp 2 có thể ước THẤP hơn thật).
+
+**Phát hiện khi sửa (khác PM brief)**: PM brief nói `build_system_prompt()`
+(`src/core/prompt_builder.py:80`) "đã có sẵn" tham số `only_terms_present_in` — kiểm tra lại code
+thực tế thì **KHÔNG đúng**: tham số đó chỉ tồn tại ở `build_prompt_text()`/`build_babeldoc_prompt_text()`
+(2 hàm build prompt file cho pdf2zh/babeldoc), `build_system_prompt()` (dùng cho EPUB và cho
+`overlay_rotated_text()`'s `glossary_prompt`) lúc đó KHÔNG có tham số này. Đã báo lại điểm này cho PM
+ở cuối task thay vì âm thầm implement theo premise sai.
+
+### Sửa
+
+- `src/core/prompt_builder.py::build_system_prompt()` — thêm 2 tham số optional
+  `only_terms_present_in: str | None = None` và `max_glossary_entries: int = 80` (mirror đúng
+  `build_prompt_text()`), truyền xuống `glossary_manager.build_prompt_snippet(only_terms_present_in=...,
+  max_entries=...)`. Mặc định `None` giữ NGUYÊN hành vi cũ (không lọc) cho caller hiện có
+  (`overlay_rotated_text()`'s `glossary_prompt` ở `job_orchestrator.py` dòng ~698) — không đổi hành
+  vi PDF. Đây là hiện thực hoá đúng cơ chế Architecture.md §6.20.9 dòng 4 đã mô tả sẵn
+  ("`build_system_prompt(...)` với glossary đã lọc theo `full_text`"), không phải thay đổi kiến trúc
+  mới — nên Dev tự thêm tham số này thay vì escalate Tech Lead.
+- `src/core/job_orchestrator.py::run_epub_job()` — sửa lời gọi `build_system_prompt()` ở bước E2/E3,
+  truyền `only_terms_present_in=doc.full_text()` (CÙNG một lần `load()` ở bước E1, không `load()`
+  lại — tránh tái sinh Bug #5 dạng EPUB) và `max_glossary_entries=self._settings.max_glossary_entries_in_prompt`
+  (CÙNG setting nhánh PDF đang dùng, khớp đúng cap mà `cost_gate.py` đã dùng khi ước). Xoá comment cũ
+  giải thích lý do CHƯA sửa, thay bằng comment mô tả cơ chế đã sửa.
+
+### Test
+
+- `tests/integration/test_epub_translate_runner.py::test_run_epub_job_filters_glossary_by_full_text_matching_cost_gate`
+  (mới) — assert 2 lớp, cả hai đều giá trị cụ thể (R6-02), không chỉ `assert_called()`:
+  1. Spy trực tiếp trên `build_system_prompt()` (monkeypatch `src.core.job_orchestrator.build_system_prompt`,
+     vẫn delegate xuống bản thật): `only_terms_present_in` nhận được PHẢI bằng đúng
+     `EpubDocument.load(epub_path).full_text()`; `max_glossary_entries` PHẢI bằng đúng
+     `settings.max_glossary_entries_in_prompt`.
+  2. Nội dung `system_prompt` THẬT gửi cho `provider.translate()` (2 glossary entry thêm vào DB:
+     `"flour"` — xuất hiện trong EPUB test fixture — và `"yeast"` — không xuất hiện): assert
+     `"flour" in system_prompt` và `"yeast" not in system_prompt` cho MỌI lời gọi — chứng minh việc
+     lọc có tác dụng thật, không chỉ tin lời gọi hàm đúng tham số. Test này FAIL trên code cũ (trước
+     fix, `"yeast"` sẽ xuất hiện vì không lọc).
+
+### Kết quả
+
+- `ruff check` — pass (3 file sửa/thêm).
+- `pytest tests/integration/test_epub_translate_runner.py -q` — 9 passed (8 cũ + 1 mới).
+- `pytest tests/ -q` (toàn bộ suite) — kết quả dao động **668 passed/3 failed** ↔ **671 passed/0
+  failed** giữa các lần chạy, luôn đúng 3 test cố định
+  (`tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`,
+  `::test_draw_block_anchors_wrapped_lines_at_the_blocks_real_left_margin`,
+  `::test_overlay_rotated_text_keeps_every_wrapped_line_within_page_bounds`) khi fail. Điều tra:
+  - File này Dev **không đụng tới** trong task này (`git diff HEAD` rỗng cho cả
+    `src/postprocess/rotated_text_overlay.py` và `tests/test_rotated_text_overlay.py` — 2 file đã ở
+    đúng trạng thái commit `636e046`).
+  - Chạy riêng `tests/test_rotated_text_overlay.py` (đơn lẻ, không chung suite) — luôn **13 passed**,
+    lặp lại nhiều lần.
+  - Deselect đúng 1 test mới thêm → suite còn lại **670 passed/0 failed**; chạy lại suite ĐẦY ĐỦ
+    (kể cả test mới) ngay sau đó → **671 passed/0 failed**, sạch hoàn toàn — chứng minh test mới
+    KHÔNG phải nguyên nhân quyết định (nếu là nguyên nhân thật, có mặt nó phải fail nhất quán).
+  - Đúng hiện tượng đã được ghi nhận vài giờ trước trong chính file này ở mục "Merge fix drift ngoại
+    suy pivot dòng wrap vào main" ngay phía trên: PM đã từng gặp **3 failed** y hệt 3 test này 1 lần
+    trong 1 lần chạy suite đầy đủ, điều tra không tái hiện được, kết luận nhiễu nhất thời (nghi do
+    nhiều session chạy test song song trên cùng máy tại đúng thời điểm — RAM/CPU contention ảnh
+    hưởng threshold margin <6pt của phép đo hình học trong test đó, không phải lỗi logic).
+  - Kết luận: **668/671 → 671/671** khi so baseline "667 passed/1 failed" — số fail KHÔNG tăng do
+    thay đổi của task này; 3 fail quan sát được là nhiễu môi trường đã biết trước, không liên quan
+    tới `prompt_builder.py`/`job_orchestrator.py`/EPUB glossary filter.
+
+### Trạng thái
+
+**CHƯA báo "xong" (Protocol 7 R7-01)** — chưa spawn Reviewer thật trong session này cho thay đổi
+này. Cần Reviewer duyệt riêng phần fix E2 này, đặc biệt: (1) điểm PM brief sai premise nêu trên, (2)
+có cần lọc `max_glossary_entries` giống hệt cap của cost_gate hay không (Dev tự quyết định thêm, PM
+brief chỉ yêu cầu `only_terms_present_in`), (3) nhiễu 3 test `rotated_text_overlay` nêu trên có thật
+sự không liên quan hay cần điều tra sâu hơn.
+
+## 2026-09-09 — US-22 Bước 2/3, vòng 2/3 Dev↔Reviewer: sửa 3 điểm Reviewer REJECT (vòng 1/3)
+
+Reviewer REJECT vòng 1/3 (xem section review mới nhất trong `docs/review-report.md`, cuối file)
+với 1 lỗi BLOCKING + 2 issue phụ. PM giao lại nguyên văn yêu cầu của Reviewer. Circuit breaker
+Dev↔Reviewer: đã dùng 1/3 vòng trước khi bắt đầu task này.
+
+### 1. BLOCKING — guard BR-EPUB-05 (`bilingual=True`) luôn fail trên EPUB thật
+
+**Root cause (Reviewer đã xác định đúng)**: `_mark_bb_vi()` (`src/services/epub_document.py`)
+giả định `node.get("class")` luôn là `list`, nhưng dưới builder XML (`features="xml"`, dùng CHÍNH
+theo Y1), bs4 trả `class` dưới dạng CHUỖI khi node gốc EPUB thật có sẵn attribute `class` (rất phổ
+biến, vd `class="noindent"` trên hầu hết `<p>` của `chapter01.html` sách mẫu Sourdough). Code cũ
+`[*existing, "bb-vi"]` trên 1 chuỗi unpack thành TỪNG KÝ TỰ, hỏng attribute thành
+`class="n o i n d e n t bb-vi"`.
+
+**Fix**: thêm helper `_node_classes(node) -> list[str]` (chuẩn hoá `str`/`list`/`None` → luôn
+`list[str]`), dùng trong CẢ `_has_bb_vi_class()` (đọc) lẫn `_mark_bb_vi()` (ghi — luôn set lại
+`class` dưới dạng `list`, không phải chuỗi ghép tay, để bs4 tự serialize đúng).
+
+**Phát hiện thêm khi verify lại trên file thật (KHÔNG nằm trong review-report.md gốc — Reviewer
+chỉ soi ra bug ghi, chưa chạm tới bug đọc vì bug ghi đã chặn đường trước)**: sau khi sửa bug ghi ở
+trên, `count_bb_vi_pairs()` (dùng bởi guard) VẪN fail — `soup.find_all(class_="bb-vi")` của bs4
+4.15 tự nó KHÔNG khớp được node có NHIỀU class (vd `class="noindent bb-vi"`) khi đọc lại qua
+builder XML: tự verify trực tiếp
+`BeautifulSoup('<p class="noindent bb-vi">x</p>', "xml").find_all(class_="bb-vi")` trả về RỖNG.
+Lý do (đọc source `bs4/filter.py::_attribute_match()`): bs4 chỉ thử "ghép lại cả chuỗi rồi so
+khớp" khi giá trị GỐC là 1 `list` nhiều phần tử — với builder XML, giá trị đọc lại LUÔN là 1 chuỗi
+đơn (`isinstance(..., list)` False), nên nhánh ghép-lại-rồi-so-sánh không bao giờ kích hoạt — so
+khớp thất bại cho MỌI node có >1 class, tức đa số unit của sách thật. Sửa: thêm
+`_find_bb_vi_nodes(root)` (predicate callable dùng `_node_classes()` đã chuẩn hoá) thay cho MỌI
+lời gọi `find_all(class_=_BB_VI_CLASS)` trong `count_bb_vi_pairs()` (cả nhánh chính lẫn nhánh
+`td`/`th`) — không phụ thuộc hành vi nội bộ này của bs4 nữa.
+
+**Test mới** (`tests/test_epub_document.py`):
+- `test_mark_bb_vi_preserves_preexisting_class_string_under_xml_parser` — dùng CHÍNH file
+  Sourdough thật (không phải fixture tự dựng, đúng lý do 12 test cũ lọt qua bug này): dịch giả lập
+  toàn bộ 384 unit (`f"VI:{text}"`, không gọi LLM — mirror đúng script live-verify của Reviewer),
+  `write_translated(bilingual=True)`, xác nhận `class="noindent bb-vi"` đúng chuẩn (không phải
+  `"n o i n d e n t bb-vi"`), xác nhận CHÍNH `soup.find_all(class_="bb-vi")` mặc định của bs4 THẤT
+  BẠI trên node này (khẳng định chủ động bug lớp 2 vẫn "còn đó" về mặt hành vi bs4, phòng ai đó lỡ
+  hoán đổi lại `_find_bb_vi_nodes()` thành `find_all(class_=...)` đơn giản trong tương lai),
+  `count_bb_vi_pairs()` đếm đúng 384/384, và `_check_epub_output_guard(bilingual=True)` PASS không
+  raise.
+- `test_check_epub_output_guard_threshold_uses_ceil_not_truncate` — xem mục 3 dưới.
+
+### 2. Y6 chưa đóng cho DeepL — `ConnectionException` không bắt được 5xx thật
+
+`src/services/deepl_provider.py`: thêm nhánh trong `except deepl.DeepLException as exc:` — đọc
+`exc.http_status_code` (field có trên MỌI `DeepLException`, tự đọc source `deepl==1.32.0` xác
+nhận), nếu `>= 500` thì raise `ConnectionError` (transient) thay vì `TranslationProviderError`
+(permanent) như cũ. 4xx và trường hợp `http_status_code is None` (lỗi không gắn với 1 response
+HTTP cụ thể) vẫn giữ nguyên permanent — Y6 chỉ MỞ RỘNG tập transient, không nới lỏng cho lỗi client
+thật.
+
+**Test mới** (`tests/test_translation_providers.py`): `test_deepl_translate_5xx_is_transient`
+(502 → `ConnectionError`), `test_deepl_translate_4xx_stays_permanent` (400 → vẫn
+`TranslationProviderError`), `test_deepl_translate_exception_without_status_code_stays_permanent`
+(`http_status_code=None` → vẫn permanent, không crash vì `None >= 500`).
+
+### 3. Ngưỡng "≥90%" dùng `int()` truncate thay vì làm tròn lên
+
+`src/core/job_orchestrator.py::_check_epub_output_guard()`: `min_required = max(1,
+int(len(source_doc.units) * 0.9))` → `max(1, math.ceil(...))`. Với N=384 (sách thật): ngưỡng cũ
+345 (89.84%, THẤP hơn 90% yêu cầu) → ngưỡng mới 346 (≥90% thật sự).
+
+**Test mới**: `test_check_epub_output_guard_threshold_uses_ceil_not_truncate` — dịch ĐÚNG
+345/384 unit thật của Sourdough (giữ nguyên 39 unit còn lại), xác nhận guard RAISE với ngưỡng mới
+(trước fix sẽ PASS sai ở đúng ca biên này).
+
+### Phát hiện thêm ngoài 3 điểm Reviewer yêu cầu — bug JSON "trailing garbage" (bắt được khi chạy live E2E full-book theo yêu cầu PM)
+
+Khi chạy `run_epub_job()` THẬT (không mock) qua `JobOrchestrator` trên toàn bộ 384 unit/7 chunk
+của Sourdough để verify guard đã sửa (yêu cầu PM, cũng đúng tinh thần Protocol 6 R6-03), job FAIL
+**deterministic 2 lần liên tiếp** ở chunk 0 với lỗi `EpubBatchTranslationError` ("thiếu bản dịch
+cho 1 unit sau 1 vòng gọi lại riêng lẻ") cho `ops/xhtml/chapter01.html#13`, dù nội dung đã dịch
+đúng. Điều tra bằng cách gọi lại riêng unit này qua `ProviderFactory.create("deepseek", ...)` thật:
+DeepSeek trả về 1 JSON object HỢP LỆ nhưng thừa đúng 1 ký tự `"` NGAY SAU dấu `}` đóng
+(`raw_response_text` capture trong `tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_trailing_garbage.json`)
+— `json.loads()` fail với `JSONDecodeError: Extra data`. `parse_epub_batch_response()` (thiết kế
+CỐ Ý dung sai với phản hồi LLM không hoàn hảo — xem docstring hàm) trước đây coi MỌI lỗi
+`JSONDecodeError` là hỏng hoàn toàn (`{}`) — vì lỗi lặp lại y hệt ở cả vòng gọi lại lẻ, unit này
+luôn bị coi là thiếu ngay cả sau retry, chunk fail thật — **cùng loại rủi ro tài chính** mà bug
+BLOCKING của vòng review này (guard BR-EPUB-05) được sinh ra để chặn, chỉ khác điểm lỗi trong
+pipeline (đây là ở bước parse response, không phải bước ghi output).
+
+**Fix**: `src/core/prompt_builder.py::parse_epub_batch_response()` — khi gặp `JSONDecodeError`
+với `msg == "Extra data"`, thử parse lại đúng phần văn bản TRƯỚC vị trí lỗi (`text[:exc.pos]`); chỉ
+khi phần đó cũng không phải JSON object hợp lệ mới trả `{}` như cũ. Lỗi `JSONDecodeError` vì lý do
+KHÁC "Extra data" (vd JSON bị cắt cụt giữa chừng — hết `max_tokens`) vẫn trả `{}` như cũ, không nới
+lỏng cho trường hợp hỏng thật.
+
+**Test mới**: `tests/test_epub_batch_golden_fixture.py` (3 test, golden fixture thật — Protocol 5
+mục 3, không viết tay) + `tests/test_epub_batch_prompt.py` (3 test biên bổ sung bằng chuỗi tổng
+hợp: 1 ký tự thừa, prose thừa nhiều id, và JSON cắt cụt thật sự vẫn phải trả `{}`).
+
+**Đây là phát hiện mới, KHÔNG nằm trong yêu cầu ban đầu của Reviewer/PM cho vòng 2/3 này** — báo rõ
+để Reviewer biết cần review thêm phần này, không lẫn vào 3 điểm đã yêu cầu.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/          → All checks passed!
+uv run pytest tests/ -q (2 lần độc lập) → 682 passed, 0 failed (cả 2 lần)
+```
+682 = baseline 671 (Reviewer xác nhận vòng 1/3) + 11 test mới (5 cho 3 điểm Reviewer yêu cầu + 6
+cho phát hiện JSON trailing-garbage ngoài yêu cầu).
+
+**Live E2E full-book THẬT** (yêu cầu PM, không chỉ tin unit test) — `run_epub_job()` qua
+`JobOrchestrator` thật, provider DeepSeek thật, KHÔNG mock, trên chính file Sourdough
+(384 unit / 7 chunk / 21 request):
+
+```
+job.status = 'completed'
+job.cost_source = 'metered'
+job.actual_cost = 0.07637542   (~7,6 cent USD)
+job.total_units = 384
+output_doc.units (guard bỏ qua bb-vi) = 384/384   -- KHỚP số unit gốc
+'class="bb-vi"' + 'lang="vi"' có mặt trong chapter01.html
+337 đoạn <p lang="vi"> tìm thấy, nội dung THẬT bằng tiếng Việt (khác "VI:" prefix giả của test)
+```
+Guard BR-EPUB-05 PASS đúng nghĩa lần đầu tiên trên dữ liệu thật, không raise `EpubEmptyOutputError`
+— xác nhận trực tiếp bug BLOCKING đã hết, không chỉ tin lại unit test.
+
+**Chi phí LLM thật đã tốn thêm trong vòng sửa này** (ngoài baseline Reviewer đã ghi nhận): 1 lần
+gọi debug riêng unit #13 (~$0.0004) + 1 lần capture golden fixture trailing-garbage (~$0.00045) +
+2 lần chạy `run_job()` full-book fail sớm ở chunk 0 (trước khi phát hiện + sửa bug JSON — chi phí
+từng phần cho các request đã hoàn tất trong chunk 0 trước điểm fail, không được ghi vào
+`job.actual_cost` vì chunk chưa `completed`; ước lượng dưới $0.02 dựa theo tỉ lệ 1/7 chunk của lần
+chạy thành công cuối) + 1 lần chạy `run_job()` full-book THÀNH CÔNG ($0.07637542, số đo thật). Tổng
+toàn bộ vòng sửa này ước tính dưới 10 cent USD.
+
+### File đã sửa/thêm
+
+Sửa: `src/services/epub_document.py` (`_node_classes()`, `_has_bb_vi_class()`, `_mark_bb_vi()`,
+`_find_bb_vi_nodes()`, `count_bb_vi_pairs()`), `src/services/deepl_provider.py` (nhánh 5xx trong
+`except deepl.DeepLException`), `src/core/job_orchestrator.py` (`math.ceil` cho `min_required`),
+`src/core/prompt_builder.py` (`parse_epub_batch_response()` phục hồi từ trailing garbage).
+
+Test sửa/thêm: `tests/test_epub_document.py` (+2), `tests/test_translation_providers.py` (+3),
+`tests/test_epub_batch_golden_fixture.py` (+3, + fixture mới
+`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_trailing_garbage.json` +
+`README.md` append), `tests/test_epub_batch_prompt.py` (+3).
+
+### Trạng thái
+
+**CHƯA báo "xong"** — cần Reviewer duyệt lại (Protocol 3, vòng 2/3 Dev↔Reviewer, giới hạn cuối là
+vòng 3/3). Đặc biệt cần Reviewer tự đánh giá: (1) 3 điểm yêu cầu ban đầu đã sửa đúng chưa, (2) phát
+hiện JSON trailing-garbage ngoài yêu cầu — fix có đủ chặt không (chỉ nới lỏng đúng 1 dạng lỗi cụ
+thể "Extra data", giữ nguyên strict cho JSON hỏng thật), R5-04 checklist riêng cho
+`deepl_provider.py` (external contract) áp dụng lại cho nhánh 5xx mới.
