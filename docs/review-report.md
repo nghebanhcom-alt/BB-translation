@@ -7412,3 +7412,17 @@ thừa token/nhiễu — không chặn round này vì nằm ngoài phạm vi bư
 3/3.**
 
 ---
+
+## 2026-09-09 — PM: merge fix `_draw_block` pivot-drift (task_062a9bd5) vào main
+
+Không phải 1 vòng review mới (fix đã qua đủ 2 vòng Reviewer thật, cả 2 APPROVE, trong worktree gốc
+`claude/strange-napier-988bad` — xem 2 section "Rotated-text-overlay pivot-drift fix" phía trên).
+Ghi lại ở đây việc PM tự ghép fix đó vào `main` (chi tiết đầy đủ tại `docs/CHANGELOG.md` mục
+"Merge fix drift ngoại suy pivot dòng wrap"): do fix Bug #8 (`insert_text_origin_fix`) và fix pivot-
+drift cùng sửa 1 dòng trong `_draw_block()`, PM tự kết hợp 2 lớp logic (tính `anchor_x/anchor_y`
+trước, áp `insert_text_origin_fix` sau) thay vì cherry-pick máy móc. Tự verify lại bằng cách revert
+tạm phần fix, xác nhận test regression fail đúng, rồi khôi phục — kết quả 13/13 test file này pass,
+671/671 toàn bộ suite pass (sau khi loại trừ 1 lần fail nhất thời do nhiễu từ session khác chạy song
+song, không tái hiện được khi chạy lại).
+
+---

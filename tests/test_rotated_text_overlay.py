@@ -302,6 +302,126 @@ async def test_overlay_rotated_text_draws_translated_text_at_correct_angle(
         out_doc.close()
 
 
+def test_draw_block_anchors_wrapped_lines_at_the_blocks_real_left_margin() -> None:
+    """Regression guard for a real drift bug in `_draw_block`: every wrapped
+    line's pivot used to be extrapolated ONLY from `block.pivot` (the first
+    real line's own baseline origin). On `rotated_text_p67_source.pdf` that
+    first line ("Disaccharide") is a typographically indented outlier ~77pt
+    further along the reading direction than every other real line's own
+    origin (all of which cluster tightly around the paragraph's true left
+    margin) -- extrapolating every wrapped line from that outlier dragged the
+    whole translated block that much further along too, eating into the
+    page's margin on every line (already down to a <6pt margin on this exact
+    fixture with the realistic `_VI_TRANSLATION_FITS` translation this suite
+    uses -- one line/word longer and PyMuPDF silently clips the overflow, no
+    error, no test failure signal from `fits`/`page_text` substring checks
+    alone). This asserts the drawn geometry directly: the first wrapped
+    line's pivot must land at the block's REAL left margin (the minimum
+    reading-direction projection across every real line's own origin), not
+    at the first (possibly indented) real line's own origin."""
+    doc = fitz.open(P67_SOURCE)
+    try:
+        blocks = group_rotated_lines(scan_rotated_lines(doc[0]), page_number=67)
+    finally:
+        doc.close()
+    block = blocks[0]
+    dx, dy = block.direction
+    real_left_u = min(ln.origin[0] * dx + ln.origin[1] * dy for ln in block.lines)
+    line0_u = block.pivot[0] * dx + block.pivot[1] * dy
+    # Sanity on the fixture itself: line 0 really is an indented outlier here
+    # -- otherwise this test would pass trivially regardless of the fix.
+    assert line0_u - real_left_u > 30.0
+
+    font = fitz.Font(fontfile=str(NOTO_FONT_PATH))
+    fit = fit_translated_block(block, _VI_TRANSLATION_FITS, font)
+    assert fit.fits is True
+
+    out_doc = fitz.open(P67_SOURCE)
+    try:
+        page = out_doc[0]
+        _draw_block(page, block, fit, str(NOTO_FONT_PATH))
+        first_drawn = next(
+            line
+            for pblock in page.get_text("dict")["blocks"]
+            if pblock.get("type") == 0
+            for line in pblock.get("lines", [])
+            if line_angle_deg(line["dir"]) == pytest.approx(-11.0, abs=1.0)
+            and "Disaccharide. Tu disaccharide"
+            in "".join(s.get("text", "") for s in line.get("spans", []))
+        )
+        drawn_x0 = first_drawn["bbox"][0]
+        # Not an exact-value match against the computed anchor point: this
+        # fixture's own `mediabox` origin is (33, 33), not (0, 0), and
+        # `get_text()`'s readback of a JUST-inserted glyph's own `origin`
+        # field carries a ~33pt offset against the raw point passed to
+        # `insert_text()` on such a page (root-caused and confirmed harmless
+        # to actual rendering -- a pixmap render lands the glyph exactly on
+        # the real margin; production never reads back its own freshly-drawn
+        # text, so this readback quirk never surfaces there -- see
+        # `docs/review-report.md` "Follow-up: regression test cho
+        # `_draw_block` anchor fix" for the full trace). Pin the RELATIVE
+        # claim the fix actually makes instead -- the drawn line must sit
+        # much closer to the paragraph's real left margin (`block.bbox[0]`,
+        # dominated by the 16 un-indented body lines) than to the indented
+        # first real line's own left edge (`block.lines[0].bbox[0]`), which
+        # is exactly where the unfixed extrapolation anchored it.
+        dist_to_real_margin = abs(drawn_x0 - block.bbox[0])
+        dist_to_indented_line0 = abs(drawn_x0 - block.lines[0].bbox[0])
+        assert dist_to_real_margin < dist_to_indented_line0 / 2
+    finally:
+        out_doc.close()
+
+
+@pytest.mark.asyncio
+async def test_overlay_rotated_text_keeps_every_wrapped_line_within_page_bounds(
+    tmp_path: Path,
+) -> None:
+    """Companion to `test_draw_block_anchors_wrapped_lines_at_the_blocks_real_
+    left_margin` above: with the anchor fixed, verify the full end-to-end
+    overlay (real word-wrap + real multi-line layout, not just line 0) still
+    keeps every drawn line inside `page.rect` on both axes -- documents the
+    invariant the anchor fix protects, even though this exact translation
+    happens to already fit (5.6pt margin) under the old extrapolation too."""
+    output_path = tmp_path / "translated_vi.pdf"
+    _build_babeldoc_output_stub(P67_SOURCE, output_path)
+
+    provider = _as_translation_provider(FakeTranslationProvider(_VI_TRANSLATION_FITS))
+    result = await overlay_rotated_text(
+        source_pdf_path=P67_SOURCE,
+        output_pdf_path=output_path,
+        provider=provider,
+        glossary_prompt="(khong co glossary)",
+        font_path=NOTO_FONT_PATH,
+    )
+    assert result.overlaid_block_count == 1
+
+    out_doc = fitz.open(output_path)
+    try:
+        page = out_doc[0]
+        # The stub's redaction already erased every original rotated line, so
+        # every remaining -11deg line in the output IS one we just drew.
+        drawn_lines = [
+            line
+            for pblock in page.get_text("dict")["blocks"]
+            if pblock.get("type") == 0
+            for line in pblock.get("lines", [])
+            if line_angle_deg(line["dir"]) == pytest.approx(-11.0, abs=1.0)
+        ]
+        assert len(drawn_lines) >= 10
+        for line in drawn_lines:
+            x0, y0, x1, y1 = line["bbox"]
+            assert x0 >= 0 and x1 <= page.rect.width, (
+                f"dong ve tran ngoai canh trai/phai trang: bbox={line['bbox']!r} "
+                f"page width={page.rect.width}"
+            )
+            assert y0 >= 0 and y1 <= page.rect.height, (
+                f"dong ve tran ngoai canh tren/duoi trang: bbox={line['bbox']!r} "
+                f"page height={page.rect.height}"
+            )
+    finally:
+        out_doc.close()
+
+
 @pytest.mark.asyncio
 async def test_overlay_rotated_text_flags_and_skips_drawing_when_too_long(
     tmp_path: Path,

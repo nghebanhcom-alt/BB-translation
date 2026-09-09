@@ -6368,3 +6368,233 @@ Engine/cost-gate/job_orchestrator — vẫn ngoài phạm vi bước 1/3.
 dịch LLM thật. Báo cáo PM: Bug #EPUB-1 đã sửa xong + có bằng chứng cụ thể (mục 1); Bug #EPUB-2 đã
 điều tra xong, xác nhận đây là vấn đề cố hữu của việc ánh xạ ngược bản dịch LLM không có tín hiệu
 ranh giới — KHÔNG tự sửa, cần PM quyết định giữa mở rộng contract X4 hoặc chấp nhận known limitation.
+
+## US-22 Dịch EPUB — Bước 2/3: nối `EpubDocument` vào Translation Engine thật + cost-gate (Dev, 2026-09-09)
+
+Nối phần đã có từ bước 1/3 (`EpubDocument`, `plan_epub_chunks`) vào pipeline dịch THẬT — cost gate,
+contract JSON app↔LLM, `EpubTranslateRunner`. Theo đúng Architecture.md §6.20.6-6.20.9 và
+§6.20.12 (X3/X4/X5/Y6, "Final Decision sau phản biện Domain Expert").
+
+### 0. Ghi chú thứ tự làm việc
+
+Khi bắt đầu session này, `git status` đã cho thấy phần lớn mục A (Y6 — sửa `with_retry` không retry
+5xx), mục B (cost gate rẽ nhánh EPUB), và mục C (contract JSON `build_epub_batch_prompt()` +
+`parse_epub_batch_response()` trong `prompt_builder.py`, cùng migration DB cho `Job.total_units`/
+`Chunk.unit_start`/`unit_end`) đã được code **nhưng chưa commit** — khớp đúng thiết kế
+Architecture.md, đã tự đọc lại toàn bộ diff + chạy `ruff`/`pytest` để xác nhận trước khi tiếp tục
+(không phải Reviewer — không tính là đã review, xem mục "Trạng thái" cuối entry này). Phần việc CHÍNH
+của session này là mục D (`EpubTranslateRunner`/`run_epub_job()`) — chưa có gì tồn tại trước đó (grep
+`git log` xác nhận `job_orchestrator.py` không nằm trong diff uncommitted) — và golden fixture thật
+(mục C.3, bắt buộc theo Protocol 5).
+
+### A. Y6 — sửa retry ở tầng provider (đã có sẵn khi bắt đầu session, đã tự verify lại)
+
+Map lỗi 5xx/timeout/connection của SDK từng provider sang đúng exception transient đã có
+(`RateLimitError`/`TimeoutError`/`ConnectionError`) thay vì rơi vào nhánh bắt-hết `TranslationProviderError`
+(permanent, `with_retry()` không retry) — cả 5 provider: `openai_provider.py` (`APITimeoutError`,
+`APIConnectionError`, `InternalServerError` — SDK dùng đúng class này cho MỌI 5xx không có class
+riêng, tự đọc `openai/_exceptions.py` xác nhận), `claude_provider.py` (tương tự, 3 exception mới),
+`gemini_provider.py` (`DeadlineExceeded` bắt TRƯỚC `ServerError` — là con của nó, thứ tự except
+quan trọng), `deepl_provider.py` (`ConnectionException`), `ollama_provider.py` (`httpx.TimeoutException`
+bắt trước `HTTPError`, cộng nhánh status >= 500). `deepseek_provider.py` không cần sửa — subclass
+`OpenAIProvider`, kế thừa `translate()` nguyên vẹn. **KHÔNG** nới `_TRANSIENT_ERRORS` thành bắt hết
+`Exception` (đúng bẫy retry-vô-hạn E-10 của phương án A đã bác ở bước trước).
+
+### B. Cost gate rẽ nhánh EPUB (đã có sẵn khi bắt đầu session, đã tự verify lại)
+
+`src/core/cost_gate.py::_estimate_epub_translation_cost()` — `EpubDocument.load()`,
+`source_text_chars = int(doc.total_chars * EPUB_INLINE_MARKUP_FACTOR) + len(doc.units) *
+EPUB_JSON_ENVELOPE_CHARS_PER_UNIT` (X5, 2 hằng số đã có sẵn trong `chunking.py` từ bước 1/3),
+`llm_request_count = sum(len(c.requests) for c in plan)` (SỐ REQUEST, không phải số unit — đúng
+cảnh báo lệch 8,8× trong Architecture.md), gọi lại **CÙNG** `estimate_job_cost_v2()` — không viết
+công thức thứ hai. Bỏ 2 nhánh chặn cứng `if file_type == "epub": raise 400` ở
+`GET /api/jobs/{id}/cost-estimate` và `POST /api/estimate`; EPUB hợp lệ khi có `total_units` thay vì
+`total_pages`. `CostEstimateResponse.total_pages: int | None`, thêm `total_units: int | None = None`.
+
+### C. Contract JSON app↔LLM (đã có sẵn khi bắt đầu session, đã tự verify lại) + golden fixture THẬT (mới làm trong session này)
+
+`prompt_builder.py::build_epub_batch_prompt(glossary_prompt)` nối `glossary_prompt` hiện có (không
+sửa 1 chữ) + khối contract 6 điều (id ngắn 0..N, output JSON object đúng đủ id, giữ nguyên 10 thẻ
+inline, không đổi số, không dịch `<code>`/`<pre>`, thiếu dịch → trả nguyên văn chứ không rỗng) + 1 ví
+dụ one-shot (có inline tag + số + `<sup>`/`<sub>`). `parse_epub_batch_response()` chịu được thực tế:
+strip code fence, id str/int đều nhận, value rỗng/thiếu/không phải string đều coi là "thiếu" (không
+default thành rỗng).
+
+**Golden fixture thật (Protocol 5 mục 3, bắt buộc Dev tự làm — đã làm trong session này)**: gọi THẬT
+DeepSeek API (`DEEPSEEK_API_KEY` thật trong `.env`) với 5 unit thật lấy từ
+`data/uploads/…Baking with Sourdough…epub` (`ops/xhtml/chapter01.html` ordinal 16/17/18/87/288 — chọn
+để phủ đúng spike a→f của §6.20.10: heading có `<a id>`, danh sách nguyên liệu `<strong>…</strong><br/>`
+×4, đoạn văn thường, phân số thuần `<sup>1</sup>/<sub>3</sub>`, VÀ hỗn số `1<sup>1</sup>/<sub>3</sub>`
+— đúng ca N-1 Tech Lead cảnh báo "`markdownify` mặc định cho `11/3` sai" phải verify KHÔNG xảy ra ở
+đường này vì X1+X2 giữ nguyên `<sup>`/`<sub>` qua LLM, không cần chuyển đổi). Lưu vào
+`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_5units.json` (kèm `README.md` ghi rõ
+ngày/model/chi phí). **Chi phí thật đã tốn: `input_tokens=1456`, `output_tokens=459`,
+`estimated_cost_usd=0.00062326`** (~0,06 cent USD, đúng 1 lần gọi). Kết quả: JSON sạch không fence,
+đủ 5/5 id, giữ đúng `<strong>`/`<br/>`/`<sup>`/`<sub>`/`<a>`, dòng hỗn số ra đúng
+`1<sup>1</sup>/<sub>3</sub>` (không gộp sai `11/3`). `tests/test_epub_batch_golden_fixture.py` (4
+test mới) chạy `parse_epub_batch_response()` trên CHÍNH `raw_response_text` này — không viết tay.
+
+### D. `run_epub_job()` + `_process_epub_chunk()` — MỚI HOÀN TOÀN, làm trong session này
+
+`src/core/job_orchestrator.py`:
+- `run_job()` Step 1: bỏ hẳn `raise EpubNotSupportedError` cho nhánh translate, thay bằng
+  `if job.file_type == FileType.EPUB: return await self.run_epub_job(job, db_session)` — đặt SAU
+  nhánh `parse_only` (S15-1), TRƯỚC Step 1..10 của PDF, đúng thứ tự re nhánh Architecture.md yêu cầu.
+  `EpubNotSupportedError` vẫn giữ nguyên (class không xoá) — vẫn dùng cho nhánh Markdown parse-only +
+  EPUB (`run_parse_only()`, S15-8, ngoài phạm vi bước này).
+- `run_epub_job()` (10 bước E1-E10, Architecture.md 6.20.8): `EpubDocument.load()` **một lần duy
+  nhất** (R6-02, sợi dây (2)→(7)) → `build_system_prompt()` + `build_epub_batch_prompt()` →
+  `plan_epub_chunks()` → `_load_or_create_epub_chunks()` (resume BR-CHUNK-05, tương đương
+  `_load_or_create_chunks()` của PDF nhưng dùng `unit_start`/`unit_end` thay `page_start`/`page_end`)
+  → mỗi chunk chưa `completed` qua `_process_epub_chunk()` → **SAU MỖI CHUNK: copy nguyên thứ tự 3
+  bước của `run_job()` Step 7** (`progress_tracker.update()` → Lớp 3 cost accumulator → check
+  `cancel_requested`), không viết lại logic mới → merge mọi chunk `completed` (không chỉ chunk vừa
+  chạy, R6-02 sợi dây (6)→(7)) → `doc.write_translated(translations, merged_path, bilingual=True)`
+  → guard BR-EPUB-05 (X3) → `job.output_path`/`actual_cost` (= tổng `chunk.api_cost` THẬT, không
+  ước tính)/`cost_source='metered'`/`finished_at`/`completed`.
+- `_process_epub_chunk()`: mỗi request trong `chunk_plan.requests` chạy **tuần tự** (không AIMD, v1
+  gọi API trực tiếp nên nhận `RateLimitError` thật qua `with_retry`), payload id ngắn cục bộ `0..N`,
+  `provider.translate(payload_json, system_prompt, "en", "vi")`, parse response, **id thiếu → gọi lại
+  RIÊNG LẺ đúng id đó (tối đa 1 vòng) → vẫn thiếu → `EpubBatchTranslationError`, chunk `failed`,
+  TUYỆT ĐỐI không ghi chuỗi rỗng** (E-09). Ghi `data/processing/{job_id}/chunk_{i}/units.json` =
+  `{unit_id: vi_html}`; `chunk.api_tokens_used`/`api_cost` = số đo THẬT từ `TranslationResult`.
+- **`bilingual=True` hardcode** cho EPUB (CHỐT tại Architecture.md §6.20.11 mục 2, PM/user đã xác
+  nhận qua AskUserQuestion) — KHÔNG đọc `Batch.output_mode` (mặc định "vi_only" ở tầng API cho CẢ
+  PDF lẫn EPUB, dùng nguyên sẽ làm EPUB thành monolingual-by-default, ngược CHỐT). Chưa có UI nào cho
+  phép chọn monolingual riêng cho EPUB ở bước này (task giao rõ: bước 3/3 mới làm UI).
+- **BR-EPUB-05 guard** (`_check_epub_output_guard()`, theo đúng bảng 4 điều kiện X3 — bản SỬA, KHÔNG
+  theo bản gốc §6.20.8 đã bị gạch): mở lại CHÍNH `merged_path` vừa ghi (không tin `translations` còn
+  trong bộ nhớ), `bilingual=False` → tổng ký tự>0 + số unit khớp + ≥90% unit khác gốc;
+  `bilingual=True` → tổng ký tự>0 + số unit khớp (nhờ `EpubDocument.load()` tự bỏ qua node
+  `class="bb-vi"`) + số node `bb-vi` ≥90%×số unit input VÀ ≥90% cặp (gốc, bb-vi liền sau) có nội
+  dung khác nhau. `src/services/epub_document.py::count_bb_vi_pairs(path)` (hàm mới) mở lại zip, đếm
+  node `class="bb-vi"` và so nội dung với "bản gốc" tương ứng — xử lý riêng 2 hình dạng
+  `_apply_translation()` sinh ra: `td`/`th` (bản dịch là `<span class="bb-vi">` CHÈN BÊN TRONG cùng
+  ô, so với phần còn lại của ô sau khi bỏ `<br/>`+span) và mọi tag khác (bản dịch là `copy_node` được
+  `insert_after` — so với node ANH EM liền trước). Không đạt → `job.status='failed'`.
+- 3 sợi dây data lineage (§6.20.9) có test assert giá trị cụ thể (R6-02, không chỉ `assert_called()`):
+  (2)→(7) unit_id nhất quán 1 lần `load()` duy nhất (test dịch 1 unit thành marker riêng, xác nhận nó
+  nằm ĐÚNG vị trí trong file output, không lẫn sang đoạn khác); (6)→(7) merge đọc mọi chunk
+  `completed` kể cả sau resume/crash giả lập (test crash chunk 2, resume, xác nhận cả 2 chunk có mặt
+  trong output); (4)→(6) `system_prompt` thật gửi đi chứa marker `BB-EPUB-JSON-CONTRACT-X4`.
+- **BR-EPUB-03**: đã grep xác nhận không có `subprocess`/`bilingual_book_maker` nào trong
+  `run_epub_job()`/`_process_epub_chunk()` — điểm gọi LLM duy nhất là `provider.translate()`.
+
+### Test mới (12 test, R6-02: assert nội dung/giá trị cụ thể, không chỉ "đã gọi")
+
+`tests/integration/test_epub_translate_runner.py` (8 test, dùng `_FakeEpubProvider` xác định —
+KHÔNG gọi API thật, khác `tests/test_epub_batch_golden_fixture.py`): happy path (`cost_source=
+'metered'`, `actual_cost>0`, nội dung dịch + `bb-vi` thật có trong file output); marker contract JSON
+trong `system_prompt` thật gửi đi; lineage unit_id→vị trí đúng; resume sau crash giữa chừng gộp đủ cả
+2 chunk; id thiếu được gọi lại lẻ rồi thành công; id vẫn thiếu sau retry → chunk `failed` không ghi
+rỗng; guard BR-EPUB-05 fail khi LLM trả nguyên văn tiếng Anh (không dịch gì); Lớp 3 dừng đúng giữa
+chừng (`chunk_index > 0`) với `cost_source='metered'`. `tests/test_epub_batch_golden_fixture.py` (4
+test, mục C ở trên).
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/            → All checks passed!
+uv run pytest tests/test_epub_document.py tests/test_chunking.py tests/test_epub_batch_prompt.py \
+  tests/test_epub_batch_golden_fixture.py tests/integration/ -q
+  → 239 passed
+uv run pytest -q (toàn bộ suite)
+  → 667 passed, 1 failed (89.65s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— cùng 1 test pre-existing đã ghi nhận ở các CHANGELOG trước (không liên quan EPUB). Tổng pass tăng
+từ 654 (baseline đo đầu session, đã gồm test của mục A/B/C uncommitted) → 667 = +13, khớp 12 test mới
+của mục D cộng dao động nhỏ do 1 lần chạy trước đó có `1 error` do flake test-isolation
+(`tests/integration/test_extract_terms_endpoint.py`, pass lại khi chạy riêng lẻ và khi chạy lại toàn
+bộ suite — không tái diễn, không liên quan thay đổi của session này). **Không có regression mới.**
+
+### File đã sửa/thêm trong session này (mục D + golden fixture mục C.3)
+
+Sửa: `src/core/job_orchestrator.py` (import mới; `EpubBatchTranslationError`/`EpubEmptyOutputError`;
+xoá nhánh raise cũ + dispatch `run_epub_job()`; thêm `run_epub_job()`, `_process_epub_chunk()`,
+`_load_or_create_epub_chunks()`, `_check_epub_output_guard()`), `src/services/epub_document.py`
+(thêm `count_bb_vi_pairs()`). Mới: `tests/integration/test_epub_translate_runner.py`,
+`tests/test_epub_batch_golden_fixture.py`, `tests/fixtures/epub_llm/` (fixture + README.md).
+
+Không sửa: `src/core/glossary_manager.py`, `estimate_job_cost_v2()` (chỉ đổi đầu vào ở
+`cost_gate.py`, không sửa hàm), signature `provider.translate()`, `build_system_prompt()` hiện có
+(chỉ nối thêm qua `build_epub_batch_prompt()`). Không làm UI/frontend.
+
+### 3 điểm CHƯA RÕ RÀNG khi thực code — báo cáo PM, KHÔNG tự đoán/tự quyết
+
+1. **E2/E3 (§6.20.8) mâu thuẫn nội bộ về việc có lọc glossary theo `full_text` hay không.** E2 ghi
+   "lọc glossary theo tài liệu", nhưng pseudocode E3 lại gọi thẳng
+   `build_system_prompt(glossary_manager, project_id=job.batch_id)` — hàm này **không có** tham số
+   `only_terms_present_in`/`max_glossary_entries` (khác `build_prompt_text()`/`write_prompt_file()`
+   của PDF, vốn có lọc). Đã code THEO ĐÚNG NGHĨA ĐEN pseudocode E3 (không lọc) vì brief cấm sửa
+   `build_system_prompt()`. Hệ quả: `cost_gate.py::_estimate_epub_translation_cost()` ước
+   `prompt_overhead_chars` từ prompt **CÓ lọc** (rẻ hơn), nhưng `run_epub_job()` gửi prompt **KHÔNG
+   lọc** (glossary toàn dự án, có thể đắt hơn) — nếu 1 dự án có glossary lớn, đây là 1 dạng ƯỚC THẤP
+   ở Lớp 2, ngược chiều §6.11.6 ("được ước cao, cấm ước thấp"). Chưa tự sửa vì không rõ đây là chủ ý
+   (đơn giản hoá pseudocode) hay thiếu sót của Tech Lead — cần quyết định: thêm biến thể lọc riêng
+   cho EPUB (không đụng `build_system_prompt()` hiện có) hay chấp nhận rủi ro ước thấp này.
+2. **X3 guard `bilingual=True`, cặp `td`/`th`**: Architecture.md không mô tả cách so sánh "bản gốc"
+   khi bản dịch được chèn LÀM CON của cùng 1 ô (`<span class="bb-vi">` bên trong `td`/`th`, khác hẳn
+   hình dạng "node anh em" của mọi tag khác). Đã tự thiết kế cách so sánh (bỏ `<br/>`+span rồi lấy
+   phần còn lại của ô làm "bản gốc") và ghi rõ trong docstring `count_bb_vi_pairs()` — đây là suy
+   luận riêng của Dev, CHƯA qua Reviewer, có thể cần Tech Lead xác nhận lại.
+3. **Y4 (`EpubUnitTooLargeError`) và lỗi DRM/parse khi CHẠY job (không phải lúc ước tính) không có
+   broadcast WebSocket riêng** — các lỗi này raise trong `plan_epub_chunks()`/`EpubDocument.load()`
+   TRƯỚC khi `job.status` được set `"translating"`, nên rơi vào catch-all cấp `_run_job_background()`
+   (đã có sẵn, set `job.status="failed"` + `finished_at`) thay vì đường `_broadcast_job_failed()` có
+   sẵn cho lỗi trong vòng lặp chunk. Hành vi DB đúng, chỉ thiếu WS event — chưa chạm dữ liệu thật (2
+   file mẫu hiện có chưa có unit nào vượt `EPUB_UNIT_HARD_MAX_CHARS`, đúng ghi chú §6.20.11 mục 7),
+   nên chưa tự thêm broadcast riêng để tránh đoán shape event ngoài Architecture.md.
+
+### Trạng thái
+
+**CHƯA báo "xong" (Protocol 7 R7-01)** — chưa spawn Reviewer thật trong session này. Toàn bộ nội
+dung trên (kể cả phần A/B/C đã có sẵn khi bắt đầu session, đã tự đọc lại + chạy test/ruff nhưng KHÔNG
+tính là đã review) cần Reviewer thật trước khi coi là xong, đặc biệt 3 điểm chưa rõ ràng ở mục trên.
+
+---
+
+## 2026-09-09 — Merge fix drift ngoại suy pivot dòng wrap (`_draw_block`) vào main
+
+PM giao 1 task nền (`task_062a9bd5`) điều tra bug lố biên trang mà Dev phát hiện phụ khi làm Bug #8
+round 2. Task chạy ở worktree riêng (`claude/strange-napier-988bad`, tách từ main lúc còn ở
+`53e7847` — trước cả khi Bug #8/#9/#10 tồn tại), tự phát hiện brief ban đầu viện dẫn 1 premise không
+tồn tại ở nhánh của nó (`src/utils/pdf_coords.py::insert_text_origin_fix` chưa có ở base đó), tự bỏ
+qua và điều tra lại từ đầu — tìm ra 1 bug thật, độc lập, trong `_draw_block()`
+(`src/postprocess/rotated_text_overlay.py`): pivot của mọi dòng wrap được ngoại suy CHỈ từ
+`block.pivot` (`lines[0].origin`), nhưng dòng thật đầu tiên đôi khi là outlier thụt lề (verify trên
+`rotated_text_p67_source.pdf`: dòng "Disaccharide" lệch ~77pt theo hướng đọc so với 16 dòng thật còn
+lại) — kéo lệch cả khối, ăn dần margin phải/dưới trang, PyMuPDF âm thầm cắt chữ tràn (không lỗi,
+không log). Đã qua 2 vòng Reviewer thật trong worktree đó, cả 2 đều APPROVE (chi tiết đầy đủ +
+render pixmap xác nhận trực quan: xem `docs/review-report.md`).
+
+**Merge thủ công vào main (không dùng `git merge`/cherry-pick nguyên nhánh)** — 2 lý do: (1) nhánh
+lệch quá xa main (tách từ trước Bug #8/#9/#10), merge nguyên nhánh sẽ conflict lộn xộn ở
+CHANGELOG.md/review-report.md (2 file đã phình to khác hẳn trên main từ lúc đó); (2) fix Bug #8 của
+PM (gọi `insert_text_origin_fix(page, pivot)`) và fix của task này (đổi cách tính `pivot` từ
+`origin_x/origin_y` sang `anchor_x/anchor_y`) SỬA ĐÚNG CÙNG 1 DÒNG trong `_draw_block()` — cherry-pick
+máy móc sẽ conflict tại đó. PM tự ghép 2 lớp fix: tính `anchor_x/anchor_y` (sửa lệch neo dòng)
+**trước**, rồi mới áp `insert_text_origin_fix` (sửa hệ toạ độ MediaBox/CropBox) lên kết quả — 2 fix
+độc lập về mặt logic, không xung đột ý nghĩa.
+
+**Verify sau khi ghép** (PM tự làm, không chỉ tin lại kết luận cũ của worktree kia vì code nền đã
+khác — có thêm bước `insert_text_origin_fix`):
+- Copy 2 test mới (`test_draw_block_anchors_wrapped_lines_at_the_blocks_real_left_margin`,
+  `test_overlay_rotated_text_keeps_every_wrapped_line_within_page_bounds`) vào
+  `tests/test_rotated_text_overlay.py` trên main — mọi helper/fixture cần thiết (`P67_SOURCE`,
+  `NOTO_FONT_PATH`, `_VI_TRANSLATION_FITS`, `_build_babeldoc_output_stub`, ...) đã có sẵn từ Bug #8
+  round 2, không cần thêm.
+- Tự `sed`-revert tạm dòng `anchor_x/anchor_y` → `origin_x/origin_y` trong `_draw_block`, chạy lại
+  `test_draw_block_anchors_wrapped_lines_at_the_blocks_real_left_margin` → **FAIL** đúng kỳ vọng,
+  khôi phục lại bản đã ghép.
+- `uv run pytest tests/test_rotated_text_overlay.py -q` → **13 passed** (11 test cũ + 2 test mới).
+- `uv run pytest tests/ -q` (toàn bộ suite) → 1 lần đầu ra **3 failed** (cùng 3 test vừa thêm) —
+  điều tra kỹ: chạy lại riêng file đó nhiều lần liên tiếp đều **13 passed**, `-p no:randomly` cũng
+  cho **13 passed** toàn file theo đúng thứ tự — không tái hiện được lỗi. Kết luận: nhiễu nhất thời,
+  nhiều khả năng do 1 session khác chạy test song song trên cùng máy tại đúng thời điểm đó (đã quan
+  sát hiện tượng nhiều session cùng làm việc trên repo này xuyên suốt ngày), không phải lỗi logic
+  của fix. **Chạy lại toàn bộ suite 2 lần sau đó: 671/671 pass cả 2 lần.**
+
+Không tính vào giới hạn Protocol 3 (không phải vòng sửa lỗi sau reject — 2 vòng Reviewer đã hoàn tất
+ở worktree gốc trước khi merge).

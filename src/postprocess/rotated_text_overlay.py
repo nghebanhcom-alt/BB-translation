@@ -389,8 +389,29 @@ def _draw_block(page: fitz.Page, block: RotatedBlock, fit: FitResult, font_path:
     line_height = fit.font_size * _LINE_HEIGHT_FACTOR
     rotation_degrees = -block.angle_deg
 
+    # `block.pivot` (lines[0].origin) is often NOT where the paragraph's real
+    # left margin sits -- a first line that is short or carries a typographic
+    # indent (verified against rotated_text_p67_source.pdf: line 0
+    # "Disaccharide" projects ~77pt further along the reading direction than
+    # every other real line's own origin, all of which cluster tightly
+    # together) sits further along the reading direction (`dx, dy`) than the
+    # body. Extrapolating every wrapped line from that outlier drags the
+    # WHOLE translated block that much further along too, eating into the
+    # page's margin on every subsequent line -- confirmed to already leave a
+    # <6pt margin on the real fixture even before any other change, and to
+    # push the last 1-2 wrapped lines' trailing characters off the page (get
+    # clipped silently by PyMuPDF) once translated text runs a line or two
+    # longer. Anchor along the reading direction at the real block's own left
+    # margin (min projection across every real line's own baseline origin)
+    # instead, keeping line 0's own row (perpendicular position) unchanged.
+    line0_u = origin_x * dx + origin_y * dy
+    block_left_u = min(ln.origin[0] * dx + ln.origin[1] * dy for ln in block.lines)
+    delta_u = line0_u - block_left_u
+    anchor_x = origin_x - delta_u * dx
+    anchor_y = origin_y - delta_u * dy
+
     for i, text in enumerate(fit.wrapped_lines):
-        pivot = fitz.Point(origin_x + nx * line_height * i, origin_y + ny * line_height * i)
+        pivot = fitz.Point(anchor_x + nx * line_height * i, anchor_y + ny * line_height * i)
         pivot = insert_text_origin_fix(page, pivot)
         page.insert_text(
             pivot,
