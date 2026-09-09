@@ -270,6 +270,17 @@ class Settings(BaseSettings):
     term_min_occurrences: int = 3
     term_min_occurrences_short_doc: int = 2
 
+    # US-22 EPUB chunking (Architecture.md 6.20.7 Z3): "ca 3 hang so phai nam
+    # o Settings (.env), khong chon trong code". Gia tri mac dinh KHOP voi
+    # module constant cung ten trong src/core/chunking.py (EPUB_CHUNK_CHAR_BUDGET
+    # v.v.) — 2 noi ton tai co chu dich: hang so trong chunking.py la default
+    # param cua plan_epub_chunks() (chay doc lap duoc trong test khong can
+    # Settings), field o day la duong override qua .env cho luc wire that vao
+    # Job Orchestrator (buoc 2/3 cua US-22, NGOAI PHAM VI increment nay).
+    epub_chunk_char_budget: int = 8_000
+    epub_request_char_budget: int = 3_000
+    epub_unit_hard_max_chars: int = 10_000
+
 
 @lru_cache
 def get_settings() -> Settings:

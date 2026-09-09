@@ -5887,3 +5887,484 @@ KHÔNG có trong danh sách tường minh của Architecture.md §6.17.2 (BatchO
 đúng 7 điểm còn lại) — đúng theo Ý ĐỊNH thiết kế ("MỌI trạng thái cuối") nhưng CHƯA qua review
 tường minh cho phần mở rộng này.
 `babeldoc_word_wrap_fix_enabled=True` lên production thật.
+
+## US-22 Dịch EPUB — Bước 1/3: `EpubDocument` (parser + chunk theo chương)
+
+**Phạm vi task này (theo brief PM)**: CHỈ `EpubDocument` (parse cấu trúc EPUB thành `EpubUnit`) +
+`plan_epub_chunks()` (chunk theo chương). KHÔNG gọi `provider.translate()`, KHÔNG đụng
+cost_estimator/cost_gate, KHÔNG wire vào `job_orchestrator.py`/`jobs.py`, KHÔNG UI. Đó là bước 2/3
+và 3/3, giao riêng sau.
+
+### 1. Protocol 5 R5-02 — spike verify TRƯỚC khi implement đầy đủ
+
+Cài thật vào `.venv` chính thức của project: `uv add ebooklib beautifulsoup4 lxml markdownify` →
+`ebooklib==0.20`, `beautifulsoup4==4.15.0`, `lxml==6.1.3`, `markdownify==1.2.3` — khớp CHÍNH XÁC
+version Tech Lead đã verify ở Architecture.md §6.20.1/§6.20.12 N-3. (`markdownify` chưa dùng ở
+bước này — thêm theo đúng điều kiện (b) của §6.20.12 "đủ điều kiện giao Dev": pin cả 4 lib trong
+CÙNG commit đầu tiên chạm tới US-22, dùng thật ở nhánh Markdown parse-only US-15 sau.)
+
+Chạy lại 4/6 bước a→d của spike 6 bước (§6.20.10 mục 1) trên chính file EPUB thật
+(`data/uploads/9d436d7b-…Sourdough….epub`) TRƯỚC khi viết `EpubDocument` đầy đủ — bước e/f (gọi
+LLM thật, capture golden fixture) thuộc bước 2/3, không làm ở đây:
+
+| Bước | Kỳ vọng (Architecture.md) | Đo lại được |
+|---|---|---|
+| a — `doc_href` (X6) | `item.file_name` 0/5 khớp zip, join `opf_dir` → 5/5 | **KHỚP Y HỆT**: 0/5 raw, 5/5 sau join |
+| b — round-trip `features="xml"` | `ET.fromstring()` OK, `viewBox` không hạ chữ | **KHỚP**: well-formed, không có `viewbox` sai |
+| c — 6 dòng `<sup>`/`<sub>` | 5 dòng `1/3`, 1 dòng `1 1/3` (không phải `11/3`) | **KHỚP**: inner-HTML giữ nguyên `<sup>1</sup>/<sub>3</sub>`, không có rule nào chuyển đổi (EPUB→EPUB không cần — X1/X2) |
+| d — 4 `<br/>` + bold | inner-HTML giữ `<strong>×4<br/>×3` | **KHỚP**: `blockquote` unit giữ nguyên cả 4 `<strong>` + 3 `<br/>` |
+
+Không lệch số đo nào so với Architecture.md → không cần escalate Tech Lead.
+
+**1 điểm PHẢI escalate PM (không phải sai spec, mà là ước tính của chính PM)**: brief nói "ước
+tính 42 chunk" cho file Bread @ budget 8000. Đo bằng `plan_epub_chunks()` thật (thuật toán đúng
+§6.20.7/§6.20.12, đã unit-test riêng — xem mục 4): **28 chunk**, không phải 42. Tổng
+`doc.total_chars` đo được là 232.127 — 232.127/8.000 ≈ 29, khớp sát 28 đo được. Nhiều khả năng
+con số 42 của PM tính theo cách khác (vd ước lượng theo dung lượng file thô, không qua unit-based
+chunking thật). Đã trust số đo của chính thuật toán đã implement thay vì brief chưa verify
+(đúng tinh thần Protocol 5), nhưng cần PM xác nhận 28 là số đúng trước khi ai dùng con số 42 ở
+đâu đó khác.
+
+### 2. `EpubDocument` — `src/services/epub_document.py` (module MỚI)
+
+Theo ĐÚNG bản đã supersede tại Architecture.md §6.20.12 (không theo §6.20.5 gốc ở các điểm đã ⚠️):
+
+- `EpubUnit.text` = **inner-HTML** (X2), không phải text thuần — giữ nguyên `<strong>`, `<sup>`/
+  `<sub>`, `<br/>`, v.v. Không có rule `extract()` nào (X1 đã bị xoá hoàn toàn).
+- `doc_href` = `posixpath.normpath(posixpath.join(opf_dir, item.file_name))`, `opf_dir` đọc từ
+  `META-INF/container.xml` (`full-path` attr) — KHÔNG dùng `item.file_name` của `ebooklib` trần
+  (X6). Test bắt buộc `doc_href in zip.namelist()` cho 100% unit.
+- `ordinal` đếm trên MỌI node thuộc danh sách tag (sau khi lọc node lồng nhau + node `bb-vi` của
+  lần dịch trước), TRƯỚC khi áp drop rule nội dung (Y3) — test riêng xác nhận unit sống sót giữ
+  đúng ordinal dù có unit khác bị lọc ở giữa.
+- Drop rule Y8 sửa: unit **CHỈ** chứa ISBN mới bị bỏ, không phải "chứa ISBN" — đoạn có tên
+  sách/tác giả trước ISBN (file thật `copyright.html#8`) vẫn được giữ.
+- `write_translated()` ghi đè tại chỗ bằng `zipfile` (B-07), KHÔNG dùng `epub.write_epub()`:
+  - `bilingual=False`: thay nội dung node bằng fragment đã dịch, giữ tag/class/style của node.
+  - `bilingual=True`: chèn THÊM node copy sau bản gốc, strip toàn bộ `id` (kể cả descendant, Y2a),
+    gắn `lang="vi"` + `class="bb-vi"` (Y2, và là dấu hiệu X3 dùng để `load()` bỏ qua node này ở
+    lần đọc sau — chống dịch đôi khi upload lại chính file output). Riêng `td`/`th`: chèn
+    `<br/><span class="bb-vi">…</span>` BÊN TRONG ô (Y2b), không tạo cột mới.
+  - Validate `ET.fromstring()` trên mọi XHTML đã sửa TRƯỚC khi ghi (Y1) — không bao giờ ghi XHTML
+    hỏng vào EPUB.
+  - Ghi qua `<output>.epub.tmp` rồi `Path.replace()` (Y5).
+  - `translations` có `unit_id` không thuộc lần `load()` này → `EpubParseError` ngay (lineage
+    guard R6-02), không âm thầm bỏ qua.
+- `EpubDrmError` khi có `META-INF/encryption.xml` VÀ ít nhất 1 `<EncryptedData>` trỏ tài nguyên
+  không phải font (`.ttf/.otf/.woff*`) — font obfuscation hợp lệ không bị chặn nhầm.
+
+**1 điểm tự quyết định, cần Tech Lead xác nhận (§6.20.12 Y2c chưa rõ ràng)**: bảng Y2 của
+§6.20.12 có dòng "(c) bilingual=False: chỉ thay text node, không đụng element con (nếu không sẽ
+mất 10 `<img>` nằm trong `<p>`)" — điều này **mâu thuẫn bề mặt** với mô tả chính ở §6.20.5 bước 2
+("thay nội dung của node bằng fragment HTML đã dịch, giữ nguyên tag/class/style"). Đã implement
+theo mô tả CHÍNH (thay toàn bộ children bằng fragment đã parse từ bản dịch LLM trả về) vì đơn
+giản hơn và khớp X2's core design (cả inner-HTML round-trip qua LLM, kể cả `<img>` nếu có, dựa
+vào LLM echo nguyên vẹn thẻ không cần dịch — đã ghi rõ trong prompt contract theo X4, thuộc bước
+2/3). Cách đọc khác của Y2c (chỉ vá text node, giữ nguyên cấu trúc element gốc bất kể LLM trả gì)
+phức tạp hơn nhiều (cần tree-diff/merge) và CHƯA cần thiết ở bước này vì `write_translated()`
+chưa được gọi với bản dịch LLM thật. Đề nghị Tech Lead xác nhận cách hiểu trước khi bước 2/3 build
+prompt contract X4 thật — nếu Y2c đúng nghĩa đen thì `write_translated()` cần sửa lại phần
+`bilingual=False`.
+
+### 3. `plan_epub_chunks()` — `src/core/chunking.py` (thêm, không đụng `calculate_chunks`/`plan_chunks`)
+
+`EpubChunkPlan`, `EPUB_CHUNK_CHAR_BUDGET=8_000`, `EPUB_REQUEST_CHAR_BUDGET=3_000`,
+`EPUB_UNIT_HARD_MAX_CHARS=10_000` (Architecture.md §6.20.7). Thuật toán 2 bước: (1) cắt CHUNK ưu
+tiên tại ranh giới tài liệu — chỉ cắt đúng ranh giới khi running đã đạt budget NGAY LÚC chuyển
+tài liệu, không ép mỗi tài liệu = 1 chunk, không ép chunk luôn đầy budget khi merge tài liệu nhỏ;
+khi 1 tài liệu tự nó vượt budget thì cắt tiếp bên trong nó theo ranh giới unit; (2) trong mỗi
+chunk, gộp unit liên tiếp thành REQUEST theo `request_budget`, không bao giờ cắt giữa 1 unit; unit
+đơn lẻ vượt `request_budget` được gửi một mình; unit vượt `EPUB_UNIT_HARD_MAX_CHARS` →
+`EpubUnitTooLargeError` (Y4 — job phải fail rõ ràng, không tự cắt câu).
+
+3 hằng số cũng thêm vào `Settings` (`src/core/config.py`: `epub_chunk_char_budget`,
+`epub_request_char_budget`, `epub_unit_hard_max_chars`, giá trị mặc định khớp module constant) —
+theo đúng Z3 "cả 3 hằng số phải nằm ở Settings, không chôn trong code". Chưa wire override thật
+vào `plan_epub_chunks()` (đó là việc của Job Orchestrator, bước 2/3) — bước này chỉ thêm field.
+
+KHÔNG thêm `EPUB_INLINE_MARKUP_FACTOR`/`EPUB_JSON_ENVELOPE_CHARS_PER_UNIT` (X5) — thuộc
+`cost_estimator`/`cost_gate`, ngoài phạm vi task này theo đúng brief PM.
+
+### 4. Test
+
+`tests/test_epub_document.py` (27 test) + bổ sung vào `tests/test_chunking.py` (11 test EPUB,
+thuần thuật toán với `EpubUnit` giả lập, không cần file EPUB thật).
+
+Dùng CẢ 2 file EPUB thật (Protocol 5 mục 3 — không mock tay):
+
+- **(a) Cấu trúc**: Sourdough 384 unit / 5 doc spine (khớp B-01/B-04); Bread 19 doc spine (tự
+  verify qua `ebooklib.read_epub().spine` trực tiếp, không qua `EpubDocument`, trước khi tin).
+- **(b) Chunk**: Sourdough 7 chunk (khớp Architecture.md); Bread 28 chunk (KHÁC 42 của brief PM —
+  xem mục 1). Test thêm: liên tục/không chồng lấp/phủ hết unit, request không cắt giữa 1 unit.
+- **(c) `<sup>`/`<sub>`**: 6 dòng thật (5 phân số thuần + 1 hỗn số) giữ nguyên HTML, không rút gọn.
+- **(d) Inline markup**: đoạn 4 nguyên liệu `<strong>×4<br/>×3` giữ nguyên qua parse.
+- **(e) Round-trip ghi lại**: entry không liên quan byte-identical (so `zipfile.read()`, không
+  phải so byte nén thô — xem ghi chú thiết kế trong docstring `write_translated`), thứ tự entry
+  giữ nguyên, mono + bilingual đều well-formed, bilingual không tạo duplicate id (32 unit có
+  `<a id="page_N"/>` trong file thật), bilingual giữ đúng số cột bảng (test trên file Bread, có
+  `<table>` thật — 12 bảng, 36 unit `td`).
+- Thêm: DRM (dương tính + âm tính font-only, dùng fixture EPUB tối thiểu tự dựng bằng `zipfile`,
+  KHÔNG phải mock cho logic đang test — chỉ nhỏ hơn 2 file thật), lineage guard (`unit_id` lạ →
+  `EpubParseError`), determinism `unit_id` qua 2 lần `load()` (R6-02), nesting dedup (`li>p`).
+
+### Kết quả chạy thật
+
+```
+uv run ruff check <files sua>          → All checks passed!
+uv run ruff format --check <files sua> → sach (3 file can format lai da format xong)
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q  → 43 passed
+uv run pytest -q (toan bo suite, so voi baseline qua git stash)
+  truoc thay doi (stash):  575 passed, 1 failed
+  sau thay doi:            613 passed, 1 failed   (+38 test moi, PASS het)
+```
+
+1 fail cả 2 lần đều là `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— PRE-EXISTING, không liên quan EPUB, không đụng file này trong task. Không có fail mới.
+
+### File đã sửa/thêm
+
+Mới: `src/services/epub_document.py`, `tests/test_epub_document.py`.
+
+Sửa: `src/core/chunking.py` (thêm `EpubChunkPlan`/`plan_epub_chunks`/3 hằng số/`EpubUnitTooLargeError`,
+KHÔNG đụng phần PDF hiện có), `src/core/config.py` (thêm 3 field Settings, KHÔNG đụng field khác —
+đọc bản mới nhất có Bug #10 trước khi sửa), `tests/test_chunking.py` (thêm test EPUB),
+`pyproject.toml`/`uv.lock` (thêm `ebooklib`/`beautifulsoup4`/`lxml`/`markdownify`, pin version).
+
+Không đụng: `src/core/glossary_manager.py`, `src/core/job_orchestrator.py`,
+`src/postprocess/font_shrink.py`/`rotated_text_overlay.py`, `src/preprocess/searchable_pdf.py`,
+`src/services/babeldoc_runner.py`/`pdf2zh_runner.py`, `src/babeldoc_shim/*`, `CLAUDE.md`,
+`docs/Architecture.md`, `docs/PRD.md`.
+
+### Trạng thái
+
+**CHƯA spawn Reviewer** (Protocol 7 R7-01) — báo cáo lại PM, chờ Reviewer thật trước khi coi bước
+này là "xong". 2 điểm cần PM/Tech Lead xác nhận trước khi bước 2/3 bắt đầu: (1) chênh lệch 28 vs
+42 chunk cho file Bread (mục 1), (2) cách đọc đúng của Y2c "chỉ thay text node" vs mô tả chính
+"thay nội dung node bằng fragment" cho `bilingual=False` (mục 2).
+
+---
+
+## Bổ sung (2026-09-09) — Sửa Y2(c) `write_translated()` (bilingual=False) trước khi giao Reviewer
+
+PM đọc lại `docs/Architecture.md` dòng 5591 (bảng Final Decision §6.20.12) xác nhận Y2(c)
+**"NHẬN toàn bộ"** — THẮNG so với mô tả nháp ở §6.20.5 bước 2 mà bản trước đã lỡ chọn implement.
+Sửa lại đúng theo Y2(c): `bilingual=False` **chỉ thay text node, không đụng element con**.
+
+### 1. Thay đổi trong `src/services/epub_document.py`
+
+- Thêm `_INLINE_PRESERVE_TAGS` (đúng danh sách contract X4, Architecture.md dòng 5541-5542:
+  `strong, em, b, i, sup, sub, br, a, span, small`) và `_NO_TRANSLATE_TAGS = {code, pre}`.
+- `_apply_translation()` nhánh `not bilingual` rẽ 2 đường:
+  - Subtree KHÔNG có tag ngoài `_INLINE_PRESERVE_TAGS` → giữ nguyên cách cũ (`node.clear()` +
+    append fragment dịch nguyên khối) — an toàn vì LLM cam kết giữ đúng số lượng/vị trí các tag
+    này (X4).
+  - Subtree CÓ tag ngoài danh sách đó (vd `<img>`) → `_apply_translation_untrusted_structure()`:
+    KHÔNG bao giờ gọi `.clear()`/xoá bất kỳ Tag nào — chỉ `NavigableString.replace_with(...)` trên
+    đúng các text node gốc. `<img>` (và mọi tag không nằm trong contract) do đó **không thể** bị
+    mất, vì không có lệnh nào từng nhắm vào nó.
+- 3 nhánh con của `_apply_translation_untrusted_structure()` (`_collect_runs_recursive`/
+  `_text_runs_under` dùng chung cho cả subtree gốc lẫn fragment đã dịch, đảm bảo cùng định nghĩa
+  "slot" ở 2 phía):
+  1. **1 slot** (đa số ca thực tế — xem mục 2): thay đúng node đó bằng toàn bộ fragment dịch
+     (`replace_with(*translated_children)`), giữ nguyên định dạng nếu LLM có trả tag inline.
+  2. **Nhiều slot, đếm khớp** giữa số đoạn text gốc và số đoạn text trong bản dịch: khớp 1-1 theo
+     đúng thứ tự tài liệu (chỉ lấy nội dung text của mỗi đoạn dịch, giữ nguyên tag bọc của bản
+     GỐC — không tin cấu trúc tag của bản dịch ở nhánh này, chỉ tin thứ tự).
+  3. **Nhiều slot, đếm KHÔNG khớp** (LLM gộp/tách câu khác số đoạn gốc) → **fallback đã biết giới
+     hạn, xem mục 2**.
+
+### 2. Gap báo cáo PM (đã escalate, chưa có phản hồi ngược lại)
+
+Architecture.md (X4, Y2, §6.20.12) mô tả CONTRACT (id→html, tag nào được giữ) và RÀNG BUỘC
+(Y2c: không đụng element con) nhưng **không có thuật toán tường minh** cho ca "1 unit có nhiều
+text node xen kẽ 1 tag không nằm trong `_INLINE_PRESERVE_TAGS`, và bản dịch LLM trả về không giữ
+đúng số lượng đoạn text tương ứng". Đây là gap thật, không phải lười tra cứu — đã đọc lại toàn bộ
+X4/Y2/Y2c + vùng lân cận trước khi kết luận.
+
+Đã chọn phương án (không tự đoán liều, chọn theo hướng PM gợi ý — an toàn hơn là mất cấu trúc):
+khi đếm không khớp, gán TOÀN BỘ bản dịch vào text node **gốc dài nhất** (heuristic "nội dung
+chính"), các text node còn lại **giữ nguyên tiếng Anh gốc** (không xoá, không đoán chia). Đã ghi
+rõ thành "Known limitation" ngay đầu `epub_document.py` và có test riêng
+(`test_write_translated_monolingual_img_mismatch_uses_documented_fallback`) xác nhận hành vi này
+tường minh, không phải bug ẩn.
+
+**Đo trên 2 file EPUB thật hiện có (Protocol 5 mục 3)**: cả 10 `<img>` (Sourdough) đều nằm trong
+`<p>` KHÔNG có text nào khác → bị `_is_droppable_content()` loại khỏi `units` từ trước (get_text()
+rỗng) → **chưa từng đi tới nhánh `write_translated()` này trên dữ liệu mẫu hiện có** (tự verify lại
+bằng script, không suy đoán). Nghĩa là gap trên hiện là rủi ro LÝ THUYẾT cho 2 file mẫu, nhưng
+Y2(c) áp dụng tổng quát cho MỌI EPUB khác — nơi ảnh + chữ chú thích thật sự nằm chung 1 `<p>` —
+nên vẫn bắt buộc implement đúng, không được bỏ qua vì "chưa gặp trên data mẫu".
+
+### 3. Test thêm vào `tests/test_epub_document.py` (3 test mới, EPUB tối thiểu tự dựng — cùng quy
+ước với các test DRM/nesting hiện có, KHÔNG phải mock cho logic đang test)
+
+- `test_write_translated_monolingual_preserves_img_child_single_text_run`: `<p><img/> text</p>` —
+  ca phổ biến nhất trên thực tế, 1 slot, không nhập nhằng.
+- `test_write_translated_monolingual_preserves_img_child_matched_multi_run`: 4 slot gốc khớp đúng
+  4 đoạn bản dịch → xác nhận khớp 1-1 đúng thứ tự, `<img>` và tag `<b>` gốc giữ nguyên vị trí.
+- `test_write_translated_monolingual_img_mismatch_uses_documented_fallback`: đếm lệch (4 slot gốc
+  vs 1 đoạn dịch gộp) → xác nhận `<img>` không mất, bản dịch đầy đủ vào slot dài nhất, các slot
+  ngắn hơn giữ nguyên tiếng Anh, output vẫn well-formed XHTML.
+
+Không sửa gì thêm cho điểm "28 vs 42 chunk" — PM xác nhận 28 là số đúng, không cần điều chỉnh.
+
+### 4. Kết quả chạy thật
+
+```
+uv run ruff check src/services/epub_document.py tests/test_epub_document.py     → All checks passed!
+uv run ruff format --check <2 file trên>                                        → sạch
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q             → 46 passed (43 cũ + 3 mới)
+uv run pytest -q (toàn bộ suite)                                                → 616 passed, 1 failed
+```
+
+1 fail (`tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`)
+— tự verify lại bằng `git stash` (bỏ toàn bộ thay đổi của mình, chạy lại): **fail y hệt trước khi
+sửa** → xác nhận PRE-EXISTING, không liên quan tới thay đổi này, không có fail mới phát sinh.
+
+### File đã sửa
+
+`src/services/epub_document.py` (thêm `_INLINE_PRESERVE_TAGS`/`_NO_TRANSLATE_TAGS`/
+`_has_untrusted_descendant`/`_collect_runs_recursive`/`_text_runs_under`/
+`_apply_translation_untrusted_structure`, sửa nhánh `not bilingual` của `_apply_translation`),
+`tests/test_epub_document.py` (3 test mới). Không đụng file nào khác.
+
+### Trạng thái
+
+**CHƯA spawn Reviewer** — chờ Reviewer thật (Protocol 7 R7-01) trước khi coi là "xong". Cần PM xác
+nhận: (a) implementation Y2(c) đã đúng theo bảng Final Decision, (b) hướng fallback đã chọn cho ca
+đếm-không-khớp (mục 2) có chấp nhận được hay cần hỏi lại Tech Lead để chốt thuật toán khác.
+
+---
+
+## Sửa (2026-09-09) — Y2(d) `li > ul` lồng: tách unit theo "innermost" (Reviewer reject vòng 1/3)
+
+Reviewer reject bước 1/3 US-22 vòng 1/3 (Dev↔Reviewer, Protocol 3): Architecture.md §6.20.12 bảng
+Final Decision hàng Y2 chấp nhận toàn bộ **"NHẬN toàn bộ"** cho cả 4 mục (a)-(d), trong đó mục (d)
+*"`li > ul` lồng: lấy **innermost** block có text trực tiếp"* — nghĩa là 1 `<li>` chứa `<ul>` lồng
+bên trong phải tách thành NHIỀU unit riêng, không được gom cả khối `<li><ul>...</ul></li>` thành 1
+unit duy nhất. Code trước đó (`_collect_candidate_nodes()`) áp dụng đồng nhất luật "outermost only"
+cho MỌI ca lồng nhau, kể cả `li > ul` — sinh ra 1 unit khổng lồ nhét nguyên markup `<ul><li>` thô
+vào `text`, ngoài contract X4 (`_INLINE_PRESERVE_TAGS`), hành vi LLM với markup đó không xác định.
+Chi tiết đầy đủ: xem `docs/review-report.md` section "Review Report — US-22 Dịch EPUB, Bước 1/3",
+mục 1 "Blocking issue" (dòng ~6986 trở đi).
+
+### 1. Thay đổi trong `src/services/epub_document.py`
+
+- Thêm hằng số `_LIST_CONTAINER_TAGS = frozenset({"ul", "ol"})`.
+- Tách `_has_unit_tag_ancestor()` thành 2 hàm con: `_nearest_unit_ancestor()` (tìm ancestor unit-tag
+  gần nhất) và `_crosses_list_container()` (kiểm tra có `<ul>`/`<ol>` nằm giữa node và ancestor đó
+  hay không). `_has_unit_tag_ancestor()` giờ chỉ loại node lồng nếu đường đi tới ancestor gần nhất
+  KHÔNG băng qua `<ul>`/`<ol>` — tức giữ nguyên luật cũ (outermost) cho ca lồng đơn giản (`li > p`,
+  §6.20.5, chưa bị Y2(d) thay thế), nhưng CHO PHÉP `li` con trong `ul`/`ol` lồng trở thành candidate
+  riêng — đệ quy tự nhiên với lồng nhiều cấp vì mỗi node chỉ so với ancestor GẦN NHẤT của chính nó.
+- Thêm `_strip_nested_lists(node)`: trả về bản COPY độc lập (`copy.deepcopy` + `decompose()` từng
+  `<ul>`/`<ol>` con, mọi cấp) — dùng trong `load()` TRƯỚC khi trích `text` (`_inner_html`) và trước
+  khi xét drop-rule (`_is_droppable_content`), để unit của node cha không chứa lại markup danh sách
+  con (đã tách unit riêng) và không bị `get_text()` "ăn ké" nội dung của unit con khi xét rỗng/toàn
+  số/URL/ISBN.
+- Sửa `_collect_runs_recursive()` (dùng bởi `_text_runs_under()` trong nhánh Y2(c)
+  `_apply_translation_untrusted_structure`): bỏ qua (không đệ quy vào) subtree `<ul>`/`<ol>` giống
+  cách đã bỏ qua `<code>`/`<pre>` — nếu không, khi `write_translated()` ghi bản dịch cho unit cha
+  (vd `li` chứa `ul` lồng, luôn rơi vào nhánh untrusted-structure vì `ul`/`li` không nằm trong
+  `_INLINE_PRESERVE_TAGS`), nó sẽ gom nhầm cả text bên trong `ul` con làm "slot" của chính nó, ghi
+  đè sai lên nội dung đáng lẽ thuộc về unit con (vốn được ghi riêng ở ordinal khác trong cùng lần
+  gọi `write_translated()`).
+- Cập nhật docstring đầu file, thêm đoạn giải thích Y2(d) và cách 3 thay đổi trên phối hợp với nhau.
+
+### 2. Tự verify bằng script độc lập trước khi viết test chính thức (giống cách Reviewer đã làm)
+
+Dựng EPUB tối thiểu với `<li>Preheat the oven to 220C, then:<ul><li>Add flour and water</li><li>Knead
+for ten minutes</li></ul></li>` (đúng fixture Reviewer đã dùng để phát hiện bug) — `load()` cho ra
+**3 unit** (`text` lần lượt: "Preheat the oven to 220C, then:", "Add flour and water", "Knead for ten
+minutes"), không unit nào chứa markup `<ul>`/`<li>` thô. `write_translated()` với bản dịch giả cho cả
+3 unit → output XHTML giữ nguyên cấu trúc `<ul>/<li>` lồng, mỗi `<li>` mang đúng bản dịch của chính
+nó, không lệch/tràn sang `<li>` khác. Test thêm cả ca lồng 3 cấp (`li > ul > li > ul > li`) — tách
+đúng thành 3 unit, mỗi unit là 1 lá có text trực tiếp, đúng tinh thần "innermost" đệ quy.
+
+### 3. Test thêm vào `tests/test_epub_document.py` (3 test mới, R6-02: assert cấu trúc unit cụ thể —
+tag/ordinal/text từng unit và cấu trúc XHTML sau khi ghi, không chỉ đếm số lượng)
+
+- `test_nested_list_splits_into_innermost_units`: fixture `li > ul` 1 cấp giống hệt Reviewer dùng —
+  assert đúng 3 unit, đúng `text` từng unit, không unit nào chứa `<ul>`/`<li>` thô.
+- `test_nested_list_multi_level_splits_to_every_leaf`: lồng 3 cấp — assert tách hết tới tận lá.
+- `test_write_translated_nested_list_updates_each_leaf_independently`: ghi bản dịch cho cả 3 unit,
+  assert output giữ nguyên `<ul>/<li>`, mỗi `<li>` mang đúng bản dịch của chính nó (so khớp chuỗi con
+  cụ thể theo đúng vị trí lồng nhau), không còn tiếng Anh gốc sót lại, vẫn well-formed XHTML
+  (`ET.fromstring` không raise).
+
+### 4. Kết quả chạy thật
+
+```
+uv run ruff check src/services/epub_document.py tests/test_epub_document.py     → All checks passed!
+uv run ruff format --check <2 file trên>                                        → sạch (1 file tự động
+                                                                                    format lại bởi
+                                                                                    `ruff format`)
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q             → 49 passed (46 cũ + 3 mới)
+uv run pytest -q (toàn bộ suite)                                                → 619 passed, 1 failed
+```
+
+1 fail (`tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`)
+— khớp CHÍNH XÁC tên/số lượng fail đã ghi nhận ở 2 lần review trước (Increment US-19 và bước 1/3
+US-22 vòng 1), pre-existing, không liên quan tới thay đổi Y2(d) này. So khớp SỐ LƯỢNG fail (không
+phải tổng pass): 1 fail trước sửa, 1 fail sau sửa — không có fail mới phát sinh; tổng pass tăng từ
+616 → 619 đúng bằng 3 test mới thêm.
+
+### File đã sửa
+
+`src/services/epub_document.py` (thêm `_LIST_CONTAINER_TAGS`, `_nearest_unit_ancestor`,
+`_crosses_list_container`, `_strip_nested_lists`; sửa `_has_unit_tag_ancestor`, vòng lặp trong
+`load()`, `_collect_runs_recursive`; cập nhật docstring đầu file), `tests/test_epub_document.py`
+(3 test mới). Không đụng file nào khác — không chạm `src/core/chunking.py`, `src/core/config.py`,
+Translation Engine/cost-gate/job_orchestrator (vẫn ngoài phạm vi bước 1/3, đúng như bước trước).
+
+### Trạng thái
+
+**CHƯA spawn Reviewer cho vòng sửa này** — chờ Reviewer duyệt lại (vòng 2/3 Dev↔Reviewer, giới hạn
+cuối là vòng 3/3 theo Protocol 3). Báo cáo lại PM: đã implement đúng Y2(d) theo yêu cầu reject của
+Reviewer, có test riêng cho cả ca lồng 1 cấp lẫn nhiều cấp, đã tự verify bằng script độc lập trước
+khi viết test chính thức (không chỉ tin code compile được), regression 0 fail mới.
+
+---
+
+## US-22 Bước 1/3 — Fix Bug #EPUB-1 (QA vòng 1/5 Dev↔QA) + điều tra Bug #EPUB-2 (2026-09-09)
+
+### Bối cảnh
+
+QA test round-trip toàn bộ unit của 2 file EPUB thật (`docs/test-report.md` mục "US-22 Dịch EPUB —
+Bước 1/3") phát hiện 2 bug trong `write_translated()` — bug NGHIÊM TRỌNG (#EPUB-1, mất dữ liệu âm
+thầm) bắt buộc sửa trước bước 2/3, và 1 bug mức trung bình (#EPUB-2) cần điều tra thêm xem có pattern
+sửa được không. Đây KHÔNG tính vào giới hạn Protocol 3 Dev↔Reviewer (QA là vòng khác) — vòng 1/5
+Dev↔QA.
+
+### 1. Bug #EPUB-1 — ĐÃ SỬA
+
+**Root cause** (đúng như QA đã trace): `_apply_translation()` đưa thẳng `vi_html` (ban dịch LLM,
+PLAIN TEXT chưa chắc đã escape đúng `&`/`<`) vào `_fragment_children()` để re-parse như XML
+(`features="xml"` qua lxml). Ký tự `&`/`<` trần làm XML không well-formed — lxml "chữa cháy" bằng
+cách âm thầm CẮT BỎ phần nội dung không hợp lệ, KHÔNG raise lỗi. `_validate_wellformed()` (Y1) không
+bắt được ca này vì kết quả sau khi cắt vẫn là XML hợp lệ.
+
+**Fix** (`src/services/epub_document.py`):
+
+- Hàm mới `_escape_untrusted_markup(vi_html: str) -> str`: escape mọi `&` không phải 1 phần của
+  entity hợp lệ (`&amp;`/`&lt;`/`&gt;`/`&quot;`/`&apos;`/numeric charref) thành `&amp;`, và mọi `<`
+  KHÔNG mở đầu 1 thẻ nằm trong `_INLINE_PRESERVE_TAGS` (X4 — `strong, em, b, i, sup, sub, br, a,
+  span, small`) thành `&lt;`. Các thẻ inline hợp lệ vẫn được giữ nguyên để parse thành `Tag` thật
+  (không escape nhầm thành text), đúng cam kết X4. Gọi hàm này ở đầu `_apply_translation()` — áp
+  dụng cho cả nhánh `bilingual=False` lẫn `bilingual=True` (`td`/`th` và nhánh chung), vì cả 3 đều
+  gọi `_fragment_children()` với cùng `vi_html` chưa qua sanitize.
+- `_inner_html()` (dùng để tạo `EpubUnit.text`, X2 — nguồn phụ, không phải fix bắt buộc nhưng cùng
+  root cause QA đã chỉ ra): đổi từ tự ghép `"".join(str(child) for child in node.children)` (SAI —
+  `str()` của 1 `NavigableString` đã tách khỏi cây trả về text đã decode, KHÔNG re-escape) sang dùng
+  đúng API của bs4: `node.decode_contents()` — tự escape đúng chuẩn cho cả `Tag` lẫn `NavigableString`
+  con, đúng gợi ý của QA ("dùng đúng API của bs4 ... thay vì tự ghép chuỗi rồi re-parse").
+
+**Bằng chứng đã sửa xong — chạy lại ĐÚNG 2 câu QA đã đo**:
+
+```
+vi_html = "Do am can duy tri o muc < 65% de tranh nhao qua uot."
+doc.write_translated({unit.unit_id: vi_html}, out, bilingual=False)
+EpubDocument.load(out).units[0].text          -> 'Do am can duy tri o muc &lt; 65% de tranh nhao qua uot.'
+plain text sau khi giải mã lại (get_text()) -> 'Do am can duy tri o muc < 65% de tranh nhao qua uot.'
+=> KHỚP 100% chuỗi gốc, không mất chữ (trước fix: chỉ còn 'Do am can duy tri o muc ')
+
+vi_html = "In an boi C&C Offset Printing Co. Ltd."
+=> plain text sau round-trip khớp 100%, còn nguyên "C&C" (trước fix: mất '&C')
+```
+
+Chạy lại `qa_roundtrip.py` (script QA để lại) trên chính 2 file EPUB thật QA dùng:
+
+```
+Sourdough: 384 unit, 0 mismatch (như cũ — file này không có ký tự & trần)
+Bread:     866 unit, mismatch giảm từ (mất dữ liệu #EPUB-1 lẫn #EPUB-2 trộn lẫn) xuống ĐÚNG 24
+           mismatch — toàn bộ 24 ca còn lại đều là Bug #EPUB-2 (xem mục 2), KHÔNG còn ca nào mất
+           dữ liệu kiểu #EPUB-1 (đã kiểm từng ca: không còn ca nào trong 24 này liên quan `&`/`<`
+           trần bị cắt — tất cả là duplicate-content do fallback đếm-slot, đúng cơ chế #EPUB-2)
+```
+
+Đã thêm 4 test permanent vào `tests/test_epub_document.py` (mục "(f) Bug #EPUB-1"), dùng ĐÚNG 2 câu
+QA đã đo làm golden case + 1 test regression đảm bảo thẻ inline (`<b>`, `<i>`) vẫn được parse thành
+Tag thật (không bị escape nhầm) + 1 test cho `_inner_html()`.
+
+**Kết luận Bug #EPUB-1: ĐÃ SỬA XONG, có bằng chứng cụ thể, sẵn sàng cho QA re-verify.**
+
+### 2. Bug #EPUB-2 — ĐÃ ĐIỀU TRA, KHÔNG TỰ SỬA, ESCALATE LẠI CHO PM
+
+Điều tra toàn bộ 24/866 unit của file Bread rơi vào fallback đếm-slot-không-khớp
+(`_apply_translation_untrusted_structure`), bằng script phân tích trực tiếp cấu trúc DOM của từng
+unit (không đoán):
+
+```
+24/24 unit:      tag = 'td', descendant "untrusted" duy nhất = 1 thẻ <p class="top">
+23/24 unit:      2 "slot" text (vd <i>Apple</i> + " Erika Janik")
+1/24 unit:       1 "slot" text (không có <i>)
+doc_href:        100% CHỈ 1 tài liệu — OEBPS/02_editor.xhtml (không rải rác khắp sách)
+```
+
+**Đây là 1 bảng "The Edible Series" (danh sách sách + tác giả liên quan) lặp lại 24 dòng, mỗi dòng
+1 `<td><p class="top"><i>TenSach</i> TenTacGia</p></td>`** — hoàn toàn không phải hiện tượng rải rác
+ngẫu nhiên, mà là 1 cấu trúc bảng biên tập cụ thể, xuất hiện đúng 1 chỗ trong sách.
+
+**Vì sao KHÔNG tự sửa dù pattern rất rõ**: nguyên nhân sâu xa của việc rơi vào fallback là số "slot"
+văn bản đếm được của `vi_html` (bản dịch) không khớp số "slot" gốc — cụ thể ở đây do `<p>` là 1 thẻ
+NGOÀI `_INLINE_PRESERVE_TAGS` (X4 chỉ cam kết LLM giữ nguyên `strong, em, b, i, sup, sub, br, a,
+span, small` — KHÔNG có `p`), nên ứng xử của `_apply_translation_untrusted_structure` với nó phụ
+thuộc hoàn toàn vào **LLM thật sẽ trả về vi_html có giữ nguyên thẻ `<p>` bao ngoài hay không** — điều
+này KHÔNG được định nghĩa trong Architecture.md X4 (prompt chỉ nói về 10 thẻ inline, không nói gì về
+`<p>`/`<td>`/thẻ khối khác lồng bên trong 1 unit), và bước 2/3 (wire LLM thật) CHƯA làm nên KHÔNG có
+cách verify sống hành vi LLM thật với ca này (đúng tinh thần R5-02 — không được viết implementation
+dựa trên phỏng đoán hành vi 1 dependency ngoài chưa verify). Bất kỳ rule bổ sung nào ở đây (vd: "tin
+luôn `<p>` là thẻ bao ngoài đáng tin nếu nó là node bao NGOÀI CÙNG duy nhất") thực chất là MỞ RỘNG
+contract X4 — vượt quyền Dev, đúng theo CLAUDE.md "Không tự ý thay đổi architecture — escalate lên
+Tech Lead nếu cần".
+
+**Số liệu cụ thể báo cáo PM để quyết định**:
+- Tỷ lệ: 24/866 (~2,8%), 100% tập trung ở 1 bảng biên tập cụ thể (không lan toả khắp sách).
+- Bản chất: đúng như PM mô tả — "vấn đề cố hữu của việc ánh xạ ngược bản dịch LLM (không có cách nào
+  chắc chắn khớp lại nhiều text-node từ 1 khối text đã dịch mà không có tín hiệu định ranh giới từ
+  chính LLM)" — vì gốc rễ là contract X4 hiện tại KHÔNG nói LLM phải làm gì với thẻ khối lồng bên
+  trong unit (chỉ nói về 10 thẻ inline).
+- 2 phương án PM có thể chọn (Dev không tự quyết): (a) mở rộng contract JSON X4 — thêm chỉ thị rõ
+  ràng cho LLM về cách xử lý thẻ khối lồng (vd tường minh yêu cầu giữ nguyên `<p>` bao ngoài, hoặc
+  tách `<p>` thành 1 unit riêng ngay từ `load()` thay vì gộp vào unit `<td>` cha — đổi rule dedup
+  "outermost wins" hiện tại), hoặc (b) chấp nhận tỷ lệ ~2,8% này là known limitation tại bước 2/3
+  (bản dịch cho các unit dạng bảng biên tập kiểu này có thể bị duplicate content nhẹ, không mất cấu
+  trúc/không hỏng EPUB — đã có test `test_write_translated_monolingual_img_mismatch_uses_documented_fallback`
+  đảm bảo hành vi fallback không phá hỏng file).
+
+**Không nâng mức "blocking" cho bước 2/3** — khác Bug #EPUB-1, vì bản chất KHÔNG phải data loss/silent
+failure, mà là duplicate content đã biết giới hạn, ưu tiên đúng "không mất/không hỏng cấu trúc" theo
+thiết kế hiện tại.
+
+### 3. Regression — chạy lại toàn bộ, so sánh số lượng với baseline QA
+
+```
+uv run ruff check src/services/epub_document.py src/core/chunking.py tests/test_epub_document.py
+  → All checks passed!
+uv run ruff check src/ tests/ (toàn bộ)
+  → All checks passed!
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q
+  → 53 passed (49 cũ + 4 test mới cho Bug #EPUB-1)
+uv run pytest -q (toàn bộ suite)
+  → 623 passed, 1 failed (94.99s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp ĐÚNG tên đã ghi nhận ở QA/Reviewer các vòng trước (pre-existing, không liên quan EPUB). Tổng
+pass tăng từ 619 (baseline QA) → 623 = đúng bằng 4 test mới thêm. **Không có regression mới.**
+
+### File đã sửa
+
+`src/services/epub_document.py` (thêm `_escape_untrusted_markup`, `_INLINE_TAG_ALTERNATION`,
+`_TRUSTED_TAG_OR_BARE_LT_RE`, `_BARE_AMP_RE`; sửa `_inner_html()` dùng `decode_contents()`; sửa
+`_apply_translation()` gọi sanitize `vi_html` ở đầu hàm), `tests/test_epub_document.py` (4 test mới,
+mục "(f) Bug #EPUB-1"). Không đụng `src/core/chunking.py`, `src/core/config.py`, Translation
+Engine/cost-gate/job_orchestrator — vẫn ngoài phạm vi bước 1/3.
+
+### Trạng thái
+
+**CHƯA báo "xong"** — chờ QA re-verify (vòng 2/5 Dev↔QA nếu QA test lại), và chờ PM/Tech Lead quyết
+định hướng xử lý Bug #EPUB-2 (mục 2 ở trên) trước khi bước 2/3 dùng chung cơ chế fallback này cho bản
+dịch LLM thật. Báo cáo PM: Bug #EPUB-1 đã sửa xong + có bằng chứng cụ thể (mục 1); Bug #EPUB-2 đã
+điều tra xong, xác nhận đây là vấn đề cố hữu của việc ánh xạ ngược bản dịch LLM không có tín hiệu
+ranh giới — KHÔNG tự sửa, cần PM quyết định giữa mở rộng contract X4 hoặc chấp nhận known limitation.

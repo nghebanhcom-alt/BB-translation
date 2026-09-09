@@ -3110,3 +3110,341 @@ khớp đúng Reviewer). Dữ liệu test đã dọn sạch, verify lại bằng
 
 **Không tính vào giới hạn Protocol 3** (Dev↔QA) — đây là vòng QA ĐẦU TIÊN cho US-19 trong session
 này (Reviewer đã APPROVE ở vòng 1/3 Dev↔Reviewer).
+
+---
+
+## US-22 Dịch EPUB — Bước 1/3: `EpubDocument` (parser + chunk theo chương) — QA (2026-09-09)
+
+**Phạm vi**: CHỈ `src/services/epub_document.py` (parser + `write_translated()`) +
+`src/core/chunking.py::plan_epub_chunks()`. KHÔNG có Translation Engine/cost-gate/output UI thật —
+đây là hạ tầng nội bộ, chưa có endpoint HTTP nào để test qua UI/browser. Test toàn bộ ở tầng
+integration/unit qua Python trực tiếp (import module, gọi hàm thật), dữ liệu THẬT (2 file EPUB mẫu
+`data/uploads/...Sourdough...epub` và `data/uploads/sample2_Bread-A-Global-History.epub`), scripts
+QA tự viết riêng (không chạy lại test suite của Dev như là "test của tôi", dù suite của Dev cũng
+được chạy lại ở mục regression). Đã đọc `docs/PRD.md` US-22, `docs/Architecture.md` §6.20 (đặc biệt
+§6.20.5/§6.20.7/§6.20.12 bảng Final Decision Y1-Y8/X1-X6) + §6.21, `docs/review-report.md` 2 vòng
+review US-22 Bước 1/3 (vòng 1 REJECT Y2(d), vòng 2 APPROVE), `docs/CHANGELOG.md` toàn bộ 3 entry
+US-22 bước 1.
+
+**KẾT LUẬN NGẮN GỌN TRƯỚC (theo yêu cầu PM): đây là bước TRUNG GIAN, KHÔNG kết luận
+`ready_for_release`. Kết luận đúng là: CHƯA sẵn sàng cho bước 2/3 — phát hiện 1 bug MỚI mức độ
+nghiêm trọng (mất dữ liệu âm thầm) nằm ngay trong module bước 1/3, phải sửa TRƯỚC khi Dev viết
+`_process_epub_chunk()`/gọi LLM thật ở bước 2/3, vì bug này nằm trên đúng con đường mà MỌI bản
+dịch LLM trả về sẽ phải đi qua (`write_translated()`).**
+
+### 1. Load 2 file EPUB thật qua `EpubDocument.load()` — PASS
+
+```
+Sourdough: units=384, opf_dir=ops, total_chars=53135, 5 spine doc (khớp ebooklib.read_epub().spine
+           đo độc lập), 3/5 doc có unit sống sót (2 doc không có unit — hợp lý: bìa/trang trắng)
+Bread:     units=866, opf_dir=OEBPS, total_chars=232127, 19 spine doc (khớp Architecture.md +
+           CHANGELOG "19 cho Bread"), 18/19 doc có unit
+```
+
+Số unit Sourdough (384) khớp đúng con số Dev/Reviewer đã báo. Số spine document (5 và 19) verify
+độc lập bằng `ebooklib.epub.read_epub(path).spine` gọi trực tiếp, không qua `EpubDocument` — khớp
+tuyệt đối. **PASS.**
+
+### 2. Round-trip toàn bộ unit 1 file — dịch giả "[VI] " + `write_translated()` + mở lại — **FAIL,
+phát hiện 2 bug**
+
+Script: `qa_roundtrip.py` (scratchpad phiên QA này) — lấy TOÀN BỘ unit của cả 2 file, tạo bản dịch
+giả `f"[VI] {unit.text}"` (đúng theo gợi ý kịch bản của PM), ghi qua `write_translated()`, mở lại
+bằng CHÍNH `EpubDocument.load()` lẫn `zipfile` độc lập.
+
+**Phần PASS**: cả 2 file — file output vẫn là zip hợp lệ (`zipfile.testzip()` không lỗi), entry đầu
+tiên là `mimetype` dạng `ZIP_STORED` với nội dung đúng `application/epub+zip` (đúng OCF spec),
+`content.opf`/`9781603424073.opf` parse được bằng `ET.fromstring()`, thứ tự + danh sách entry trong
+zip giữ nguyên 100% so với gốc, MỌI entry ảnh/CSS/font (18 file Sourdough, 62 file Bread) byte-
+identical tuyệt đối với bản gốc (so bằng `zipfile.read()`, không phải so byte nén thô). Sourdough:
+0/384 unit lệch nội dung sau round-trip — sạch tuyệt đối.
+
+**Bug #EPUB-1 (NGHIÊM TRỌNG — mất dữ liệu âm thầm, không raise exception, `status` vẫn là
+`completed`)**: bản dịch (hoặc bất kỳ `vi_html` nào) chứa ký tự `&` hoặc `<` chưa escape bị
+**CẮT/MẤT NỘI DUNG ÂM THẦM** khi `write_translated()` ghi ngược. Phát hiện lần đầu trên dữ liệu
+THẬT (file Bread, không phải fixture tự tạo): unit `OEBPS/04_copy.xhtml#6` gốc `"...C&C Offset
+Printing Co. Ltd"` → sau round-trip còn `"...C Offset Printing Co. Ltd"` (mất `&C`); unit
+`OEBPS/08_chapter02.xhtml#47` gốc có `"...dough & set them..."` → mất chữ `&`. Đã tự dựng thêm 1
+fixture độc lập để xác nhận đây không phải hiện tượng lẻ tẻ, mà là lỗi có tính hệ thống, và đo mức
+độ nghiêm trọng thật sự:
+```python
+vi_html_lt = 'Do am can duy tri o muc < 65% de tranh nhao qua uot.'
+doc.write_translated({unit.unit_id: vi_html_lt}, out, bilingual=False)   # KHÔNG raise exception
+# đọc lại:
+EpubDocument.load(out).units[0].text
+# → 'Do am can duy tri o muc '   (MẤT TOÀN BỘ phần sau dấu '<' — hơn nửa câu biến mất, im lặng)
+```
+**Root cause** (đã trace tới tận `bs4`, không suy đoán): `_inner_html()`
+(`src/services/epub_document.py:241-242`, `"".join(str(child) for child in node.children)`) join
+trực tiếp `str()` của từng child. Với `Tag` con, `str()` của `bs4` tự escape đúng — nhưng với
+`NavigableString` con (text thuần), `str()` của `bs4` trả về text đã DECODE, KHÔNG re-escape (tự
+verify: `BeautifulSoup('<p>a &amp; b &lt; c</p>','xml')` → `str(NavigableString)` cho ra `'a & b <
+c'`, không phải `'a &amp; b &lt; c'`). Chuỗi chưa escape này (`EpubUnit.text`, và mọi `vi_html`
+được cấu trúc tương tự) sau đó bị đưa NGƯỢC vào `_fragment_children()` để re-parse như XML/HTML
+(`BeautifulSoup(f"<bb-fragment-root>{html}</bb-fragment-root>", parser_name)`) — `&`/`<` trần
+(không phải entity hợp lệ) làm parser XML (`lxml`, qua `features="xml"`) tự phục hồi bằng cách
+**âm thầm cắt bỏ** phần nội dung không hợp lệ, không raise lỗi. `_validate_wellformed()` (Y1) KHÔNG
+bắt được ca này vì kết quả sau khi cắt vẫn là XML well-formed hợp lệ — well-formed nhưng THIẾU nội
+dung, đúng loại silent failure mà Y1 được thiết kế để ngăn nhưng không bao phủ tới.
+
+**Vì sao lọt qua cả Dev lẫn Reviewer**: 2 file mẫu — Sourdough hoàn toàn KHÔNG có ký tự `&` trần
+nào trong bất kỳ unit nào (tự verify bằng script quét toàn bộ 384 unit: 0 unit chứa `&`) — nên bug
+không bao giờ có cơ hội biểu hiện trên file Dev/Reviewer dùng nhiều nhất. Chỉ lộ ra khi QA test
+round-trip TOÀN BỘ unit của file Bread (file mẫu thứ 2, ít được test round-trip toàn bộ hơn — review
+vòng 2 ghi rõ "không tự chạy lại toàn bộ script X6/opf_dir/chunk/R5-02" trên Bread). Test suite của
+Dev (`tests/test_epub_document.py`, đã đọc qua) không có test nào chứa `&`/`<` trong nội dung dịch
+giả — toàn bộ câu văn công thức bánh tự viết đều "sạch" ký tự đặc biệt.
+
+**Mức độ ảnh hưởng tới bước 2/3**: đây KHÔNG phải bug chỉ xảy ra với kịch bản dịch giả "[VI] " của
+QA — nó xảy ra với BẤT KỲ `vi_html` nào (kể cả bản dịch LLM thật ở bước 2/3) hễ chứa `&` hoặc `<`
+chưa escape, và tiếng Việt dịch thật hoàn toàn có thể chứa các ký tự này (tên thương hiệu "A&W",
+so sánh "< 65%", "&" trong liệt kê...). Vì `write_translated()` là con đường DUY NHẤT mọi bản dịch
+LLM sẽ đi qua ở bước 2/3, bug này phải coi là **blocking cho bước 2/3**, không phải "known
+limitation" có thể ghi nhận rồi bỏ qua như gap Y2(c) đếm-slot-không-khớp mà Dev đã tự báo cáo.
+
+**Bug #EPUB-2 (mức trung bình — đã một phần được Dev document trước dưới dạng "known limitation",
+nhưng QA đo được nó xảy ra TRÊN DỮ LIỆU THẬT, không chỉ lý thuyết)**: 24/866 unit của file Bread có
+"untrusted descendant" (subtree chứa tag ngoài `_INLINE_PRESERVE_TAGS`, vd `<td>` bọc `<p><i>...`) —
+khi số "slot" text-run của bản dịch không khớp số slot gốc (rất dễ xảy ra khi cấu trúc dịch không
+mirror 100% cấu trúc gốc — chính là ca kịch bản "[VI] " prefix của QA tạo ra), code rơi vào fallback
+đã biết giới hạn: gán TOÀN BỘ bản dịch vào slot dài nhất, các slot khác giữ nguyên tiếng Anh —
+nhưng vì bản dịch "dồn" đã bao gồm cả nội dung của slot khác, kết quả là **nội dung trùng lặp** (vd
+unit `OEBPS/02_editor.xhtml#4`: gốc `"<i>Apple</i> Erika Janik"` → sau round-trip
+`"<i>Apple</i>[VI] Apple Erika Janik"` — chữ "Apple" xuất hiện 2 lần, 1 lần tiếng Anh gốc chưa dịch,
+1 lần lẫn trong khối đã dịch). Dev đã document rõ đây là "Known limitation" trong docstring đầu
+file + có test riêng cho ca `<img>` mismatch — nhưng báo cáo của Dev (CHANGELOG mục "Bổ sung
+2026-09-09") nói ca này "chưa xảy ra trên 2 file mẫu hiện có" — **QA xác nhận điều đó ĐÚNG cho
+riêng case `<img>`-trong-`<p>` mà Dev đo (10 `<img>` đều bị drop khỏi units vì `<p>` rỗng text) —
+nhưng KHÔNG đúng cho case tổng quát hơn `<p>`-trong-`<td>` (không phải `<img>`), case này CÓ xảy ra
+thật trên file Bread, 24 lần**. Không nâng mức "blocking" như Bug #EPUB-1 vì bản chất là gap đã biết
++ đã document + ưu tiên "không mất cấu trúc" đúng như thiết kế, nhưng đề nghị Tech Lead/PM xác nhận
+lại mức độ chấp nhận được của "24/866 (~2.8%) unit có khả năng dính duplicate content" trước khi
+bước 2/3 dùng chung cơ chế fallback này cho bản dịch LLM thật.
+
+Chi tiết trace code, script tái hiện, và toàn bộ log đã lưu tại scratchpad phiên QA
+(`qa_roundtrip.py`) — sẵn sàng cung cấp cho Dev khi bug được giao lại.
+
+### 3. Nested list Y2(d) + `<img>` trong `<p>` Y2(c) — fixture QA tự tạo (độc lập với Dev/Reviewer)
+— PASS
+
+Fixture riêng (`qa_fixtures.py`, EPUB tối thiểu tự dựng bằng `zipfile`, tên file/nội dung câu văn
+khác hoàn toàn cả `tests/test_epub_document.py` của Dev lẫn `reviewer_r2_verify.py` của Reviewer):
+
+- **Nested list** (`<ol><li>...text...<ul><li>...</li><li>...</li></ul></li><li>...</li></ol>`):
+  `load()` cho ra ĐÚNG 4 unit (1 `li` cha có text riêng, 2 `li` con lá, 1 `li` độc lập khác), không
+  unit nào chứa markup `<ul>`/`<li>` thô. `write_translated()` với 4 bản dịch phân biệt (`VI-0::`…
+  `VI-3::`) → xác nhận qua `ET.fromstring()` + `findall` namespace-aware: đúng 4 `<li>`, 1 `<ul>`
+  trong output, mỗi bản dịch nằm đúng vị trí lồng của nó, không cross-contamination, well-formed.
+- **`<img>` trong `<p>`** (`<p>...text... <img src=... alt=... width=.../> ...text...</p>`, câu văn
+  khác hoàn toàn fixture Dev/Reviewer dùng): `load()` cho 1 unit, `<img>` còn nguyên trong
+  `unit.text` (inner-HTML). Dịch giả giữ đúng cấu trúc 2 đoạn text quanh `<img>` (case "khớp số
+  slot", KHÔNG rơi vào fallback #EPUB-2) → `write_translated()` giữ nguyên 100% attribute `src`/
+  `alt`/`width` của `<img>`, cả 2 đoạn text tiếng Việt đều xuất hiện đúng vị trí, well-formed.
+
+**PASS cả 2 ca** — khớp đúng hành vi Architecture.md mô tả, khi số lượng "slot" khớp giữa bản gốc
+và bản dịch (ca phổ biến thực tế nhất theo chính đo lường của Dev).
+
+### 4. `<sup>`/`<sub>` — fixture QA tự tạo — PASS
+
+Fixture riêng: `"Add <sup>1</sup>/<sub>3</sub> cup of starter, then 1<sup>1</sup>/<sub>2</sub> cups
+flour."` — `load()` giữ nguyên `<sup>`/`<sub>` trong `unit.text` (đúng X1/X2 — EPUB→EPUB không rút
+gọn phân số như nhánh Markdown §6.21 làm). Dịch giả (đổi từ tiếng Anh sang tiếng Việt CHỈ phần text
+ngoài `<sup>`/`<sub>`, giữ nguyên toàn bộ markup phân số) → `write_translated()` + mở lại bằng
+`EpubDocument.load()`: `<sup>1</sup>`/`<sub>3</sub>` còn nguyên 100% sau round-trip đầy đủ (không
+chỉ so string tĩnh — đã đi qua đúng pipeline ghi/đọc thật). **PASS.**
+
+### 5. Chunk theo `EPUB_CHUNK_CHAR_BUDGET` — PASS
+
+`plan_epub_chunks()` gọi trực tiếp trên unit thật của cả 2 file:
+
+```
+Sourdough: 7 chunk (khớp CHANGELOG), 384/384 unit phủ hết, liên tục không chồng lấp/không gap,
+           kích thước chunk 3.386–8.480 ký tự (budget 8.000) — không chunk nào vượt 1,5× budget,
+           không request nào (nhiều unit) vượt EPUB_REQUEST_CHAR_BUDGET=3.000
+Bread:     28 chunk (khớp CHANGELOG, KHÁC 42 estimate ban đầu của PM — đã escalate & PM xác nhận
+           28 đúng theo CHANGELOG), 866/866 unit phủ hết, liên tục không gap, kích thước chunk
+           1.838–9.296 ký tự — không chunk nào vượt 1,5× budget, không request nào vượt ngân sách
+```
+
+Tự verify độc lập bằng script riêng (không dùng lại `tests/test_chunking.py` của Dev), tính lại
+`_plain_char_len()` cho từng chunk/request bằng cùng công thức module export — kết quả khớp đúng
+tinh thần thiết kế §6.20.7 (cắt ưu tiên ranh giới tài liệu, không ép mỗi tài liệu = 1 chunk, không
+cắt giữa 1 unit). **PASS.**
+
+### 6. Regression — `ruff check` + `pytest` toàn bộ suite — PASS
+
+```
+uv run ruff check src/services/epub_document.py src/core/chunking.py tests/test_epub_document.py
+  → All checks passed!
+uv run pytest -q (toàn bộ suite)
+  → 619 passed, 1 failed (89.39s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp ĐÚNG tên + đúng số lượng (1 fail) đã ghi nhận ở review-report.md vòng 1 VÀ vòng 2 US-22 Bước
+1/3 (pre-existing, không liên quan EPUB). Tổng pass 619 khớp đúng con số Reviewer báo ở vòng 2.
+**PASS — không có regression mới.**
+
+### 7. R5-04 / Protocol 5 checklist
+
+**External contract verified against real source: N/A** — QA lần này chỉ gọi `EpubDocument`/
+`plan_epub_chunks()` (thư viện Python nội bộ dùng `ebooklib`/`bs4`/`lxml` qua API core, không phải
+external network/subprocess service) — không có lời gọi CLI/HTTP/SDK provider nào tới tool bên thứ
+ba trong phạm vi test này. Đồng ý với đánh giá N/A của Reviewer vòng 1 mục 8/vòng 2 mục 7.
+
+**Protocol 5 R5-03 (gate release cho external tool)**: N/A — module này không gọi tool ngoài, chưa
+tới lượt gọi LLM provider (đó là bước 2/3, sẽ cần R5-03 riêng khi tới lượt).
+
+### Bug list (US-22 Bước 1/3)
+
+1. **Bug #EPUB-1 — NGHIÊM TRỌNG, BLOCKING cho bước 2/3**: `write_translated()` mất dữ liệu âm thầm
+   (không raise exception) khi `vi_html` chứa ký tự `&`/`<` chưa escape — do `_inner_html()`
+   (`epub_document.py:241-242`) không escape `NavigableString` con khi join `str()`, chuỗi chưa
+   escape này sau đó bị re-parse như XML ở `_fragment_children()` → parser tự phục hồi bằng cách
+   cắt bỏ nội dung không hợp lệ. Đo được trên dữ liệu THẬT (file Bread): mất `&C` trong "C&C Offset
+   Printing", và trên fixture riêng: mất TOÀN BỘ phần câu sau dấu `<` (hơn nửa câu). Phải sửa TRƯỚC
+   khi bước 2/3 wire LLM thật, vì `write_translated()` là đường DUY NHẤT mọi bản dịch đi qua.
+2. **Bug #EPUB-2 — mức trung bình, đã document 1 phần bởi Dev nhưng QA đo được xảy ra THẬT trên dữ
+   liệu (không chỉ lý thuyết)**: fallback đếm-slot-không-khớp (`_apply_translation_untrusted_structure`)
+   gây nội dung trùng lặp khi unit có nested block tag (vd `<p>` trong `<td>`) — 24/866 unit
+   (~2,8%) của file Bread có khả năng dính ca này. Đề nghị Tech Lead/PM xác nhận lại mức chấp nhận
+   được trước bước 2/3, không tự ý coi "đã document = đã xong".
+
+### KẾT LUẬN US-22 Bước 1/3
+
+**KHÔNG kết luận `ready_for_release`** — đây là bước TRUNG GIAN (hạ tầng parser nội bộ, chưa có
+Translation Engine/UI/endpoint nào để release). Kết luận đúng: **CHƯA sẵn sàng cho bước 2/3.**
+
+Căn cứ: 4/6 kịch bản PASS sạch (load 2 file thật, nested-list/img fixture riêng, sup/sub fixture
+riêng, chunk budget, regression suite 619/1 khớp baseline) — nhưng kịch bản round-trip TOÀN BỘ unit
+(kịch bản 2, dùng đúng phương pháp PM gợi ý "[VI] " prefix) phát hiện Bug #EPUB-1 (mất dữ liệu âm
+thầm, nghiêm trọng) và xác nhận thực tế hoá Bug #EPUB-2 (đã document nhưng chưa xác nhận mức chấp
+nhận được). Cả 2 bug đều nằm trong `write_translated()` — đúng con đường mọi bản dịch LLM thật sẽ đi
+qua ở bước 2/3 — nên đề nghị: (a) Dev sửa Bug #EPUB-1 (escape đúng trong `_inner_html()`/trước khi
+re-parse ở `_fragment_children()`) trước khi bắt đầu bước 2/3, có test riêng cho `&`/`<` trong nội
+dung dịch; (b) PM/Tech Lead xác nhận lại mức chấp nhận được của Bug #EPUB-2 trước khi bước 2/3 dùng
+chung cơ chế fallback này cho bản dịch LLM thật.
+
+**Không tính vào giới hạn Protocol 3 (Dev↔QA)** — đây là vòng QA ĐẦU TIÊN cho US-22 Bước 1/3 trong
+session này (Reviewer đã APPROVE 2/3 vòng Dev↔Reviewer, nhưng đó là Protocol 3 riêng của Dev↔Reviewer,
+không cùng bộ đếm với Dev↔QA).
+này (Reviewer đã APPROVE ở vòng 1/3 Dev↔Reviewer).
+
+## US-22 Dịch EPUB — Bước 1/3: Re-verify Bug #EPUB-1 (vòng 2/5 Dev↔QA) — QA (2026-09-09)
+
+**Phạm vi**: Re-verify fix của Dev cho Bug #EPUB-1 (mất dữ liệu âm thầm khi `vi_html` chứa `&`/`<`
+chưa escape) theo brief PM. Đã đọc lại report vòng 1 (section "US-22 Dịch EPUB — Bước 1/3" ở trên)
+và `docs/CHANGELOG.md` entry "US-22 Bước 1/3 — Fix Bug #EPUB-1 (QA vòng 1/5 Dev↔QA) + điều tra Bug
+#EPUB-2 (2026-09-09)". Tự chạy lại toàn bộ, không tin lời báo cáo của Dev.
+
+### 1. Chạy lại chính `qa_roundtrip.py` (vòng 1) trên 2 file EPUB thật — PASS
+
+Chạy nguyên script cũ để lại ở scratchpad, không sửa 1 dòng nào:
+
+```
+Sourdough: units=384, content mismatches after round-trip reload: 0/384   -> PASS
+Bread:     units=866, content mismatches after round-trip reload: 24/866 -> FAIL (như dự kiến — xem mục 2)
+```
+
+Sourdough 384/384 khớp tuyệt đối (không đổi so với vòng 1 — file này vốn không có `&` trần nên
+không phải là bằng chứng cho fix, chỉ là baseline không regress).
+
+### 2. Xác nhận 24 mismatch còn lại của Bread đều là Bug #EPUB-2 (KHÔNG còn ca #EPUB-1) — PASS
+
+Viết script riêng (`verify_24_locations.py`, độc lập với `qa_roundtrip.py`), lấy `doc_href` của toàn
+bộ 24 unit mismatch:
+
+```
+Total mismatches: 24
+Distinct doc_href involved: {'OEBPS/02_editor.xhtml'}
+unit_id: OEBPS/02_editor.xhtml#4 .. #27 (24 unit liên tiếp, đúng 1 tài liệu duy nhất)
+```
+
+100% tập trung ở đúng 1 file `OEBPS/02_editor.xhtml` — khớp CHÍNH XÁC mô tả của Dev ("bảng The
+Edible Series", 24 dòng `<td><p class="top"><i>TenSach</i> TenTacGia</p></td>`), không rải rác/không
+có pattern mới phát sinh nơi khác trong sách. Đã đối chiếu nội dung 1 vài unit mẫu (`#4`..`#8`) —
+đúng dạng "Apple Erika Janik", "Lobster Elisabeth Townsend"... như mô tả CHANGELOG.
+
+### 3. Chạy lại đúng 2 câu QA đã đo ở vòng 1 + 5 ca ký tự đặc biệt mới — TẤT CẢ PASS
+
+Script mới `verify_epub1_fix2.py`, round-trip qua đúng pipeline thật (`write_translated()` →
+`EpubDocument.load()` lại), so sánh bằng plain-text đã giải mã entity (`BeautifulSoup(...).get_text()`
+— cùng phương pháp Dev dùng làm bằng chứng, không so trực tiếp raw inner-HTML vì `unit.text` đúng ra
+PHẢI chứa `&lt;`/`&amp;` sau khi round-trip 1 ký tự literal `<`/`&` — đó là hành vi ĐÚNG, không phải
+lỗi).
+
+```
+Case < (do am can duy tri o muc < 65%...)          -> PLAIN-TEXT MATCH: True (raw: '...&lt; 65%...')
+Case & (C&C Offset Printing)                        -> PLAIN-TEXT MATCH: True (raw: 'C&amp;C...')
+Curly quotes ("banh mi ngon")                       -> PLAIN-TEXT MATCH: True
+Em-dash (—)                                          -> PLAIN-TEXT MATCH: True
+Cả & lẫn < cùng lúc (A&W, < 100C, > 5%, & < 10%)     -> PLAIN-TEXT MATCH: True
+Chuỗi dịch đã có sẵn entity escape (&amp;, &lt;...)  -> PLAIN-TEXT MATCH: True (không double-escape)
+Tag inline <b> vẫn parse thành Tag thật (regression) -> PLAIN-TEXT MATCH: True, <b>...</b> còn nguyên
+```
+
+2 câu gốc của vòng 1 (`< 65%` và `C&C Offset Printing`) khớp 100% — xác nhận ĐÚNG bằng chứng Dev nêu
+trong CHANGENLOG (không chỉ tin lời, đã tự chạy lại độc lập với input y hệt). Thêm 5 ca mới (dấu
+ngoặc kép cong, em-dash, `&`+`<` cùng lúc, entity đã escape sẵn, tag inline `<b>`) đều PASS — đặc
+biệt ca cuối quan trọng: xác nhận fix (`_escape_untrusted_markup`) chỉ escape `<`/`&` KHÔNG hợp lệ,
+không escape nhầm 10 thẻ inline hợp lệ theo X4 thành text — đúng chỗ Dev có thể vô tình phá vỡ khi
+sửa. Ca "entity đã escape sẵn" xác nhận không bị double-escape (`&amp;amp;`), một lỗi thường gặp khi
+vá escape mà QA chủ động test thêm dù không nằm trong 2 câu gốc.
+
+**Kết luận: fix giải quyết đúng root cause tổng quát (mọi `&`/`<` trần trong `vi_html`), không chỉ
+vá 2 câu cụ thể đã báo cáo.**
+
+### 4. Regression — `ruff check` + `pytest` toàn bộ suite — PASS
+
+```
+uv run ruff check src/services/epub_document.py src/core/chunking.py tests/test_epub_document.py
+  → All checks passed!
+uv run ruff check src/ tests/ (toàn bộ)
+  → All checks passed!
+uv run pytest -q (toàn bộ suite)
+  → 623 passed, 1 failed (94.82s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— đúng tên + đúng số lượng (1 fail, 623 pass) khớp CHÍNH XÁC con số Dev báo ở CHANGELOG vòng sửa này
+(pre-existing, không liên quan EPUB). **PASS — không có regression mới, không có test nào bị Dev vô
+tình xoá/skip để né fail.**
+
+### Bug list — cập nhật trạng thái
+
+1. **Bug #EPUB-1 — ĐÃ ĐÓNG (PASS)**: fix `_escape_untrusted_markup()` + `_inner_html()` dùng
+   `decode_contents()` giải quyết đúng root cause. Verify độc lập trên: 2 câu gốc vòng 1, round-trip
+   toàn bộ 384 unit Sourdough (0 mismatch) + 866 unit Bread (24 mismatch, toàn bộ đều là #EPUB-2,
+   không còn ca mất dữ liệu kiểu #EPUB-1), và 5 ca ký tự đặc biệt mới tự thêm. Không phát hiện ca nào
+   còn mất dữ liệu do `&`/`<` chưa escape.
+2. **Bug #EPUB-2 — GIỮ NGUYÊN mức trung bình, chờ PM/Tech Lead quyết định (không phải việc của QA
+   vòng này)**: xác nhận đúng 24/866 unit của Bread, 100% thuộc 1 bảng "The Edible Series" duy nhất ở
+   `OEBPS/02_editor.xhtml`, không lan ra chỗ khác. Dev đã escalate đúng theo R5-02 (không tự quyết
+   định mở rộng contract X4), QA đồng ý đây là quyết định thuộc PM/Tech Lead, không phải bug code sai
+   theo nghĩa "chưa fix xong".
+
+### R5-04 / Protocol 5 checklist (vòng 2)
+
+**External contract verified against real source: N/A** — vẫn chỉ gọi thư viện Python nội bộ
+(`ebooklib`/`bs4`/`lxml` qua API core), không có lời gọi CLI/HTTP/SDK provider bên thứ ba nào trong
+phạm vi re-verify này.
+
+### KẾT LUẬN US-22 Bước 1/3 — vòng 2/5 Dev↔QA (2026-09-09)
+
+**Bug #EPUB-1: PASS — ĐÃ ĐÓNG.** Tự chạy lại độc lập toàn bộ bằng chứng Dev nêu (không tin lời): 2
+câu gốc, round-trip toàn bộ unit 2 file EPUB thật, và 5 ca ký tự đặc biệt mới — tất cả khớp, không
+còn ca mất dữ liệu âm thầm nào liên quan `&`/`<` chưa escape.
+
+**Bug #EPUB-2: xác nhận ĐÚNG như Dev mô tả** — 24/866 unit (~2,8%) của Bread, 100% ở 1 bảng cụ thể
+(`OEBPS/02_editor.xhtml`, "The Edible Series"), không rải rác/không phát sinh pattern mới. Đây là
+known limitation đã document, chờ PM/Tech Lead quyết định hướng xử lý trước bước 2/3 (mở rộng
+contract X4 hay chấp nhận tỷ lệ ~2,8%) — KHÔNG phải lỗi QA yêu cầu Dev sửa thêm ở vòng này.
+
+**KHÔNG kết luận `ready_for_release`** — US-22 Bước 1/3 vẫn là bước TRUNG GIAN (hạ tầng parser nội
+bộ, chưa có Translation Engine/UI/endpoint). Kết luận đúng: **Bước 1/3 đã sẵn sàng cho Bước 2/3**, với
+điều kiện đi kèm: PM/Tech Lead cần chốt hướng xử lý Bug #EPUB-2 (không blocking bắt đầu Bước 2/3,
+nhưng blocking việc coi cơ chế fallback hiện tại là "final" cho bản dịch LLM thật dạng bảng biên
+tập lồng thẻ khối).
+
+**Tính vào Protocol 3 (Dev↔QA): vòng 2/5.** Còn 3 vòng trước khi chạm giới hạn Protocol 3 (max 5
+vòng Dev↔QA).

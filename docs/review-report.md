@@ -6984,3 +6984,431 @@ lưu ý cho bất kỳ consumer tương lai nào đọc thẳng cột này từ 
 **Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng cho US-19.**
 
 ---
+
+# Review Report — US-22 Dịch EPUB, Bước 1/3 (`EpubDocument` parser + chunk theo chương)
+
+- **Phạm vi**: CHỈ `src/services/epub_document.py` (module mới) + `src/core/chunking.py` phần
+  `EpubChunkPlan`/`plan_epub_chunks` + `src/core/config.py` (3 field Settings) + test tương ứng.
+  KHÔNG bao gồm Translation Engine/cost-gate/job_orchestrator wiring (bước 2/3, 3/3 — giao riêng sau).
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-09
+- **Đọc trước khi review**: `docs/PRD.md` US-22 + BR-EPUB-01..06, `docs/Architecture.md` §6.20 toàn
+  bộ (đặc biệt §6.20.12 Final Decision, bảng X1-X6/Y1-Y8) + §6.21, `docs/expert-review-us22-epub.md`,
+  2 entry mới nhất của `docs/CHANGELOG.md` ("US-22 Dịch EPUB — Bước 1/3" + "Bổ sung — Sửa Y2(c)").
+
+## Verdict: REJECT (vòng 1/3 Dev↔Reviewer, Protocol 3)
+
+1 blocking issue tự phát hiện qua trace tay theo Architecture.md (không nằm trong 2 trọng tâm PM nêu
+sẵn — Y2(c) và fallback mismatch — cả hai điểm đó đều **đạt**, xem bên dưới). Toàn bộ phần còn lại
+(spike R5-02, X6 doc_href, thuật toán chunk, `<sup>`/`<sub>`, round-trip byte-identical, regression)
+đã tự verify độc lập bằng script/test riêng, không chỉ đọc code tĩnh hay tin lời Dev — đạt.
+
+---
+
+## 1. Blocking issue — Y2(d) "li > ul lồng: lấy innermost" (Final Decision, `NHẬN toàn bộ`) CHƯA implement, CHƯA document
+
+Architecture.md dòng 5591 (bảng Final Decision §6.20.12, hàng **Y2**) liệt kê 4 mục con (a)-(d) cho
+"Quy tắc chèn bản dịch", cột Quyết định ghi rõ **"NHẬN toàn bộ"** — tức cả 4 mục, không có mục nào bị
+loại. Mục (d): *"`li > ul` lồng: lấy **innermost** block có text trực tiếp"*, dẫn từ
+`docs/expert-review-us22-epub.md` §5 Y2: *"Nested `li > ul`: 'chỉ lấy node ngoài cùng' → 1 unit khổng
+lồ, bản dịch copy phẳng → mất cấu trúc lồng. Sửa: lấy **innermost** block có text trực tiếp; `li`
+chứa `ul` con thì chỉ dịch phần text trực tiếp của `li`."*
+
+**Đã tự verify bằng script độc lập** (dựng 1 EPUB tối thiểu tự tay, không tái dùng fixture của Dev):
+
+```python
+BODY = ('<li>Preheat the oven to 220C, then:'
+        '<ul><li>Add flour and water</li><li>Knead for ten minutes</li></ul>'
+        '</li>')
+```
+
+Kết quả `EpubDocument.load()`:
+
+```
+Number of units: 1
+  tag=li ordinal=0 text='Preheat the oven to 220C, then:<ul><li>Add flour and water</li><li>Knead for ten minutes</li></ul>'
+```
+
+`_collect_candidate_nodes()` (`src/services/epub_document.py:165-183`) dùng đúng 1 quy tắc "chỉ giữ
+node NGOÀI CÙNG" (`_has_unit_tag_ancestor`, dòng 154-162) cho **mọi** trường hợp lồng nhau, không
+phân biệt "lồng đơn giản" (`li > p`, đúng quy tắc gốc §6.20.5 chưa bị Y2(d) thay thế) với "lồng danh
+sách" (`li > ul > li`, quy tắc PHẢI khác theo Y2(d)). Hệ quả:
+
+- Toàn bộ `<ul><li>...</li></ul>` (2 bước công thức) bị nhét làm **raw HTML nằm trong `text` của 1
+  unit duy nhất** — 2 bước "Add flour and water" / "Knead for ten minutes" không trở thành unit riêng,
+  trái với yêu cầu tường minh của Y2(d).
+- **Hệ quả dây chuyền sang bước 2/3 (ngoài phạm vi code review này nhưng phải nêu vì root cause nằm ở
+  đây)**: contract X4 (Architecture.md §6.20.12, dòng 5541-5542) chỉ liệt kê `_INLINE_PRESERVE_TAGS =
+  {strong, em, b, i, sup, sub, br, a, span, small}` là các thẻ LLM CAM KẾT giữ nguyên. `ul`/`li` KHÔNG
+  nằm trong danh sách này — khi unit này (chứa `<ul><li>` thô) được gửi cho LLM dịch, không có chỉ thị
+  nào trong prompt (`build_epub_batch_prompt`, chưa viết ở bước này nhưng đã có trong Architecture.md)
+  nói LLM phải giữ nguyên các thẻ `ul`/`li` đó — hành vi LLM với các thẻ ngoài contract là KHÔNG XÁC
+  ĐỊNH (có thể dịch cả nhãn thẻ thành văn bản, có thể gộp 2 `<li>` thành 1 câu, có thể giữ nguyên do
+  may mắn). Đây đúng loại "hợp đồng mập mờ giữa app và LLM" mà X4 được viết ra để đóng cho trường hợp
+  đơn — Y2(d) chưa được đóng tương tự cho trường hợp lồng.
+- Tại thời điểm `write_translated()`, vì `ul`/`li` không thuộc `_INLINE_PRESERVE_TAGS`, node sẽ đi
+  vào nhánh `_apply_translation_untrusted_structure()` (Y2(c)) — nhánh này gom **3 slot text** (câu
+  dẫn + 2 mục `li`) bằng đệ quy qua chính `<ul>`/`<li>`, nghĩa là code VẪN cố "chữa cháy" ở bước ghi,
+  nhưng chỉ khớp đúng nếu LLM trả về ĐÚNG 3 đoạn text tương ứng theo thứ tự — một giả định không có
+  cơ sở nào trong contract đã viết.
+
+**Không phải rủi ro lý thuyết cho riêng file này** — đã tự kiểm cả 2 file EPUB thật hiện có
+(`data/uploads/...Sourdough....epub` và `data/uploads/sample2_Bread-A-Global-History.epub`): **0
+`<ul>`/`<li>` trong cả hai** (kiểm bằng bs4, không chỉ regex đếm thẻ). Nghĩa là gap này **chưa từng
+chạm dữ liệu thật**, đúng tinh thần cảnh báo đã có sẵn ở chính Architecture.md §6.20.11 mục 7 (Z1):
+*"nếu không có file này thì ... toàn bộ Y2 phải vào known limitations của PRD với nhãn ⚠️ N=1, chưa
+kiểm chứng trên sách thương mại"*.
+
+**Đây chính là lý do reject, không phải bản thân việc code chưa chạm ca hiếm**: khác với gap fallback-
+mismatch (mục 2 dưới đây) — nơi Dev **đã chủ động phát hiện, escalate PM, ghi "Known limitation" tường
+minh trong docstring đầu file + có test riêng xác nhận hành vi** — gap Y2(d) này **không được nhắc tới
+ở bất kỳ đâu**: không có comment trong `epub_document.py`, không có dòng nào trong `CHANGELOG.md`,
+không có test nào cho `li > ul` (test hiện có `test_nesting_dedup_keeps_outermost_node_only` chỉ kiểm
+`li > p`, một ca KHÁC — lồng đơn, không phải lồng danh sách — vẫn đúng theo quy tắc gốc §6.20.5, không
+đại diện cho Y2(d)). Một quyết định kiến trúc đã được Tech Lead "NHẬN toàn bộ" formal, rồi lặng lẽ
+không cài đặt, không phát hiện, không ghi nhận — đúng loại lỗ hổng quy trình mà Protocol 5/6/7 của
+project này tồn tại để chặn.
+
+**Yêu cầu cụ thể để đóng round này** (chọn 1 trong 2, không được im lặng bỏ qua như đang có):
+1. Implement Y2(d) đúng nghĩa: `li` chứa `ul`/`ol` con → tách thành unit riêng cho phần text trực
+   tiếp của `li` (không bao gồm subtree `ul`/`ol`) + mỗi `li` con trong `ul`/`ol` đó trở thành unit
+   độc lập theo đúng flow đệ quy bình thường (không bị `_has_unit_tag_ancestor` loại nữa với đúng
+   trường hợp này). Thêm ≥ 1 test cho `li > ul` (kể cả lồng nhiều cấp) tương tự cách Dev đã làm cho
+   ca `<img>`.
+2. Nếu quyết định defer (không implement ở bước này) — phải làm ĐÚNG quy trình Dev đã dùng cho ca
+   fallback-mismatch: ghi "Known limitation" tường minh trong docstring `epub_document.py` +
+   `CHANGELOG.md`, có ≥ 1 test xác nhận hành vi hiện tại (dù là hành vi chưa đúng Y2(d)) để không phải
+   silent gap, và escalate xin Tech Lead/PM xác nhận bằng văn bản (giống hệt cách gap img-mismatch đã
+   escalate) — KHÔNG tự quyết âm thầm.
+
+---
+
+## 2. Trọng tâm PM yêu cầu — Y2(c) (`bilingual=False` chỉ thay text node) — ĐẠT, tự verify bằng test độc lập
+
+**Đã KHÔNG dùng lại test của Dev.** Tự dựng 1 EPUB tối thiểu khác (tên biến, path, `<html>` skeleton
+khác các fixture trong `tests/test_epub_document.py`), nội dung khác (câu văn công thức bánh khác:
+*"Preheat the oven first. `<img ...>` Let the crust cool before slicing."*), script chạy trực tiếp
+qua `EpubDocument.load()` + `write_translated()` thật (không mock):
+
+```
+Parsed unit inner-HTML: Preheat the oven first. <img alt="Freshly baked sourdough loaf" src="images/loaf.png" width="300"/> Let the crust cool before slicing.
+--- output XHTML ---
+<p>Preheat the oven first. <img alt="..." src="images/loaf.png" width="300"/>Lam nong lo truoc. De vo banh nguoi truoc khi cat.</p>
+PASS: <img> survived translation with bilingual=False
+```
+
+Xác nhận: `<img>` (với đủ 3 attribute `src`/`alt`/`width`) **còn nguyên vẹn 100%** sau khi ghi "bản
+dịch" — không có lệnh `.clear()`/xoá Tag nào chạm tới nó, đúng cam kết Y2(c) *"chỉ thay text node,
+không đụng element con"*. Ca này còn thú vị hơn test có sẵn của Dev vì có **2 slot text** (trước và
+sau `<img>`) với 1 bản dịch chỉ có 1 đoạn liên tục → rơi đúng vào nhánh fallback (mục 3 dưới đây) —
+xác nhận LUÔN CẢ 2 cơ chế (giữ `<img>` + fallback khi lệch số lượng) hoạt động đúng cùng lúc trên 1
+ca thực tế hợp lý (không phải ca dàn dựng để né fallback).
+
+Đọc code xác nhận thêm: `_apply_translation()` (dòng 332-355) rẽ nhánh đúng theo
+`_has_untrusted_descendant()` (dòng 258-263, kiểm TOÀN BỘ descendant chứ không chỉ con trực tiếp) —
+nhánh an toàn (`node.clear()+append`) chỉ chạy khi subtree KHÔNG có tag nào ngoài
+`_INLINE_PRESERVE_TAGS`; có bất kỳ tag lạ nào (không riêng `<img>` — `<table>` lồng, `<video>`, SVG
+inline...) đều rẽ sang nhánh an toàn hơn. Thiết kế phòng thủ đúng, không chỉ vá riêng case `<img>`.
+
+## 3. Trọng tâm PM yêu cầu — Fallback khi số đoạn không khớp — ĐẠT, đánh giá lựa chọn hợp lý
+
+Thuật toán (`_apply_translation_untrusted_structure`, dòng 291-329): khi số "slot" text gốc và số
+đoạn text trong bản dịch LLM trả về **không khớp**, gán TOÀN BỘ bản dịch vào slot GỐC DÀI NHẤT (đo
+bằng ký tự), các slot ngắn hơn **giữ nguyên tiếng Anh gốc** (không xoá, không đoán chia).
+
+**Đánh giá**: đây là lựa chọn AN TOÀN hợp lý — ưu tiên "không mất/không hỏng cấu trúc" (không xoá
+`<img>`, không tạo XHTML hỏng) hơn "dịch đủ 100%" ở đúng ca hiếm/nhập nhằng mà kiến trúc chưa có
+thuật toán tường minh. Heuristic "slot dài nhất = nội dung chính" hợp lý về mặt thống kê (đoạn văn
+chính thường dài hơn các mẩu câu ngắn quanh 1 `<img>`/thẻ lạ). Có test rõ ràng
+(`test_write_translated_monolingual_img_mismatch_uses_documented_fallback`) xác nhận đúng hành vi này
+— và tôi tự verify lại bằng ca ở mục 2 (2 slot, 1 đoạn dịch → rơi đúng fallback, `<img>` còn nguyên).
+
+**Ghi "Known limitation" đúng cách**: docstring đầu `epub_document.py` (dòng 21-45, 48-60) mô tả rõ
+gap, lý do chọn hướng này, và nói rõ đây là **gap CHƯA có thuật toán tường minh trong Architecture.md,
+đã escalate PM (2026-09-09), chưa có phản hồi ngược lại**. `CHANGELOG.md` mục "Bổ sung (2026-09-09)"
+ghi lại toàn bộ quá trình quyết định. Đây đúng là quy trình mà project này kỳ vọng cho 1 gap thật —
+**tương phản trực tiếp** với cách gap Y2(d) ở mục 1 bị bỏ sót hoàn toàn không escalate.
+
+**1 góp ý non-blocking**: heuristic "dài nhất theo ký tự gốc" không tính tới trường hợp slot dài nhất
+lại là phần ít quan trọng nhất về nghiệp vụ (vd 1 câu mô tả dài hơn 1 con số định lượng ngắn) — chấp
+nhận được cho v1 vì đã có test + known-limitation rõ ràng, nhưng nên nhắc QA thử tìm ca thật (nếu có
+sách chứa `<img>` xen giữa nhiều câu ngắn) ở gate R6-03 khi bước 2/3 chạy live.
+
+---
+
+## 4. Spike R5-02 — tự verify lại độc lập (không tin lời Dev)
+
+**Package versions**: `uv pip show/uv.lock` xác nhận `ebooklib==0.20`, `beautifulsoup4==4.15.0`,
+`lxml==6.1.3`, `markdownify==1.2.3` — khớp CHÍNH XÁC bản Tech Lead đã verify (Architecture.md
+§6.20.1/§6.20.12 N-3). `pyproject.toml` dùng `>=` thay vì `==` (không phải "pin cứng" theo nghĩa đen)
+— nhưng đây là convention nhất quán của TOÀN BỘ `pyproject.toml` (mọi dependency khác cũng dùng `>=`,
+vd `deepl>=1.18`, `fastapi>=0.115`), và `uv.lock` khoá đúng version đã verify — không coi đây là vi
+phạm "pin version" của §6.20.12 vì nó khớp cách project này vẫn luôn làm.
+
+**4/6 bước a-d tự chạy lại bằng script riêng** (không dùng lại test suite của Dev cho phần này):
+
+| Bước | Kỳ vọng | Tự đo được |
+|---|---|---|
+| a — `doc_href` (X6) | 100% unit ∈ `zip.namelist()` | Sourdough: khớp. **Bread (866 unit) cũng tự kiểm riêng: 0/866 lệch** — Dev chỉ báo cáo trên Sourdough, tôi mở rộng sang cả file Bread |
+| b (gián tiếp qua c/d) | round-trip `xml` parser giữ cấu trúc | Xác nhận qua kết quả c/d bên dưới + `test_write_translated_monolingual_output_reparses_with_translated_content` (chạy PASS) |
+| c — `<sup>1</sup>/<sub>3</sub>` | 5 dòng `1/3`, 1 dòng `1 1/3` | Chạy `pytest tests/test_epub_document.py::test_sup_sub_preserved_verbatim_on_real_fraction_lines` PASS; đọc lại nội dung khớp mô tả |
+| d — 4 `<strong>` + 3 `<br/>` | giữ nguyên | `test_inline_markup_preserved_not_flattened` PASS |
+
+**Chunk count — tự đo lại độc lập bằng script riêng** (không chạy `pytest`, gọi thẳng
+`EpubDocument.load()` + `plan_epub_chunks()`):
+
+```
+Sourdough units: 384   Sourdough chunks: 7
+Bread units: 866       Bread chunks: 28    Bread total_chars: 232127
+```
+
+Khớp đúng số Dev báo cáo (7 và 28, không phải 42 như brief PM ban đầu — CHANGELOG đã ghi PM xác nhận
+28 là số đúng). `232_127 / 8_000 ≈ 29` khớp sát 28 đo được (chênh lệch nhỏ do cắt ưu tiên ranh giới
+tài liệu).
+
+## 5. X6 — `doc_href` join `opf_dir` — ĐẠT trên cả 2 file thật
+
+Tự chạy: `posixpath.normpath(posixpath.join(opf_dir, item.file_name))` cho **866/866 unit của file
+Bread** đều là entry thật trong zip (0 lệch) — mở rộng ngoài phạm vi test Dev viết sẵn (test của Dev
+chỉ assert `startswith("ops/")` cho Sourdough; Bread dùng `opf_dir="OEBPS"` khác hẳn, là 1 test case
+độc lập tốt hơn vì khác cấu trúc thư mục gốc).
+
+## 6. Round-trip / regression — tự chạy lại thật
+
+```
+uv run ruff check <5 file sửa/thêm>              → All checks passed!
+uv run ruff format --check <5 file sửa/thêm>     → 5 files already formatted
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q   → 46 passed
+uv run pytest -q (toàn bộ suite)                                       → 616 passed, 1 failed (96.31s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— khớp CHÍNH XÁC Dev đã báo. **Tự xác nhận pre-existing bằng `git stash`** (không chỉ tin lời Dev):
+chạy riêng test này trên working tree đã stash (bỏ toàn bộ thay đổi US-22) → **fail y hệt** → xác nhận
+độc lập, không liên quan gì tới thay đổi US-22. Không có fail mới.
+
+**Phạm vi thay đổi đúng như khai báo**: `git diff --stat` xác nhận chỉ 6 file bị sửa
+(`docs/CHANGELOG.md`, `pyproject.toml`, `src/core/chunking.py`, `src/core/config.py`,
+`tests/test_chunking.py`, `uv.lock`) + 2 file mới (`src/services/epub_document.py`,
+`tests/test_epub_document.py`). `config.py` diff **thuần additive** (+11/-0 dòng) — xác nhận không
+đụng field Bug #10 (`babeldoc_word_wrap_fix_enabled` và các field lân cận vẫn nguyên). Không chạm
+`job_orchestrator.py`, `glossary_manager.py`, `cost_gate.py`, `cost_estimator.py` đúng như Dev khai
+báo trong CHANGELOG.
+
+## 7. Security — kiểm tra XXE/DoS trên đường parse XML của EPUB tải lên
+
+Vì `EpubDocument.load()` parse nội dung XML từ file EPUB do user tải lên (không tin cậy tuyệt đối,
+dù app hiện là single-user không auth) qua `BeautifulSoup(raw_bytes, "xml")` (lxml) và `ET.fromstring`
+(`_check_drm`, `_validate_wellformed`), tự dựng PoC kiểm XXE (đọc file cục bộ qua `<!ENTITY ... SYSTEM
+"file://...">`):
+
+```
+Parsed result body text: (rỗng)
+TOP-SECRET-CONTENT-12345 in output: False
+```
+
+**Không khai thác được** qua đường `_parse_xhtml()` thật đang dùng trong code — bs4 "xml" (lxml) qua
+đường này không resolve external entity. Path traversal cũng không khả thi: `doc_href` luôn được
+validate against `names = set(zf.namelist())` trước khi `zf.read()` — không có chỗ nào ghi ra
+filesystem bằng path lấy từ nội dung EPUB.
+
+**Non-blocking hardening suggestion**: `ET.fromstring()` (dùng ở `_check_drm`/`_validate_wellformed`)
+vẫn expand internal entity (kiểu "billion laughs") theo hành vi mặc định của `xml.etree.ElementTree`
+— đây là giới hạn đã biết của thư viện chuẩn Python (tài liệu chính thức khuyến nghị `defusedxml` cho
+input không tin cậy), không phải lỗi Dev tạo ra, và rủi ro thấp cho use-case single-user hiện tại.
+Ghi nhận làm việc nên làm khi app chuyển sang multi-user/cloud (đúng roadmap PRD §1.2 "sẵn sàng
+migrate lên cloud"), không chặn round này.
+
+## 8. R5-04 checklist
+
+**External contract verified against real source: YES.**
+
+Nguồn: `docs/Architecture.md` §6.20.1-§6.20.3, §6.20.12 (bảng "Ranh giới bằng chứng") — API surface
+của `ebooklib`/`bs4`/`lxml` (`item.file_name` không khớp zip entry, `book.opf_dir` không tồn tại,
+hành vi `write_epub()` di chuyển path...) được verify bằng cài thật + đọc source + chạy thật trên 2
+file EPUB thật, không suy đoán từ trí nhớ — đúng 2 lớp độc lập (Domain Expert đo lần 1 bằng stdlib
+thuần không dùng chung code path, Tech Lead đo lại lần 2, cả 2 khớp nhau). Dev's spike R5-02
+(CHANGELOG "US-22 Bước 1/3" mục 1) re-verify 4/6 bước a-d bằng chính `.venv` project với version đã
+pin — tôi tự verify lại LẦN THỨ 3 độc lập ở mục 4/5 bài review này (chunk count, doc_href trên cả 2
+file, sup/sub, inline markup) — tất cả khớp.
+
+---
+
+## Kết luận US-22 Bước 1/3
+
+**REJECT — vòng 1/3 Dev↔Reviewer (Protocol 3).**
+
+- **1 blocking issue**: Y2(d) ("li > ul lồng: lấy innermost") trong bảng Final Decision §6.20.12 đã
+  được "NHẬN toàn bộ" nhưng chưa implement VÀ chưa document như known limitation (khác hẳn cách xử lý
+  đúng quy trình mà Dev đã làm cho gap fallback-mismatch trong cùng file). Yêu cầu cụ thể ở mục 1.
+- 2 trọng tâm PM nêu (Y2(c) giữ `<img>`, fallback mismatch): **ĐẠT**, tự verify bằng test độc lập viết
+  mới (không tái dùng test Dev), cả hai đều đứng vững kể cả trên ca có 2 slot xen kẽ `<img>` tôi tự
+  dựng khác cấu trúc fixture của Dev.
+- Spike R5-02, X6 doc_href, thuật toán chunk, `<sup>`/`<sub>`, round-trip byte-identical, phạm vi thay
+  đổi (không đụng Bug #10/job_orchestrator/glossary_manager): tất cả **ĐẠT**, tự verify bằng
+  script/test riêng trên CẢ 2 file EPUB thật, không chỉ đọc code tĩnh hay tin số liệu Dev báo cáo.
+- Security (XXE/path traversal): không khai thác được qua code path thật, có 1 gợi ý hardening
+  non-blocking cho tương lai multi-user.
+- Regression: 616 passed / 1 fail — fail tự xác nhận pre-existing bằng `git stash`, không liên quan
+  US-22. Không có fail mới.
+
+**Circuit breaker Dev↔Reviewer: 1/3 vòng đã dùng cho US-22 Bước 1/3.**
+
+---
+
+# Review Report — US-22 Dịch EPUB, Bước 1/3 — VÒNG 2/3 (Dev↔Reviewer, Protocol 3)
+
+Review lại sau khi Dev sửa Y2(d) theo đúng 1 trong 2 yêu cầu reject vòng 1 (mục "Implement Y2(d)
+đúng nghĩa" — lựa chọn 1, không chọn defer). Xem `docs/CHANGELOG.md` mục "Sửa (2026-09-09) — Y2(d)
+`li > ul` lồng: tách unit theo "innermost"" cho khai báo đầy đủ của Dev.
+
+## 1. Đọc code — `_LIST_CONTAINER_TAGS`, `_nearest_unit_ancestor`, `_crosses_list_container`,
+`_strip_nested_lists`, `_collect_runs_recursive`
+
+Trace bằng tay từng hàm (`src/services/epub_document.py` dòng 129-135, 174-257, 323-339):
+
+- `_nearest_unit_ancestor(node)`: đi ngược `node.parents`, trả về ancestor `Tag` gần nhất có tên
+  nằm trong `UNIT_TAG_NAMES` — đúng như cũ (không đổi hành vi tìm ancestor).
+- `_crosses_list_container(node, ancestor)`: đi từ `node.parent` lên tới (không tính) `ancestor`,
+  trả `True` nếu gặp bất kỳ `<ul>`/`<ol>` nào giữa đường — đây chính là "phát hiện dấu hiệu Y2(d)".
+- `_has_unit_tag_ancestor(node)` = `not _crosses_list_container(...)` khi có ancestor hợp lệ: nếu
+  đường đi băng qua `<ul>`/`<ol>` → trả `False` (node KHÔNG bị coi là lồng, trở thành candidate
+  riêng — đúng ý Y2(d)); nếu KHÔNG băng qua (vd `li > p` thường) → trả `True` (dedup như cũ, giữ
+  outermost — đúng §6.20.5 chưa đổi). Đệ quy tự nhiên đúng cho lồng nhiều cấp vì mỗi node chỉ so
+  với ancestor GẦN NHẤT của chính nó, không so với gốc toàn cây.
+- `_strip_nested_lists(node)`: `copy.deepcopy` + `decompose()` mọi `<ul>`/`<ol>` con (mọi cấp) trên
+  BẢN COPY, dùng khi trích `text`/xét drop-rule ở `load()` — không đụng cây `soup` thật đang dịch,
+  nên không ảnh hưởng candidate list ở lần gọi `write_translated()` sau (verify được ở mục 3).
+- `_collect_runs_recursive`: thêm `node.name in _LIST_CONTAINER_TAGS` vào điều kiện bỏ qua (cùng
+  nhóm với `_NO_TRANSLATE_TAGS` cũ) — chặn `_text_runs_under()` (dùng ở nhánh untrusted-structure
+  của Y2(c)) không "ăn ké" text bên trong `<ul>/<ol>` lồng làm slot của unit cha.
+
+Code khớp đúng mô tả trong CHANGELOG, không phát hiện lệch giữa lời khai báo và implementation thật.
+
+## 2. Tự dựng fixture EPUB ĐỘC LẬP (không dùng lại fixture của Dev) — chạy `EpubDocument.load()`
+và `write_translated()` thật
+
+Viết script riêng (`reviewer_r2_verify.py`, khác hoàn toàn tên biến/cấu trúc thư mục zip/nội dung
+câu văn so với `tests/test_epub_document.py::_build_minimal_epub`): 3 file XHTML riêng biệt
+(`content/chapA.xhtml`, `chapB.xhtml`, `chapC.xhtml`), `content/book.opf` với `opf_dir="content"`
+(khác `OEBPS` Dev dùng), câu văn công thức bánh khác hẳn.
+
+**Case A — 1 cấp lồng, `<li>` cha CÓ text trực tiếp lẫn `<ul>` con** (đúng ca PM yêu cầu):
+```
+<li>Preheat oven to 220C, then follow the sub-steps below:
+  <ul><li>Add flour and water to the bowl</li><li>Knead the dough for ten minutes</li></ul>
+</li>
+```
+→ `load()` cho ra ĐÚNG 3 unit, tag đều `li`, `text` lần lượt đúng 3 đoạn, **không unit nào chứa
+`<ul>`/`<li>` thô** (assert tường minh `"<ul" not in u.text`).
+
+**Case B — lồng 3 cấp, ĐÚNG literal fixture PM viết trong yêu cầu** (`li><ul><li><ul><li>...`),
+chỉ node lá cùng có text trực tiếp, các `<li>` bọc ngoài (cấp 0, cấp 1) KHÔNG có text riêng: kết
+quả **1 unit duy nhất** (đúng lá), 2 `<li>` bọc ngoài trở thành candidate nhưng bị
+`_is_droppable_content` loại vì rỗng sau `strip()` — hành vi ĐÚNG theo tinh thần "innermost", không
+sinh unit rác rỗng. (Lưu ý: test của Dev cho ca lồng 3 cấp dùng fixture có text ở CẢ 3 cấp — xem
+mục 2b bên dưới — không hoàn toàn giống literal fixture PM viết, nhưng đây không phải sai sót, chỉ
+là 2 biến thể khác nhau của cùng 1 luật; tôi tự bổ sung case riêng để phủ đúng literal fixture PM
+đưa ra.)
+
+**Case B2 — lồng 3 cấp, MỌI cấp đều có text trực tiếp riêng** (biến thể khó hơn, gần giống fixture
+`test_nested_list_multi_level_splits_to_every_leaf` của Dev nhưng tự viết lại độc lập, câu văn
+khác): → **4 unit** (top + middle + 2 lá cấp đáy), mỗi cấp tách đúng thành unit riêng, không unit
+nào lẫn markup `<ul>/<li>` thô. Xác nhận đệ quy "innermost" hoạt động đúng khi có text ở MỌI cấp,
+không chỉ ở 1 cấp lẻ.
+
+## 3. `write_translated()` ghi đúng từng `<li>` lá — không lẫn/ghi đè
+
+Case A: gán 3 bản dịch giả lập khác nhau cho 3 unit, ghi ra EPUB mới, đọc lại `content/chapA.xhtml`:
+cấu trúc `<ul>/<li>` lồng còn nguyên (đếm đúng 3 `<li>`, 2 `<ul>`), mỗi bản dịch nằm ĐÚNG vị trí
+lồng của nó (`"Lam nong lo den 220C..."` ở `<li>` cha, `"Cho bot va nuoc vao to"` + `"Nhao bot..."`
+ở đúng 2 `<li>` con), không tiếng Anh gốc nào còn sót, vẫn qua được `ET.fromstring()` (well-formed).
+
+Case B2 (4 cấp): tương tự, gán 4 bản dịch khác nhau (`TOP-VI`/`MID-VI`/`SHAPE-VI`/`SCORE-VI`), ghi
+ra, đọc lại — cả 4 nằm đúng vị trí lồng 4 cấp, không cross-contamination, vẫn well-formed. Đây là
+ca khó hơn ca Dev tự test (Dev chỉ test ghi cho 1 cấp lồng ở
+`test_write_translated_nested_list_updates_each_leaf_independently`) — tôi mở rộng sang ghi cho cả
+4 cấp cùng lúc để chắc chắn cơ chế candidate-list ổn định qua nhiều lần `_apply_translation()` liên
+tiếp trong CÙNG 1 lần gọi `write_translated()` (lo ngại chính đáng: node bị `clear()`/`replace_with`
+ở 1 candidate có thể làm invalidate tham chiếu Tag của candidate khác nếu chúng lồng nhau — trace
+tay xác nhận KHÔNG xảy ra vì mỗi thao tác chỉ đụng đúng subtree/text-node của chính unit đó, không
+đụng tới cây con đã tách riêng cho unit khác).
+
+## 4. Regression — ca cũ đã qua vòng 1
+
+- **`li > p` không lồng list** (Case C, tự dựng độc lập, câu văn khác): vẫn dedup đúng outermost —
+  1 unit `tag="li"` chứa nguyên `<p>...</p>` bên trong `text` (KHÔNG tách riêng `<p>`, đúng luật cũ
+  §6.20.5 chưa bị Y2(d) thay thế) + 1 unit `<p>` độc lập kiểm soát. **Xác nhận trực tiếp claim của
+  Dev** ("ca lồng đơn giản `li > p` vẫn giữ nguyên luật outermost cũ") bằng code MỚI, không chỉ tin
+  lời khai.
+- **Y2(c) `<img>` còn nguyên**: tự dựng thêm 1 fixture độc lập khác (`<p>Whisk the eggs... <img
+  .../> Fold in the sugar...</p>`), chạy qua code MỚI (có thay đổi `_collect_runs_recursive`) —
+  `<img>` với đủ `src`/`alt`/`width` còn nguyên 100% sau khi ghi bản dịch giả lập, well-formed XHTML.
+  Xác nhận thay đổi `_collect_runs_recursive` (thêm điều kiện bỏ qua `_LIST_CONTAINER_TAGS`) không
+  ảnh hưởng nhánh xử lý `<img>` đã có từ vòng 1.
+- Chạy lại test có sẵn liên quan: `pytest tests/test_epub_document.py -k "img or fallback or
+  mismatch or inline_markup or sup_sub"` → **5/5 PASS** (bao gồm cả case fallback mismatch — gap đã
+  document ở vòng 1, không bị đổi hành vi bởi fix Y2(d) lần này).
+- Không tự chạy lại toàn bộ script X6/opf_dir/chunk/R5-02 (đã tự verify sâu ở vòng 1, phạm vi thay
+  đổi vòng 2 xác nhận KHÔNG đụng `chunking.py`/`config.py`/spike logic — xem mục 5 bên dưới), chỉ
+  chạy lại test suite liên quan để xác nhận không hồi quy.
+
+## 5. Phạm vi thay đổi
+
+`git diff --stat` xác nhận vòng 2 CHỈ đụng 2 file mới từ vòng 1 (`src/services/epub_document.py`,
+`tests/test_epub_document.py`, cả 2 vẫn ở dạng untracked `??`) — không file nào khác trong diff so
+với baseline vòng 1 bị thay đổi thêm. Khớp đúng khai báo CHANGELOG "Không đụng file nào khác".
+
+## 6. Regression toàn bộ — tự chạy lại thật
+
+```
+uv run ruff check src/services/epub_document.py tests/test_epub_document.py   → All checks passed!
+uv run ruff format --check <2 file trên>                                       → 2 files already formatted
+uv run pytest tests/test_epub_document.py tests/test_chunking.py -q            → 49 passed
+uv run pytest -q (toàn bộ suite)                                                → 619 passed, 1 failed (94.62s)
+```
+
+1 fail: `tests/test_rotated_text_overlay.py::test_overlay_rotated_text_draws_translated_text_at_correct_angle`
+— đúng tên/số lượng đã biết từ vòng 1 (đã tự xác nhận pre-existing bằng `git stash` ở vòng 1, file
+này không nằm trong phạm vi thay đổi vòng 2 nên không cần stash lại). Không có fail mới. Số pass
+tăng đúng 619 (616 vòng 1 + 3 test Y2(d) mới), khớp khai báo Dev.
+
+## 7. R5-04 checklist
+
+**External contract verified against real source: N/A** — thay đổi vòng 2 thuần nội bộ (logic
+chọn/tách unit trên cây DOM đã parse sẵn bởi `bs4`), không thêm/đổi lời gọi tới API/CLI của
+`ebooklib`/`lxml`/`bs4` nào mới so với vòng 1 (đã verify ở review vòng 1 mục 8). Không phát sinh
+nghĩa vụ verify nguồn mới.
+
+## 8. Non-blocking
+
+Unit `text` của `<li>` cha khi có `<ul>` lồng ngay sau vẫn giữ nguyên khoảng trắng/newline thừa ở
+cuối (vd `"Preheat oven to 220C, then follow the sub-steps below:\n    \n"`, đo được ở Case A) —
+không phải lỗi mới của round này (thuộc cách `_inner_html`/BeautifulSoup serialize khoảng trắng
+giữa các thẻ, không liên quan gì tới logic Y2(d)), không ảnh hưởng `write_translated()` (toàn bộ
+text node kể cả whitespace thừa bị thay nguyên khối, không để sót). Ghi nhận cho bước 2/3 (khi thật
+sự gọi LLM dịch): nên `strip()` phần trailing whitespace này trước khi đưa vào prompt để tránh gửi
+thừa token/nhiễu — không chặn round này vì nằm ngoài phạm vi bước 1/3 (module này chưa gọi
+`provider.translate()`).
+
+---
+
+## Kết luận US-22 Bước 1/3 — VÒNG 2/3
+
+**APPROVE.**
+
+- Y2(d) đã implement đúng nghĩa theo đúng lựa chọn 1 trong yêu cầu reject vòng 1: tách unit theo
+  "innermost" cho `li > ul`/`ol` lồng, kể cả lồng nhiều cấp, có test cho cả 2 biến thể (chỉ lá có
+  text / mọi cấp có text). Tự verify độc lập bằng fixture riêng (không dùng lại fixture Dev), cả
+  `load()` lẫn `write_translated()`, cả ca đơn giản lẫn ca khó hơn Dev tự test (ghi 4 cấp lồng cùng
+  lúc) — đứng vững.
+- Regression: ca `li > p` (outermost cũ) và `<img>` (Y2(c)) xác nhận KHÔNG bị phá vỡ bằng code MỚI,
+  không chỉ tin lời Dev khai trong CHANGELOG.
+- Phạm vi thay đổi đúng như khai báo (chỉ 2 file, không lan ra ngoài bước 1/3).
+- Regression suite: 619 passed / 1 fail — fail đã biết, pre-existing, không liên quan.
+- 1 gợi ý non-blocking (trailing whitespace trong unit text) — ghi nhận cho bước 2/3, không chặn.
+
+**Circuit breaker Dev↔Reviewer: 2/3 vòng đã dùng cho US-22 Bước 1/3 — ĐÃ APPROVE, không cần vòng
+3/3.**
+
+---
