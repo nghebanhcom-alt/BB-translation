@@ -7356,3 +7356,111 @@ với đầy đủ ngân sách đã duyệt, tham chiếu gate H-1..H-5 tại Ar
 **Trạng thái**: implement đủ cả 3 lớp theo đúng thứ tự Tech Lead chốt (B → A-4 → A-1/2/3 → C). Chưa
 có Reviewer thật review trong phiên này (R7-01) — **KHÔNG tự báo cáo "xong"/"sẵn sàng release"**. Chờ
 PM giao Reviewer trước khi chuyển tiếp cho QA.
+
+## US-22 EPUB — Bước 3/3 (2026-09-10)
+
+BA rà soát Bước 1/3 + 2/3 (đã commit) và xác định 5 việc còn thiếu để đủ Acceptance Criteria của
+US-22 (`docs/PRD.md` mục "US-22"). Cả 5 việc đã implement trong phiên này.
+
+### 1. Nối `parse_epub_batch_response_detailed()`/`EpubParseOutcome` vào `job_orchestrator.py`
+
+QA đã escalate: 3 call site trong `_process_epub_chunk()` (X4 request chính, `_retry_single_unit()`,
+`_retry_whole_epub_request()`) vẫn dùng bản rút gọn `parse_epub_batch_response()`, bỏ phí telemetry
+`salvaged_count`/`salvaged_ids` mà Lớp B (Architecture.md §6.20.14.3 B-3) đã spec nhưng chưa từng
+nối vào observability thật.
+
+- Đổi cả 4 lời gọi parse (main request + 2 helper dùng chung `_retry_single_unit()`/
+  `_retry_whole_epub_request()`, mỗi helper được gọi ở 2 chỗ khác nhau trong `_process_epub_chunk()`)
+  sang `parse_epub_batch_response_detailed()`, giữ nguyên `EpubParseOutcome.translations` làm
+  `dict[str, str]` y hệt hành vi cũ (KHÔNG đổi hành vi nghiệp vụ — chỉ thêm observability).
+  `_retry_single_unit()`/`_retry_whole_epub_request()` nhận thêm `job_id`/`chunk_index` (keyword-only)
+  để log gắn đúng ngữ cảnh.
+- Helper mới `JobOrchestrator._log_epub_parse_salvage()`: `salvaged_count > 0` → `logger.warning`
+  (tín hiệu Lớp B đã phải can thiệp, đúng như Architecture.md §6.20.14.3 B-3 mô tả); `== 0` →
+  `logger.info` (đường chuẩn, không cần cứu hộ).
+- **Test** (`tests/integration/test_epub_translate_runner.py`,
+  `test_run_epub_job_logs_salvaged_count_when_layer_b_engages`): provider giả `_SpuriousBracesProvider`
+  mô phỏng ĐÚNG hình dạng bug đã golden-fixture-test ở cấp parser đơn lẻ
+  (`tests/test_epub_batch_golden_fixture.py`, fixture Bug #EPUB-B2-5 — 1 dấu `{`, N dấu `}` rải rác)
+  nhưng test ở CẤP ORCHESTRATOR (tích hợp, không mock parser) — xác nhận `caplog` bắt được đúng 1
+  log WARNING `salvaged_count=2` (3 unit/1 request: id "0" qua đường chuẩn, "1"/"2" qua salvage), và
+  nội dung dịch vẫn đúng đủ sau salvage.
+
+### 2. `output_mode` cho EPUB — honor lựa chọn user thay vì hardcode
+
+`run_epub_job()` hardcode `bilingual = True` cho MỌI job EPUB (dòng có comment "E8"), bỏ qua
+`Batch.output_mode` mà user chọn lúc tạo job.
+
+- Đổi `bilingual = True` → `bilingual = await self._wants_bilingual(job, db_session)` — TÁI DÙNG
+  đúng helper đã có sẵn cho nhánh PDF (`_wants_bilingual()`, đọc `Batch.output_mode`), không viết
+  logic mới. `write_translated(bilingual=False)` đã hỗ trợ sẵn chế độ THAY THẾ (không chèn thêm) từ
+  Bước 1/3 — không cần sửa `EpubDocument`.
+- `web/index.html`: **không có** đoạn code nào ẩn/disable select "Đơn ngữ/Song ngữ" riêng cho `.epub`
+  (đã grep xác nhận, không tồn tại) — select đã hoạt động bình thường cho EPUB như PDF từ trước, mục
+  này của brief hoá ra không cần sửa gì ở `index.html`.
+  - **Nhưng** phát hiện 1 vấn đề thật liên quan: `web/js/app.js` (`handleFiles()`) mặc định
+    `output_mode: lastOutputMode || "monolingual"` cho MỌI file type khi chưa có lựa chọn nhớ từ lần
+    trước — nếu giữ nguyên, sau khi (2) có hiệu lực, upload EPUB đầu tiên sẽ ra monolingual, SAI với
+    AC "mặc định bật bản song ngữ". Sửa: `defaultOutputMode = body.file_type === "epub" ? "bilingual"
+    : "monolingual"`, giữ nguyên tinh thần "mặc định, không phải bắt buộc cố định" — 1 khi user đã
+    từng đổi lựa chọn (`lastOutputMode` có giá trị trong `localStorage`), lựa chọn đó thắng cho MỌI
+    file type như cũ, không riêng gì EPUB.
+- **Test** (`test_run_epub_job_monolingual_output_mode_has_no_english_original`): job EPUB tạo với
+  `Batch.output_mode="monolingual"` → output chỉ có VI (không có node `bb-vi`, câu tiếng Anh gốc chỉ
+  xuất hiện 1 lần — bên trong bản dịch — thay vì 2 lần như bilingual mặc định), số unit output = số
+  unit input (X3, không mất chương ở monolingual).
+  - **Thay đổi kèm theo bắt buộc**: helper test `_create_epub_job()` giờ LUÔN tạo 1 `Batch` thật và
+    gán `job.batch_id` (giống hệt `_resolve_batch()` của `src/api/routes/jobs.py` luôn tạo 1 Batch
+    cho MỌI job kể cả job đơn lẻ) — trước bước 3/3, test job EPUB không có `batch_id` nên
+    `_wants_bilingual()` sẽ luôn trả `False` nếu không sửa helper, làm SẬP toàn bộ test EPUB cũ (vốn
+    kỳ vọng bilingual mặc định khi `bilingual = True` còn hardcode). Default `output_mode="bilingual"`
+    của helper giữ nguyên kỳ vọng các test cũ, tham số `output_mode` optional cho test mới.
+
+### 3. UI: hiển thị `total_units` cho EPUB thay vì ô trống
+
+`web/index.html` (khu vực dòng ~52) chỉ hiển thị `f.page_count` (luôn `null` cho EPUB theo thiết kế,
+Architecture.md §6.20.6) — EPUB không hiện con số nào thay thế.
+
+- Thêm `<template x-if="!f.page_count && epubTotalUnits(f)">` hiển thị "N đoạn" — chỉ kích hoạt khi
+  KHÔNG có `page_count` (an toàn cho PDF vì PDF luôn có `page_count`, và job PDF phục hồi từ server
+  có `total_units=None` nên `epubTotalUnits()` trả `null`, template không hiện).
+- Helper mới `epubTotalUnits(f)` trong `web/js/app.js`: ưu tiên `f.job?.total_units` (field có sẵn
+  trên `JobDetail`, `src/api/routes/jobs.py` dòng ~167 — có giá trị sau khi job được tạo), fallback
+  `f.costEstimate?.total_units` (field có sẵn trên `CostEstimateResponse`, dòng ~206 — có giá trị
+  NGAY SAU khi bấm "Xem chi phí ước tính", TRƯỚC CẢ khi tạo job). `UploadResponse` (`upload.py`)
+  không có field `total_units` nên không thể hiển thị ngay lúc vừa upload — đây là giới hạn hợp lý,
+  không phải thiếu sót (số đoạn chỉ tính được sau khi ước tính chi phí hoặc tạo job, giống cách PDF
+  cũng không biết `page_count` chính xác cho tới lúc đó — thực ra PDF CÓ biết `page_count` ngay lúc
+  upload qua PyMuPDF, khác EPUB; ghi chú lại để không nhầm 2 trường hợp).
+
+### 4. Test — tổng kết
+
+2 test mới trong `tests/integration/test_epub_translate_runner.py` (việc 1 + việc 2 ở trên, chi tiết
+đã mô tả kèm từng việc).
+
+### 5. Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/     → All checks passed!
+uv run pytest tests/ -q           → 746 passed, 0 failed (baseline 744 trước vòng này + 2 test mới)
+```
+
+Không regression trên bất kỳ test EPUB/PDF nào đã có (kể cả các test EPUB cũ mặc định bilingual —
+vẫn pass đúng vì helper `_create_epub_job()` giữ default `output_mode="bilingual"`).
+
+### Ngoài phạm vi (theo đúng chỉ đạo PM/BA, để lại backlog riêng)
+
+- KHÔNG động tới US-15 nhánh EPUB (`_reject_epub_parse_only`, `EpubDocument.to_markdown()`).
+- KHÔNG sửa Bug #EPUB-3 (job mồ côi khi restart server).
+- KHÔNG cài `epubcheck` — QA tự xử lý verify bằng reader thật riêng.
+
+### Trạng thái
+
+Đủ cả 5 việc BA yêu cầu. **Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo
+"xong"/"sẵn sàng release". Chờ PM giao Reviewer trước khi chuyển tiếp cho QA.
+
+**Điểm cần Reviewer/QA lưu ý riêng** (R5-04 checklist tự đánh giá): 2 file sửa trong bước này
+(`job_orchestrator.py`, `_process_epub_chunk`/`run_epub_job`) là orchestrator nội bộ, KHÔNG tự gọi
+API/CLI/SDK bên thứ ba mới nào chưa từng verify — logic dùng lại nguyên contract JSON X4 đã verify từ
+Bước 2/3, không có claim contract mới nào cần Protocol 5. `web/index.html`/`web/js/app.js` không gọi
+external tool — N/A cho Protocol 5.

@@ -56,9 +56,10 @@ from src.core.glossary_manager import GlossaryManager
 from src.core.ocr_warning import build_ocr_warning
 from src.core.progress_tracker import BroadcastFn, ProgressTracker
 from src.core.prompt_builder import (
+    EpubParseOutcome,
     build_epub_batch_prompt,
     build_system_prompt,
-    parse_epub_batch_response,
+    parse_epub_batch_response_detailed,
     write_babeldoc_prompt_file,
     write_prompt_file,
 )
@@ -1111,14 +1112,13 @@ class JobOrchestrator:
         all_fallback_units = self._collect_epub_fallback_units(job, chunks)
         untranslated_ids = {entry["unit_id"] for entry in all_fallback_units}
 
-        # E8: `bilingual=True` mac dinh cho EPUB (CHOT, Architecture.md
-        # 6.20.11 muc 2 — PM/user da xac nhan qua AskUserQuestion). Chua co
-        # duong UI nao cho phep chon monolingual rieng cho EPUB o buoc nay
-        # (bang task, buoc 3/3 moi lam UI) nen hardcode True thay vi doc
-        # `Batch.output_mode` (mac dinh "vi_only" cho CA PDF lan EPUB o tang
-        # API — dung nguyen no se lam EPUB thanh monolingual-by-default,
-        # nguoc voi CHOT nay).
-        bilingual = True
+        # E8 (buoc 3/3, sua): "bilingual=True mac dinh" (Architecture.md
+        # 6.20.11 muc 2 + PRD US-22 AC) la mac dinh CHO PHEP DOI, khong phai
+        # gia tri co dinh — UI (web/index.html) gio da cho chon output_mode
+        # cho EPUB giong het PDF, mac dinh select la "bilingual" khi user
+        # chua tung doi gi (xem web/js/app.js). Dung chung `_wants_bilingual()`
+        # da co san cho nhanh PDF (doc `Batch.output_mode`) thay vi hardcode.
+        bilingual = await self._wants_bilingual(job, db_session)
         merged_path = self._output_dir / job.id / "translated_vi.epub"
         merged_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1866,12 +1866,41 @@ class JobOrchestrator:
         db_session.add(chunk)
         await db_session.commit()
 
+    @staticmethod
+    def _log_epub_parse_salvage(
+        job_id: str, chunk_index: int, outcome: EpubParseOutcome
+    ) -> None:
+        """Architecture.md §6.20.14.3 mucB-3 — observability cho lop cuu ho
+        (`_salvage_epub_id_pairs()`). `salvaged_count > 0` la tin hieu suc
+        khoe (model van sinh JSON hong, chi la da cuu duoc) nen len muc
+        WARNING; `== 0` (duong chuan, khong can cuu ho) chi can INFO.
+        """
+        salvaged_count = len(outcome.salvaged_ids)
+        if salvaged_count > 0:
+            logger.warning(
+                "EPUB parse salvage (Lop B): job=%s chunk=%s salvaged_count=%d "
+                "salvaged_ids=%s",
+                job_id,
+                chunk_index,
+                salvaged_count,
+                sorted(outcome.salvaged_ids),
+            )
+        else:
+            logger.info(
+                "EPUB parse: job=%s chunk=%s salvaged_count=0 (duong chuan)",
+                job_id,
+                chunk_index,
+            )
+
     async def _retry_single_unit(
         self,
         pricing_provider: TranslationProvider,
         system_prompt: str,
         local_id: str,
         unit: EpubUnit,
+        *,
+        job_id: str,
+        chunk_index: int,
     ) -> tuple[str | None, int, int, float]:
         """Helper CHIA SE giua 2 co che retry-rieng-le KHAC nghia
         (Architecture.md 6.20.13.5's "CHOT: TACH, nhung dung CHUNG 1
@@ -1883,9 +1912,10 @@ class JobOrchestrator:
         retry_result = await with_retry(
             lambda p=single_payload: pricing_provider.translate(p, system_prompt, "en", "vi")
         )
-        retry_parsed = parse_epub_batch_response(retry_result.text, {local_id})
+        outcome = parse_epub_batch_response_detailed(retry_result.text, {local_id})
+        self._log_epub_parse_salvage(job_id, chunk_index, outcome)
         return (
-            retry_parsed.get(local_id),
+            outcome.translations.get(local_id),
             retry_result.input_tokens,
             retry_result.output_tokens,
             retry_result.estimated_cost_usd,
@@ -1897,6 +1927,9 @@ class JobOrchestrator:
         system_prompt: str,
         payload_json: str,
         expected_ids: set[str],
+        *,
+        job_id: str,
+        chunk_index: int,
     ) -> tuple[dict[str, str], int, int, float]:
         """Goi lai NGUYEN 1 request (payload/expected_ids y het) dung 1 lan —
         dung chung cho ca nhanh C-1 (qua nua batch thieu id, Architecture.md
@@ -1906,9 +1939,10 @@ class JobOrchestrator:
         retry_result = await with_retry(
             lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
         )
-        retry_parsed = parse_epub_batch_response(retry_result.text, expected_ids)
+        outcome = parse_epub_batch_response_detailed(retry_result.text, expected_ids)
+        self._log_epub_parse_salvage(job_id, chunk_index, outcome)
         return (
-            retry_parsed,
+            dict(outcome.translations),
             retry_result.input_tokens,
             retry_result.output_tokens,
             retry_result.estimated_cost_usd,
@@ -2008,7 +2042,9 @@ class JobOrchestrator:
             expected_output_tokens = epub_expected_output_tokens(len(payload_json))
             runaway_ratio = result.output_tokens / max(expected_output_tokens, 1)
 
-            parsed = parse_epub_batch_response(result.text, expected_ids)
+            parse_outcome = parse_epub_batch_response_detailed(result.text, expected_ids)
+            self._log_epub_parse_salvage(job.id, chunk.chunk_index, parse_outcome)
+            parsed = dict(parse_outcome.translations)
             missing_ids = expected_ids - parsed.keys()
 
             if runaway and missing_ids:
@@ -2062,7 +2098,12 @@ class JobOrchestrator:
                             break
                         unit = slice_units[int(local_id)]
                         translated, it, ot, cost = await self._retry_single_unit(
-                            pricing_provider, system_prompt, local_id, unit
+                            pricing_provider,
+                            system_prompt,
+                            local_id,
+                            unit,
+                            job_id=job.id,
+                            chunk_index=chunk.chunk_index,
                         )
                         extra_requests += 1
                         await _accumulate_and_check_budget(it, ot, cost)
@@ -2070,7 +2111,12 @@ class JobOrchestrator:
                             parsed[local_id] = translated
                 elif extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
                     retry_parsed, it, ot, cost = await self._retry_whole_epub_request(
-                        pricing_provider, system_prompt, payload_json, expected_ids
+                        pricing_provider,
+                        system_prompt,
+                        payload_json,
+                        expected_ids,
+                        job_id=job.id,
+                        chunk_index=chunk.chunk_index,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)
@@ -2120,7 +2166,12 @@ class JobOrchestrator:
                 ratio_after: float | None = None
                 if extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
                     retry_parsed, it, ot, cost = await self._retry_whole_epub_request(
-                        pricing_provider, system_prompt, payload_json, expected_ids
+                        pricing_provider,
+                        system_prompt,
+                        payload_json,
+                        expected_ids,
+                        job_id=job.id,
+                        chunk_index=chunk.chunk_index,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)
@@ -2169,7 +2220,12 @@ class JobOrchestrator:
                 retried_tier2 = False
                 if extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
                     translated, it, ot, cost = await self._retry_single_unit(
-                        pricing_provider, system_prompt, local_id, unit
+                        pricing_provider,
+                        system_prompt,
+                        local_id,
+                        unit,
+                        job_id=job.id,
+                        chunk_index=chunk.chunk_index,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)

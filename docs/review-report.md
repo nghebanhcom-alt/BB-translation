@@ -8906,3 +8906,297 @@ Dev↔QA đã chạm giới hạn 5/5 trước đó (đã ghi trong `docs/escala
 đổi chiến lược, không phải lỗi của vòng review này).
 
 ---
+
+# Review Report — US-22 Bước 3/3 (5 việc hoàn thiện AC) — VÒNG 1/3
+
+**Phạm vi**: working tree chưa commit — `src/core/job_orchestrator.py`,
+`tests/integration/test_epub_translate_runner.py`, `web/index.html`, `web/js/app.js`,
+`docs/CHANGELOG.md` (entry "US-22 EPUB — Bước 3/3"). Đọc trực tiếp `git diff`, không dựa vào mô tả
+trong CHANGELOG.
+
+## 1. Salvage telemetry (việc 1)
+
+Xác nhận CẢ 4 lời gọi parse trong `job_orchestrator.py` đã đổi sang `parse_epub_batch_response_detailed()`:
+main request (`_process_epub_chunk()`, dòng ~2045), `_retry_single_unit()` (dòng ~1915),
+`_retry_whole_epub_request()` (dòng ~1942), và grep xác nhận không còn lời gọi nào tới
+`parse_epub_batch_response()` (bản rút gọn) trong `job_orchestrator.py` — chỉ còn import
+`EpubParseOutcome` + `parse_epub_batch_response_detailed`. Cả 2 helper retry đều nhận thêm
+`job_id`/`chunk_index` keyword-only đúng như CHANGELOG mô tả, và cả 4 call site gọi 2 helper này
+(2 vị trí retry-đơn-unit, 2 vị trí retry-nguyên-request) đều truyền đủ 2 tham số mới.
+
+`_log_epub_parse_salvage()`: `salvaged_count > 0` → WARNING kèm đủ `job_id`, `chunk_index`,
+`salvaged_count`, `salvaged_ids` (sorted) — đủ thông tin để trace đúng chunk/unit nào cần cứu hộ,
+đúng yêu cầu brief. `== 0` → INFO, không gây nhiễu log ở đường chuẩn. Không phát hiện vấn đề.
+
+## 2. output_mode cho EPUB (TRỌNG TÂM CHÍNH)
+
+**Đây là điểm quan trọng nhất của vòng review này — đã verify kỹ, KHÔNG có gap thật.**
+
+- `_wants_bilingual()` (`job_orchestrator.py:2517-2520`):
+  ```python
+  async def _wants_bilingual(self, job: Job, db_session: AsyncSession) -> bool:
+      if not job.batch_id:
+          return False
+      batch = await db_session.get(Batch, job.batch_id)
+      return bool(batch and batch.output_mode == "bilingual")
+  ```
+  Xác nhận đúng như brief cảnh báo: nếu `job.batch_id` falsy, trả `False` ngay (im lặng thành
+  monolingual). Đây chính là rủi ro brief yêu cầu verify.
+
+- Đã trace TOÀN BỘ đường tạo `Job` trong production code (`grep -rln "Job(" src/` → chỉ
+  `src/models/job.py` (định nghĩa) và `src/api/routes/jobs.py` có khởi tạo `Job(...)`). Chỉ có
+  DUY NHẤT 1 chỗ khởi tạo `Job` thật trong `create_job()` (dòng ~622-645), và nó LUÔN đi qua
+  `batch = await _resolve_batch(...)` trước đó (dòng 622) rồi gán `batch_id=batch.id` (dòng 624) —
+  không có nhánh nào bỏ qua `_resolve_batch()`. `_resolve_batch()` (dòng 463-494) luôn trả về 1
+  `Batch` hợp lệ: nếu có `glossary_project_id` thì lấy Batch có sẵn (404 nếu không tồn tại — không
+  bao giờ trả `None`), nếu không thì tạo mới `Batch` và commit trước khi trả về. Endpoint
+  `create_batch()` (dòng 1007+) cũng qua `_resolve_batch()` tương tự. `retry_job()` (dòng 727) chỉ
+  reset job hiện có, không tạo `Job` mới nên không tạo `batch_id` mới nào.
+  → **Kết luận: không có kịch bản nào trong production tạo được 1 Job EPUB (hay bất kỳ file type
+  nào) với `batch_id=None`.** Đánh giá của Dev trong CHANGENLOG ("đây là gap thật của test helper,
+  không phải gap production") là ĐÚNG, đã tự verify độc lập bằng cách đọc source, không dựa vào mô
+  tả của Dev.
+- `write_translated(bilingual=False)`: đọc `src/services/epub_document.py:617-686+` — logic ghi
+  THAY THẾ tại chỗ (không chèn node `bb-vi` mới) khi `bilingual=False`, đúng thiết kế "monolingual
+  = thay thế, bilingual = chèn thêm". Test
+  `test_run_epub_job_monolingual_output_mode_has_no_english_original` assert đúng và chặt: không chỉ
+  check thiếu `bb-vi`, mà còn đếm số lần xuất hiện của cụm gốc `"Chapter 0 paragraph 0"` — kỳ vọng
+  đúng 1 lần (câu tiếng Anh gốc chỉ còn tồn tại NHƯ MỘT CHUỖI CON của bản dịch `"VI:Chapter 0..."`,
+  không phải node riêng), so với bilingual mặc định là 2 lần (node gốc + node `bb-vi`). Đây là cách
+  assert đúng bản chất "thay thế" thay vì chỉ đếm số dòng dịch — không phải test hời hợt. Ngoài ra
+  còn assert `len(output_doc.units) == 6` (không mất chương ở monolingual).
+- Regression case mặc định: helper `_create_epub_job()` giữ `output_mode: str = "bilingual"` làm
+  default — mọi test EPUB cũ gọi `_create_epub_job()` không truyền `output_mode` vẫn tạo `Batch`
+  với `output_mode="bilingual"`, giữ đúng kỳ vọng cũ. Chạy `uv run pytest tests/ -q` độc lập xác
+  nhận không có test EPUB nào cũ bị fail.
+- `web/js/app.js` `defaultOutputMode = body.file_type === "epub" ? "bilingual" : "monolingual"` chỉ
+  áp dụng khi `lastOutputMode` (localStorage) rỗng — đúng tinh thần "mặc định, không phải cố định",
+  và không ảnh hưởng gì tới việc `_wants_bilingual()` phía backend đọc `Batch.output_mode` (2 lớp
+  độc lập: UI chỉ set giá trị mặc định hiển thị/gửi lên, backend là nguồn sự thật cuối).
+
+## 3. UI `total_units` (việc 3)
+
+`web/index.html` dòng mới: `<template x-if="!f.page_count && epubTotalUnits(f)">` — chỉ kích hoạt
+khi KHÔNG có `page_count`, an toàn cho PDF (PDF luôn có `page_count` nên template PDF không bao giờ
+hiện đè). `epubTotalUnits(f)` trong `app.js`:
+```js
+epubTotalUnits(f) {
+  return f.job?.total_units ?? f.costEstimate?.total_units ?? null;
+}
+```
+Dùng optional chaining (`?.`) và `??` nên khi `f.job`/`f.costEstimate` là `undefined`/`null`, hoặc
+khi cả 2 field `total_units` đều `null`/`undefined`, hàm trả `null` — Alpine `x-if` với `null` là
+falsy nên template không hiện, không crash. Không phát hiện vấn đề.
+
+## 4. Data lineage (Protocol 6)
+
+Đọc `run_epub_job()`: `bilingual = await self._wants_bilingual(...)` được gọi SAU khi toàn bộ
+`translations` (kết quả dịch qua LLM, chi phí đã tính ở `chunk.api_cost` trong `_process_epub_chunk()`
+mỗi chunk) đã hoàn tất — biến `bilingual` chỉ được dùng ở bước `doc.write_translated(...)` và
+`_check_epub_output_guard(...)`, không quay lại ảnh hưởng số lần gọi LLM hay `chunk.api_cost` nào.
+Xác nhận đúng như Architecture.md đã ghi: đổi `output_mode` không phát sinh chi phí LLM thêm.
+
+## 5. Kết quả chạy lại độc lập
+
+```
+uv run ruff check src/ tests/   → All checks passed!
+uv run pytest tests/ -q         → 746 passed, 0 failed (100.51s)
+```
+Khớp đúng con số Dev báo cáo.
+
+## Checklist R5-04 (Protocol 5, external contract)
+
+`job_orchestrator.py`/test file trong diff này: N/A — không có claim contract API/CLI/SDK bên thứ 3
+mới nào (dùng lại contract JSON X4 đã verify ở Bước 2/3, `web/*` không gọi external tool).
+
+## Kết luận
+
+**APPROVE.**
+
+Không có issue blocking. Trả lời thẳng câu hỏi trọng tâm của brief: **KHÔNG có job EPUB thật nào
+trong production có thể thiếu `batch_id`** — mọi đường tạo `Job` (kể cả EPUB) đều đi qua
+`_resolve_batch()` trước, luôn gán `batch_id` hợp lệ. Gap chỉ tồn tại ở test helper cũ (thiếu tạo
+`Batch`/gán `batch_id`), đã được Dev sửa đúng trong diff này, và sửa đó không che giấu gap production
+nào — đã tự trace bằng tay toàn bộ call site tạo `Job`, không suy đoán.
+
+**Finding non-blocking (không chặn merge, ghi lại để theo dõi)**:
+1. `_wants_bilingual()` không tự log/warn khi `job.batch_id` falsy trước khi trả `False` — hiện tại
+   vô hại vì production luôn có `batch_id`, nhưng nếu tương lai có thêm 1 đường tạo `Job` mới (vd
+   qua script migration, seed data, hoặc endpoint mới) quên gọi `_resolve_batch()`, lỗi sẽ lại im
+   lặng y hệt kịch bản Bug #5/#9 (silent wrong-default) mà không có log nào báo hiệu. Đề nghị Tech
+   Lead cân nhắc thêm 1 dòng `logger.warning` khi `not job.batch_id` ở nhánh sớm return, hoặc raise
+   thay vì âm thầm `False` — không blocking vòng này vì đây là phòng ngừa cho tương lai, không phải
+   bug hiện tại.
+2. Test mới `test_run_epub_job_logs_salvaged_count_when_layer_b_engages` dùng `_SpuriousBracesProvider`
+   tự viết tay để mô phỏng hình dạng bug, không phải golden fixture capture từ response thật — Dev
+   đã tự giải thích rõ trong docstring rằng đây là mô phỏng CÙNG HÌNH DẠNG với golden fixture đã có
+   ở cấp parser (`tests/test_epub_batch_golden_fixture.py`), chỉ chạy lại ở cấp orchestrator, nên
+   không vi phạm Protocol 5 R5-03 (không phải claim contract mới của LLM thật, mà là test lại logic
+   nội bộ `_process_epub_chunk()` với input đã biết hình dạng từ golden fixture) — chấp nhận được,
+   ghi lại để QA lưu ý không nhầm đây là smoke test thay thế cho live E2E.
+
+## Vòng lặp
+
+Circuit breaker Dev↔Reviewer cho US-22 Bước 3/3: **1/3 vòng đã dùng — APPROVE ngay ở VÒNG 1/3**,
+không cần vòng 2. Vòng đếm riêng, không cộng dồn với các vòng review trước của US-22 Bước 1/3, 2/3
+hay các bug #5/#8/#9 trước đó.
+
+---
+
+---
+
+# Review Report — Fix UI Alpine template (N đoạn/trang/Tải lên) + đóng US-22 toàn bộ — VÒNG 1/3
+
+- **Reviewer**: Reviewer Agent (Sonnet)
+- **Phạm vi**: PM tự sửa trực tiếp `web/index.html` (3 dòng, không qua Dev) theo Protocol 7 R7-01 —
+  bắt buộc Reviewer thật trước khi coi xong, bất kể thay đổi nhỏ. Đối tượng review: diff 3 dòng +
+  toàn bộ bằng chứng PM ghi trong `docs/test-report.md` section "US-22 Dịch EPUB — Bổ sung: đóng gap
+  'Apple Books' + fix bug UI 'N đoạn' (PM, 2026-09-10)".
+- **External contract verified against real source**: N/A — thay đổi này không gọi tool bên thứ ba
+  nào (chỉ Alpine.js client-side template + đọc file EPUB tĩnh), Protocol 5 không áp dụng.
+
+## 1. Diff thực tế (`git diff web/index.html`)
+
+```html
+-                <template x-if="f.page_count"> · <span x-text="f.page_count"></span> trang</template>
+-                <template x-if="formatUploadDate(f)"> · Tải lên: <span x-text="formatUploadDate(f)"></span></template>
++                <template x-if="f.page_count"><span> · <span x-text="f.page_count"></span> trang</span></template>
++                <template x-if="!f.page_count && epubTotalUnits(f)"><span> · <span x-text="epubTotalUnits(f)"></span> đoạn</span></template>
++                <template x-if="formatUploadDate(f)"><span> · Tải lên: <span x-text="formatUploadDate(f)"></span></span></template>
+```
+
+Khớp đúng với mô tả "3 dòng" trong test-report.md (thực chất 2 dòng sửa + 1 dòng thêm mới — dòng
+"N đoạn" vốn đã tồn tại trước đó theo cùng pattern lỗi, nay được sửa cùng lúc; không lệch với bối
+cảnh brief).
+
+## 2. Root cause + tính đúng đắn của fix — tự verify độc lập, KHÔNG dựa lời PM
+
+Tự dựng 1 trang test Alpine.js tối giản, tách biệt hoàn toàn khỏi app thật (không đụng server dev,
+không đụng dữ liệu user), tại
+`/private/tmp/.../scratchpad/reviewer_check/alpine_template_test.html`, dùng Alpine 3.x qua CDN
+(`cdn.jsdelivr.net`), phục vụ qua `python3 -m http.server 8765` (localhost, không phải `file://` vì
+Claude Browser MCP không exec JS trên file cục bộ) và mở bằng Claude Browser MCP:
+
+```html
+<div id="broken">
+  BROKEN: <span x-text="'x'"></span>
+  <template x-if="cond"> · <span x-text="val"></span> đoạn</template>
+</div>
+<div id="fixed">
+  FIXED: <span x-text="'x'"></span>
+  <template x-if="cond"><span> · <span x-text="val"></span> đoạn</span></template>
+</div>
+```
+
+`get_page_text` trả về thật (encoding hiển thị lệch do thiếu `<meta charset>` trong file test, không
+ảnh hưởng tới việc so sánh có/không có text):
+
+```
+BROKEN: x 10
+FIXED: x · 10 đoạn
+```
+
+**Xác nhận độc lập, khớp chính xác root cause PM mô tả**: bản BROKEN (pattern cũ, `<template x-if>`
+có text node " · " và " đoạn" làm ANH EM của `<span>`) chỉ render số "10" trần trụi, mất hoàn toàn
+dấu "·" và nhãn — đúng y hệt bug QA vòng trước phát hiện. Bản FIXED (bọc `<span>` bao ngoài) render
+đầy đủ "· 10 đoạn". Đây là hành vi đã biết của Alpine `x-if`/`<template>`: engine dùng
+`template.content.firstElementChild` để clone nội dung khi expand, nên chỉ 1 root element duy nhất
+được xử lý đúng — text node anh em bị bỏ qua. Bọc `<span>` bao ngoài là cách sửa chuẩn, không phải
+workaround tạm bợ.
+
+**Ảnh hưởng CSS/layout**: `<span>` là phần tử inline mặc định, không có style riêng được gán (không
+set `display`, `class`) → không ảnh hưởng flow/wrapping của `<p class="text-xs text-gray-500">` cha.
+Tự kiểm tra bằng mắt qua trang test: text "· 10 đoạn" nằm cùng dòng, không xuống dòng lạ, không đổi
+kích thước font. **Không có rủi ro layout.**
+
+## 3. Cả 3 template có nhất quán không
+
+`grep -n "template x-if" web/index.html` → đúng 3 kết quả (dòng 52-54), cả 3 đều đã bọc `<span>` bao
+ngoài theo đúng 1 pattern. Không có template `x-if` nào khác trong file bị sót. **Nhất quán.**
+
+## 4. Verify qua browser thật trên server dev (PM tự làm) — đánh giá độ tin cậy
+
+PM báo cáo mở `http://localhost:8000` (server dev đang chạy, dữ liệu PDF thật, CHỈ ĐỌC) và xác nhận
+12 file PDF hiển thị đúng "· Tải lên: ...". Đây là bằng chứng hợp lệ cho nhánh "trang" +
+"Tải lên:" (2/3 template) vì PDF thật chắc chắn có `page_count`. **Không tự lặp lại bước này** (vì
+brief nói server có thể không còn chạy trong phiên Reviewer, và việc này không đổi kết luận — đã có
+bằng chứng độc lập mạnh hơn ở mục 2 phía trên chứng minh đúng cơ chế chung).
+
+## 5. Đánh giá riêng: "N đoạn dùng chung pattern nên chắc chắn đúng" — suy luận PM có đủ tin cậy không?
+
+PM tự nhận KHÔNG upload EPUB test lên server thật (đúng, tránh nhiễu data production) và chỉ suy
+luận nhánh "N đoạn" dùng đúng 1 pattern y hệt "trang"/"Tải lên" nên chắc chắn đúng.
+
+**Đánh giá: suy luận này ĐÚNG VỀ KẾT LUẬN, nhưng bản thân "suy luận suông" (không kèm bằng chứng độc
+lập nào) là chưa đủ chặt để tự nó đứng vững** — đây chính xác là loại rủi ro Protocol 8/R8-01 cảnh
+báo ("chắc ổn vì dùng chung code" không tự động đúng, cần verify tường minh). Tuy nhiên khác với
+Protocol 8 (áp dụng cho pipeline nhiều BƯỚC xử lý có ý nghĩa nghiệp vụ khác nhau giữa các biến thể),
+ở đây cả 3 nhánh là **cùng 1 cấu trúc HTML, cùng 1 cơ chế Alpine engine xử lý y hệt nhau** (khác
+nhau duy nhất ở biểu thức điều kiện và text hiển thị, không khác ở cấu trúc DOM quyết định bug) —
+mức độ rủi ro "biến thể lệch nhau" thấp hơn nhiều so với bối cảnh Protocol 8 gốc (engine dịch khác
+nhau về hành vi nghiệp vụ).
+
+Để đóng dứt điểm, Reviewer đã **tự verify thay PM** bằng trang test độc lập ở mục 2 (dùng chính
+biểu thức `<template x-if="cond"><span> · <span x-text="val"></span> đoạn</span></template>` — cùng
+hệt cấu trúc dòng "N đoạn" thật, chỉ đổi tên biến) → xác nhận render đúng "· 10 đoạn" không mất chữ.
+**Kết luận: nhánh "N đoạn" ĐÃ được verify gián tiếp nhưng chắc chắn (cùng cấu trúc DOM, cùng engine,
+khác biến số) — không còn là suy luận suông nữa sau review này.** Khuyến nghị PM: lần sau nếu tự
+nhận "suy luận dùng chung pattern" thay vì verify trực tiếp, nên chủ động tạo 1 test độc lập như
+Reviewer vừa làm (rẻ, nhanh, không đụng data thật) thay vì để lại cho vòng Reviewer, để rút ngắn
+Protocol 3 vòng lặp.
+
+## 6. Apple Books (X1/X2) — tự đối chiếu lại độc lập, không tin lời PM
+
+Tự giải nén `/tmp/qa_apple_books_check/sourdough_translated.epub` (md5 khớp file trong scratchpad
+QA gốc, cùng kích thước 2.040.751 byte) và đọc trực tiếp `ops/xhtml/chapter01.html`:
+
+- **X1 (phân số)**: `grep`/`grep -o` xác nhận nguồn dùng ký tự Unicode phân số trực tiếp (`¼ ½ ¾
+  1¼ 1½ 2½ 4½ 6 ½`), không phải `<sup>/<sub>`. Đối chiếu nhiều dòng cụ thể, ví dụ dòng 77:
+  `<strong>1¼ cups unbleached white flour</strong>` → `<strong>1¼ cups bột mì trắng chưa tẩy
+  trắng</strong>` — ký tự phân số giữ nguyên vẹn, không có ca nào bị hỏng/gộp sai thành dạng số
+  nguyên liền (kiểu "11/4"). Đếm được hàng chục lần xuất hiện `¼/½/¾/1¼/1½` rải khắp file, tất cả
+  đều giữ nguyên ở cả câu EN gốc và câu VI dịch đi kèm.
+- **X2 (danh sách nguyên liệu)**: dòng 27 xác nhận đúng cấu trúc PM mô tả:
+  `<strong>4 cups unbleached white flour</strong><br/><strong>2 teaspoons salt</strong><br/>
+  <strong>2 tablespoons honey</strong><br/><strong>4 cups potato water</strong>` → dịch giữ ĐÚNG 4
+  dòng `<strong>`+`<br/>` riêng biệt, in đậm giữ nguyên ở cả bản EN và bản VI theo sau
+  (`class="blockquote bb-vi" lang="vi"`). Kiểm tra thêm nhiều khối `<strong>...</strong><br/>` khác
+  trong file (dòng 32, 37-38...) — cùng pattern giữ nguyên đúng.
+
+**Kết luận mục 6: bằng chứng byte-level của PM ĐÚNG, tự đối chiếu độc lập khớp 100%.** Đây là bằng
+chứng cấu trúc HTML (không phải visual rendering qua reader thật) — đúng như PM tự nhận trong
+test-report.md, không phóng đại thành "đã verify bằng mắt qua Apple Books". Chấp nhận được làm bằng
+chứng thay thế vì: (a) Books.app bị chặn cứng ở tầng policy công cụ agent, không phải do agent lười
+thử, (b) rủi ro cụ thể X1/X2 nhắm tới ("phân số/danh sách bị hỏng cấu trúc") là rủi ro ở tầng HTML
+generation, không phải rủi ro riêng của CSS/font rendering trong 1 reader cụ thể — bằng chứng cấu
+trúc HTML đã đủ loại trừ rủi ro chính, phần dàn trang thị giác còn lại là rủi ro thấp hơn và PM đã
+minh bạch ghi rõ giới hạn này cho user tự quyết định thêm nếu muốn.
+
+## 7. Type hints / error handling / security
+
+Không áp dụng — thay đổi thuần HTML template (Alpine.js markup), không có Python function signature
+mới, không có I/O/API call mới, không có input người dùng nào được xử lý thêm.
+
+## Kết luận
+
+**APPROVE.**
+
+- Fix đúng root cause, xác nhận bằng verify độc lập (trang test Alpine tách biệt, không dựa lời PM).
+- Cả 3 template nhất quán, không sót.
+- Không ảnh hưởng CSS/layout.
+- Bằng chứng Apple Books (X1/X2) đối chiếu độc lập khớp 100% với báo cáo PM.
+- Suy luận "N đoạn dùng chung pattern" của PM về kết luận là đúng, nhưng bản thân suy luận đó (không
+  kèm bằng chứng) chưa đủ chặt để tự đứng — Reviewer đã bổ sung bằng chứng độc lập để đóng dứt điểm
+  trong vòng này, không cần vòng lặp Dev↔Reviewer nào thêm.
+
+**Non-blocking, khuyến nghị cho lần sau (không chặn approve)**:
+1. Khi PM/Dev tự nhận "suy luận dùng chung pattern thay vì verify trực tiếp" cho 1 thay đổi UI rẻ để
+   test độc lập, nên tự tạo test độc lập ngay lúc đó (như Reviewer vừa làm, < 5 phút) thay vì để lại
+   cho Reviewer — rút ngắn vòng lặp.
+2. `docs/test-report.md` ghi nhận bug JS console `Cannot read properties of null (reading 'id')` từ
+   `f.job.id` tại `web/index.html:145/147` (có từ trước, không thuộc phạm vi 3 dòng review lần này)
+   — vẫn còn tồn tại trong file hiện tại, chưa có fix nào trong diff đang review. Giữ nguyên khuyến
+   nghị dùng optional chaining `f.job?.id`, không block APPROVE vòng này vì ngoài phạm vi brief.
+
+Script/artifact phiên này (scratchpad, không commit): `alpine_template_test.html`,
+`reviewer_check/extracted/` (bản giải nén `sourdough_translated.epub` để đối chiếu X1/X2).

@@ -49,8 +49,9 @@
               <p class="text-xs text-gray-500">
                 <span x-text="f.file_type"></span> ·
                 <span x-text="(f.size_bytes / 1024 / 1024).toFixed(1)"></span> MB
-                <template x-if="f.page_count"> · <span x-text="f.page_count"></span> trang</template>
-                <template x-if="formatUploadDate(f)"> · Tải lên: <span x-text="formatUploadDate(f)"></span></template>
+                <template x-if="f.page_count"><span> · <span x-text="f.page_count"></span> trang</span></template>
+                <template x-if="!f.page_count && epubTotalUnits(f)"><span> · <span x-text="epubTotalUnits(f)"></span> đoạn</span></template>
+                <template x-if="formatUploadDate(f)"><span> · Tải lên: <span x-text="formatUploadDate(f)"></span></span></template>
               </p>
             </div>
             <div class="flex items-center gap-2">

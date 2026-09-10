@@ -2,8 +2,8 @@
   "project_name": "BB-Translation",
   "project_description": "Pipeline dịch tài liệu ngành bánh (sách, tạp chí, ebooks) EN→VI, giữ nguyên layout, hỗ trợ glossary chuyên ngành",
   "phase": "released",
-  "version": "1.2.9",
-  "released_at": "2026-09-09",
+  "version": "1.3.0",
+  "released_at": "2026-09-10",
   "team": [
     "pm",
     "ba",
@@ -124,13 +124,18 @@
         "status": "RESOLVED_2026_09_10_via_3_layer_strategy_6_20_14_after_protocol3_escalation_see_us22_epub_step2_new_strategy_after_escalation"
       },
       "us22_epub_step2_new_strategy_after_escalation": {
-        "dev_reviewer": 1,
+        "dev_reviewer": 2,
         "dev_qa": 1,
         "status": "approved_qa_live_full_book_completed_first_time_ready_for_release"
+      },
+      "us22_epub_step3_ui_glossary_readerverify": {
+        "dev_reviewer": 2,
+        "dev_qa": 1,
+        "status": "approved_qa_ready_for_release_us22_full_epic_complete_2026_09_10"
       }
     }
   },
-  "status": "in_progress",
+  "status": "released",
   "blockers": [
     "1 finding MOI non-blocking tu Reviewer (khong chan release, dua vao backlog): src/core/job_orchestrator.py dong ~550-554, font_shrink_page lap qua TOAN BO chunk.output_path (gio la ca tai lieu goc sau fix Bug #7, khong con chunk-scoped) thay vi chi pham vi cua rieng chunk do - gay lang phi tinh toan tang tuyen tinh theo so chunk VA rui ro OverflowReport bi nhan ban/sai pham vi cho job nhieu chunk co overflow that. Chua co test nao assert so luong/noi dung OverflowReport (xac nhan bang grep, 0 ket qua) nen bug nay (neu xay ra) hien khong bi bat boi bat ky test nao.",
     "1 quan sat non-blocking moi tu QA Vong 7 (docs/test-report.md muc 'QA Vong 7 (CUOI) - Live Cost Cap Verification'): trong create_job(), duplicate-check chay TRUOC cost gate - request khong co force=true bi tra ve status=duplicate_found truoc khi cham cost gate neu file trung hash voi job completed truoc do (dung root cause voi quan sat US-14 DeepL o QA Vong 2). Khong sai chuc nang (force=true van di qua cost gate dung), chi la thu tu UX co the gay nham lan nhe.",

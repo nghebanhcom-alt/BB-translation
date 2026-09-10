@@ -10,6 +10,7 @@ BR-EPUB-05 guard (X3) actually fires on a broken pipeline.
 """
 
 import json
+import logging
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -22,6 +23,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from src.core.config import Settings
 from src.core.job_orchestrator import JobOrchestrator
 from src.core.prompt_builder import build_system_prompt
+from src.models.batch import Batch
 from src.models.chunk import Chunk
 from src.models.glossary import Glossary, GlossaryEntry
 from src.models.job import Job
@@ -89,8 +91,25 @@ def _build_epub(path: Path, *, paragraphs_per_doc: int = 3, n_docs: int = 2) -> 
     return path
 
 
-async def _create_epub_job(session: AsyncSession, epub_path: Path, model: str = "deepseek") -> Job:
+async def _create_epub_job(
+    session: AsyncSession,
+    epub_path: Path,
+    model: str = "deepseek",
+    *,
+    # US-22 buoc 3/3: `run_epub_job()` gio doc `Batch.output_mode` qua
+    # `_wants_bilingual()` (Architecture.md 6.20.11 muc 2) thay vi hardcode
+    # `bilingual = True` — nen job test PHAI co `batch_id` tro toi 1 `Batch`
+    # that voi `output_mode` mong muon, giong het cach PDF (`_resolve_batch()`
+    # o src/api/routes/jobs.py) luon tao 1 Batch cho MOI job, ke ca job don
+    # le. Mac dinh "bilingual" o day = dung PRD US-22 AC "mac dinh bat ban
+    # song ngu", giu nguyen ky vong cua cac test EPUB da co TRUOC buoc 3/3.
+    output_mode: str = "bilingual",
+) -> Job:
+    batch = Batch(total_files=1, output_mode=output_mode, model=model)
+    session.add(batch)
+    await session.flush()
     job = Job(
+        batch_id=batch.id,
         filename=epub_path.name,
         file_path=str(epub_path),
         file_size=epub_path.stat().st_size,
@@ -534,3 +553,140 @@ async def test_run_epub_job_stops_at_cost_capped_via_layer4_mid_first_chunk(
     # tren nhanh EPUB no tro thanh khong con duong nao con lai de tu minh
     # trigger truoc Lop 4 nua. Khong viet them test "Lop 3 rieng trigger
     # doc lap tren EPUB" vi kich ban do khong con dat duoc sau fix nay.
+
+
+class _SpuriousBracesProvider:
+    """Mo phong DUNG hinh dang Bug #EPUB-B2-5 (Architecture.md §6.20.14.3,
+    fixture that da golden-fixture-test o CAP PARSER don le trong
+    `tests/test_epub_batch_golden_fixture.py`:
+    `deepseek_batch_response_sourdough_single_object_spurious_closing_braces.json`
+    — dung 1 dau '{' o dau nhung N dau '}' rai rac sau moi cap id/gia tri).
+    Test nay dung lai CHINH hinh dang bug do nhung o CAP ORCHESTRATOR
+    (tich hop, khong mock `parse_epub_batch_response_detailed()`) de xac
+    nhan US-22 buoc 3/3 viec 1: `_process_epub_chunk()` da noi that
+    `EpubParseOutcome`/`salvaged_count` vao logging, khong chi ham rut gon
+    `parse_epub_batch_response()`.
+
+    Voi payload N unit: id "0" luon cuu duoc qua duong JSON chuan (nam
+    trong doi tuong `{...}` DUY NHAT), moi id con lai (1..N-1) CHI cuu duoc
+    qua Lop B salvage — dung y het ty le cua fixture that (1/32 qua strict,
+    31/32 qua salvage).
+    """
+
+    provider_name = "fake"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def translate(
+        self, text: str, glossary_prompt: str, source_lang: str, target_lang: str
+    ) -> TranslationResult:
+        self.calls.append(text)
+        payload = json.loads(text)
+        parts: list[str] = []
+        for i, item in enumerate(payload):
+            escaped_value = json.dumps(f"VI:{item['html']}", ensure_ascii=False)
+            if i == 0:
+                parts.append(f'{{"{item["id"]}": {escaped_value}}}')
+            else:
+                parts.append(f'"{item["id"]}": {escaped_value}}}')
+        reply_text = "".join(parts)
+        return TranslationResult(
+            text=reply_text,
+            input_tokens=len(text),
+            output_tokens=len(reply_text),
+            estimated_cost_usd=0.000001 * (len(text) + len(reply_text)),
+            provider_name="fake",
+        )
+
+    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        return 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_epub_job_logs_salvaged_count_when_layer_b_engages(
+    session: AsyncSession, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """US-22 buoc 3/3, viec 1 (BA escalate): 3 call site trong
+    `_process_epub_chunk()` phai dung `parse_epub_batch_response_detailed()`
+    va ghi log `salvaged_count` muc WARNING khi > 0 (Architecture.md
+    §6.20.14.3 B-3 — `salvaged_count > 0` la tin hieu Lop B da phai can
+    thiep). Chunk co dung 3 unit trong 1 request duy nhat (payload nho, du
+    han muc `epub_request_char_budget` mac dinh) -> id "0" qua duong
+    chuan, id "1"/"2" qua salvage -> `salvaged_count=2`.
+    """
+    epub_path = _build_epub(tmp_path / "book.epub", paragraphs_per_doc=3, n_docs=1)
+    job = await _create_epub_job(session, epub_path)
+    provider = _SpuriousBracesProvider()
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(),
+        provider=provider,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.core.job_orchestrator"):
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    salvage_logs = [r for r in caplog.records if "EPUB parse salvage" in r.getMessage()]
+    assert salvage_logs, "phai co it nhat 1 log WARNING salvage khi Lop B can thiep"
+    assert any(r.levelno == logging.WARNING for r in salvage_logs)
+    assert any("salvaged_count=2" in r.getMessage() for r in salvage_logs)
+
+    # Noi dung van dich dung du (salvage khong lam mat/sai ban dich), chi
+    # khac cach parse ra duoc no.
+    with zipfile.ZipFile(result.output_path) as zf:
+        chap0 = zf.read("OEBPS/chap0.xhtml").decode("utf-8")
+    assert "VI:Chapter 0 paragraph 0" in chap0
+    assert "VI:Chapter 0 paragraph 1" in chap0
+    assert "VI:Chapter 0 paragraph 2" in chap0
+
+
+@pytest.mark.asyncio
+async def test_run_epub_job_monolingual_output_mode_has_no_english_original(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """US-22 buoc 3/3, viec 2: `output_mode=monolingual` phai duoc HONOR cho
+    EPUB (truoc day hardcode `bilingual = True`, bo qua lua chon user) —
+    output CHI co VI, KHONG chen them doan tieng Anh goc. Doi chieu voi
+    `test_run_epub_job_completes_with_metered_cost_and_real_translated_content`
+    (mac dinh bilingual): file .bb-vi node KHONG duoc them, va van ban tieng
+    Anh goc KHONG con trong output (thay the, khong chen them).
+    """
+    epub_path = _build_epub(tmp_path / "book.epub")
+    job = await _create_epub_job(session, epub_path, output_mode="monolingual")
+    provider = _FakeEpubProvider()
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(epub_chunk_char_budget=8_000, epub_request_char_budget=3_000),
+        provider=provider,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    await session.refresh(job)
+    assert job.status == "completed"
+
+    with zipfile.ZipFile(job.output_path) as zf:
+        chap0 = zf.read("OEBPS/chap0.xhtml").decode("utf-8")
+    # Ban dich VI co mat.
+    assert "VI:Chapter 0 paragraph 0" in chap0
+    # bilingual=False -> THAY THE, khong chen them: khong co node bb-vi. Vi
+    # ban dich la "VI:" + nguyen van goc, doan goc van xuat hien nhu 1 CHUOI
+    # CON trong ban dich — phep so sanh dung la DEM so lan xuat hien: THAY
+    # THE -> dung 1 lan (chi trong ban dich); CHEN THEM (bilingual) se la 2
+    # lan (node goc + node bb-vi). Doi chieu voi test bilingual macdinh o
+    # tren (dung "Chapter 0 paragraph 0" con NGUYEN trong output, tuc 2 lan).
+    assert 'class="bb-vi"' not in chap0
+    assert chap0.count("Chapter 0 paragraph 0") == 1
+
+    # `load()` khong bo qua gi ca o che do monolingual (khong co bb-vi de
+    # bo qua) -> so unit output = so unit input (khong mat chuong, X3).
+    output_doc = EpubDocument.load(Path(job.output_path))
+    assert len(output_doc.units) == 6

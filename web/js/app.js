@@ -130,6 +130,16 @@ function translationApp() {
       });
     },
 
+    // US-22 buoc 3/3: EPUB khong co "trang" (page_count luon NULL, thiet ke
+    // co chu dich — Architecture.md 6.20.6), nen o ngoai gia tri tuong duong
+    // "total_units" (so doan) cho user thay 1 con so thay vi o trong. Lay tu
+    // `f.job.total_units` (JobDetail, co gia tri sau khi tao job) neu co,
+    // fallback `f.costEstimate.total_units` (CostEstimateResponse, co gia
+    // tri ngay sau khi bam "Xem chi phi uoc tinh", TRUOC ca khi tao job).
+    epubTotalUnits(f) {
+      return f.job?.total_units ?? f.costEstimate?.total_units ?? null;
+    },
+
     availableProviders(fileType) {
       // BR-PROVIDER-01: DeepL cannot receive glossary/prompt on the PDF pipeline.
       return PDF_FILE_TYPES.has(fileType)
@@ -193,11 +203,17 @@ function translationApp() {
           }
           const available = this.availableProviders(body.file_type);
           const provider = available.includes(lastProvider) ? lastProvider : available[0];
+          // US-22 buoc 3/3 (PRD "mac dinh bat ban song ngu" cho EPUB, khac
+          // PDF mac dinh "Don ngu"): CHI ap dung khi user CHUA tung doi gi
+          // (khong co lua chon nho tu lan truoc trong localStorage) — 1 khi
+          // da doi 1 lan, lua chon do thang the cho MOI file type, dung
+          // tinh than "mac dinh", khong phai "bat buoc co dinh".
+          const defaultOutputMode = body.file_type === "epub" ? "bilingual" : "monolingual";
           this.files.push({
             ...body,
             job_type: "translate",
             provider,
-            output_mode: lastOutputMode || "monolingual",
+            output_mode: lastOutputMode || defaultOutputMode,
             // Architecture.md 6.21.3: checkbox "uu tien do chinh xac ky
             // hieu" — chi co y nghia khi job_type === "parse_only", gui
             // parse_method="ocr" trong createJob() ben duoi khi bat.
