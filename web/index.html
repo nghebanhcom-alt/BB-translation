@@ -88,7 +88,10 @@
             </div>
           </div>
 
-          <div class="mb-2" x-show="!f.job && f.job_type === 'parse_only'">
+          <!-- §6.15.7 W-5: checkbox nay la lua chon parse_method="ocr" cho
+               MinerU (txt/ocr) — khong co nghia voi EPUB (nhanh Markdown
+               rieng, khong dung MinerU), an khi f.file_type === 'epub'. -->
+          <div class="mb-2" x-show="!f.job && f.job_type === 'parse_only' && f.file_type !== 'epub'">
             <label class="flex items-center gap-2 text-xs text-gray-600">
               <input type="checkbox" x-model="f.parse_force_ocr" />
               Tài liệu nhiều công thức toán/hoá — ưu tiên độ chính xác ký hiệu (chậm hơn)

@@ -12,7 +12,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.config import Settings
-from src.core.job_orchestrator import EpubNotSupportedError, JobOrchestrator
+from src.core.job_orchestrator import JobOrchestrator
 from src.models.chunk import Chunk
 from src.models.job import Job
 from src.models.layout_qa import LayoutQaFinding
@@ -1647,19 +1647,85 @@ async def test_run_parse_only_mineru_unavailable_raises_before_touching_job_stat
     assert job.status == status_before
 
 
+_EPUB_CONTAINER_XML = """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+
+_EPUB_OPF = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Book</dc:title>
+    <dc:language>en</dc:language>
+    <dc:identifier id="bookid">urn:uuid:test-book</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="chap1" href="xhtml/chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="img1" href="images/f01.jpg" media-type="image/jpeg"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="chap1"/>
+  </spine>
+</package>
+"""
+
+_EPUB_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:uuid:test-book"/></head>
+  <docTitle><text>Test Book</text></docTitle>
+  <navMap>
+    <navPoint id="np1" playOrder="1">
+      <navLabel><text>Chapter 1</text></navLabel>
+      <content src="xhtml/chap1.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def _build_minimal_epub_for_orchestrator(path: Path) -> Path:
+    """Fixture EPUB toi thieu, HOP LE ve OCF (mimetype ZIP_STORED dau tien,
+    v.v.) — cung mau voi `tests/test_epub_document.py::_build_minimal_epub`
+    (Protocol 5 muc 3: khong viet mock tay gia lap `EpubDocument.load()`, ma
+    dung file zip THAT de chinh code load/to_markdown() chay qua no)."""
+    xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<head><title>Chapter 1</title></head>"
+        "<body><h1>Chuong 1</h1>"
+        "<p><sup>1</sup>/<sub>3</sub> cup soy grits</p>"
+        '<p><img src="../images/f01.jpg" alt="pic"/></p>'
+        "</body></html>"
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        mimetype_info = zipfile.ZipInfo("mimetype")
+        mimetype_info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(mimetype_info, "application/epub+zip")
+        zf.writestr("META-INF/container.xml", _EPUB_CONTAINER_XML)
+        zf.writestr("OEBPS/content.opf", _EPUB_OPF)
+        zf.writestr("OEBPS/toc.ncx", _EPUB_NCX)
+        zf.writestr("OEBPS/xhtml/chap1.xhtml", xhtml)
+        zf.writestr("OEBPS/images/f01.jpg", b"fake-jpeg-bytes")
+    return path
+
+
 @pytest.mark.asyncio
-async def test_run_parse_only_epub_raises_without_calling_mineru(
+async def test_run_parse_only_epub_completes_without_calling_mineru(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """S15-8 "he qua thu tu lam viec": the EPUB branch of parse-only is out
-    of scope for this increment. `create_job()`/`create_batch()` already
-    block this at the API layer (HTTP 400, no Job row) — this is the second,
-    defensive layer inside `JobOrchestrator` itself, for a Job row that
-    reaches `run_job()` some other way. Must raise WITHOUT ever calling
-    MinerU (no 3600s hang, no wasted OCR compute).
+    """Architecture.md §6.15.7 muc F: nhanh EPUB cua US-15 parse-only gio DA
+    duoc implement (`EpubDocument.to_markdown()`, khong con
+    `EpubNotSupportedError`) — thay cho test cu (chi assert raise). Phai
+    chay xong ma KHONG bao gio dung MinerU (khong health, khong
+    parse_document — EPUB khong can OCR/parse engine ngoai), va zip output
+    phai co document.md THAT (R6-03 tinh than: khong chi tin status).
     """
     epub_path = tmp_path / "book.epub"
-    epub_path.write_bytes(b"fake epub bytes")
+    _build_minimal_epub_for_orchestrator(epub_path)
     job = await _create_parse_only_job(session, epub_path, file_type="epub")
 
     mineru_runner = _fake_mineru_runner_for_parse_only()
@@ -1671,11 +1737,26 @@ async def test_run_parse_only_epub_raises_without_calling_mineru(
         processing_dir=tmp_path / "processing",
     )
 
-    with pytest.raises(EpubNotSupportedError):
-        await orchestrator.run_job(job.id, session)
+    result = await orchestrator.run_job(job.id, session)
 
     mineru_runner.health.assert_not_awaited()
     mineru_runner.parse_document.assert_not_awaited()
+
+    assert result.status == "completed"
+    await session.refresh(job)
+    assert job.status == "completed"
+    assert job.parse_method is None  # EPUB khong dung MinerU (§6.15.7 W-2)
+    assert job.total_pages is None  # khong co _count_pdf_pages() nao chay
+
+    with zipfile.ZipFile(job.output_path) as zf:
+        names = zf.namelist()
+        assert "document.md" in names
+        markdown_text = zf.read("document.md").decode("utf-8")
+        assert "Chuong 1" in markdown_text
+        assert "1/3 cup soy grits" in markdown_text  # normalize_sup_sub() da chay
+        image_entries = [n for n in names if n.startswith("images/")]
+        assert len(image_entries) == 1
+        assert zf.read(image_entries[0]) == b"fake-jpeg-bytes"
 
 
 @pytest.mark.asyncio

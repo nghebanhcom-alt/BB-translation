@@ -409,14 +409,20 @@ def _minimal_epub_bytes(tmp_path) -> bytes:
     return epub_path.read_bytes()
 
 
-def test_create_job_rejects_epub_parse_only_before_creating_job_record(
+def test_create_job_accepts_epub_parse_only_since_epub_markdown_shipped(
     client: TestClient, tmp_path
 ) -> None:
-    """US-15 §6.15.3 S15-8 "he qua thu tu lam viec": the EPUB branch of
-    parse-only depends on `EpubDocument.to_markdown()` (US-22, out of scope
-    for this increment) — a `parse_only` request for an `.epub` file must
-    get a clear HTTP 400 with NO `Job` row created, not a job that gets
-    created and then fails/hangs inside `JobOrchestrator`.
+    """Architecture.md §6.15.7 (EpubDocument.to_markdown() da implement,
+    US-22 hoan tat): thay cho test cu (S15-8 "he qua thu tu lam viec" — luc
+    do EPUB parse-only con bi HTTP 400 chan cung o day). `_reject_epub_parse_only()`
+    da bi XOA (W-1) — mot request `parse_only` cho file `.epub` gio phai duoc
+    CHAP NHAN (202 + Job row "queued"), giong het duong di cua PDF, KHONG con
+    bi chan o tang API nua. Hanh vi background thuc te (EpubDocument.load()/
+    to_markdown() that) duoc cover rieng o
+    tests/integration/test_job_orchestrator.py (fake MinerURunner injected
+    truc tiep, cung mau voi cac test parse_only PDF khac trong file nay —
+    xem docstring module o tren ve ly do khong assert trang thai background
+    o day).
     """
     upload_response = client.post(
         "/api/upload",
@@ -428,9 +434,9 @@ def test_create_job_rejects_epub_parse_only_before_creating_job_record(
 
     response = client.post("/api/jobs", json={"file_id": file_id, "job_type": "parse_only"})
 
-    assert response.status_code == 400
-    assert "EPUB" in response.json()["detail"]
-    assert client.get("/api/jobs").json()["total"] == 0
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert client.get("/api/jobs").json()["total"] == 1
 
 
 def test_create_batch_schedules_parse_only_jobs_instead_of_marking_failed(

@@ -2,7 +2,7 @@
   "project_name": "BB-Translation",
   "project_description": "Pipeline dịch tài liệu ngành bánh (sách, tạp chí, ebooks) EN→VI, giữ nguyên layout, hỗ trợ glossary chuyên ngành",
   "phase": "released",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "released_at": "2026-09-10",
   "team": [
     "pm",
@@ -132,6 +132,11 @@
         "dev_reviewer": 2,
         "dev_qa": 1,
         "status": "approved_qa_ready_for_release_us22_full_epic_complete_2026_09_10"
+      },
+      "us15_epub_branch_markdown_parse_only": {
+        "dev_reviewer": 1,
+        "dev_qa": 1,
+        "status": "approved_qa_ready_for_release_live_verified_no_us22_regression"
       }
     }
   },

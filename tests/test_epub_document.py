@@ -10,16 +10,21 @@ khong cham toi (DRM, drop rule ranh gioi, nesting).
 
 from __future__ import annotations
 
+import tempfile
 import zipfile
 from itertools import pairwise
 from pathlib import Path
 
+import markdownify
 import pytest
 
 from src.services.epub_document import (
     EpubDocument,
     EpubDrmError,
     EpubParseError,
+    _parse_xhtml,
+    _rewrite_image_srcs,
+    normalize_sup_sub,
 )
 
 # ---------------------------------------------------------------------------
@@ -1106,3 +1111,209 @@ def test_full_text_and_total_chars_are_plain_text_not_html() -> None:
     assert "1/3 cup soy grits" in full_text or "13 cup soy grits" not in full_text
     assert doc.total_chars == len(full_text)
     assert doc.total_chars > 0
+
+
+# ---------------------------------------------------------------------------
+# normalize_sup_sub() — US-15 nhanh EPUB->Markdown (Architecture.md §6.15.7
+# muc C / §6.21.2). Bang 7 dong "Kết quả đã chạy thật" o §6.21.2 la bang KY
+# VONG TEST BAT BUOC, khong phai vi du minh hoa.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        # F-1: 5 dong phan so thuan cua chapter01.html.
+        ("<sup>1</sup>/<sub>3</sub> cup soy grits", "1/3 cup soy grits"),
+        # F-2 — case QUAN TRONG NHAT (§6.21.2): hon so, KHONG duoc ra
+        # "11/3" (loi cua markdownify mac dinh / de xuat cua Expert).
+        (
+            "1<sup>1</sup>/<sub>3</sub> cups unbleached white flour",
+            "1 1/3 cups unbleached white flour",
+        ),
+        # F-3: so mu, ke ca so mu am (khong duoc doc thanh phep tru).
+        (
+            "Area = x<sup>2</sup> + y<sup>3</sup> - 5x<sup>-1</sup>",
+            "Area = x² + y³ - 5x⁻¹",
+        ),
+        # F-4: chi so duoi hoa hoc, ke ca ion (sup sau sub).
+        (
+            "H<sub>2</sub>O, CO<sub>2</sub>, Ca(OH)<sub>2</sub>, SO<sub>4</sub><sup>2-</sup>",
+            "H₂O, CO₂, Ca(OH)₂, SO₄²⁻",
+        ),
+        # Chu thich dinh vao cau van van phai PHAN BIET duoc voi so thuong.
+        ("network.<sup>12</sup>", "network.¹²"),
+        # Khong map duoc sang Unicode (nhieu ky tu/chu cai) -> ASCII tuong
+        # minh `^(...)`/`_(...)`.
+        ("x<sup>a+b</sup>, V<sub>total</sub>", "x^(a+b), V_(total)"),
+        ("10<sup>-6</sup> mol", "10⁻⁶ mol"),
+    ],
+)
+def test_normalize_sup_sub_golden_table(html: str, expected: str) -> None:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(f"<p>{html}</p>", "html.parser")
+    normalize_sup_sub(soup)
+
+    assert soup.p.get_text() == expected
+    assert soup.find(("sup", "sub")) is None  # khong con the sup/sub nao
+
+
+def test_normalize_sup_sub_pandoc_style_wraps_with_carets_and_tildes() -> None:
+    """§6.21.2: `markdown_supsub_style="pandoc"` -> `x^2^` / `H~2~O`, KHAC
+    voi mac dinh "unicode". Quy tac phan so o Buoc 1 GIONG NHAU o ca 2 che
+    do (phan so khong phai sup/sub)."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(
+        "<p>x<sup>2</sup>, H<sub>2</sub>O, "
+        "1<sup>1</sup>/<sub>3</sub> cups flour</p>",
+        "html.parser",
+    )
+    normalize_sup_sub(soup, style="pandoc")
+
+    assert soup.p.get_text() == "x^2^, H~2~O, 1 1/3 cups flour"
+
+
+# ---------------------------------------------------------------------------
+# EpubDocument.to_markdown() — US-15 nhanh EPUB->Markdown (Architecture.md
+# §6.15.7). Golden test tren CHINH ops/xhtml/chapter01.html cua sourdough
+# (S15-8): 10 <img>, 214 <strong>, 26 <em>, 2 <h2>, 34 <h3>.
+# ---------------------------------------------------------------------------
+
+
+def test_to_markdown_golden_chapter01_html_counts(tmp_path: Path) -> None:
+    """Dung dung CAC HAM NOI BO ma `to_markdown()` goi (`_parse_xhtml`,
+    `_rewrite_image_srcs`, `normalize_sup_sub`, `markdownify.MarkdownConverter`)
+    tren MOT tai lieu spine (`ops/xhtml/chapter01.html`) de doi chieu voi
+    bang so do that cua S15-8 — tach rieng khoi tong ca cuon sach (co them
+    anh tu cover/title, xem test_to_markdown_whole_book_* ben duoi)."""
+    doc_href = "ops/xhtml/chapter01.html"
+    images_out = tmp_path / "images"
+    images_out.mkdir()
+
+    with zipfile.ZipFile(SOURDOUGH_PATH) as zf:
+        zip_names = set(zf.namelist())
+        raw_bytes = zf.read(doc_href)
+        soup, _parser_used = _parse_xhtml(raw_bytes)
+        # So dem TRUOC normalize (so mu/chi so van la <sup>/<sub> luc nay,
+        # dung dung ham that de kiem chinh contract Y1/X6 §6.15.7 muc B).
+        assert len(soup.find_all("img")) == 10
+        assert len(soup.find_all("strong")) == 214
+        assert len(soup.find_all("em")) == 26
+        assert len(soup.find_all("h2")) == 2
+        assert len(soup.find_all("h3")) == 34
+
+        _rewrite_image_srcs(soup, doc_href, zf, zip_names, images_out, {}, {})
+
+    normalize_sup_sub(soup)
+    assert soup.find(("sup", "sub")) is None
+
+    body = soup.find("body") or soup
+    markdown_text = markdownify.MarkdownConverter(heading_style="ATX").convert_soup(body)
+
+    assert markdown_text.count("![") == 10
+    assert len(list(images_out.iterdir())) == 10
+    assert markdown_text.count("\n## ") + markdown_text.startswith("## ") == 2
+    assert markdown_text.count("\n### ") + markdown_text.startswith("### ") == 34
+
+
+def test_to_markdown_whole_book_produces_real_content_and_images(tmp_path: Path) -> None:
+    """R6-03 tinh than (Architecture.md §6.15.7 muc G-5): mo file that ra
+    xem co chu that + anh that, khong chi tin 1 string non-empty. Dung
+    `EpubDocument.to_markdown()` public API (khong dung helper noi bo nhu
+    test golden o tren) tren CA cuon sach that."""
+    doc = EpubDocument.load(SOURDOUGH_PATH)
+    images_out = tmp_path / "images"
+
+    markdown_text = doc.to_markdown(images_out_dir=images_out)
+
+    assert "Baking with Sourdough" in markdown_text
+    assert "1/3 cup soy grits" in markdown_text  # normalize_sup_sub() chay dung
+    assert "<sup>" not in markdown_text
+    assert "<sub>" not in markdown_text
+    written_images = list(images_out.iterdir())
+    assert len(written_images) > 0
+    for name in written_images:
+        assert f"images/{name.name}" in markdown_text
+
+
+def test_to_markdown_r6_02_heading_counts_match_units() -> None:
+    """R6-02 (S15-8, giu nguyen theo §6.15.7 muc G-1): tu MOT `load()`, so
+    h2/h3 trong `to_markdown()` phai == so unit co `tag in {"h2","h3"}` —
+    day la soi day noi 2 projection (units DE DICH / to_markdown DE XUAT)
+    cung mot lan parse. Sourdough KHONG co ca heading-toan-chu-so bi
+    `_is_droppable_content()` drop khoi `units` (da tu kiem: h2=2/h2=2,
+    h3=34/h3=34 khop tuyet doi) — neu file mau khac co ca do, assert nay
+    phai duoc sua de TRU dung so bi drop, KHONG duoc noi long thanh `>=`."""
+    doc = EpubDocument.load(SOURDOUGH_PATH)
+
+    with tempfile.TemporaryDirectory() as td:
+        markdown_text = doc.to_markdown(images_out_dir=Path(td) / "images")
+
+    md_h2 = markdown_text.count("\n## ") + markdown_text.startswith("## ")
+    md_h3 = markdown_text.count("\n### ") + markdown_text.startswith("### ")
+    units_h2 = sum(1 for u in doc.units if u.tag == "h2")
+    units_h3 = sum(1 for u in doc.units if u.tag == "h3")
+
+    assert md_h2 == units_h2
+    assert md_h3 == units_h3
+
+
+def test_to_markdown_rejects_second_load_lineage_break(tmp_path: Path) -> None:
+    """R6-02 lineage guard: `to_markdown()` PHAI dung `self._spine_hrefs` cua
+    CHINH instance vua `load()` — kiem gian tiep bang cach xac nhan 2 lan
+    `load()` doc lap tren CUNG 1 file cho ra `spine_hrefs` GIONG HET NHAU (vi
+    load() luon tinh lai dung 1 cach) — tuc goi `load()` lai (neu Dev lam
+    sai) se KHONG the bi phat hien boi so sanh gia tri, day la ly do
+    Architecture.md yeu cau Reviewer trace bang doc code, khong chi bang
+    test. Test nay it nhat khoa contract "spine_hrefs on dinh giua 2 lan
+    load() doc lap"."""
+    doc_a = EpubDocument.load(SOURDOUGH_PATH)
+    doc_b = EpubDocument.load(SOURDOUGH_PATH)
+
+    assert doc_a.spine_hrefs == doc_b.spine_hrefs
+    assert doc_a.spine_hrefs == [
+        "ops/xhtml/cover.html",
+        "ops/xhtml/title.html",
+        "ops/xhtml/copyright.html",
+        "ops/xhtml/chapter01.html",
+        "ops/xhtml/backmatter01.html",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# to_markdown() — anh: URL tuyet doi/data URI giu nguyen, entry thieu trong
+# zip khong crash (Architecture.md §6.15.7 muc B).
+# ---------------------------------------------------------------------------
+
+
+def test_to_markdown_skips_external_and_data_uri_images(tmp_path: Path) -> None:
+    epub_path = tmp_path / "book.epub"
+    body = (
+        '<p><img src="http://example.com/x.jpg" alt="ext"/></p>'
+        '<p><img src="data:image/png;base64,AAAA" alt="data"/></p>'
+    )
+    _build_minimal_epub(epub_path, body)
+    doc = EpubDocument.load(epub_path)
+
+    images_out = tmp_path / "images"
+    markdown_text = doc.to_markdown(images_out_dir=images_out)
+
+    assert "http://example.com/x.jpg" in markdown_text
+    assert "data:image/png;base64,AAAA" in markdown_text
+    assert list(images_out.iterdir()) == []
+
+
+def test_to_markdown_missing_image_entry_does_not_crash(tmp_path: Path) -> None:
+    epub_path = tmp_path / "book.epub"
+    body = '<p><img src="missing.jpg" alt="gone"/></p>'
+    _build_minimal_epub(epub_path, body)
+    doc = EpubDocument.load(epub_path)
+
+    images_out = tmp_path / "images"
+    markdown_text = doc.to_markdown(images_out_dir=images_out)
+
+    # Khong raise — src giu nguyen trang (khong rewrite thanh images/...).
+    assert "images/missing.jpg" not in markdown_text
+    assert list(images_out.iterdir()) == []

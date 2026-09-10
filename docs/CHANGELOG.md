@@ -7464,3 +7464,141 @@ vẫn pass đúng vì helper `_create_epub_job()` giữ default `output_mode="bi
 API/CLI/SDK bên thứ ba mới nào chưa từng verify — logic dùng lại nguyên contract JSON X4 đã verify từ
 Bước 2/3, không có claim contract mới nào cần Protocol 5. `web/index.html`/`web/js/app.js` không gọi
 external tool — N/A cho Protocol 5.
+
+## US-15 nhánh EPUB — xuất Markdown gốc, KHÔNG dịch (2026-09-10, theo Architecture.md §6.15.7)
+
+Implement đúng spec thi hành §6.15.7 (bản cập nhật S15-8 sau khi US-22 hoàn tất — S15-8 cũ/§6.20.5
+đã LỆCH với code thật, mục này SUPERSEDE). Đọc toàn bộ §6.15.7 + §6.21.2 trước khi code, theo đúng
+chỉ đạo PM.
+
+### 1. `EpubDocument` (`src/services/epub_document.py`)
+
+- **`_spine_hrefs`** (field mới) + property `spine_hrefs` — tính ĐÚNG MỘT LẦN trong `load()`, ngay
+  sau guard X6 (không giữ lại soup nào, khác giả định cũ `spine_documents` của S15-8 gốc — điểm LỆCH
+  #1 mà §6.15.7 mục A đã ghi).
+- **`to_markdown(images_out_dir: Path) -> str`** (method mới) — mở lại `self.path` bằng `zipfile`,
+  parse lại từng `doc_href` trong `self._spine_hrefs` (dùng lại `_parse_xhtml()` có sẵn, KHÔNG viết
+  parser thứ hai), rewrite `<img src>` + copy ảnh ra `images_out_dir` (`_rewrite_image_srcs()`, mới),
+  chuẩn hoá `<sup>`/`<sub>` (`normalize_sup_sub()`, mới) **TRƯỚC KHI** convert bằng
+  `markdownify.MarkdownConverter(heading_style="ATX").convert_soup(body)` — thứ tự bắt buộc theo
+  §6.21.2 (chuẩn hoá trước để độc lập với `sup_symbol`/`sub_symbol` mặc định của thư viện).
+  - **Phát hiện khi implement (KHÔNG có trong §6.15.7, tự đo)**: gọi thẳng
+    `markdownify.markdownify(str(soup), ...)` (như §6.15.7 mục A mô tả nôm na) làm rò rỉ khai báo XML
+    (`<?xml version="1.0"?>`) và nội dung `<title>` vào Markdown output, vì `markdownify()` tự
+    `BeautifulSoup(html, "html.parser")` lại TOÀN BỘ chuỗi — `html.parser` không hiểu XML processing
+    instruction, biến nó thành text thường. Fix: dùng `MarkdownConverter().convert_soup(soup.find("body"))`
+    thay vì serialize-rồi-reparse toàn bộ soup — convert đúng CHỈ phần `<body>`, tránh double-parse.
+  - Rewrite `src` ảnh tính tương đối so với CHÍNH `doc_href` chứa nó (`posixpath.join(posixpath.dirname(doc_href), src)`),
+    KHÔNG phải `opf_dir` — đúng điểm §6.15.7 mục B nhấn mạnh dễ sai nhất.
+  - Trùng basename giữa 2 thư mục khác nhau trong zip: nếu bytes GIỐNG nhau, gộp chung 1 file đích;
+    nếu KHÁC nhau, thêm hậu tố tăng dần (`f01_2.jpg`) — không ghi đè im lặng.
+  - URL tuyệt đối/`data:` URI: giữ nguyên, không copy. Entry thiếu trong zip: không raise, log
+    warning, giữ `src` nguyên trạng (khác guard X6 của `load()` — ở đó lệch href phải raise).
+- **`normalize_sup_sub(soup, *, style="unicode")`** (hàm mới, module-level) — implement đúng §6.21.2:
+  Bước 1 (phân số `<sup>N</sup>/<sub>M</sub>` → `"N/M"`, guard hỗn số chèn dấu cách khi ký tự trước
+  `<sup>` là chữ số — case quan trọng nhất, F-2), Bước 2 (mapping Unicode 2 bảng sup/sub cho
+  digit/dấu/1-chữ-cái, fallback ASCII `^(c)`/`_(c)` khi không map được, không bọc thêm ngoặc nếu `c`
+  đã có sẵn ngoặc). Tự chạy cả 7 dòng bảng "Kết quả đã chạy thật" của §6.21.2 khớp 100% (xem mục Test
+  bên dưới). CHỈ dùng bởi `to_markdown()` — KHÔNG đụng tới `units`/`write_translated()` của US-22 (đã
+  verify `tests/test_epub_document.py` 72 test cũ xanh nguyên, không sửa 1 assertion nào).
+  - `style="pandoc"` (setting mới, xem mục 2) — bọc `^c^`/`~c~`, Bước 1 (phân số) giống hệt 2 chế độ.
+
+### 2. Setting mới (`src/core/config.py`)
+
+`markdown_supsub_style: Literal["unicode", "pandoc"] = "unicode"` — `.env`-only theo đúng chỉ định
+§6.15.7 mục C, KHÔNG thêm vào `SETTINGS_DB_OVERRIDABLE_FIELDS` (lựa chọn biểu diễn, không phải tham
+số vận hành).
+
+### 3. Wiring (6 điểm, đúng bảng W-1..W-6 §6.15.7 mục E)
+
+- **W-1** `src/api/routes/jobs.py`: XOÁ `_reject_epub_parse_only()` + 2 call site (`create_job()`,
+  `create_batch()`) — chốt chặn HTTP 400 đã gỡ.
+- **W-2** `_resolve_parse_method()`: trả `None` cho `file_type == "epub"` (thay vì `"ocr"` vô nghĩa)
+  — `Job.parse_method` là cột nullable, `None` đúng nghĩa "không áp dụng".
+- **W-3** `job_orchestrator.py::run_parse_only()`: nhánh `if job.file_type == FileType.EPUB` giờ gọi
+  `return await self._run_epub_parse_only(job, db_session)` — đặt TRƯỚC `_count_pdf_pages()`/guard
+  MinerU (không áp dụng cho EPUB).
+- **W-4** Xoá class `EpubNotSupportedError` (không còn call site nào sau W-3).
+- **W-5** `web/index.html`: checkbox "ưu tiên độ chính xác ký hiệu" (dành cho MinerU `txt`/`ocr`) ẩn
+  khi `f.file_type === 'epub'`. `web/js/app.js` đã tự gửi `parse_method=undefined` khi checkbox
+  không bật (logic có sẵn, không cần sửa thêm) — vì checkbox giờ luôn ẩn với EPUB nên
+  `f.parse_force_ocr` không bao giờ được set `true`.
+- **W-6** `src/api/routes/download.py`: xác nhận KHÔNG cần sửa (đã branch theo `job_type`, không
+  quan tâm `file_type`) — đúng như §6.15.7 đã ghi.
+
+### 4. `_run_epub_parse_only()` + `_finalize_parse_only_output()` (Protocol 8 R8-03)
+
+Method mới `JobOrchestrator._run_epub_parse_only()` — song song với `_run_parse_only_pipeline()`
+(nhánh PDF), có try/except RIÊNG (chạy TRƯỚC try/except của `run_parse_only()`, giống hình dạng thất
+bại `job.status="failed"` + `error_message` + broadcast). Bắt `EpubDrmError`/`EpubParseError` từ
+`EpubDocument.load()` qua `except Exception` chung — đúng contract sẵn có (R6-01 sợi dây lineage:
+`doc` là CHÍNH instance vừa `load()`, `to_markdown()` đọc lại `self._spine_hrefs` của instance đó,
+cấm `load()` lần 2).
+
+Tách `_finalize_parse_only_output(job, markdown_text, image_files, db_session)` — phần "đóng gói"
+(ghi `document.md`, guard đọc lại từ đĩa, zip eager, guard zip, `job.output_path`/`actual_cost="metered"`,
+`status="completed"`, broadcast) DÙNG CHUNG giữa nhánh PDF (`_run_parse_only_pipeline()`) và nhánh
+EPUB — đúng tinh thần Protocol 8 (không rẽ nhánh `if file_type == epub` rải rác). Đã verify:
+`_run_parse_only_pipeline()` gọi hàm này y hệt hành vi cũ (tất cả test parse_only PDF cũ xanh
+nguyên, 41/41 trong `test_job_orchestrator.py` + `test_cost_capped_orchestrator.py`).
+
+### 5. Test bắt buộc — kết quả
+
+- **Golden `normalize_sup_sub()`** (`tests/test_epub_document.py`): 7/7 case khớp đúng bảng §6.21.2
+  (phân số đơn, hỗn số N-1 `"1 1/3"` không phải `"11/3"`, số mũ âm, hoá học/ion, chú thích, ASCII
+  fallback không map được, `10⁻⁶`) + 1 test riêng cho `style="pandoc"`.
+- **Golden `to_markdown()` trên `ops/xhtml/chapter01.html`** (sourdough thật): khớp đúng số đo của
+  S15-8 — 10 `<img>`, 214 `<strong>`, 26 `<em>`, 2 `<h2>`, 34 `<h3>`.
+- **R6-02** (`test_to_markdown_r6_02_heading_counts_match_units`): số h2/h3 trong `to_markdown()` ==
+  số unit `tag in {"h2","h3"}` từ CÙNG một `load()`. Sourdough KHÔNG có case heading-toàn-chữ-số bị
+  `_is_droppable_content()` drop khỏi `units` (đã tự kiểm: khớp tuyệt đối 2/2, 34/34) — ghi rõ trong
+  test để nếu sách khác có case đó, phải sửa assert để TRỪ đúng số bị drop, không được nới `>=`.
+- **Ảnh**: test URL tuyệt đối/`data:` URI giữ nguyên không copy; entry thiếu trong zip không crash,
+  giữ `src` nguyên trạng.
+- **KHÔNG regression US-22**: `tests/test_epub_document.py` (86 test, +14 test mới) +
+  `tests/test_epub_batch_golden_fixture.py` xanh nguyên — 0 assertion nào của US-22 bị sửa/xoá.
+  `units` vẫn chứa `<sup>1</sup>/<sub>3</sub>` thô (test dòng ~280 cũ không đổi).
+- **`tests/integration/test_job_orchestrator.py`**: thay test cũ
+  `test_run_parse_only_epub_raises_without_calling_mineru` (assert raise `EpubNotSupportedError`,
+  hành vi cũ đã sai) bằng `test_run_parse_only_epub_completes_without_calling_mineru` — dùng 1 EPUB
+  tối thiểu THẬT (zipfile, hợp lệ OCF, cùng mẫu với `tests/test_epub_document.py::_build_minimal_epub`),
+  chạy `run_job()` thật, assert job "completed", `parse_method is None`, `total_pages is None`, mở
+  zip output thật ra kiểm `document.md` có chữ thật + `images/` có đúng 1 ảnh đúng bytes.
+- **`tests/integration/test_upload_and_job_flow.py`**: thay test cũ
+  `test_create_job_rejects_epub_parse_only_before_creating_job_record` (assert 400, hành vi cũ đã
+  sai) bằng `test_create_job_accepts_epub_parse_only_since_epub_markdown_shipped` — assert 202 +
+  `status="queued"` + 1 Job row được tạo, cùng mẫu với test parse_only PDF khác trong file (không
+  assert trạng thái background, để riêng cho `test_job_orchestrator.py`).
+
+### 6. Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/     → All checks passed!
+uv run pytest tests/ -q           → 760 passed, 0 failed (baseline 746 trước vòng này + 14 test mới
+                                     trong test_epub_document.py, 2 test THAY (không phải test mới)
+                                     trong test_job_orchestrator.py và test_upload_and_job_flow.py)
+```
+
+**KHÔNG có test US-22 nào bị regression hoặc bị sửa/xoá assertion để né lỗi** — đây là câu hỏi quan
+trọng nhất theo brief PM, xác nhận lại rõ ràng: `tests/test_epub_document.py` (72 test cũ + 14 test
+mới = 86, tất cả 72 test cũ giữ nguyên 100% không đổi 1 dòng) và
+`tests/test_epub_batch_golden_fixture.py` (14 test, không đổi) đều xanh nguyên. 2 test bị SỬA
+(`test_job_orchestrator.py`, `test_upload_and_job_flow.py`) đều là test đang assert TRỰC TIẾP hành vi
+cũ "EPUB parse-only bị chặn/raise" — hành vi đó đã đổi CÓ CHỦ Ý theo đúng spec §6.15.7 (đây chính là
+mục tiêu của US-15 nhánh EPUB), không phải sửa để né lỗi; cả 2 test mới thay thế đều siết chặt hơn
+(assert nội dung file output thật, không chỉ status).
+
+### 7. Trạng thái
+
+Đủ 5 việc (field/method/hàm `normalize_sup_sub`/copy ảnh + rewrite link/setting) + 6 điểm wiring
+W-1..W-6. **Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo "xong"/"sẵn
+sàng release". Chờ PM giao Reviewer trước khi chuyển tiếp cho QA.
+
+**R5-04 checklist tự đánh giá**: `EpubDocument.to_markdown()`/`normalize_sup_sub()` không gọi
+API/CLI/SDK bên thứ ba mới nào — `markdownify` là thư viện Python thuần (không phải subprocess/HTTP
+service), verify version `1.2.3` đã cài qua `importlib.metadata` (khớp Architecture.md §6.15.7 nguồn
+xác thực) — N/A cho Protocol 5 muc pham vi ("khong ap dung cho thu vien noi bo Python thuan code
+logic"). Riêng hành vi `markdownify.markdownify()` re-parse lại toàn bộ chuỗi qua `html.parser` (làm
+rò rỉ XML declaration/`<title>`) LÀ một phát hiện Protocol 5-flavor tự đo được khi implement (không
+có trong Architecture.md) — đã ghi lại ở mục 1 và đổi sang `convert_soup(body)` để tránh phụ thuộc
+hành vi ngầm định đó.

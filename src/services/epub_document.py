@@ -75,6 +75,7 @@ trong `<ul>/<ol>` lồng khỏi bị tính là "slot" của unit cha ở
 from __future__ import annotations
 
 import copy
+import logging
 import posixpath
 import re
 import zipfile
@@ -82,9 +83,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import markdownify
 from bs4 import BeautifulSoup
 from bs4.element import Comment, NavigableString, Tag
 from ebooklib import epub
+
+from src.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 #: Quy tắc chọn unit dùng CHUNG với §6.15 S15-8 (Architecture.md 6.20.5).
 UNIT_TAG_NAMES: tuple[str, ...] = (
@@ -171,6 +177,185 @@ def _escape_untrusted_markup(vi_html: str) -> str:
     return _TRUSTED_TAG_OR_BARE_LT_RE.sub(
         lambda m: "&lt;" if m.group(0) == "<" else m.group(0), escaped
     )
+
+
+#: §6.21.2 Buoc 1 — text node phan cach phan so PHAI chi chua DUNG 1 trong 2
+#: ky tu nay (khong strip whitespace them: "chi chua" trong Architecture.md
+#: la nghia den).
+_FRACTION_SEP_CHARS = frozenset({"/", "⁄"})
+#: §6.21.2 Buoc 2 — dieu kien "thuan so/dau" de xet mapping Unicode.
+_NUMERIC_PUNCT_RE = re.compile(r"^[0-9+\-=()]+$")
+_SINGLE_ALPHA_RE = re.compile(r"^[A-Za-z]$")
+
+#: Bang anh xa Unicode §6.21.2 (du cho hoa hoc pho thong + so mu so hoc).
+_SUP_UNICODE_MAP: dict[str, str] = dict(
+    zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ", strict=True)
+)
+_SUB_UNICODE_MAP: dict[str, str] = dict(
+    zip("0123456789+-=()aeoxhklmnpst", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ", strict=True)
+)
+
+
+def _all_digits(text: str) -> bool:
+    return bool(text) and text.isdigit()
+
+
+def _extract_mixed_number_fractions(soup: BeautifulSoup) -> None:
+    """§6.21.2 Buoc 1 (uu tien cao nhat, chay TRUOC Buoc 2): pattern
+    `<sup>N</sup>` + text node CHI chua "/" hoac "⁄" (U+2044) + `<sub>M</sub>`
+    (N, M la chuoi chu so) -> gop ca 3 node thanh MOT text node "N/M".
+
+    Guard hon so (day la CHINH cho cach lam cua Expert hong, §6.21.2 F-2):
+    neu ky tu NGAY TRUOC `<sup>` la 1 chu so, chen them 1 dau cach truoc phan
+    so -> `1<sup>1</sup>/<sub>3</sub>` ra "1 1/3", KHONG phai "11/3".
+    """
+    for sup in list(soup.find_all("sup")):
+        numerator = sup.get_text().strip()
+        if not _all_digits(numerator):
+            continue
+        separator = sup.next_sibling
+        if not isinstance(separator, NavigableString) or str(separator) not in _FRACTION_SEP_CHARS:
+            continue
+        denominator_node = separator.next_sibling
+        if not (isinstance(denominator_node, Tag) and denominator_node.name == "sub"):
+            continue
+        denominator = denominator_node.get_text().strip()
+        if not _all_digits(denominator):
+            continue
+
+        prev = sup.previous_sibling
+        needs_space = isinstance(prev, NavigableString) and str(prev)[-1:].isdigit()
+        prefix = " " if needs_space else ""
+        sup.replace_with(NavigableString(f"{prefix}{numerator}/{denominator}"))
+        separator.extract()
+        denominator_node.decompose()
+
+
+def _unicode_supsub(content: str, table: dict[str, str]) -> str | None:
+    """§6.21.2 Buoc 2: tra ve dang Unicode neu `content` khop dieu kien
+    (thuan `[0-9+\\-=()]+` HOAC dung 1 chu cai) VA MOI ky tu cua no co mapping
+    trong `table` — nguoc lai tra None (bao hieu Dev goi `_ascii_supsub()`)."""
+    if not content:
+        return None
+    if not (_NUMERIC_PUNCT_RE.fullmatch(content) or _SINGLE_ALPHA_RE.fullmatch(content)):
+        return None
+    if not all(ch in table for ch in content):
+        return None
+    return "".join(table[ch] for ch in content)
+
+
+def _ascii_supsub(content: str, marker: str) -> str:
+    """§6.21.2 Buoc 2, fallback ASCII: `^(c)` cho sup, `_(c)` cho sub — neu
+    `c` da bat dau bang "(" va ket thuc bang ")" thi KHONG boc them ngoac
+    (`(n-1)` -> `^(n-1)`, khong phai `^((n-1))`)."""
+    if content.startswith("(") and content.endswith(")"):
+        return f"{marker}{content}"
+    return f"{marker}({content})"
+
+
+def normalize_sup_sub(soup: BeautifulSoup, *, style: str = "unicode") -> None:
+    """Architecture.md §6.21.2 — chuan hoa MOI `<sup>`/`<sub>` con lai trong
+    `soup` sang bieu dien Markdown-an-toan (Unicode hoac Pandoc `^..^`/`~..~`
+    tuy `style`, xem `Settings.markdown_supsub_style`). CHAY TRUOC khi goi
+    `markdownify` — doc lap hoan toan voi `sup_symbol`/`sub_symbol` mac dinh
+    cua thu vien do (Protocol 5: khong phu thuoc hanh vi ngam dinh ben thu
+    ba). Sau khi chay xong, khong con the `sup`/`sub` nao trong `soup`.
+
+    CHI dung boi `EpubDocument.to_markdown()` (dich EPUB->Markdown, US-15).
+    KHONG duoc dung cho luong `units`/`write_translated()` cua US-22 — X2
+    (Architecture.md 6.20.12) giu `<sup>`/`<sub>` nguyen ven khi dich
+    EPUB->EPUB, vi dich XHTML->XHTML khong can chieu sang Markdown.
+    """
+    _extract_mixed_number_fractions(soup)
+
+    for node in list(soup.find_all(("sup", "sub"))):
+        content = node.get_text().strip()
+        is_sup = node.name == "sup"
+        if style == "pandoc":
+            marker = "^" if is_sup else "~"
+            replacement = f"{marker}{content}{marker}"
+        else:
+            table = _SUP_UNICODE_MAP if is_sup else _SUB_UNICODE_MAP
+            unicode_form = _unicode_supsub(content, table)
+            replacement = (
+                unicode_form
+                if unicode_form is not None
+                else _ascii_supsub(content, "^" if is_sup else "_")
+            )
+        node.replace_with(NavigableString(replacement))
+
+
+_EXTERNAL_OR_DATA_URI_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:)", re.IGNORECASE)
+
+
+def _is_external_or_data_uri(src: str) -> bool:
+    """§6.15.7 muc B: `src` la URL tuyet doi (`http://...`) hoac `data:` URI
+    -> giu nguyen, KHONG copy (khong phai anh nhung trong zip). Bat theo
+    scheme URI tong quat (`scheme:`), khong chi `http(s)`/`data`, de khong bo
+    sot cac scheme khac (vd `mailto:`) — an toan hon la chi liet ke 2 ten."""
+    return bool(_EXTERNAL_OR_DATA_URI_RE.match(src))
+
+
+def _rewrite_image_srcs(
+    soup: BeautifulSoup,
+    doc_href: str,
+    zf: zipfile.ZipFile,
+    zip_names: set[str],
+    images_out_dir: Path,
+    entry_to_target: dict[str, str],
+    bytes_by_target: dict[str, bytes],
+) -> None:
+    """§6.15.7 muc B: copy bytes cua moi `<img>` nhung trong `soup` (tai
+    lieu `doc_href`) ra `images_out_dir`, roi rewrite `img["src"]` tro dung
+    file da copy — de `markdownify` sau do tu sinh `![alt](images/x.jpg)`.
+
+    Diem de sai nhat (Architecture.md nhan manh): `src` tuong doi so voi
+    CHINH `doc_href`, KHONG phai `opf_dir` (`doc_href` da la duong dan
+    tuyet doi trong zip, vi `load()` da join `opf_dir` theo X6).
+
+    `entry_to_target`/`bytes_by_target` la trang thai DUNG CHUNG cho CA
+    cuon sach (nhieu loi goi ham nay, moi lan 1 doc_href) — de:
+    - cung 1 zip_entry duoc tham chieu > 1 lan (nhieu trang cung dung 1
+      anh) chi copy MOT LAN, dung lai dung target_name.
+    - basename trung nhau giua 2 thu muc KHAC nhau trong zip: neu bytes
+      GIONG nhau, gop chung 1 file dich; neu bytes KHAC nhau, them hau to
+      tang dan (`f01_2.jpg`) — khong ghi de im lang (mat anh), khong de 2
+      link Markdown tro nham vao nhau.
+    """
+    for img in soup.find_all("img"):
+        src = img.get("src")
+        if not src:
+            continue
+        if _is_external_or_data_uri(src):
+            continue
+        zip_entry = posixpath.normpath(posixpath.join(posixpath.dirname(doc_href), src))
+
+        target_name = entry_to_target.get(zip_entry)
+        if target_name is None:
+            if zip_entry not in zip_names:
+                # Khong raise (khac guard X6 cua load()): 1 anh hong khong
+                # duoc lam hong ca job parse-only. Giu src nguyen trang.
+                logger.warning(
+                    "EPUB to_markdown(): anh '%s' (src='%s' trong '%s') khong "
+                    "ton tai trong zip — bo qua, giu src nguyen trang",
+                    zip_entry,
+                    src,
+                    doc_href,
+                )
+                continue
+            data = zf.read(zip_entry)
+            basename = posixpath.basename(zip_entry)
+            target_name = basename
+            stem, dot, ext = basename.rpartition(".")
+            suffix = 2
+            while target_name in bytes_by_target and bytes_by_target[target_name] != data:
+                target_name = f"{stem}_{suffix}{dot}{ext}" if dot else f"{basename}_{suffix}"
+                suffix += 1
+            bytes_by_target[target_name] = data
+            entry_to_target[zip_entry] = target_name
+            (images_out_dir / target_name).write_bytes(data)
+
+        img["src"] = f"images/{target_name}"
 
 
 class EpubDrmError(RuntimeError):
@@ -526,6 +711,10 @@ class EpubDocument:
     path: Path
     opf_dir: str
     _units: list[EpubUnit] = field(default_factory=list)
+    #: §6.15.7 muc A — `doc_href` theo DUNG thu tu spine, tinh ĐÚNG MỘT LẦN
+    #: trong `load()` (khong giu lai soup nao — `to_markdown()` mo lai zip
+    #: va parse lai tung doc theo danh sach nay, expose qua `spine_hrefs`).
+    _spine_hrefs: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> EpubDocument:
@@ -558,6 +747,7 @@ class EpubDocument:
 
             doc = cls(path=path, opf_dir=opf_dir)
             units: list[EpubUnit] = []
+            spine_hrefs: list[str] = []
             for idref, _linear in book.spine:
                 item = book.get_item_with_id(idref)
                 if item is None:
@@ -571,6 +761,10 @@ class EpubDocument:
                         f"doc_href '{doc_href}' (tu spine idref='{idref}') "
                         f"khong khop entry nao trong zip cua '{path}'"
                     )
+                # §6.15.7 muc A: tinh thu tu spine DUNG MOT LAN o day, dung
+                # chung boi to_markdown() sau nay — khong giu lai soup nao
+                # (chi phi bo nho vo ich cho sach vai tram trang).
+                spine_hrefs.append(doc_href)
                 raw_bytes = zf.read(doc_href)
                 soup, _parser_used = _parse_xhtml(raw_bytes)
                 candidates = _collect_candidate_nodes(soup)
@@ -593,11 +787,61 @@ class EpubDocument:
                         )
                     )
             doc._units = units
+            doc._spine_hrefs = spine_hrefs
             return doc
 
     @property
     def units(self) -> list[EpubUnit]:
         return self._units
+
+    @property
+    def spine_hrefs(self) -> list[str]:
+        return self._spine_hrefs
+
+    def to_markdown(self, images_out_dir: Path) -> str:
+        """US-15 nhanh EPUB->Markdown (Architecture.md §6.15.7 muc A/B/C):
+        chieu TOAN BO cuon sach sang MOT chuoi Markdown, theo dung thu tu
+        `self._spine_hrefs` cua CHINH lan `load()` nay — CAM goi `load()`
+        lan thu hai o day (R6-02: soi day lineage Reviewer phai trace).
+
+        Voi tung tai lieu trong spine: mo lai `self.path` (KHONG dung soup
+        da vut di sau `load()`), parse lai bang `_parse_xhtml()` (dung lai
+        helper co san, khong viet parser thu hai), rewrite `<img src>` +
+        copy bytes anh ra `images_out_dir` (`_rewrite_image_srcs()`), chuan
+        hoa `<sup>`/`<sub>` (`normalize_sup_sub()`) — THU TU BAT BUOC: chuan
+        hoa sup/sub TRUOC khi goi `markdownify`, khong duoc dao nguoc (phu
+        thuoc `sup_symbol` mac dinh cua thu vien neu lam sai thu tu).
+        """
+        images_out_dir = Path(images_out_dir)
+        images_out_dir.mkdir(parents=True, exist_ok=True)
+        style = get_settings().markdown_supsub_style
+        converter = markdownify.MarkdownConverter(heading_style="ATX")
+
+        entry_to_target: dict[str, str] = {}
+        bytes_by_target: dict[str, bytes] = {}
+        parts: list[str] = []
+
+        with zipfile.ZipFile(self.path) as zf:
+            zip_names = set(zf.namelist())
+            for doc_href in self._spine_hrefs:
+                raw_bytes = zf.read(doc_href)
+                soup, _parser_used = _parse_xhtml(raw_bytes)
+                _rewrite_image_srcs(
+                    soup, doc_href, zf, zip_names, images_out_dir, entry_to_target, bytes_by_target
+                )
+                normalize_sup_sub(soup, style=style)
+                # Convert only <body> (via convert_soup(), no re-serialize +
+                # re-parse round trip through markdownify.markdownify()) —
+                # feeding the WHOLE soup back through markdownify() would
+                # also re-parse the XML declaration + <head>/<title> as
+                # ordinary body content (verified: leaks "xml version=..."
+                # and the page <title> text into the Markdown output).
+                body = soup.find("body") or soup
+                fragment_md = converter.convert_soup(body).strip("\n")
+                if fragment_md:
+                    parts.append(fragment_md)
+
+        return ("\n\n".join(parts) + "\n") if parts else ""
 
     def full_text(self) -> str:
         """Text thuần nối từ mọi unit — dùng cho lọc glossary (6.6.5) và

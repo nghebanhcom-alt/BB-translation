@@ -315,28 +315,11 @@ async def _reject_deepl_for_pdf(job_type: str, provider: str, file_type: str) ->
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _reject_epub_parse_only(job_type: str, file_type: str) -> None:
-    """US-15 §6.15.3 S15-8 "he qua thu tu lam viec": nhanh EPUB cua US-15
-    phu thuoc `EpubDocument.to_markdown()` (US-22, chua implement trong
-    increment nay). Phai fail RO RANG bang HTTP 400 TRUOC KHI tao Job row —
-    khong duoc de 1 job "parse" file EPUB roi fail im lang/treo trong
-    `JobOrchestrator.run_parse_only()` (co 1 luoi an toan thu 2 o do, nhung
-    day moi la noi chan chinh theo dung thiet ke).
-    """
-    if job_type == "parse_only" and file_type == "epub":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Chua ho tro xuat Markdown cho EPUB, se co khi tinh nang dich EPUB hoan thien."
-            ),
-        )
-
-
-def _resolve_parse_method(requested: str, file_type: str) -> str:
-    """Architecture.md 6.21.3: resolve `JobCreateRequest.parse_method`
-    (`auto`/`txt`/`ocr`) into the value actually written to
-    `Job.parse_method` and passed to MinerU. `auto` (default) maps by
-    `file_type` — same mapping S15 originally hardcoded in
+def _resolve_parse_method(requested: str, file_type: str) -> str | None:
+    """Architecture.md 6.21.3 + §6.15.7 muc E (W-2): resolve
+    `JobCreateRequest.parse_method` (`auto`/`txt`/`ocr`) into the value
+    actually written to `Job.parse_method` and passed to MinerU. `auto`
+    (default) maps by `file_type` — same mapping S15 originally hardcoded in
     `JobOrchestrator.run_parse_only()` (`pdf_digital`->`txt`,
     `pdf_scan`->`ocr`). `txt`/`ocr` pass through UNCHANGED as an explicit
     user override (e.g. forcing `ocr` on a `pdf_digital` file to read
@@ -345,7 +328,14 @@ def _resolve_parse_method(requested: str, file_type: str) -> str:
     the SAME job reuses this exact choice (BR-CHUNK-05-style resumability,
     same pattern as `Job.chunk_size_used`) instead of recomputing "auto" and
     silently losing the override.
+
+    EPUB has its own Markdown parse-only branch (`EpubDocument.to_markdown()`,
+    §6.15.7) that does not call MinerU at all — `parse_method` has no
+    meaning for it, so this returns `None` (the column is nullable, `None`
+    means "not applicable") regardless of what was requested.
     """
+    if file_type == "epub":
+        return None
     if requested != "auto":
         return requested
     return "txt" if file_type == "pdf_digital" else "ocr"
@@ -584,8 +574,6 @@ async def create_job(
         raise HTTPException(
             status_code=400, detail="job_type phai la 'translate' hoac 'parse_only'"
         )
-
-    _reject_epub_parse_only(request.job_type, upload.file_type)
 
     if request.job_type == "translate" and not request.force:
         duplicate = await _find_completed_duplicate(session, upload.file_hash)
@@ -1024,7 +1012,6 @@ async def create_batch(request: BatchCreateRequest, session: SessionDep) -> Batc
 
     for upload in uploads:
         await _reject_deepl_for_pdf(request.job_type, provider_name, upload.file_type)
-        _reject_epub_parse_only(request.job_type, upload.file_type)
 
     # dict[file_id, DetailedCostEstimate] — chi duoc dien khi job_type ==
     # "translate" (nhanh duoi). Job creation loop (cuoi ham) doc no de biet

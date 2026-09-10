@@ -149,6 +149,13 @@ class Settings(BaseSettings):
     # lam tu UI, va rollback phai la 1 thao tac co chu dich (sua .env + restart).
     pdf_translate_engine: Literal["pdf2zh", "babeldoc"] = "babeldoc"
     babeldoc_executable: str = "babeldoc"
+
+    # US-15 nhanh EPUB->Markdown, Architecture.md §6.15.7 muc C / §6.21.2:
+    # bieu dien sup/sub trong `EpubDocument.to_markdown()` — "unicode" (mac
+    # dinh, x2 -> "x²") hay "pandoc" (x^2^, cho user render bang Pandoc). Day
+    # la lua chon bieu dien, KHONG phai tham so van hanh -> `.env`-only,
+    # KHONG vao SETTINGS_DB_OVERRIDABLE_FIELDS.
+    markdown_supsub_style: Literal["unicode", "pandoc"] = "unicode"
     # Architecture.md "Root Cause Analysis: Line-break/List Regression" (F1/F2,
     # 2026-09-06) + "Đo lại F1 trên nhiều trang — kết quả live A/B/C"
     # (2026-09-06, Tech Lech, 21 lan chay babeldoc+DeepSeek that qua dung

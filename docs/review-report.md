@@ -9200,3 +9200,187 @@ mới, không có I/O/API call mới, không có input người dùng nào đư�
 
 Script/artifact phiên này (scratchpad, không commit): `alpine_template_test.html`,
 `reviewer_check/extracted/` (bản giải nén `sourdough_translated.epub` để đối chiếu X1/X2).
+
+---
+
+# Review Report — US-15 nhánh EPUB (to_markdown, sau khi US-22 unblock) — VÒNG 1/3
+
+**Phạm vi**: `src/services/epub_document.py` (mới: `_spine_hrefs`, `to_markdown()`,
+`normalize_sup_sub()`, `_rewrite_image_srcs()`), `src/core/job_orchestrator.py`
+(`_run_epub_parse_only()`, `_finalize_parse_only_output()`, xoá `EpubNotSupportedError`),
+`src/api/routes/jobs.py` (W-1, W-2), `src/core/config.py` (`markdown_supsub_style`),
+`web/index.html` (W-5), + test đi kèm. Đối chiếu với Architecture.md §6.15.7 và §6.21.2.
+
+## 1. Regression US-22 — KHÔNG có
+
+- `git diff -- tests/test_epub_document.py`: xác nhận bằng mắt toàn bộ diff, **0 dòng `-` xoá/sửa**
+  nội dung cũ — chỉ có block mới thêm vào cuối file (từ dòng ~1111). 72 test cũ nguyên vẹn 100%,
+  bao gồm `test_sup_sub_preserved_verbatim_on_real_fraction_lines` (dòng 275-289) — assert
+  `"1<sup>1</sup>/<sub>3</sub>"` còn thô trong `unit.text` cho luồng `units`/dịch EPUB→EPUB —
+  KHÔNG bị `normalize_sup_sub()` đụng vào, đúng như Architecture.md §6.15.7 mục C yêu cầu.
+- Tự chạy độc lập `uv run pytest tests/test_epub_document.py tests/test_epub_batch_golden_fixture.py -v`
+  (không chỉ tin số tổng): **86/86 PASSED** riêng lẻ (72 cũ + 14 mới), không skip, không xfail.
+- Tự chạy độc lập `uv run pytest tests/integration/test_job_orchestrator.py tests/integration/test_cost_capped_orchestrator.py -q`
+  (baseline PDF parse_only mà CHANGELOG claim "41/41 xanh nguyên"): **41 passed** — khớp đúng.
+- Tự chạy toàn bộ suite: `uv run pytest tests/ -q` → **760 passed, 0 failed** (khớp con số Dev báo
+  cáo). `uv run ruff check src/ tests/` → **All checks passed!**
+
+**Kết luận câu hỏi quan trọng nhất của PM: KHÔNG có regression US-22 thật nào.**
+
+## 2. 2 test bị THAY — verify là thay đổi có chủ đích đúng, không phải nới lỏng
+
+- `test_run_parse_only_epub_raises_without_calling_mineru` →
+  `test_run_parse_only_epub_completes_without_calling_mineru`
+  (`tests/integration/test_job_orchestrator.py`): test mới dùng EPUB tối thiểu THẬT hợp lệ OCF
+  (mimetype ZIP_STORED đầu tiên, container.xml/opf/ncx/xhtml/ảnh thật), chạy `run_job()` thật (không
+  mock `EpubDocument`), rồi mở **thật** zip output ra kiểm `document.md` chứa `"Chuong 1"` +
+  `"1/3 cup soy grits"` (xác nhận `normalize_sup_sub()` chạy), và `images/` có đúng 1 ảnh với bytes
+  khớp `b"fake-jpeg-bytes"` gốc. Đây là siết chặt hơn test cũ (test cũ chỉ assert raise), đúng tinh
+  thần R6-03 "không chỉ tin status".
+- `test_create_job_rejects_epub_parse_only_before_creating_job_record` →
+  `test_create_job_accepts_epub_parse_only_since_epub_markdown_shipped`
+  (`tests/integration/test_upload_and_job_flow.py`): assert `202` + `status="queued"` + đúng 1 Job
+  row được tạo (`total == 1`) — khớp đúng hành vi mới sau khi `_reject_epub_parse_only()` bị xoá
+  (W-1). Test này chủ động KHÔNG assert hành vi background (nói rõ trong docstring, để riêng cho
+  `test_job_orchestrator.py`), hợp lý — tránh test 2 tầng trùng lặp.
+
+Cả 2 đều là thay đổi có chủ đích, khớp mục tiêu chính của US-15 nhánh EPUB, không phải test rỗng.
+
+## 3. `normalize_sup_sub()` — đối chiếu ĐỘC LẬP với bảng golden 7 dòng §6.21.2
+
+Tự viết script gọi trực tiếp `normalize_sup_sub()` (không đọc lại code Dev, chạy độc lập) với đúng 7
+input trong bảng "Kết quả đã chạy thật" của Architecture.md §6.21.2 (dòng 6715-6723):
+
+| # | Input | Kỳ vọng (Architecture.md) | Kết quả thật | Khớp |
+|---|---|---|---|---|
+| 1 | `<sup>1</sup>/<sub>3</sub> cup soy grits` | `1/3 cup soy grits` | `1/3 cup soy grits` | ✅ |
+| 2 | `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour` (hỗn số N-1) | `1 1/3 cups unbleached white flour` | `1 1/3 cups unbleached white flour` | ✅ |
+| 3 | `Area = x<sup>2</sup> + y<sup>3</sup> - 5x<sup>-1</sup>` | `Area = x² + y³ - 5x⁻¹` | khớp | ✅ |
+| 4 | `H<sub>2</sub>O, CO<sub>2</sub>, Ca(OH)<sub>2</sub>, SO<sub>4</sub><sup>2-</sup>` | `H₂O, CO₂, Ca(OH)₂, SO₄²⁻` | khớp | ✅ |
+| 5 | `network.<sup>12</sup>` | `network.¹²` | khớp | ✅ |
+| 6 | `x<sup>a+b</sup>, V<sub>total</sub>` | `x^(a+b), V_(total)` | khớp | ✅ |
+| 7 | `10<sup>-6</sup> mol` | `10⁻⁶ mol` | khớp | ✅ |
+
+**7/7 khớp tuyệt đối, tự verify độc lập (không tin lời Dev)**. Đặc biệt ca N-1 (hỗn số) — điểm dễ
+sai nhất theo Architecture.md, đúng loại lỗi `markdownify` mặc định (`11/3`) — đã KHÔNG xảy ra, guard
+"ký tự trước `<sup>` là chữ số → chèn dấu cách" hoạt động đúng.
+
+## 4. Thứ tự `normalize_sup_sub()` trước `markdownify` + fix rò rỉ `<body>`
+
+Đọc `to_markdown()` (`epub_document.py:801-843`): thứ tự đúng —
+`_rewrite_image_srcs()` → `normalize_sup_sub()` → `converter.convert_soup(body)`, đúng yêu cầu
+Architecture.md (chuẩn hoá TRƯỚC khi markdownify nhìn thấy sup/sub, độc lập với `sup_symbol` mặc
+định của thư viện).
+
+Fix `convert_soup(soup.find("body"))` thay vì `markdownify.markdownify(str(soup))` — tự verify độc
+lập bằng script tái tạo đúng lỗi Dev mô tả: gọi `markdownify.markdownify()` trên soup đầy đủ (có
+`<?xml?>` + `<title>`) đúng là làm rò rỉ text `<title>` vào output; dùng `convert_soup(body)` thì
+không. Xác nhận fix đúng.
+
+**Phát hiện thêm (non-blocking, KHÔNG có trong spec, Reviewer tự đo)**: code hiện dùng
+`body = soup.find("body") or soup` — fallback `or soup` chỉ kích hoạt khi tài liệu XHTML KHÔNG có
+thẻ `<body>` nào (vi phạm chuẩn XHTML, nhưng `_parse_xhtml()` không raise nếu thiếu `<body>`, chỉ
+raise nếu XML không parse được). Tự test case này:
+
+```
+html không có <body>: <html><head><title>Leaky Title</title>...</head><p>Hello</p></html>
+convert_soup(soup.find("body") or soup) → "Leaky Title\n\nHello world"   ← <title> RÒ RỈ
+```
+
+Khi `<body>` tồn tại (trường hợp thực tế mọi EPUB hợp lệ), `<title>`/`<style>`/`<script>` trong
+`<head>` không lọt vào vì `convert_soup()` chỉ nhận đúng phần `<body>` — không có lỗ rò nào ở nhánh
+chính. Rủi ro chỉ tồn tại ở nhánh fallback `or soup` cho 1 EPUB có XHTML thiếu hẳn thẻ `<body>` — một
+ca hiếm nhưng không phải không thể (một số công cụ export EPUB lỗi có thể sinh fragment không đầy
+đủ). Đề xuất non-blocking: đổi guard này thành raise `EpubParseError` rõ ràng khi thiếu `<body>` thay
+vì fallback âm thầm sang toàn bộ soup (nhất quán với triết lý "raise rõ ràng thay vì im lặng sai" mà
+chính đoạn code này vừa áp dụng cho case ảnh thiếu/URL ngoài).
+
+## 5. Copy ảnh + rewrite link
+
+Đọc `_rewrite_image_srcs()` (`epub_document.py:299-354`): `zip_entry` tính bằng
+`posixpath.normpath(posixpath.join(posixpath.dirname(doc_href), src))` — đúng theo `doc_href`
+(không phải `opf_dir`), khớp chính xác Architecture.md §6.15.7 mục B. Test edge case đầy đủ và assert
+đúng nội dung thật (không hời hợt):
+- `test_to_markdown_skips_external_and_data_uri_images` — URL tuyệt đối + `data:` URI giữ nguyên,
+  `images_out` rỗng.
+- `test_to_markdown_missing_image_entry_does_not_crash` — không raise, `src` giữ nguyên trạng, có
+  log warning (đọc code xác nhận `logger.warning(...)` đúng chỗ, không nuốt lỗi im lặng hoàn toàn).
+- Trùng basename khác bytes (hậu tố tăng dần `f01_2.jpg`) và trùng basename cùng bytes (gộp 1 file):
+  logic đọc đúng (`bytes_by_target[target_name] != data` mới tăng suffix), nhưng **không có test
+  trực tiếp cho ca "2 thư mục khác nhau, basename trùng, bytes KHÁC nhau"** trong bộ test mới — chỉ
+  có test golden chapter01 (10 ảnh, khả năng cao không trùng basename) và 2 test trên. Đây là
+  non-blocking — logic đọc code đúng, nhưng thiếu 1 test trực tiếp cho nhánh "thêm hậu tố" khiến
+  hành vi này chưa có golden lock-in nếu ai đó sửa sai sau này.
+
+## 6. Wiring 6 điểm (W-1..W-6)
+
+Đối chiếu từng điểm với bảng Architecture.md §6.15.7 mục E:
+
+- **W-1**: `_reject_epub_parse_only()` đã XOÁ hoàn toàn (grep xác nhận 0 kết quả còn lại trong
+  `src/`), cả 2 call site (`create_job`, `create_batch`) đã gỡ đúng.
+- **W-2**: `_resolve_parse_method("auto", "epub")` → đọc code xác nhận trả **`None`** (dòng
+  `if file_type == "epub": return None`), không còn `"ocr"` vô nghĩa. Type hint đổi đúng
+  `str | None`.
+- **W-3**: `run_parse_only()` nhánh EPUB gọi `_run_epub_parse_only()`, đặt TRƯỚC
+  `_count_pdf_pages()`/guard MinerU — đọc code xác nhận đúng vị trí.
+- **W-4**: `EpubNotSupportedError` đã xoá khỏi `job_orchestrator.py`; `test_job_orchestrator.py`
+  không còn import (đã sửa cùng lúc với test bị thay ở mục 2).
+- **W-5**: `web/index.html` — checkbox ẩn khi `f.file_type === 'epub'` đã thêm đúng vào điều kiện
+  `x-show`, kèm comment giải thích lý do.
+- **W-6**: xác nhận đúng — không có thay đổi nào ở `download.py` trong diff, khớp Architecture.md
+  ("không phải sửa").
+
+`_finalize_parse_only_output()` dùng CHUNG giữa 2 nhánh PDF/EPUB (Protocol 8 R8-03) — đọc code xác
+nhận **không có** `if file_type == "epub"` rải rác nào bên trong hàm dùng chung này; điểm rẽ nhánh
+duy nhất nằm ở `run_parse_only()` (chọn gọi `_run_epub_parse_only()` hay pipeline PDF), đúng tinh
+thần Protocol 8 — rẽ nhánh MỘT LẦN ở điểm vào, không rẽ nhánh rải rác trong thân xử lý dùng chung.
+
+## 7. R6-02 test (nhất quán `len(doc.units)` vs nội dung `to_markdown()`)
+
+`test_to_markdown_r6_02_heading_counts_match_units`: assert `md_h2 == units_h2` và
+`md_h3 == units_h3` (đếm thật từ `markdown_text` bằng pattern `"\n## "`/`"\n### "` so với đếm thật
+từ `doc.units` theo `tag in {"h2","h3"}`), CÙNG một lần `load()` — đúng tinh thần Protocol 6 (không
+so sánh 2 con số cố định độc lập, mà so sánh chéo giữa 2 projection sinh ra từ cùng 1 lần đọc dữ
+liệu gốc). Docstring ghi rõ lý do sourdough không có ca `_is_droppable_content()` drop heading
+toàn-chữ-số (0 ca, khớp tuyệt đối), và cảnh báo rõ nếu sách khác có ca đó thì phải trừ đúng số bị
+drop — không nới `>=`. Đúng yêu cầu.
+
+## 8. R5-04 checklist (Protocol 5)
+
+`epub_document.py` không gọi API/CLI/HTTP service bên thứ ba nào mới — `markdownify` là thư viện
+Python thuần (import trực tiếp), version đã verify `1.2.3` qua `importlib.metadata` (đọc
+Architecture.md §6.15.7 mục D, khớp). Theo phạm vi áp dụng Protocol 5/CLAUDE.md project ("không áp
+dụng cho thư viện nội bộ Python thuần... `pymupdf` dùng đúng API core"), `markdownify` cùng loại rủi
+ro thấp này → **N/A cho R5-01 chính thức**, nhưng phát hiện hành vi ngầm định của
+`markdownify.markdownify()` (re-parse toàn chuỗi qua `html.parser`, rò rỉ XML declaration/`<title>`)
+là một phát hiện đúng tinh thần Protocol 5 dù ngoài phạm vi bắt buộc — Dev đã tự đo và ghi lại đúng
+cách (R5-04: "External contract verified against real source: N/A — thư viện Python thuần, nhưng có
+verify hành vi thật qua chạy thử độc lập"). Reviewer tự tái tạo lại phát hiện này ở mục 4, xác nhận
+đúng.
+
+## Kết luận
+
+**APPROVE.**
+
+- KHÔNG có regression US-22 (xác nhận bằng đọc diff + chạy test độc lập, không chỉ tin lời Dev).
+- `normalize_sup_sub()` khớp 100% (7/7) bảng golden §6.21.2, tự verify độc lập bằng script riêng.
+- 2 test bị thay là thay đổi có chủ đích đúng, siết chặt hơn test cũ, không phải nới lỏng che giấu
+  lỗi.
+- Thứ tự `normalize_sup_sub()` trước `markdownify`, fix rò rỉ `convert_soup(body)`, rewrite ảnh theo
+  `doc_href`, wiring W-1..W-6, Protocol 8 (hàm dùng chung không rẽ nhánh rải rác), R6-02 — đều đúng
+  spec Architecture.md §6.15.7/§6.21.2.
+- `uv run pytest tests/ -q` → 760 passed. `uv run ruff check src/ tests/` → All checks passed.
+
+**Non-blocking (không chặn approve, ghi lại cho lần sau)**:
+1. `to_markdown()`: `soup.find("body") or soup` — fallback này rò rỉ `<title>`/nội dung `<head>` vào
+   Markdown output nếu 1 tài liệu XHTML trong spine thiếu hẳn thẻ `<body>` (case hiếm nhưng có thể
+   xảy ra với EPUB xuất lỗi). Đề xuất: raise `EpubParseError` rõ ràng thay vì fallback âm thầm, nhất
+   quán với cách xử lý "raise rõ ràng" đã áp dụng cho các guard khác trong cùng file.
+2. Thiếu 1 test trực tiếp (golden, không suy luận từ đọc code) cho nhánh "2 basename trùng tên khác
+   thư mục, bytes KHÁC nhau → thêm hậu tố `_2`" của `_rewrite_image_srcs()` — logic đọc đúng nhưng
+   chưa có test khoá hành vi này lại.
+
+**External contract verified against real source**: N/A cho `markdownify` (thư viện Python thuần,
+theo phạm vi Protocol 5 project) — nhưng hành vi ngầm định `markdownify.markdownify()` (rò rỉ XML
+declaration khi re-parse toàn chuỗi) đã được Dev VÀ Reviewer tự chạy thử độc lập xác nhận (không chỉ
+đọc doc).

@@ -4091,6 +4091,165 @@ loại input** — đúng thứ Protocol 6 tồn tại để chặn; (iii) Miner
    ra **202 + job mới**.
 5. **§6.21 (công thức)**: bắt buộc chạy đủ 5 case của bảng "Gate bắt buộc" ở §6.21.4.
 
+#### 6.15.7. Cập nhật S15-8 sau khi US-22 hoàn tất (2026-09-10) — spec thi hành cho nhánh EPUB→Markdown
+
+S15-8 (§6.15.3) và §6.20.5 được viết **trước** khi US-22 implement xong. Mục này ghi lại các điểm
+spec cũ **đã lệch với code thật** và là **spec thi hành** cho Dev. Ở đâu mâu thuẫn, **mục này
+thắng**; phần S15-8 không bị mục này nhắc tới thì vẫn còn hiệu lực nguyên trạng (đặc biệt: quyết
+định "MỘT loader, HAI projection", lý do bác `units_to_markdown()`, và toàn bộ §6.21.2).
+
+**Nguồn xác thực (Protocol 5 R5-01)**: đọc trực tiếp code thật ở commit hiện tại —
+`src/services/epub_document.py` (toàn file), `src/core/job_orchestrator.py:1208-1444`,
+`src/api/routes/jobs.py:318-352, 575-600, 1018-1040`, `src/core/config.py`, `pyproject.toml:26`,
+`uv.lock:1082`, và chạy thật `.venv/bin/python -c "import importlib.metadata as m;
+print(m.version('markdownify'))"` → **`1.2.3`, đã cài, import được**.
+
+##### A. Điểm LỆCH #1 (chặn implement thẳng theo spec cũ): `spine_documents` KHÔNG tồn tại
+
+S15-8 giả định `EpubDocument` phơi ra `.spine_documents -> list[tuple[str, BeautifulSoup]]`. Code
+thật **không có** thuộc tính này (grep `spine_documents` trong `src/` → 0 kết quả). Cấu trúc thật
+của class (`epub_document.py:524-528`) chỉ có:
+
+```
+@dataclass
+class EpubDocument:
+    path: Path                      # đường dẫn file .epub gốc (giữ lại, đọc lại zip được)
+    opf_dir: str                    # thư mục chứa .opf, từ META-INF/container.xml
+    _units: list[EpubUnit]          # projection DỊCH, expose qua property `units`
+```
+
+`load()` (`:530-596`) parse soup của từng document trong spine **bên trong vòng lặp cục bộ rồi vứt
+đi** — không giữ lại soup nào, và **không giữ lại cả danh sách `doc_href` theo thứ tự spine**.
+
+**Spec đã cập nhật — Dev làm như sau** (rẻ hơn và ít rủi ro bộ nhớ hơn spec cũ):
+
+1. Thêm field `_spine_hrefs: list[str] = field(default_factory=list)` + property công khai
+   `spine_hrefs -> list[str]`. `load()` **append `doc_href` vào list này ngay sau guard X6**
+   (`epub_document.py:566-573`, chỗ đã raise nếu `doc_href` không có trong zip) — tức thứ tự spine
+   được tính **đúng MỘT lần**, ở **đúng loader chung**, thoả tinh thần "MỘT loader" của S15-8 mà
+   **không** phải giữ toàn bộ soup của cả cuốn sách trong RAM.
+2. `to_markdown(images_out_dir)` **mở lại `zipfile.ZipFile(self.path)`** và với mỗi href trong
+   `self._spine_hrefs` gọi lại `_parse_xhtml(zf.read(href))` — dùng lại đúng helper `_parse_xhtml`
+   đã có (`:323`, Y1: `features="xml"` + fallback có kiểm chứng), **không** viết parser thứ hai.
+3. **KHÔNG** expose `spine_documents` như spec cũ. Lý do: 1 EPUB sách bánh vài trăm trang giữ đồng
+   thời hàng trăm soup lxml là chi phí bộ nhớ vô ích khi consumer duy nhất (`to_markdown`) duyệt
+   tuần tự một lần.
+4. Ràng buộc R6-02 của S15-8 **vẫn giữ nguyên**: `to_markdown()` phải chạy trên **cùng một
+   instance** đã `load()` (đọc `self._spine_hrefs`, `self.path`) — cấm gọi `load()` lần thứ hai bên
+   trong `to_markdown()`. Đây chính là sợi dây lineage Reviewer phải trace.
+
+##### B. Điểm LỆCH #2: `to_markdown()` phải tự đọc ảnh từ zip — `EpubDocument` hiện KHÔNG có API ảnh nào
+
+`load()` chỉ đọc `META-INF/container.xml` + các XHTML trong spine. **Không có** method nào liệt kê
+hay đọc ảnh. `to_markdown()` phải tự làm, và **điểm dễ sai nhất là gốc đường dẫn tương đối**:
+
+- `src` của `<img>` là tương đối so với **chính file XHTML chứa nó**, **KHÔNG** phải so với
+  `opf_dir`. Cách tính đúng:
+  `zip_entry = posixpath.normpath(posixpath.join(posixpath.dirname(doc_href), src))`
+  (`doc_href` ở đây đã là đường dẫn tuyệt đối trong zip, vì `load()` đã join `opf_dir` theo X6 —
+  `:565`). Dùng lại đúng công thức này, đừng join `opf_dir` lần nữa (sẽ ra sai).
+- Ghi bytes ra `images_out_dir / <basename>`, và rewrite `img["src"] = f"images/{basename}"`
+  **trên soup, TRƯỚC khi gọi `markdownify`** (để `markdownify` tự sinh `![alt](images/x.jpg)`).
+- **Trùng tên basename giữa 2 thư mục khác nhau** trong zip (ví dụ `ch1/img/f01.jpg` và
+  `ch2/img/f01.jpg`): nếu tên đích đã tồn tại **và** bytes khác nhau → thêm hậu tố tăng dần
+  (`f01_2.jpg`). Không được ghi đè im lặng (mất ảnh) và không được để 2 link Markdown trỏ nhầm nhau.
+- `src` là URL tuyệt đối (`http://…`) hoặc `data:` URI → **giữ nguyên, không copy**.
+- Entry không tồn tại trong zip → **không raise** (không được để 1 ảnh hỏng làm hỏng cả job
+  parse-only); bỏ `src` về nguyên trạng và ghi 1 dòng log warning. Khác hẳn guard X6 của `load()`
+  (ở đó lệch href = Bug #5 tái sinh, phải raise).
+
+##### C. §6.21.2 (`normalize_sup_sub`) — CHƯA có code nào, KHÔNG có gì để tái dùng
+
+Đã grep `src/` (`normalize_sup_sub|sup_sub|vulgar|fraction|6\.21`): **0 implementation**. Đây
+**không** phải thiếu sót — nhánh PDF→Markdown của US-15 (đã xong) không hề chuẩn hoá gì, vì
+Markdown do MinerU sinh, app không chen được vào (đúng như §6.21.3 đã ghi). Nghĩa là:
+
+- Nhánh EPUB→Markdown là **consumer ĐẦU TIÊN** của §6.21.2 → Dev **phải viết mới** `normalize_sup_sub(soup)`
+  đúng theo spec §6.21.2 (Bước 1 phân số + guard hỗn số, Bước 2 Unicode/ASCII fallback, 2 bảng ánh
+  xạ). Đặt trong `src/services/epub_document.py` như §6.21.2 chỉ định.
+- Bảng 7 dòng "Kết quả đã chạy thật" ở §6.21.2 là **bảng kỳ vọng test bắt buộc**, không phải ví dụ
+  minh hoạ.
+- Setting `markdown_supsub_style` (§6.21.2) **chưa tồn tại** trong `src/core/config.py` → Dev thêm
+  mới: `markdown_supsub_style: Literal["unicode", "pandoc"] = "unicode"`, **`.env`-only**, KHÔNG
+  thêm vào `SETTINGS_DB_OVERRIDABLE_FIELDS`.
+- `normalize_sup_sub()` chạy trên **bản soup của `to_markdown()`**. Nó **không được** đụng tới
+  luồng `units`/`write_translated()` của US-22 (EPUB→EPUB giữ `<sup>`/`<sub>` nguyên vẹn theo X2 —
+  `tests/test_epub_document.py:275-289` đang assert đúng điều đó; làm hỏng assert này = phá US-22).
+
+##### D. `markdownify` — ĐÃ CÀI, nhưng chưa pin đúng như S15-8 yêu cầu
+
+`pyproject.toml:26` khai `markdownify>=1.2.3`; `uv.lock` khoá `1.2.3`; `.venv` cài `1.2.3`
+(đã chạy thật). Không cần thêm dependency. **Nhưng** S15-8 ràng buộc "pin version" và hiện đang là
+`>=` — vì `normalize_sup_sub()` đã xử lý xong `sup`/`sub` **trước** khi `markdownify` nhìn thấy,
+rủi ro `sup_symbol` đổi mặc định đã bị vô hiệu hoá, **nhưng** hành vi `ol`/`ul` lồng/`img`/
+`figcaption` vẫn phụ thuộc thư viện. Chốt: **giữ `>=1.2.3`** (không siết `==`, tránh xung đột
+resolve về sau) và bù bằng **golden test bắt buộc** trên `ops/xhtml/chapter01.html` như S15-8 đã
+yêu cầu — đổi version mà output đổi thì golden test đỏ ngay.
+
+##### E. Wiring — vị trí sửa chính xác
+
+| # | File / vị trí hiện tại | Việc phải làm |
+|---|---|---|
+| W-1 | `src/api/routes/jobs.py:318-332` `_reject_epub_parse_only()` | **XOÁ hàm** + 2 call site (`:588` trong `create_job`, `:1027` trong `create_batch`). Đây chính là chốt chặn 400 cần gỡ |
+| W-2 | `src/api/routes/jobs.py:334-351` `_resolve_parse_method()` | Hiện `("auto", "epub")` → `"ocr"` — **vô nghĩa cho EPUB** (không có MinerU trong nhánh này). Sửa: trả **`None`** cho `file_type == "epub"`, và call site `:637-640` giữ `None` cho EPUB. `Job.parse_method` là cột nullable, `None` đúng nghĩa "không áp dụng" |
+| W-3 | `src/core/job_orchestrator.py:1216-1227` (nhánh `if job.file_type == FileType.EPUB: raise EpubNotSupportedError`) | **Thay** bằng `return await self._run_epub_parse_only(job, db_session)`. Phải đặt **trước** `_count_pdf_pages()` (`:1231`) và trước guard/health MinerU (`:1241-1245`) — EPUB không dùng MinerU, và `job.total_pages` **luôn NULL** cho EPUB (`upload.page_count`, §6.20.6) |
+| W-4 | `src/core/job_orchestrator.py:124` `EpubNotSupportedError` | Sau W-3 không còn call site nào → xoá class + import trong `tests/integration/test_job_orchestrator.py:15` và test `:1674` (test đó phải được **thay** bằng test nhánh mới, không xoá trắng) |
+| W-5 | `web/index.html:91-96` (checkbox `parse_force_ocr`) | Ẩn khi `f.file_type === 'epub'` — đó là lựa chọn MinerU `txt`/`ocr`, không có nghĩa với EPUB. `web/js/app.js:300` gửi `parse_method` → phải gửi `undefined` cho EPUB |
+| W-6 | `src/api/routes/download.py:65-67` | **Không phải sửa** — đã branch theo `job.job_type == "parse_only"` → `.zip`, không quan tâm `file_type`. Đây là lý do §6.15/S15-8 bắt output EPUB phải **giống hệt** cây output PDF |
+
+##### F. `_run_epub_parse_only()` — hình dạng bắt buộc (R6-01 data lineage)
+
+Method mới trên `JobOrchestrator`, **song song** với `_run_parse_only_pipeline()` (nhánh PDF), KHÔNG
+nhét thêm `if` vào trong nhánh PDF (nhánh PDF gắn chặt với MinerU từ đầu tới cuối). Bắt buộc tái sử
+dụng **nguyên xi** phần "đóng gói" của nhánh PDF (`job_orchestrator.py:1362-1444`) để 2 nhánh không
+trôi khác nhau — Dev tách phần đó thành helper dùng chung
+`_finalize_parse_only_output(job, markdown_text, image_files, db_session)`:
+
+```
+job.status = "parsing"; commit                     # KHÔNG gọi MinerU health, KHÔNG parse_method
+doc = EpubDocument.load(Path(job.file_path))       # raise EpubDrmError/EpubParseError -> job failed
+output_dir   = self._output_dir / job.id
+images_dir   = output_dir / "images";  images_dir.mkdir(parents=True, exist_ok=True)
+markdown_text = doc.to_markdown(images_out_dir=images_dir)     # <-- SỢI DÂY LINEAGE (R6-01)
+_finalize_parse_only_output(...)   # ghi document.md, guard đọc lại, zip eager, guard zip,
+                                   # output_path, actual_cost=0.0/"metered", completed, broadcast
+```
+
+Lineage tường minh (R6-01) — **artifact nào, ai đọc field nào**:
+
+| Bước | Sinh ra | Bước sau đọc |
+|---|---|---|
+| `EpubDocument.load(job.file_path)` | instance `doc` (`_spine_hrefs`, `path`, `opf_dir`) | `doc.to_markdown()` đọc **chính instance này**, cấm `load()` lại |
+| `doc.to_markdown(images_out_dir=output_dir/"images")` | **giá trị trả về** = chuỗi Markdown; **side effect** = các file ảnh trong `images_dir` | `_finalize_parse_only_output` ghi chuỗi đó vào `output_dir/"document.md"`, zip `document.md` + `images/*` |
+| `output_dir/"parse_result.zip"` | file zip | `job.output_path`, rồi `download.py` |
+
+Guard bắt buộc, **giống nhánh PDF, không được bỏ**: Markdown rỗng sau strip → raise
+`ParseOnlyEmptyOutputError`; đọc **lại** `document.md` từ đĩa để kiểm (không tin biến trong RAM);
+`zipfile.testzip()` + đếm entry `images/` khớp số file thật → `ParseOnlyZipGuardError`.
+
+**Không** có cancel/timeout polling ở nhánh EPUB (không có tác vụ dài bên ngoài để poll — parse
+thuần local, xong trong vài giây); `_should_cancel`/`MinerUCancelledError` là chuyện riêng của
+MinerU. Guard `EpubDrmError`/`EpubParseError` đã có sẵn hình dạng HTTP 400 tương ứng ở
+`jobs.py:365-390` cho luồng translate — ở đây rơi vào `except Exception` của `run_parse_only()`
+(`:1294`) → `job.status="failed"` + `error_message`, đúng contract sẵn có.
+
+##### G. Test bắt buộc (bổ sung cho §6.15.6)
+
+1. **R6-02 nối 2 projection** (S15-8 đã yêu cầu, giữ nguyên): từ **một** `load()`, assert số
+   `h2`/`h3` trong `to_markdown()` **==** số unit có `tag in {"h2","h3"}`. ⚠️ Lưu ý đã kiểm:
+   `_is_droppable_content()` (`:282`) có thể **drop** một heading toàn chữ số (ví dụ `<h2>1</h2>`)
+   khỏi `units` trong khi `to_markdown()` vẫn giữ nó → nếu file mẫu có ca này, assert phải trừ đúng
+   số đó và **ghi rõ lý do trong test**, không được nới assert thành `>=` cho qua chuyện.
+2. **Golden test** `to_markdown()` trên `ops/xhtml/chapter01.html` (S15-8): 10 `<img>`, 214
+   `<strong>`, 26 `<em>`, 2 `h2`, 34 `h3` — các số này lấy từ chính bảng đo của S15-8.
+3. **Bảng §6.21.2 7 dòng** cho `normalize_sup_sub()`, đặc biệt ca hỗn số N-1 (`1 1/3`, KHÔNG phải
+   `11/3`).
+4. **Không hồi quy US-22**: `tests/test_epub_document.py` phải **xanh nguyên** — `units` vẫn chứa
+   `<sup>1</sup>/<sub>3</sub>` thô.
+5. **R6-03 live E2E**: upload EPUB thật → `job_type=parse_only` → tải zip → giải nén → `document.md`
+   có chữ thật + **mở được ít nhất 1 file trong `images/`**, và link `![](images/…)` trong Markdown
+   trỏ đúng file tồn tại (không chỉ tin `status="completed"` — đây đúng là cách Bug #5 bị bắt).
+
 ---
 
 ### 6.16. US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, và search server-side

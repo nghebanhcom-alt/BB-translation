@@ -5709,3 +5709,196 @@ code vừa fix, tin cậy dựa trên bằng chứng cùng pattern đã verify �
 
 **`ready_for_release: YES`** — cả 2 việc treo lại của vòng QA trước đã đóng: Apple Books gap được thay
 thế bằng bằng chứng byte-level chặt chẽ hơn, bug UI "N đoạn" đã fix + verify qua trình duyệt thật.
+
+---
+
+## US-15 Markdown parse-only — Nhánh EPUB (live) — QA (2026-09-10)
+
+- **QA**: QA Agent (Sonnet)
+- **Phạm vi**: lần đầu chạy SỐNG chế độ `job_type=parse_only` cho file `.epub` (Reviewer đã APPROVE
+  implementation §6.15.7, xem `docs/review-report.md` entry "US-15 nhánh EPUB — xuất Markdown gốc,
+  KHÔNG dịch"), theo đúng brief PM (6 việc + R6-03).
+- **Không đụng `data/bb_translation.db` thật** — mọi job live chạy trên DB scratch riêng
+  (`sqlite+aiosqlite:///.../qa_us15_epub/qa.db` cho orchestrator trực tiếp,
+  `.../qa_us15_epub/api_scratch/data/bb_translation.db` cho luồng API/TestClient, và server UI scratch
+  cùng thư mục `api_scratch` port 8099). Xác nhận bằng `md5 data/bb_translation.db` trước/sau — không
+  đổi — và `git status --porcelain` không có file lạ trong `data/uploads/`/`web/` sau khi dọn file tạm
+  dùng cho bước UI (mục 4).
+- Không chạy tiến trình nền rồi bỏ dở — mọi script chạy đồng bộ (`asyncio.run(main())`/vòng lặp poll
+  có deadline); server scratch cho bước UI được start/kill trong cùng lượt, xác nhận đã dừng
+  (`pkill`) trước khi kết thúc.
+
+### 1. Chạy trực tiếp `JobOrchestrator.run_job()` (script Python, DB scratch riêng)
+
+File mẫu thật: `data/uploads/9d436d7b-e91e-4198-a12b-a2150f7dd362_Baking with Sourdough - Sara
+Pitzer.epub` (2 017 999 bytes, KHÔNG phải fixture tối thiểu). `MinerURunner` được inject dưới dạng
+`AsyncMock` mà `health()`/`parse_document()` đều `side_effect=AssertionError(...)` — nếu nhánh EPUB lỡ
+gọi MinerU, script sẽ crash ngay thay vì âm thầm cho qua.
+
+Kết quả:
+```
+status: completed
+job.status: completed
+job.parse_method: None
+job.total_pages: None
+job.actual_cost: 0.0
+job.output_path: .../outputs/<job_id>/parse_result.zip
+job.error_message: None
+mineru_runner.health.assert_not_awaited()      → PASS (không raise AssertionError)
+mineru_runner.parse_document.assert_not_awaited() → PASS
+```
+**Xác nhận chi phí = 0 và 0 request LLM/OCR nào phát sinh** — đúng yêu cầu #3 của brief.
+
+### 2. R6-03 — kiểm nội dung output thật (mở trực tiếp, không chỉ tin `status`)
+
+**Zip output** (`parse_result.zip`, 13 entries): `document.md` + 12 file `images/*.jpg`
+(`f0003-01.jpg`… `f0034-01.jpg`, `pub.jpg`) — giải nén thật bằng `zipfile`, không suy đoán cấu trúc.
+
+**Heading/list** (đếm trực tiếp trên `document.md`, 54 642 ký tự):
+- `# ` × 1 (tiêu đề sách "Baking with Sourdough"), `## ` × 2 (2 dòng lặp lại tiêu đề/tác giả — đúng
+  cấu trúc HTML gốc của trang bìa, không phải lỗi parse), `### ` × 34 — khớp đúng số đo Reviewer đã
+  ghi lại ở `docs/review-report.md` (34 `<h3>`).
+- Sách mẫu Sourdough KHÔNG có bullet/numbered list thật trong nội dung (nguyên liệu công thức được
+  tác giả format bằng dòng `**...**` + xuống dòng `<br/>`, không phải `<ul>`/`<ol>`) — 0 dòng `- `/`*
+  `/`1. ` trong `document.md`, khớp đúng cấu trúc HTML gốc (đã đối chiếu `ops/xhtml/chapter01.html`
+  qua `grep`, xác nhận không có thẻ `<ul>`/`<ol>` nào trong file này) — không phải bug, không có gì
+  để test thêm cho phần "list" với sách mẫu này.
+- Không có bảng (`<table>`) nào trong sách mẫu — N/A cho phần AC "bảng công thức nhiều cột" với sách
+  cụ thể này (đã grep xác nhận `document.md` không có `<table`/`| a | b |` nào).
+
+**Nội dung tiếng Anh thật, không rỗng/placeholder**: đọc trực tiếp 150 dòng đầu `document.md` —
+đúng văn bản gốc của Sara Pitzer ("Most of us have known baking only with the recent invention of
+commercial yeast..."), không phải placeholder/lorem ipsum.
+
+**Ảnh — copy đúng + link đúng vị trí**:
+- Đối chiếu `md5` giữa ảnh trong zip output và ảnh gốc trong EPUB (`unzip` trực tiếp file gốc,
+  `ops/images/*.jpg`): `pub.jpg` và `f0003-01.jpg` khớp **100% byte-for-byte** (`93cef81b...` và
+  `aeefdfcf...` khớp đúng ở cả 2 phía) — xác nhận ảnh được copy nguyên vẹn, không bị re-encode/hỏng.
+- Mở vài link ảnh trong `document.md` (`images/pub.jpg`, `images/f0003-01.jpg`, `images/f0004-01.jpg`,
+  `images/f0034-01.jpg`) — cả 4 đều tồn tại đúng tại đường dẫn tương đối trong thư mục giải nén, `file`
+  xác nhận đều là JPEG thật (không phải file rỗng/corrupt).
+- 12/12 link ảnh trong `document.md` đều trỏ tới file có thật trong `images/` (đếm khớp: 12 dòng
+  `![...]` = 12 file trong `images/`).
+
+**Phân số**: grep trực tiếp `document.md` tìm mọi dòng có pattern phân số:
+```
+1/3 cup soy grits
+1/3 cup raw wheat germ
+1/3 cup butter
+1/3 cup brown sugar
+1/3 cup flour
+1 1/3 cups unbleached white flour   ← hỗn số, giữ ĐÚNG "1 1/3" (KHÔNG bị gộp thành "11/3")
+```
+Sách còn dùng nhiều phân số dạng ký tự Unicode sẵn có trong nguồn gốc (`1¼ cups`, `¼ cup`, `1½ cups`,
+không phải `<sup>/<sub>`) — các trường hợp này giữ nguyên nguyên vẹn qua `to_markdown()`, không bị
+`normalize_sup_sub()` đụng vào (đúng thiết kế — hàm này chỉ xử lý `<sup>/<sub>`, không đụng ký tự
+Unicode có sẵn). **Không phát hiện ca nào bị hỏng dạng "11/3"** — đúng đúng loại lỗi lịch sử cần xác
+nhận không tái diễn.
+
+**Kết luận mục 2**: PASS toàn bộ — Markdown/ảnh/phân số đều đúng, xác nhận bằng đọc trực tiếp nội
+dung thật (không chỉ tin `job.status`).
+
+### 3. Test qua API thật (`TestClient`, DB scratch riêng `api_scratch/`)
+
+`POST /api/upload` (EPUB thật, 2 017 999 bytes) → 200, `file_type: "epub"`.
+`POST /api/jobs` với `job_type=parse_only` → **202** (KHÔNG còn 400 — xác nhận đúng chặn HTTP đã gỡ
+theo W-1), `status: "queued"`.
+Poll `GET /api/jobs/{id}` (vòng lặp có deadline 60s, thực tế job xong gần như ngay lập tức vì EPUB
+không cần OCR) → `status: "completed"`, `actual_cost: 0.0`, `total_pages: null`,
+`duration_seconds: 0.06`.
+`GET /api/jobs/{id}/download` → **200**, `content-type: application/zip`,
+`content-disposition` đặt tên file đúng `..._markdown_<timestamp>.zip` — tải về, giải nén lại, 13
+entries khớp đúng như mục 1/2 (cùng nội dung, không lệch giữa đường gọi trực tiếp orchestrator và
+đường gọi qua API thật).
+
+**Kết luận mục 3**: PASS toàn bộ 4 bước (upload → job 202 → completed → download 200 với nội dung
+đúng) — đúng yêu cầu #4 của brief.
+
+### 4. Regression US-22 (translate mode)
+
+Không chạy lại full-book live LLM mới (đã verify sống đầy đủ ở 2 vòng QA US-22 trước, xem 2 mục ngay
+phía trên trong file này — tốn thêm chi phí thật không cần thiết cho mục tiêu "xác nhận không bị ảnh
+hưởng"). Thay vào đó chạy lại toàn bộ bộ test dùng fake `TranslationProvider` (đủ để phát hiện nếu
+`EpubDocument.load()`/wiring `run_epub_job()` bị đổi hành vi do side-effect của thay đổi US-15):
+```
+uv run pytest tests/integration/test_epub_translate_runner.py \
+  tests/integration/test_epub_translate_guards.py \
+  tests/test_epub_cost_gate.py tests/test_epub_document.py \
+  tests/test_epub_batch_golden_fixture.py -q
+→ 114 passed, 0 failed (6.14s)
+```
+Không có test nào bị sửa/skip để né lỗi — chạy y nguyên bộ test hiện có. **Kết luận: US-22 KHÔNG bị
+ảnh hưởng** bởi thay đổi US-15 (đúng như Reviewer đã xác nhận độc lập ở `docs/review-report.md`, QA
+verify lại lần nữa bằng cách tự chạy, không chỉ tin lời Reviewer).
+
+### 5. UI qua trình duyệt thật (Claude Browser MCP)
+
+Server thật tại `http://localhost:8000` đang chạy (dữ liệu production của user) — theo đúng chỉ đạo
+brief, **KHÔNG upload file test lên server đó**, CHỈ dùng để xác nhận server phản hồi (200). Toàn bộ
+thao tác upload/click chạy trên 1 server scratch riêng: `uv run uvicorn ... --port 8099`, khởi động
+từ cwd scratch (`.../qa_us15_epub/api_scratch/`, có sẵn `data/` riêng) — vì `_WEB_DIR` phục vụ
+`web/index.html` được tính TUYỆT ĐỐI theo vị trí `src/api/main.py` (không theo cwd), asset tĩnh dùng
+chung file thật của repo (đúng code đang review, không phải bản sao), nhưng DB/upload/output đều nằm
+trong cwd scratch (xác nhận qua kiểm `git status` sau khi xong — không có file lạ trong
+`data/uploads/`/`web/` của repo thật).
+
+Upload 1 EPUB tối thiểu hợp lệ (dựng bằng `zipfile`, không phải file test thật của user) qua
+`DragEvent('drop')` thật vào đúng phần tử `[@drop.prevent]` mà `web/index.html` bind — con đường code
+UI thật xử lý (`handleFiles($event.dataTransfer.files)`), không gọi thẳng API bỏ qua UI.
+
+**Kết quả**:
+- Dropdown chọn chế độ hiện đủ 2 option **"Dịch"** / **"Chỉ xuất Markdown (không dịch)"** cho file
+  EPUB — chọn được "Chỉ xuất Markdown (không dịch)" bình thường, không bị disable/ẩn.
+- Sau khi chọn "Chỉ xuất Markdown (không dịch)", UI ẩn đúng toàn bộ control chỉ áp dụng cho chế độ
+  dịch (chọn provider, chọn đơn/song ngữ, nút "Xem chi phí ước tính") — chỉ còn nút "Dịch" (label
+  chung cho hành động chạy job, đúng hành vi có sẵn từ PDF parse_only, không phải lỗi mới).
+  **Checkbox "ưu tiên độ chính xác ký hiệu" (dành cho MinerU) hoàn toàn KHÔNG xuất hiện ở BẤT KỲ chế
+  độ nào (cả "Dịch" lẫn "Chỉ xuất Markdown") cho file EPUB** — đúng đúng thiết kế W-5 (`f.file_type
+  === 'epub'` → ẩn checkbox này).
+- Bấm "Dịch" (chạy `job_type=parse_only` qua đúng UI) → job chuyển thẳng sang `completed`, nút "Tải
+  Markdown (.zip)" xuất hiện — xác nhận luồng UI đầu-cuối hoạt động, không cần thao tác thủ công nào
+  khác.
+
+**Dọn dẹp**: đã `pkill` tiến trình uvicorn scratch (port 8099) ngay sau khi xong. Xác nhận
+`git status --porcelain` sau khi dọn KHÔNG có file lạ nào trong `data/uploads/`/`web/` của repo thật
+(chỉ có đúng các file Dev đã sửa từ trước, không tăng thêm).
+
+**Kết luận mục 5**: PASS — đúng yêu cầu #6 của brief (dropdown chọn được, checkbox ẩn đúng).
+
+### 6. Regression suite toàn bộ
+
+```
+uv run pytest tests/ -q       → 760 passed, 0 failed (102.00s)
+uv run ruff check src/ tests/ → All checks passed!
+```
+Không có warning mới liên quan US-15 (các warning hiện có đều thuộc diện đã biết từ trước — deprecation
+`google.generativeai`, `RuntimeWarning: coroutine ... was never awaited` ở các test giả lập subprocess
+không liên quan EPUB).
+
+### Finding
+
+**Không phát hiện bug mới nào ở nhánh EPUB của US-15.** 2 finding non-blocking Reviewer đã ghi (fallback
+`soup.find("body") or soup`, thiếu test trực tiếp cho ca "2 basename trùng khác thư mục, bytes khác
+nhau") — không gặp phải trong lần chạy sống này với sách mẫu Sourdough thật (XHTML chuẩn luôn có
+`<body>`, và 12 ảnh của sách này không có ca trùng basename khác thư mục) — đúng như PM đã lưu ý trước,
+không cố tạo case để test, chỉ ghi nhận đúng theo brief.
+
+### Kết luận
+
+**`ready_for_release: YES`**
+
+- Chạy sống lần đầu tiên thành công cho `job_type=parse_only` + file `.epub` thật (Sourdough, 2MB),
+  cả 3 đường: gọi thẳng `JobOrchestrator`, qua API thật (`TestClient`), qua UI thật (browser).
+- Nội dung Markdown + ảnh + phân số đều đúng, xác nhận bằng đọc trực tiếp + đối chiếu md5 byte-level,
+  không chỉ tin `status="completed"` (R6-03).
+- Chi phí = 0, xác nhận 0 request MinerU/LLM nào phát sinh (AsyncMock guard raise nếu lỡ gọi).
+- US-22 (translate mode) không bị ảnh hưởng — 114/114 test EPUB translate liên quan vẫn xanh.
+- Regression suite đầy đủ: 760/760 test, ruff sạch.
+- Không đụng `data/bb_translation.db` thật, không để lại file rác trong `data/uploads/`/`web/` của
+  repo — đã tự kiểm bằng `md5`/`git status` sau khi xong.
+
+Script/artifact phiên này (scratchpad, không commit):
+`run_live_parse_only.py`, `run_live_api.py`, `document.md` (bản đầy đủ đã trích xuất),
+`extracted/` (zip giải nén), `api_download.zip`, `tiny_qa.epub`/`tiny_qa_b64.txt` (fixture UI tối
+thiểu tự dựng) — tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/fdb2c2d6-8d19-46e6-9002-56e408e83320/scratchpad/qa_us15_epub/`.

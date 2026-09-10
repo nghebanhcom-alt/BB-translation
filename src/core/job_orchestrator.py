@@ -121,17 +121,6 @@ class BatchNotFoundError(ValueError):
     pass
 
 
-class EpubNotSupportedError(NotImplementedError):
-    """Raised when a job's pipeline path for EPUB isn't implemented yet.
-
-    US-22 buoc 2/3 (Architecture.md 6.20.8) da implement pipeline dich THAT
-    (`run_epub_job()`) — `run_job()` KHONG con raise loi nay cho nhanh
-    translate nua. Van con dung DUY NHAT cho nhanh Markdown parse-only
-    (`EpubDocument.to_markdown()`, US-15's §6.15.3 S15-8), van ngoai pham vi
-    (buoc 3/3 hoac sau). The caller's message says which.
-    """
-
-
 class EpubBatchTranslationError(RuntimeError):
     """US-22 buoc 2/3 (Architecture.md 6.20.8/6.20.12 X4), VAI TRO DOI boi
     Architecture.md §6.20.14.4 (Lop C, 2026-09-10, sau khi cham gioi han
@@ -1206,25 +1195,19 @@ class JobOrchestrator:
         )
 
     async def run_parse_only(self, job: Job, db_session: AsyncSession) -> JobResult:
-        """US-15 (Architecture.md 6.15.3): Markdown parse-only — runs the
-        Parsing Engine (MinerU) only, skips Translation Engine, Glossary
-        injection and Unit Conversion entirely (BR-PARSE-01). Only the PDF
-        branch (`pdf_digital`/`pdf_scan`) is implemented — the EPUB branch
-        depends on `EpubDocument.to_markdown()` (US-22, §6.15.3 S15-8), out
-        of scope for this increment.
+        """US-15 (Architecture.md 6.15.3, EPUB branch: §6.15.7): Markdown
+        parse-only — runs the Parsing Engine only, skips Translation Engine,
+        Glossary injection and Unit Conversion entirely (BR-PARSE-01).
+
+        EPUB does NOT go through MinerU at all (`_run_epub_parse_only()`
+        below, §6.15.7 muc F) — placed BEFORE `_count_pdf_pages()`/the
+        MinerU health guard because neither applies to EPUB (`total_pages`
+        is always NULL for EPUB, §6.20.6) and it has its own self-contained
+        try/except (it runs before this method's own try/except wrapper,
+        which only covers `_run_parse_only_pipeline()` below).
         """
         if job.file_type == FileType.EPUB:
-            # S15-8 "he qua thu tu lam viec": API layer (create_job()/
-            # create_batch() in src/api/routes/jobs.py) already rejects
-            # job_type=parse_only + file_type=epub with HTTP 400 BEFORE any
-            # Job row is created — that is the primary guard. This is a
-            # second, defensive layer only (e.g. a Job row created by some
-            # future/other path) so such a job can never silently "run" or
-            # hang for up to `mineru_task_timeout_seconds`.
-            raise EpubNotSupportedError(
-                "Markdown parse-only cho EPUB chua duoc ho tro, se co khi tinh nang dich "
-                "EPUB hoan thien (Architecture.md 6.15.3 S15-8)."
-            )
+            return await self._run_epub_parse_only(job, db_session)
 
         file_path = Path(job.file_path)
 
@@ -1361,9 +1344,6 @@ class JobOrchestrator:
         # muc nay, khong quay lai doc `ocr_result.markdown_path`/`images_dir`.
         output_dir = self._output_dir / job.id
         output_dir.mkdir(parents=True, exist_ok=True)
-        final_md_path = output_dir / "document.md"
-        final_md_path.write_text(markdown_text, encoding="utf-8")
-
         final_images_dir = output_dir / "images"
         final_images_dir.mkdir(exist_ok=True)
         image_files: list[Path] = []
@@ -1374,9 +1354,41 @@ class JobOrchestrator:
                     shutil.copyfile(image_file, target)
                     image_files.append(target)
 
+        # Buoc 3-5 (ghi document.md + guard doc lai + zip eager + guard zip)
+        # + job completion/broadcast: dung CHUNG voi nhanh EPUB
+        # (`_run_epub_parse_only()`) qua `_finalize_parse_only_output()` —
+        # Architecture.md §6.15.7 muc F / Protocol 8 R8-03: tranh 2 nhanh
+        # troi khac nhau o phan dong goi giong het nhau (Bug #5's class of
+        # error).
+        return await self._finalize_parse_only_output(job, markdown_text, image_files, db_session)
+
+    async def _finalize_parse_only_output(
+        self,
+        job: Job,
+        markdown_text: str,
+        image_files: list[Path],
+        db_session: AsyncSession,
+    ) -> JobResult:
+        """Phan "dong goi" DUNG CHUNG giua ca 2 nhanh `run_parse_only()`
+        (PDF qua `_run_parse_only_pipeline()`, EPUB qua
+        `_run_epub_parse_only()`) — Architecture.md §6.15.7 muc F, Protocol 8
+        R8-03: moi nhanh tu lam xong phan RIENG cua minh (MinerU parse hoac
+        `EpubDocument.to_markdown()`) roi goi CHUNG ham nay cho phan con lai,
+        thay vi re nhanh `if file_type == "epub"` rai rac trong than ham.
+
+        `image_files` PHAI la danh sach file DA NAM SAN trong
+        `output_dir/"images"` (`output_dir = self._output_dir / job.id`):
+        nhanh PDF da copy tu processing dir truoc khi goi ham nay; nhanh EPUB
+        thi `EpubDocument.to_markdown()` ghi thang vao do.
+        """
+        output_dir = self._output_dir / job.id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        final_md_path = output_dir / "document.md"
+        final_md_path.write_text(markdown_text, encoding="utf-8")
+
         # Buoc 3 (guard S15-5): doc lai CHINH file `document.md` vua ghi o
-        # Buoc 2 — khong tin bien `markdown_text` trong bo nho (dung tinh
-        # than R6-02 rut ra tu Bug #5: assert/guard tren artifact THAT).
+        # tren — khong tin bien `markdown_text` trong bo nho (dung tinh than
+        # R6-02 rut ra tu Bug #5: assert/guard tren artifact THAT).
         if len(final_md_path.read_text(encoding="utf-8").strip()) == 0:
             raise ParseOnlyEmptyOutputError(
                 "document.md rong sau khi ghi vao data/outputs — job that bai."
@@ -1442,6 +1454,57 @@ class JobOrchestrator:
             bilingual_path=None,
             actual_cost=job.actual_cost,
         )
+
+    async def _run_epub_parse_only(self, job: Job, db_session: AsyncSession) -> JobResult:
+        """US-15 nhanh EPUB (Architecture.md §6.15.7 muc F): Markdown
+        parse-only cho EPUB — KHONG dung MinerU (EPUB da co text layer co cau
+        truc san, khong can OCR/parse engine ngoai). Method nay CHAY TRUOC
+        try/except cua `run_parse_only()` (no thay the nhanh
+        `raise EpubNotSupportedError` cu, cung chay truoc diem do) nen tu
+        chua try/except RIENG, cung hinh dang that bai voi `run_parse_only()`
+        (`job.status="failed"` + `error_message` + broadcast) — khong co
+        cancel/timeout polling o day (khong co tac vu ngoai dai de poll,
+        parse thuan local xong trong vai giay).
+        """
+        job.status = "parsing"
+        job.started_at = job.started_at or datetime.now(UTC)
+        db_session.add(job)
+        await db_session.commit()
+
+        try:
+            # R6-01 (soi day lineage): `doc` la chinh instance vua `load()`
+            # o day — `to_markdown()` ben duoi PHAI dung lai CHINH instance
+            # nay (doc `self._spine_hrefs`), cam goi `load()` lan thu hai.
+            doc = EpubDocument.load(Path(job.file_path))
+            output_dir = self._output_dir / job.id
+            images_dir = output_dir / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            markdown_text = doc.to_markdown(images_out_dir=images_dir)
+            if len(markdown_text.strip()) == 0:
+                raise ParseOnlyEmptyOutputError(
+                    f"EpubDocument.to_markdown() ra Markdown rong (0 ky tu doc duoc) cho "
+                    f"file '{job.filename}' — job that bai thay vi tra ve file rong "
+                    "(tuong duong S15-5 cho nhanh EPUB)."
+                )
+            image_files = sorted(p for p in images_dir.iterdir() if p.is_file())
+            return await self._finalize_parse_only_output(
+                job, markdown_text, image_files, db_session
+            )
+        except Exception as exc:  # noqa: BLE001 — same failure shape as run_parse_only()'s own wrapper (bao gom EpubDrmError/EpubParseError tu load())
+            job.status = "failed"
+            job.error_message = str(exc)
+            job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+            db_session.add(job)
+            await db_session.commit()
+            await self._broadcast_job_failed(job, 0, 1)
+            return JobResult(
+                job_id=job.id,
+                status="failed",
+                output_path=job.output_path,
+                bilingual_path=None,
+                actual_cost=job.actual_cost,
+                error_message=job.error_message,
+            )
 
     async def _run_mineru_and_record_quality(
         self,
