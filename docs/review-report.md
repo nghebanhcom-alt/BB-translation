@@ -9384,3 +9384,38 @@ verify hành vi thật qua chạy thử độc lập"). Reviewer tự tái tạo
 theo phạm vi Protocol 5 project) — nhưng hành vi ngầm định `markdownify.markdownify()` (rò rỉ XML
 declaration khi re-parse toàn chuỗi) đã được Dev VÀ Reviewer tự chạy thử độc lập xác nhận (không chỉ
 đọc doc).
+
+---
+
+# Review Report — Bump pyproject.toml version 1.2.9→1.3.1 (fix quên bump ở 2 release trước) — VÒNG 1/3
+
+**Context**: PM phát hiện 2 commit `27d7daa` (Release v1.3.0) và `c38a184` (Release v1.3.1) quên
+bump `pyproject.toml` (vẫn ghi `1.2.9`), vi phạm quy ước project (mọi commit "Release vX.Y.Z" trước
+đó đều bump `pyproject.toml` cùng commit). PM tự sửa `pyproject.toml` version → `1.3.1`.
+
+**Kiểm tra đã thực hiện** (tự chạy, không suy đoán):
+1. `git diff pyproject.toml` — xác nhận đúng 1 dòng thay đổi: `version = "1.2.9"` →
+   `version = "1.3.1"`. Không có thay đổi nào khác lọt vào file (dependencies, requires-python,
+   description... giữ nguyên).
+2. `git log --oneline --all | grep -i "release v1.3"` → thứ tự commit đúng: `27d7daa Release
+   v1.3.0` trước, `c38a184 Release v1.3.1` sau (v1.3.1 là commit mới nhất). `project_state.json`
+   field `"version": "1.3.1"` (dòng 5) khớp. Số `1.3.1` là ĐÚNG số cuối cùng cần bump tới, không
+   phải `1.3.0`.
+3. `grep -rn "1\.2\.9" src/ web/` → không có kết quả. Không có nơi nào khác hardcode version cũ cần
+   đồng bộ theo.
+4. Đọc `src/api/main.py::_read_app_version()` (dòng 64-74) — xác nhận đọc trực tiếp
+   `pyproject.toml` qua `tomllib` tại runtime mỗi lần gọi, không cache, không dùng
+   `importlib.metadata`. Claim của PM về hành vi endpoint `/api/version` là đúng theo source code
+   (khớp với kết quả `curl` PM báo cáo).
+
+**External contract verified against real source**: N/A — `pyproject.toml` là file cấu hình nội bộ
+project, không phải external tool/SDK theo phạm vi Protocol 5.
+
+**Kết luận**: APPROVE. Thay đổi đúng, tối thiểu, đúng phạm vi. Không có regression, không có
+side-effect ngoài dự kiến.
+
+**Non-blocking (không chặn approve, ghi lại cho lần sau)**:
+1. Root cause (quên bump version trong 2 commit "Release" trước) chưa có cơ chế ngăn tái diễn —
+   nên cân nhắc thêm 1 check tương tự pre-commit hook Protocol 7 (R7-02): chặn/cảnh báo commit có
+   tiêu đề "Release vX.Y.Z" nếu `pyproject.toml` không nằm trong cùng commit, hoặc version trong
+   `pyproject.toml` không khớp X.Y.Z trong tiêu đề.
