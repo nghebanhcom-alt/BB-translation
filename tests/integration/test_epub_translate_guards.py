@@ -676,3 +676,145 @@ async def test_layer4_stops_mid_first_chunk_and_persists_partial_cost(
     # Chi 1 lan goi duy nhat -> Lop 4 dung NGAY sau request dau tien, khong
     # doi het chunk (dung 6.20.13.2's "hieu qua dinh luong").
     assert len(provider.calls) == 1
+
+
+# --- BL-05 (Protocol 6, review-report.md finding lap lai 2 lan) -------------
+# `EpubBatchTranslationError` (C-2) va `EpubRequestRunawayError` (R-b) phai
+# ghi `chunk.api_cost`/`api_tokens_used` TRUOC khi raise, dung pattern
+# `EpubChunkCostCapExceeded` o test truoc da lam dung tu truoc — khong de
+# tien that da tieu cho request THANH CONG truoc do "bien mat" khi 1 request
+# SAU no trong CUNG chunk that bai.
+
+
+class _CostTrackingEpubProvider(_ControllableEpubProvider):
+    """Ghi lai `estimated_cost_usd` THAT cua TUNG lan goi (khong hardcode) —
+    dung de doc lap tinh lai tong chi phi ky vong, roi doi chieu voi
+    `chunk.api_cost` sau khi exception da duoc bat lai trong test."""
+
+    def __init__(self, script) -> None:
+        super().__init__(script)
+        self.observed_costs: list[float] = []
+
+    async def translate(
+        self, text: str, glossary_prompt: str, source_lang: str, target_lang: str
+    ) -> TranslationResult:
+        result = await super().translate(text, glossary_prompt, source_lang, target_lang)
+        self.observed_costs.append(result.estimated_cost_usd)
+        return result
+
+
+async def test_epub_batch_translation_error_still_records_cost_of_prior_successful_request(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """BL-05 — mo phong 1 chunk co 2 request: request 1 (slice unit 0-2)
+    THANH CONG hoan toan (tien that da tieu, dich dung ca 3 unit); request 2
+    (slice unit 3-5) THIEU HET id, kich hoat 1 lan goi lai NGUYEN request
+    (van thieu) -> 3/6 unit fallback > han muc chunk 20% (toi da 2/6) ->
+    `EpubBatchTranslationError` (C-2, `job_orchestrator.py`). Sau khi
+    exception nay duoc bat lai (qua `run_job()`'s outer handler), `chunk.
+    api_cost` trong DB PHAI phan anh dung TONG chi phi CA 3 lan goi that
+    (ke ca request 1 da thanh cong), khong phai 0/None.
+    """
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=6)
+    job = await _create_epub_job(session, epub_path)
+
+    def _slice_succeeds(payload: list[dict]) -> tuple[dict, None]:
+        return {item["id"]: f"VI:{item['html']}" for item in payload}, None
+
+    def _slice_missing_all(payload: list[dict]) -> tuple[dict, None]:
+        return {}, None
+
+    # call0 = request slice (0,2): succeeds. call1 = request slice (3,5):
+    # missing all 3 -> triggers 1 whole-request retry (call2), also missing
+    # all 3 (script clamps to the last entry for any call beyond index 2).
+    provider = _CostTrackingEpubProvider([_slice_succeeds, _slice_missing_all, _slice_missing_all])
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_request_max_units=3,  # forces 2 requests/chunk (3 + 3 units)
+        ),
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "failed"
+    assert len(provider.calls) == 3  # success + missing + 1 whole-retry
+    # Request 1 genuinely cost something real (not $0) -- otherwise this
+    # test couldn't distinguish "cost recorded" from "cost happens to be 0".
+    assert provider.observed_costs[0] > 0
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = list(chunks_result.all())
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.status == "failed"
+    assert chunk.output_path is None  # never marked completed (BL-05 requirement)
+
+    expected_total_cost = sum(provider.observed_costs)
+    assert chunk.api_cost is not None
+    assert chunk.api_cost == pytest.approx(expected_total_cost)
+    # The single biggest failure mode this test guards against: `api_cost`
+    # silently ending up as just the LAST call's cost (or 0/None) instead of
+    # the full accumulated total across all 3 calls in this chunk.
+    assert chunk.api_cost > provider.observed_costs[0]
+    assert chunk.api_tokens_used is not None
+    assert chunk.api_tokens_used > 0
+
+
+async def test_epub_request_runaway_error_still_records_cost_of_prior_successful_request(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """BL-05 — same shape as the C-2 test above but for `EpubRequestRunawayError`
+    (R-b): request 1 (slice unit 0-2) succeeds normally; request 2 (slice
+    unit 3-5) comes back BOTH runaway (huge output vs its own payload) AND
+    missing ids -> aborts immediately via `EpubRequestRunawayError` with NO
+    retry (R-b, Architecture.md 6.20.13.3b). `chunk.api_cost` must still
+    reflect request 1's real cost after this exception is caught.
+    """
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=6)
+    job = await _create_epub_job(session, epub_path)
+
+    def _slice_succeeds(payload: list[dict]) -> tuple[dict, None]:
+        return {item["id"]: f"VI:{item['html']}" for item in payload}, None
+
+    def _slice_runaway_and_missing(payload: list[dict]) -> tuple[dict, None]:
+        # Missing id "0", and an artificially huge output_tokens override so
+        # `is_runaway_output()` trips (Architecture.md 6.20.13.3b).
+        reply = {item["id"]: f"VI:{item['html']}" for item in payload if item["id"] != "0"}
+        return reply, 100_000
+
+    provider = _CostTrackingEpubProvider([_slice_succeeds, _slice_runaway_and_missing])
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_request_max_units=3,  # forces 2 requests/chunk (3 + 3 units)
+        ),
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "failed"
+    await session.refresh(job)
+    assert "runaway" in job.error_message
+    assert len(provider.calls) == 2  # success + the aborted runaway request, NO retry
+    assert provider.observed_costs[0] > 0
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = list(chunks_result.all())
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.status == "failed"
+    assert chunk.output_path is None
+
+    expected_total_cost = sum(provider.observed_costs)
+    assert chunk.api_cost is not None
+    assert chunk.api_cost == pytest.approx(expected_total_cost)
+    assert chunk.api_cost > provider.observed_costs[0]
+    assert chunk.api_tokens_used is not None
+    assert chunk.api_tokens_used > 0

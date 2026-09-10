@@ -575,6 +575,29 @@ async def create_job(
             status_code=400, detail="job_type phai la 'translate' hoac 'parse_only'"
         )
 
+    settings = await get_effective_settings(session)
+    provider_name = request.provider or settings.default_provider
+
+    await _reject_deepl_for_pdf(request.job_type, provider_name, upload.file_type)
+
+    # BL-02: cost gate runs BEFORE the duplicate-check below (not after), so a
+    # user whose file happens to have a completed-duplicate hash still sees
+    # the 402 cost-confirmation prompt first instead of jumping straight to
+    # "duplicate_found" -- `force=true` behavior is unaffected either way,
+    # since it always ran the cost gate unconditionally regardless of order.
+    if request.job_type == "translate":
+        provider = _resolve_provider_or_400(provider_name, settings)
+        cost_estimate = await _enforce_cost_gate(
+            session,
+            upload.file_path,
+            provider,
+            settings,
+            request.glossary_project_id,
+            request.confirm_cost,
+            scope="job nay",
+            file_type=upload.file_type,
+        )
+
     if request.job_type == "translate" and not request.force:
         duplicate = await _find_completed_duplicate(session, upload.file_hash)
         if duplicate is not None:
@@ -588,24 +611,6 @@ async def create_job(
                     job_id=duplicate.id, completed_at=duplicate.completed_at
                 ),
             )
-
-    settings = await get_effective_settings(session)
-    provider_name = request.provider or settings.default_provider
-
-    await _reject_deepl_for_pdf(request.job_type, provider_name, upload.file_type)
-
-    if request.job_type == "translate":
-        provider = _resolve_provider_or_400(provider_name, settings)
-        cost_estimate = await _enforce_cost_gate(
-            session,
-            upload.file_path,
-            provider,
-            settings,
-            request.glossary_project_id,
-            request.confirm_cost,
-            scope="job nay",
-            file_type=upload.file_type,
-        )
 
     batch = await _resolve_batch(
         session, request.glossary_project_id, 1, request.output_mode, provider_name

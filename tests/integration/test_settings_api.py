@@ -139,3 +139,34 @@ def test_put_cost_cap_settings_overrides_effective_settings(client: TestClient) 
     assert effective.max_cost_per_job_usd == 0.5
     assert effective.max_cost_per_batch_usd == 1.5
     assert effective.cost_cap_enabled is False
+
+
+# === Architecture.md 6.12.6 — ollama_thread (BL-03: round-trip via API) ===
+
+
+def test_get_settings_reports_ollama_thread_default(client: TestClient) -> None:
+    response = client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["ollama_thread"] == 2
+
+
+def test_put_ollama_thread_overrides_effective_settings(client: TestClient) -> None:
+    response = client.put("/api/settings", json={"ollama_thread": 6})
+    assert response.status_code == 200
+    assert response.json()["ollama_thread"] == 6
+
+    # GET reflects the same DB-backed override, not just the PUT echo.
+    get_response = client.get("/api/settings")
+    assert get_response.json()["ollama_thread"] == 6
+
+    # And it must actually be what JobOrchestrator's cold-start chunk_size
+    # branch (Architecture.md 6.12.7) would see through get_effective_settings().
+    async def _check_effective():
+        session_factory = database_module.get_session_factory()
+        async with session_factory() as session:
+            return await get_effective_settings(session)
+
+    import asyncio
+
+    effective = asyncio.run(_check_effective())
+    assert effective.ollama_thread == 6

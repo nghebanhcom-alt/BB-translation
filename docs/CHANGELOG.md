@@ -7671,3 +7671,113 @@ uv run pytest tests/ -q           → đang chạy full suite, xem báo cáo PM
 
 **Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo "xong"/"sẵn sàng
 release". Chờ PM giao Reviewer.
+
+## Fix 4 mục backlog kỹ thuật nhỏ — BL-01/02/03/05 (Dev, 2026-09-10)
+
+Brief PM: 4 mục backlog độc lập, mỗi mục kèm test xác nhận hành vi đúng (không chỉ sửa rồi hy vọng
+đúng). Tự xác nhận từng fix bằng cách chạy lại test trên code CŨ (git stash chỉ file `src/`) trước
+khi áp fix — mọi test bên dưới đều fail trên code cũ, pass trên code mới.
+
+### BL-01 — `font_shrink_page()` lặp toàn tài liệu thay vì đúng phạm vi chunk
+
+**Vấn đề**: `src/core/job_orchestrator.py::_process_chunk()` mở `chunk.output_path` (từ sau Bug #7,
+đây là bản COPY CẢ TÀI LIỆU GỐC, không còn chunk-scoped) rồi `for page in doc:` lặp qua TOÀN BỘ
+trang tài liệu cho MỖI chunk — lãng phí tính toán tăng tuyến tính theo số chunk, và
+`OverflowReport` có thể bị ghi lặp lại cho cùng 1 trang bởi nhiều chunk khác nhau.
+
+**Fix**: đổi `for page in doc:` thành `for page_num in range(chunk.page_start - 1,
+min(chunk.page_end, doc.page_count)):` — đúng convention `page_start`/`page_end` 1-indexed inclusive
+đã dùng ở `_extract_chunk_text()`/`_count_text_segments()` cùng file.
+
+**Test**: `tests/integration/test_job_orchestrator.py::test_font_shrink_only_processes_own_chunk_page_range`
+— job 90 trang, `chunk_size_used=40` (3 chunk: 1-40/39-80/79-90), patch `font_shrink_page` để ghi
+lại `page.number` TẠI THỜI ĐIỂM gọi (trước khi doc handle bị đóng). Assert tổng số lần gọi = 94 (40
++ 42 + 12, không phải 3×90=270) VÀ mỗi `page.number` quan sát được nằm đúng trong phạm vi
+`page_start-1..page_end-1` của chunk tương ứng nó thuộc về (zip theo thứ tự chunk_index).
+
+### BL-02 — `create_job()`: cost gate giờ chạy TRƯỚC duplicate-check (thứ tự UX)
+
+**Vấn đề**: `src/api/routes/jobs.py::create_job()` chạy duplicate-check (nếu file trùng hash với job
+`completed` trước đó và `force` không set) TRƯỚC cost gate — user thấy cảnh báo "đã dịch rồi"
+trước khi thấy cảnh báo chi phí vượt cap, dù cost gate luôn chạy vô điều kiện cho mọi request
+`translate` (kể cả `force=true`).
+
+**Fix**: di chuyển khối `settings`/`provider`/`_reject_deepl_for_pdf()`/`_enforce_cost_gate()` lên
+TRƯỚC khối duplicate-check. Hành vi `force=true` (bỏ qua RIÊNG duplicate-check, cost gate vẫn áp
+dụng) không đổi.
+
+**Test**:
+- `tests/integration/test_cost_gate_api.py::test_create_job_cost_gate_runs_before_duplicate_check`
+  (mới) — file trùng hash với 1 job `translate` đã `completed`, cap thấp hơn ước tính thật. Request
+  không `force` trả `402` (không phải `200`/`duplicate_found`) — assert `_job_row_count()` không
+  tăng. `force=true` (không `confirm_cost`) vẫn `402` — chứng minh cost gate vẫn áp dụng dưới
+  `force`. `force=true` + `confirm_cost=true` mới thực sự tạo job mới (202, job id khác job trùng).
+- Sửa `tests/integration/test_upload_and_job_flow.py::test_create_job_reports_duplicate_of_completed_job_with_same_hash`
+  — request duplicate-check giờ phải chỉ định `provider: "ollama"` (không cần API key) vì cost gate
+  chạy trước nó, tránh 400 do thiếu key `deepseek` (default provider) làm sai lệch mục đích test.
+
+### BL-03 — thêm test round-trip `ollama_thread` qua `PUT`/`GET /api/settings`
+
+Field đã expose đúng ở `src/api/routes/settings.py` (verify lại bằng đọc code, không sửa gì) nhưng
+thiếu test round-trip. Thêm 2 test vào `tests/integration/test_settings_api.py` theo đúng pattern
+`test_put_cost_cap_settings_overrides_effective_settings` đã có:
+- `test_get_settings_reports_ollama_thread_default` — GET trả về default `2`.
+- `test_put_ollama_thread_overrides_effective_settings` — `PUT {"ollama_thread": 6}` → PUT response,
+  GET response, VÀ `get_effective_settings()` (không chỉ HTTP echo) đều trả `6`.
+
+### BL-05 (ưu tiên cao nhất) — ghi `chunk.api_cost`/`api_tokens_used` TRƯỚC khi raise qua
+`EpubBatchTranslationError`/`EpubRequestRunawayError`
+
+**Vấn đề** (finding Reviewer đã nhắc 2 lần, xem `docs/review-report.md` mục "2. Data lineage —
+`chunk.api_cost`/`api_tokens_used` khi rơi vào Lớp C"): trong
+`job_orchestrator.py::_process_epub_chunk()`, khi chunk fail qua `EpubBatchTranslationError` (C-2,
+vượt ngưỡng fallback 20%/chunk) hoặc `EpubRequestRunawayError` (R-b, runaway + thiếu id), hàm raise
+NGAY mà KHÔNG ghi `chunk.api_cost`/`chunk.api_tokens_used` (biến cục bộ `total_cost`/
+`total_input_tokens`/`total_output_tokens` đã tích luỹ qua `_accumulate_and_check_budget()` cho MỌI
+request đã gọi trong chunk, kể cả request thành công trước request lỗi) — tiền thật đã tiêu "biến
+mất" khỏi `job.actual_cost`/cost accumulator Lớp 3 khi chunk fail.
+
+**Fix**: thêm đúng trước mỗi lệnh `raise` của 2 exception này:
+```python
+chunk.api_tokens_used = total_input_tokens + total_output_tokens
+chunk.api_cost = total_cost
+db_session.add(chunk)
+await db_session.commit()
+```
+— giống hệt pattern `EpubChunkCostCapExceeded` (Lớp 4) đã làm đúng từ trước. KHÔNG đổi
+`chunk.status` (outer `except Exception` ở `run_epub_job()` tự set `"failed"` — đã verify đọc code,
+không đoán).
+
+**Test** (điểm quan trọng nhất của brief): `tests/integration/test_epub_translate_guards.py`, thêm
+class `_CostTrackingEpubProvider` (subclass `_ControllableEpubProvider`, ghi lại
+`estimated_cost_usd` THẬT của từng lần gọi, không hardcode) + 2 test:
+- `test_epub_batch_translation_error_still_records_cost_of_prior_successful_request` — chunk 6
+  unit, 2 request/chunk (`epub_request_max_units=3`): request 1 (unit 0-2) THÀNH CÔNG hoàn toàn;
+  request 2 (unit 3-5) thiếu hết id → 1 lần gọi lại nguyên request (vẫn thiếu) → 3/6 fallback vượt
+  hạn mức chunk 20% (tối đa 2/6) → `EpubBatchTranslationError`. Sau khi bắt lại exception, assert
+  `chunk.api_cost == pytest.approx(sum(provider.observed_costs))` (tổng CẢ 3 lần gọi, không phải
+  0/None/chỉ lần cuối) và `chunk.api_cost > provider.observed_costs[0]` (chứng minh cost của request
+  1 THẬT SỰ được cộng vào, không bị ghi đè/bỏ qua).
+- `test_epub_request_runaway_error_still_records_cost_of_prior_successful_request` — cùng hình dạng
+  cho `EpubRequestRunawayError` (request 2 runaway + thiếu id → abort ngay, không retry).
+- Cả 2 test đã verify fail trên code CŨ (`chunk.api_cost is None`) qua `git stash` trước khi áp fix,
+  xác nhận test thật sự chứng minh fix, không phải test tự thoả mãn giả định.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/                     → All checks passed!
+uv run ruff format --check <các file đã sửa>      → sạch cho MỌI dòng do Dev thêm/sửa
+                                                     (còn vài dòng format-drift TIỀN TỒN TẠI ở
+                                                     src/api/routes/jobs.py, job_orchestrator.py,
+                                                     test_cost_gate_api.py, test_upload_and_job_flow.py
+                                                     — KHÔNG do Dev đụng tới, ngoài phạm vi 4 mục
+                                                     backlog này, không tự ý sửa)
+uv run pytest tests/ -q                           → 773 passed (baseline 767, +6 test mới,
+                                                     không regression)
+```
+
+### Trạng thái
+
+**Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo "xong"/"sẵn sàng
+release". Chờ PM giao Reviewer.

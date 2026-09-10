@@ -367,7 +367,16 @@ def test_create_job_reports_duplicate_of_completed_job_with_same_hash(
     file_id_after_translate = reupload_response_2.json()["file_id"]
 
     duplicate_check_response = client.post(
-        "/api/jobs", json={"file_id": file_id_after_translate, "job_type": "translate"}
+        "/api/jobs",
+        # BL-02: cost gate now runs BEFORE the duplicate-check (order fix),
+        # so this call must specify a provider needing no API key too --
+        # otherwise it 400s on provider resolution before ever reaching the
+        # duplicate-check code path this test is actually about.
+        json={
+            "file_id": file_id_after_translate,
+            "job_type": "translate",
+            "provider": "ollama",
+        },
     )
     assert duplicate_check_response.status_code == 200
     body = duplicate_check_response.json()

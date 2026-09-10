@@ -93,22 +93,22 @@
       "id": "BL-01",
       "text": "font_shrink_page() lặp qua toàn bộ tài liệu thay vì phạm vi riêng của chunk (lãng phí tính toán sau fix Bug #7)",
       "source": "reviewer",
-      "ref": "src/core/job_orchestrator.py ~550-554",
-      "status": "open"
+      "ref": "src/core/job_orchestrator.py ~550-554 — DONE: 2026-09-10, Dev→Reviewer APPROVE→QA live PASS (77 lần gọi thay vì 455, đúng phạm vi chunk)",
+      "status": "done"
     },
     {
       "id": "BL-02",
       "text": "create_job(): duplicate-check chạy TRƯỚC cost gate — request không có force=true trả duplicate_found trước khi chạm cost gate",
       "source": "qa",
-      "ref": "docs/test-report.md — QA Vòng 7",
-      "status": "open"
+      "ref": "docs/test-report.md — QA Vòng 7 — DONE: 2026-09-10, đảo thứ tự cost gate trước duplicate-check, QA live verify qua TestClient",
+      "status": "done"
     },
     {
       "id": "BL-03",
       "text": "Thiếu test round-trip cho field ollama_thread qua API (field đã expose đúng ở settings.py)",
       "source": "qa",
-      "ref": "tests/integration/test_settings_api.py",
-      "status": "open"
+      "ref": "tests/integration/test_settings_api.py — DONE: 2026-09-10, thêm test round-trip PUT/GET, QA live verify",
+      "status": "done"
     },
     {
       "id": "BL-04",
@@ -121,8 +121,8 @@
       "id": "BL-05",
       "text": "chunk.api_cost/api_tokens_used không được ghi trước khi raise qua EpubBatchTranslationError và EpubRequestRunawayError",
       "source": "reviewer",
-      "ref": "Reviewer nhắc lần 2 — vòng B2-1/#EPUB-4",
-      "status": "open"
+      "ref": "Reviewer nhắc lần 2 — vòng B2-1/#EPUB-4 — DONE: 2026-09-10, ghi chunk.api_cost/api_tokens_used trước cả 2 điểm raise; QA verify sống bằng DeepSeek thật",
+      "status": "done"
     }
   ],
   "steps": [
@@ -138,7 +138,7 @@
     {
       "id": "S2",
       "title": "Bước 2 — Port Protocol A–F + mở rộng 2/3/4 từ AB-RnD sang BB-Translation",
-      "owner_role": "pm",
+      "owner_role": "dev",
       "status": "in_progress",
       "blocked_by": [],
       "output": null,
@@ -148,17 +148,9 @@
   "loops": [
     {
       "pair": "dev-reviewer",
-      "item": "S1",
+      "item": "S2",
       "count": 1,
       "limit": 3,
-      "escalated_at": null,
-      "reset_reason": null
-    },
-    {
-      "pair": "dev-qa",
-      "item": "S1",
-      "count": 1,
-      "limit": 5,
       "escalated_at": null,
       "reset_reason": null
     }

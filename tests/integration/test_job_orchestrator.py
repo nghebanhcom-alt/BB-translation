@@ -1906,6 +1906,79 @@ async def test_pdf2zh_engine_still_runs_font_shrink_regression(
 
 
 @pytest.mark.asyncio
+async def test_font_shrink_only_processes_own_chunk_page_range(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """BL-01: since Bug #7's fix, `chunk.output_path` is a full-document copy
+    (`_fake_pdf2zh_runner()`'s mono output re-embeds every page of
+    `input_path`, same across all chunks — see its docstring), NOT
+    chunk-scoped. `font_shrink_page()` must only run over
+    `chunk.page_start..chunk.page_end`, not every page of that copy —
+    otherwise cost grows with `len(chunks) * total_pages` instead of
+    `total_pages` (each page shrunk exactly once, by its own chunk), and
+    `OverflowReport` rows for a page could be written once per chunk instead
+    of once. Uses the same TOTAL_PAGES=90/chunk_size_used=40 fixture as
+    `test_run_job_completes_with_three_chunks` (3 chunks: 1-40, 39-80, 79-90).
+    """
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, TOTAL_PAGES)
+    job = await _create_job(session, source_pdf)
+    job.chunk_size_used = 40
+    session.add(job)
+    await session.commit()
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    seen_page_numbers: list[int] = []
+
+    async def _capture_page_number(page, *args, **kwargs):
+        seen_page_numbers.append(page.number)
+        return await _real_font_shrink_page(page, *args, **kwargs)
+
+    with patch(
+        "src.core.job_orchestrator.font_shrink_page",
+        new=AsyncMock(side_effect=_capture_page_number),
+    ) as font_shrink_spy:
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = sorted(chunks_result.all(), key=lambda c: c.chunk_index)
+    assert len(chunks) == 3
+    assert [(c.page_start, c.page_end) for c in chunks] == [(1, 40), (39, 80), (79, 90)]
+
+    expected_calls = sum(c.page_end - c.page_start + 1 for c in chunks)
+    assert expected_calls == 94  # 40 + 42 + 12, not 3 * 90 = 270
+    assert font_shrink_spy.await_count == expected_calls
+
+    # Every `page.number` the real implementation actually touched (captured
+    # AT call time, before the doc handle is closed) must fall inside that
+    # chunk's own range -- proves the fix restricts the loop's bounds, not
+    # just its call count coincidentally matching.
+    for page_number, chunk in zip(seen_page_numbers, _expand_call_chunks(chunks), strict=True):
+        assert chunk.page_start - 1 <= page_number <= chunk.page_end - 1
+
+
+def _expand_call_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    """Test helper for `test_font_shrink_only_processes_own_chunk_page_range`:
+    chunks are processed in `chunk_index` order and, per chunk, one
+    `font_shrink_page` call per page in `page_start..page_end` — expand that
+    into a flat per-call chunk list to zip against `await_args_list`.
+    """
+    expanded: list[Chunk] = []
+    for chunk in chunks:
+        expanded.extend([chunk] * (chunk.page_end - chunk.page_start + 1))
+    return expanded
+
+
+@pytest.mark.asyncio
 async def test_needs_font_shrink_property_isinstance_guard_catches_unset_mock(
     tmp_path: Path,
 ) -> None:

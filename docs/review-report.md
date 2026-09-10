@@ -2181,3 +2181,324 @@ pre-existing (40 lần ở baseline không có fix), không phải do thay đổ
 **External contract verified against real source**: N/A — không có lời gọi external
 tool/CLI/HTTP/SDK provider nào trong `job_recovery.py` hoặc thay đổi trong `main.py`/`job.py` (chỉ
 DB nội bộ qua SQLModel). Không thuộc phạm vi Protocol 5.
+
+
+---
+
+# Review Report — Port Protocol A–F + mở rộng 2/3/4 từ AB-RnD (hạ tầng quy trình) — VÒNG 1/3
+
+**Phạm vi**: `scripts/validate_state.py` (mới), `.git/hooks/pre-commit` (khối bổ sung cuối file),
+`project_state.schema.json` (mới), `project_state.json` (viết lại từ văn xuôi sang cấu trúc),
+`CLAUDE.md` + `.claude/agents/*.md` (chỉ kiểm tính nhất quán). Không đụng `src/`/`web/` — xác nhận
+`src/api/main.py`, `src/models/job.py`, `src/core/job_recovery.py` là công việc Bug #EPUB-3 của đợt
+trước (đã commit ở `3ed0088`/`727629b`, không còn xuất hiện trong `git status` hiện tại) — không
+review, không đụng vào.
+
+**External contract verified against real source**: N/A — không có wrapper nào gọi tool/API bên thứ
+3 trong phạm vi đợt này (`validate_state.py` chỉ đọc file cục bộ bằng stdlib). Không thuộc Protocol 5.
+
+## 1. Phương pháp kiểm
+
+Tự tạo 14 file `project_state.json` hỏng có chủ đích trong một **git repo cô lập** dựng riêng tại
+scratchpad (không đụng vào `project_state.json` thật của repo), chạy `scripts/validate_state.py` và
+`bash .git/hooks/pre-commit` (bản copy) lên từng file để xác nhận validator/hook thực sự bắt lỗi nó
+tuyên bố bắt. Sau khi xong, xác nhận `git diff --stat project_state.json` ở repo thật rỗng — file gốc
+không bị đụng.
+
+## 2. Validator có bắt đúng các vi phạm nó tuyên bố không — CÓ, với 7/7 case yêu cầu
+
+| Case | Kết quả |
+|---|---|
+| `steps[].status=done` thiếu `output` | ❌ bắt đúng: "step S1: status=done nhưng thiếu output" |
+| `loops[].count > limit` mà `escalated_at=null` | ❌ bắt đúng: "count 5 > limit 3 nhưng chưa escalate" |
+| `blockers[]` chứa câu văn thay vì id | ❌ bắt đúng (qua nhánh heuristic `" " in b or len(b)>20`) |
+| `infra_pending[]` quá 24h `commit=null` | ❌ bắt đúng: "quá 24h chưa có commit (Protocol E)" |
+| `infra_pending[]` còn trong 24h, `commit=null` | ✅ pass đúng (không báo lỗi sai) |
+| `open_questions[].clarify_rounds > 2` | ❌ bắt đúng: "clarify_rounds > 2 (Protocol B)" |
+| `text` vượt 220 ký tự | ❌ bắt đúng, đếm đúng số ký tự thực tế (221) |
+
+`check_blockers()` đáng chú ý: heuristic "trông như câu văn" (`" " in b or len(b) > 20`) tự nó không
+đủ vét cạn (vd một chuỗi 15 ký tự không dấu cách vẫn "trông như id"), nhưng nhánh `elif b not in
+known_ids` phía sau vẫn chặn được các trường hợp đó vì gần như chắc chắn không khớp id thật nào — hai
+lớp kiểm tra bù nhau, không phải lỗ hổng. Xác nhận đây là thiết kế chấp nhận được.
+
+`parse_day()` (đúng như câu hỏi trong brief): value rác (vd `"khong phai ngay thang"`) khiến
+`date.fromisoformat` raise `ValueError`, hàm trả `None`, và `check_infra()` **bỏ qua hoàn toàn** mục
+đó — không fail, **không cả warn**. Xác nhận bằng case `case_infra_garbage_date.json`: một
+`infra_pending` có `commit=null` và `applied_at` không parse được chạy qua validator cho kết quả
+"✅ hợp lệ", 0 lỗi, 0 cảnh báo. Đây **là lỗ hổng im lặng thật**, không phải "chấp nhận được" — xếp
+blocking bên dưới (mục 4.1).
+
+## 3. Validator có khớp schema không — KHÔNG, lệch đáng kể
+
+`project_state.schema.json` và `validate_state.py` được viết tay tách rời như brief mô tả, và thực sự
+**lệch nhau ở phần lớn ràng buộc cấu trúc**, không chỉ vài trường lẻ tẻ. Verify bằng 6 case bổ sung
+(cùng phương pháp cô lập ở mục 1) — mỗi case vi phạm rõ ràng 1 ràng buộc `project_state.schema.json`
+khai báo, tất cả đều lọt qua `validate_state.py` với kết quả "✅ hợp lệ":
+
+| Case (vi phạm ràng buộc schema nào) | Kết quả validator |
+|---|---|
+| `open_questions[].id` không khớp pattern `^(HOI\|BUG)-[0-9]+...$` | ✅ "hợp lệ" (SAI — phải fail) |
+| `backlog[].id` không khớp pattern `^BL-[0-9]+$` | ✅ "hợp lệ" (SAI) |
+| `project_name` dài 200 ký tự (schema `maxLength: 80`) | ✅ "hợp lệ" (SAI) |
+| `steps[].id` dài hơn 12 ký tự (schema `maxLength: 12`) | ✅ "hợp lệ" (SAI) |
+| `checkpoints[]` có field lạ `unexpected_field` (schema `additionalProperties: false`) | ✅ "hợp lệ" (SAI) |
+| top-level có field lạ `totally_unexpected_top_field` (schema `additionalProperties: false`) | ✅ "hợp lệ" (SAI) |
+
+Đối chiếu toàn bộ: `validate_state.py` chỉ thực sự kiểm tra ~9 luật nghiệp vụ tường minh (status
+enum, `done`+`output`, `stale`+`status_reason`, `answered`+`answered_in`, `clarify_rounds>2`,
+`text`>220 cho 2 mảng, `count>limit`+`escalated_at`, `infra` 24h, `blockers` heuristic+membership) —
+**không hề implement** `additionalProperties: false` (ở BẤT KỲ cấp nào, kể cả top-level), không
+implement bất kỳ `pattern` nào, và chỉ implement `maxLength` cho đúng 2 trường (`open_questions.text`,
+`backlog.text`) trong số ~15 trường có `maxLength` khai báo trong schema.
+
+Ngược chiều (validator strict hơn schema) không phát hiện trường hợp nào đáng kể.
+
+`project_state.json` hiện tại (bản mới) **có hợp lệ theo chính schema của nó** — verify độc lập bằng
+script Python tự viết (không dùng `validate_state.py`, không có `jsonschema` trong `.venv` nên đối
+chiếu tay `required`/`additionalProperties`/`maxLength`/`pattern` cho từng field): không phát hiện vi
+phạm nào. Bản thân file dữ liệu OK — vấn đề nằm ở **cơ chế validate**, không phải ở data hiện tại.
+
+## 4. Issues
+
+### Blocking
+
+1. **`parse_day()` — lỗ hổng im lặng, không cả warning** (`scripts/validate_state.py:63-68,
+   154-172`). Một `infra_pending` item có `applied_at` không parse được (sai định dạng, gõ nhầm,
+   copy-paste lỗi) bị bỏ qua vĩnh viễn khỏi kiểm tra 24h — kể cả khi `commit=null`. Đây đúng là kiểu
+   lỗi "2 thứ tự nhất quán với chính nó, không ai kiểm tra sợi dây nối" mà chính CLAUDE.md dự án này
+   (Protocol 5/6) được viết ra để phòng — chỉ khác là lần này lỗ hổng nằm trong chính cơ chế phòng
+   thủ. Đề nghị tối thiểu: gọi `warn()` khi `parse_day()` trả `None` (không được im lặng hoàn toàn);
+   cân nhắc `fail()` luôn vì "không parse được ngày" tự nó đã là dữ liệu hỏng.
+
+2. **`validate_state.py` không thực thi phần lớn ràng buộc cấu trúc mà `project_state.schema.json`
+   khai báo** — xem bảng ở mục 3. Nghiêm trọng nhất là **`additionalProperties: false` bị bỏ qua
+   hoàn toàn ở mọi cấp** (kể cả top-level): một field gõ nhầm tên (vd `"statuss"` thay vì `"status"`)
+   sẽ lọt qua validator + hook mà không có bất kỳ cảnh báo nào — trong khi đây chính là kiểu bug (gõ
+   sai field, 2 phía không đồng bộ với nhau) mà toàn bộ nỗ lực đưa `project_state.json` từ văn xuôi
+   sang có-cấu-trúc-theo-schema hướng tới giải quyết. `pattern` cho `open_questions[].id` và
+   `backlog[].id` cũng không được kiểm, nên id sai định dạng (vd không đúng tiền tố `HOI-`/`BUG-`/
+   `BL-`) sẽ không bị chặn dù schema có khai báo.
+   Đề nghị 1 trong 2 hướng (Dev/Tech Lead chọn, không cần quay lại Hiếu vì đây là chi tiết hiện thực,
+   không đổi phạm vi đã duyệt):
+   - (a) Viết 1 checker generic đọc trực tiếp `project_state.schema.json` và tự áp `required` /
+     `additionalProperties` / `maxLength` / `pattern` / `enum` bằng đệ quy thuần stdlib (không cần
+     thêm dependency `jsonschema`, khối lượng code không lớn vì schema ở đây không dùng `oneOf`/`$ref`
+     phức tạp) — loại bỏ hẳn nguy cơ lệch giữa 2 file được duy trì tay riêng rẽ; hoặc
+   - (b) Nếu giữ nguyên cách viết tay từng luật nghiệp vụ như hiện tại, phải đổi tên/docstring cho
+     rõ ràng rằng đây là "business-rule checker", KHÔNG phải "schema validator" — để không ai (kể cả
+     Hiếu) hiểu nhầm là `project_state.json` đã được validate đầy đủ theo `project_state.schema.json`
+     chỉ vì `validate_state.py` chạy xanh.
+   Không chặn việc dùng `project_state.schema.json` làm tài liệu tham chiếu con người đọc — chỉ chặn
+   việc coi 2 file này tương đương nhau về mặt thực thi.
+
+### Non-blocking
+
+1. `project_state.json`: `phase: "build"` nhưng `released_at: "2026-09-10"` vẫn còn set (rơi rớt từ
+   sự kiện release v1.3.2 trước khi bắt đầu S2). Không vi phạm schema (schema không ràng buộc quan hệ
+   2 field này) nhưng gây hiểu nhầm khi đọc nhanh state. Đề nghị PM dọn lại `released_at: null` khi
+   quay về `phase=build`, hoặc thêm luật `phase != released → released_at phải null` vào cả schema
+   (`if/then` draft-07 hỗ trợ) lẫn validator nếu muốn enforce.
+2. Không có kiểm tra trùng `id` trong cùng 1 mảng (`steps[].id`, `checkpoints[].id`,
+   `open_questions[].id`, `backlog[].id`, `loops[].pair+item`) — cả schema (draft-07 khó diễn đạt
+   "unique theo 1 field" mà không phải `uniqueItems` toàn phần tử) lẫn validator đều bỏ qua. Rẻ để
+   thêm (1 `set()` mỗi mảng, so `len` trước/sau) và bắt được lỗi copy-paste khi PM tạo id mới bằng
+   tay. Không có bằng chứng đã xảy ra ở data hiện tại — chỉ là gap phòng ngừa.
+3. Docstring/comment của `validate_state.py` không nói rõ giới hạn phạm vi (xem Blocking #2) — nếu
+   chọn hướng (b) ở trên thì nên bổ sung 1 dòng comment đầu file.
+
+## 5. Hook (`.git/hooks/pre-commit`)
+
+- Khối Protocol 1 cũ (chặn commit đổi `src/`/`web/` thiếu `review-report.md`) **giữ nguyên**, không
+  bị đụng.
+- Khối mới gọi `python3 scripts/validate_state.py` với guard `if [[ -f scripts/validate_state.py ]]`
+  — hợp lý cho giai đoạn bootstrap (script chưa từng tồn tại ở các commit cũ hơn không bị vỡ khi
+  checkout ngược).
+- Xác nhận đường dẫn tương đối `scripts/validate_state.py` đúng: đã test thực tế bằng cách chạy
+  `git commit` từ một thư mục con lồng sâu (`src/sub/`) trong repo cô lập — hook vẫn chạy đúng vì Git
+  luôn set cwd của hook về root của working tree, không phụ thuộc cwd lúc gọi `git commit`.
+- Test cô lập (repo riêng ở scratchpad, không phải repo thật): (1) code đổi + review-report không
+  đổi → BLOCK đúng thông điệp Protocol 1; (2) review-report có đổi + state hỏng
+  (`blockers` chứa câu văn) → Protocol 1 pass, Protocol 4 mở rộng BLOCK đúng thông điệp. Cả 2 gate
+  hoạt động độc lập, đúng như thiết kế, không có luồng ghi đè lẫn nhau.
+- Chạy `bash .git/hooks/pre-commit` trực tiếp ở repo thật (không có gì staged) → exit 0, không side
+  effect, không đổi `project_state.json` (`git diff --stat` rỗng sau khi chạy) — không làm hỏng
+  luồng commit bình thường.
+
+## 6. Ruff
+
+```
+.venv/bin/ruff check scripts/validate_state.py       → All checks passed!
+.venv/bin/ruff format --check scripts/validate_state.py → 1 file already formatted
+```
+
+Type hints đầy đủ cho mọi function signature trong `validate_state.py` (bao gồm `-> set[str]`,
+`-> None`, `-> int`, tham số đều có annotation) — đạt tiêu chí review.
+
+## 7. Không mất nội dung khi tách/rotate tài liệu (Protocol C)
+
+Tự trích toàn bộ heading Markdown (`#`–`####`) từ 3 cặp file, so sánh tập hợp:
+
+- `docs/Architecture.md` (HEAD, trước tách) vs (`docs/Architecture.md` mới + `docs/design-log.md`
+  mới) ở working tree: **0 heading nào bị mất** — mọi heading ở bản HEAD đều xuất hiện lại ở 1 trong
+  2 file mới.
+- `docs/review-report.md` (HEAD, trước rotate) vs (`docs/review-report.md` mới +
+  `docs/archive/review-report-until-2026-09-10.md`): **0 heading nào bị mất**.
+
+Lưu ý: `docs/Architecture.md` ở HEAD (12.591 dòng) đã KHÔNG bao gồm phần Bug #EPUB-3 vốn nằm ở
+working tree trước đó — chênh lệch dòng giữa HEAD và tổng 2 file mới (~299 dòng) không phải mất nội
+dung, mà do so sánh ở 2 thời điểm khác nhau của lịch sử git; kiểm bằng heading-set nên không bị ảnh
+hưởng bởi mốc thời gian này.
+
+## 8. Nhất quán CLAUDE.md / `.claude/agents/*.md` (kiểm nông theo yêu cầu)
+
+- Ngân sách dòng trong `CLAUDE.md` Protocol C.3 (Architecture 8.000 / design-log 8.000 / CHANGELOG
+  8.000 / review-report 4.000 / test-report 4.000 / PRD 2.000) khớp chính xác với `DOC_LINE_BUDGET`
+  trong `validate_state.py`.
+- `clarify_rounds ≤ 2` (Protocol B) khớp với `QUESTION_STATUS`/check trong validator (`> 2` fail).
+- Mọi file `documents{}` trong `project_state.json` trỏ tới đường dẫn tồn tại thật:
+  `docs/escalation-log.md`, `docs/decisions-archive.md`, `docs/expert-notes/`, `docs/archive/` — đã
+  `ls` xác nhận cả 4 tồn tại.
+- `.claude/agents/reviewer.md` (bản mới) tự mô tả đúng checklist R5-04/R6-04/R8-01 — khớp với những
+  gì report này đang làm theo.
+- Không kiểm sâu nội dung nghiệp vụ của `ba.md`/`dev.md`/`pm.md`/`qa.md`/`tech-lead.md`/
+  `domain-expert.md`/`critic.md` theo đúng phạm vi brief ("chỉ kiểm tính nhất quán, không cần review
+  sâu").
+
+## Kết luận
+
+**REJECT** (Vòng 1/3) — 2 blocking issue, cả hai đều nằm trong `scripts/validate_state.py` (mục 4).
+Không phải lỗi thiết kế tổng thể: hook, schema, `project_state.json`, và phần lớn business-rule check
+trong validator đều đúng và đã verify chạy thật. Cần Dev sửa 2 điểm ở mục 4 (silent hole của
+`parse_day()`, và khoảng trống enforcement giữa validator/schema) rồi gửi lại. Không có vi phạm
+Protocol 5/6/7 nào trong đợt này (R5-04 = N/A, không có external tool wrapper trong phạm vi).
+
+---
+
+# Review Report — Fix backlog BL-01/02/03/05 — VÒNG 1/3
+
+- **Reviewer**: Reviewer (Sonnet)
+- **Ngày**: 2026-09-10
+- **Circuit breaker Dev↔Reviewer (fix backlog BL-01/02/03/05)**: vòng 1/3
+- **Phạm vi review**: 4 mục backlog độc lập từ Dev, theo `docs/CHANGELOG.md` entry "Fix 4 mục backlog
+  kỹ thuật nhỏ — BL-01/02/03/05 (Dev, 2026-09-10)". Diff đọc trực tiếp: `src/core/job_orchestrator.py`,
+  `src/api/routes/jobs.py`, `tests/integration/test_job_orchestrator.py`,
+  `tests/integration/test_cost_gate_api.py`, `tests/integration/test_upload_and_job_flow.py`,
+  `tests/integration/test_settings_api.py`, `tests/integration/test_epub_translate_guards.py`.
+
+## Verdict: APPROVE (cả 4 mục)
+
+## 1. BL-05 (ưu tiên cao nhất) — ghi `chunk.api_cost`/`api_tokens_used` trước 2 raise EPUB
+
+**Đọc code trực tiếp** `_process_epub_chunk()` (`job_orchestrator.py`):
+- `total_input_tokens`/`total_output_tokens`/`total_cost` là biến cục bộ, cộng dồn qua
+  `_accumulate_and_check_budget()` (dùng `nonlocal`) cho **MỌI** lần gọi `pricing_provider.translate`
+  trong chunk (request chính + mọi lần retry: single-id, whole-request, diacritic tier 1/2) — xác
+  nhận đây đúng là tổng chi phí THẬT đã tiêu tới thời điểm raise, không phải chỉ request cuối.
+- Điểm raise `EpubRequestRunawayError` (dòng ~2141-2144, ngay sau `raise` gốc R-b) và điểm raise
+  `EpubBatchTranslationError` (dòng ~2370-2373, sau ngưỡng fallback C-2): cả 2 đều ghi
+  `chunk.api_tokens_used = total_input_tokens + total_output_tokens`,
+  `chunk.api_cost = total_cost`, `db_session.add(chunk)`, `await db_session.commit()` **ngay trước**
+  `raise`, đúng pattern `EpubChunkCostCapExceeded` đã làm đúng từ trước (dòng ~2081-2086).
+- `chunk.status` **không** bị đổi ở 2 block mới — xác nhận qua đọc trực tiếp diff + docstring
+  `EpubRequestRunawayError` (dòng 153: "xu ly no qua nhanh `except Exception` chung da co san (chunk
+  `failed`, ...)") — outer handler ở `run_epub_job()` vẫn là nơi set `"failed"`, đúng claim CHANGELOG.
+- `chunk.output_path` không bị set ở 2 block mới (chỉ set ở dòng 2426 sau khi hoàn tất toàn bộ) — vẫn
+  giữ `None`/giá trị cũ, khớp assertion test `chunk.output_path is None`.
+
+**Tự chạy độc lập** (không tin lại lời Dev):
+- `pytest tests/integration/test_epub_translate_guards.py -k
+  "test_epub_batch_translation_error_still_records_cost_of_prior_successful_request or
+  test_epub_request_runaway_error_still_records_cost_of_prior_successful_request"` → **2 passed**
+  trên code hiện tại.
+- `git stash push -- src/core/job_orchestrator.py` rồi chạy lại đúng 2 test đó → **2 failed** (cả hai
+  fail đúng chỗ dự kiến: `chunk.api_cost` không phản ánh tổng chi phí tích luỹ). `git stash pop` khôi
+  phục sạch. → claim "fail trên code cũ, pass trên code mới" là THẬT, không phải Dev tự nhận.
+- Đọc kỹ assertion: cả 2 test dùng `_CostTrackingEpubProvider` ghi lại `estimated_cost_usd` THẬT của
+  từng lần gọi (không hardcode, tính từ `0.000001 * (len(text) + output_tokens)` ở
+  `_ControllableEpubProvider.translate`, dòng 131), rồi so `chunk.api_cost ==
+  pytest.approx(sum(provider.observed_costs))` VÀ `chunk.api_cost > provider.observed_costs[0]` — điều
+  kiện thứ hai loại trừ chính xác failure mode nguy hiểm nhất ("chỉ ghi cost request cuối, không cộng
+  dồn"). Test không rỗng, không tự thoả mãn giả định — đủ tin cậy.
+
+**Kết luận BL-05: ĐÚNG và ĐÁNG TIN.** Đây là fix rủi ro tài chính cao nhất trong 4 mục, đã verify kỹ
+nhất và không phát hiện vấn đề.
+
+## 2. BL-01 — `font_shrink_page()` giới hạn đúng phạm vi chunk
+
+- `job_orchestrator.py` dòng 1899-1907: `for page_num in range(chunk.page_start - 1,
+  min(chunk.page_end, doc.page_count)): await font_shrink_page(doc[page_num], ...)` — đúng công thức
+  0-based/1-based, **giống hệt** công thức đã dùng ở `_count_text_segments()` (dòng 255, cùng file,
+  đã chạy ổn từ trước) — không phải công thức tự nghĩ ra mới có rủi ro off-by-one riêng.
+- Test mới `test_font_shrink_only_processes_own_chunk_page_range` không chỉ đếm số lần gọi
+  (`await_count == 94`, tức 40+42+12 thay vì 3×90=270) mà còn capture `page.number` TẠI THỜI ĐIỂM
+  gọi (trước khi đóng doc handle) và `zip(..., strict=True)` từng lời gọi với đúng chunk nó thuộc về,
+  assert `chunk.page_start - 1 <= page_number <= chunk.page_end - 1` cho MỌI lời gọi — đủ chặt để bắt
+  lỗi "đúng số lần gọi nhưng sai trang" (ví dụ nếu ai đó vô tình đảo `page_start`/`page_end`).
+- Tự chạy: `pytest ... -k test_font_shrink_only_processes_own_chunk_page_range` → 1 passed. `git
+  stash push -- src/core/job_orchestrator.py` → chạy lại → **1 failed**. Stash pop khôi phục sạch.
+
+**Kết luận BL-01: APPROVE.**
+
+## 3. BL-02 — thứ tự cost gate trước duplicate-check trong `create_job()`
+
+- Đọc diff `src/api/routes/jobs.py`: khối `settings`/`provider`/`_reject_deepl_for_pdf()`/
+  `_enforce_cost_gate()` di chuyển lên trước khối `_find_completed_duplicate()`. Khối duplicate-check
+  giữ nguyên logic cũ (`if request.job_type == "translate" and not request.force`), chỉ đổi VỊ TRÍ.
+- Test mới `test_create_job_cost_gate_runs_before_duplicate_check` cover đủ 3 tổ hợp cho cùng 1 file
+  trùng hash + cap thấp: (a) không `force` → 402, không tạo Job row (`_job_row_count() == 1`, chỉ có
+  job trùng cũ); (b) `force=true` không `confirm_cost` → vẫn 402 (chứng minh cost gate KHÔNG bị
+  `force` bỏ qua); (c) `force=true` + `confirm_cost=true` → 202, tạo job MỚI (id khác job trùng,
+  `_job_row_count() == 2`). Đủ để phân biệt "chỉ đổi thứ tự" với "đổi luôn kết quả cuối cùng".
+- `test_create_job_reports_duplicate_of_completed_job_with_same_hash` (test cũ, bị sửa): thêm
+  `"provider": "ollama"` vào request duplicate-check vì cost gate giờ chạy trước và cần provider
+  resolve được (không cần API key) — đây là sửa hợp lý để giữ đúng mục đích gốc của test (verify
+  response `duplicate_found`), không phải nới lỏng assertion nào để che giấu lỗi; response
+  `duplicate_found` + `job_id`/`completed_at` không đổi.
+- Tự chạy: cả 2 test trên `pytest` → 2 passed. `git stash push -- src/api/routes/jobs.py` → chạy lại
+  `test_create_job_cost_gate_runs_before_duplicate_check` → **1 failed**. Stash pop khôi phục sạch.
+
+**Kết luận BL-02: APPROVE.**
+
+## 4. BL-03 — round-trip test `ollama_thread` qua `PUT`/`GET /api/settings`
+
+- 2 test mới ở `tests/integration/test_settings_api.py`: `test_get_settings_reports_ollama_thread_default`
+  (GET trả default `2`), `test_put_ollama_thread_overrides_effective_settings` — PUT giá trị **6**
+  (khác default `2`), rồi verify CẢ 3 nguồn đều trả `6`: response của chính PUT, GET riêng sau đó, và
+  `get_effective_settings()` gọi trực tiếp qua session thật (không chỉ tin HTTP echo). Đây đúng là
+  round-trip thật (set khác default → đọc lại đúng giá trị đã set), không phải chỉ test default không
+  đổi.
+- Không có thay đổi source code cho mục này (field đã expose sẵn) — chỉ thêm test, rủi ro thấp.
+- Tự chạy: `pytest tests/integration/test_settings_api.py -k "test_get_settings_reports_ollama_thread_default
+  or test_put_ollama_thread_overrides_effective_settings"` → 2 passed.
+
+**Kết luận BL-03: APPROVE.**
+
+## 5. Regression toàn cục — tự chạy độc lập
+
+```
+uv run pytest tests/ -q          → 773 passed (khớp claim CHANGELOG, không regression)
+uv run ruff check src/ tests/    → All checks passed!
+```
+
+## 6. Checklist bắt buộc (CLAUDE.md project)
+
+- **R5-04**: N/A — không có thay đổi nào trong `src/services/*_runner.py`/`*_provider.py` (wrapper
+  gọi external tool) ở phạm vi 4 mục backlog này. `_process_epub_chunk()` gọi `pricing_provider`
+  nhưng thay đổi thực tế nằm ở logic ghi `chunk.api_cost` nội bộ, không đổi contract external.
+- **R6-04**: không có orchestrator mới gọi tuần tự nhiều service cần trace lineage N→N+1 trong phạm vi
+  đợt này — BL-05 chỉ thêm 2 điểm ghi DB cục bộ dùng biến đã tích luỹ sẵn trong CHÍNH hàm đó (không
+  phải nối 2 bước external riêng biệt). Đã tự trace bằng tay ở mục 1 phía trên (đường đi biến
+  `total_cost` từ chỗ tích luỹ tới chỗ ghi DB) để chắc chắn không có khoảng trống lineage kiểu Bug #5.
+- **R8-01**: N/A — không có engine/biến thể mới nào được thêm vào pipeline dùng chung trong đợt này.
+- **Protocol 5 R5-03 (mock có golden file thật không)**: không áp dụng — không có mock nào mô phỏng
+  external tool thật (`_ControllableEpubProvider`/`_CostTrackingEpubProvider` là fake nội bộ cho
+  `TranslationProvider` interface đã tự định nghĩa, không mô phỏng response thật của 1 SDK/API bên
+  ngoài cụ thể, giống các test EPUB khác đã có từ trước).
+
+## Kết luận
+
+**APPROVE cả 4 mục (BL-01, BL-02, BL-03, BL-05)**. Đã tự verify độc lập bằng `git stash` cho từng mục
+có thay đổi source code (BL-01/02/05), tự đọc assertion xác nhận test không rỗng/không tự thoả mãn
+giả định, và tự chạy lại toàn bộ suite (773 passed) + `ruff check` (sạch). Không phát hiện vấn đề nào
+cần Dev sửa lại — không tốn vòng lặp Protocol 3.

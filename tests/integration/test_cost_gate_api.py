@@ -164,6 +164,111 @@ def test_create_job_confirm_cost_bypasses_the_gate(client: TestClient, monkeypat
     assert detail["estimated_cost"] > 0
 
 
+def test_create_job_cost_gate_runs_before_duplicate_check(client: TestClient, monkeypatch) -> None:
+    """BL-02: a request whose file hash matches an already-`completed`
+    TRANSLATE job, but whose estimate also exceeds the cap and `force` is
+    unset, must surface the 402 cost-confirmation prompt -- NOT
+    `status=duplicate_found` -- so the user sees the cost warning before the
+    duplicate one. `force=true` behavior (unconditional bypass of the
+    duplicate-check, still subject to the cost gate) must stay unchanged.
+    """
+    import asyncio
+
+    import src.models.database as database_module
+    from src.api.routes.upload import resolve_upload
+    from src.models.job import Job
+
+    monkeypatch.setattr(jobs_route, "_schedule_background", lambda coro: coro.close())
+    _configure_low_cap(client)
+    # Reused across BOTH uploads below (like
+    # test_create_job_reports_duplicate_of_completed_job_with_same_hash) --
+    # `_make_pdf_bytes()` is not guaranteed byte-identical across calls
+    # (PDF metadata/timestamps), so re-generating for the second upload would
+    # silently produce a different `file_hash` and the duplicate would never
+    # actually match, regardless of gate order.
+    pdf_bytes = _make_pdf_bytes()
+    upload_response = client.post(
+        "/api/upload", files={"file": ("book.pdf", pdf_bytes, "application/pdf")}
+    )
+    assert upload_response.status_code == 200
+    file_id = upload_response.json()["file_id"]
+    upload_meta = resolve_upload(file_id)
+
+    async def _insert_completed_translate_job() -> str:
+        session_factory = database_module.get_session_factory()
+        async with session_factory() as session:
+            job = Job(
+                filename=upload_meta.filename,
+                file_path=upload_meta.file_path,
+                file_size=upload_meta.size_bytes,
+                file_hash=upload_meta.file_hash,
+                file_type=upload_meta.file_type,
+                job_type="translate",
+                model="claude",
+                status="completed",
+            )
+            session.add(job)
+            await session.commit()
+            await session.refresh(job)
+            job.completed_at = job.created_at
+            session.add(job)
+            await session.commit()
+            return job.id
+
+    duplicate_job_id = asyncio.run(_insert_completed_translate_job())
+
+    reupload_response = client.post(
+        "/api/upload",
+        files={"file": ("book.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert reupload_response.status_code == 200
+    reupload_file_id = reupload_response.json()["file_id"]
+
+    response = client.post(
+        "/api/jobs",
+        json={"file_id": reupload_file_id, "job_type": "translate", "provider": "claude"},
+    )
+
+    # Would have been 200/"duplicate_found" (pointing at duplicate_job_id)
+    # under the pre-BL-02 order -- the cost gate must win this race now.
+    assert response.status_code == 402
+    body = response.json()["detail"]
+    assert body["requires_confirmation"] is True
+    # Only the manually-inserted duplicate job exists -- this rejected
+    # request must NEVER create a Job row of its own (RC-3, same as
+    # test_create_job_blocked_with_402_when_estimate_exceeds_cap).
+    assert _job_row_count() == 1
+
+    # `force=true` still bypasses the DUPLICATE check unconditionally, but
+    # the cost gate still applies underneath it (unchanged from before).
+    forced_response = client.post(
+        "/api/jobs",
+        json={
+            "file_id": reupload_file_id,
+            "job_type": "translate",
+            "provider": "claude",
+            "force": True,
+        },
+    )
+    assert forced_response.status_code == 402
+    assert forced_response.json()["detail"]["requires_confirmation"] is True
+    assert _job_row_count() == 1
+
+    forced_and_confirmed_response = client.post(
+        "/api/jobs",
+        json={
+            "file_id": reupload_file_id,
+            "job_type": "translate",
+            "provider": "claude",
+            "force": True,
+            "confirm_cost": True,
+        },
+    )
+    assert forced_and_confirmed_response.status_code == 202
+    assert forced_and_confirmed_response.json()["job_id"] != duplicate_job_id
+    assert _job_row_count() == 2
+
+
 def test_estimate_cost_gate_never_underestimates_a_full_glossary(client: TestClient) -> None:
     """Sanity companion, not a golden-file replica: a non-trivial glossary
     must raise the estimate, not leave it unchanged — the RC-1 mechanism

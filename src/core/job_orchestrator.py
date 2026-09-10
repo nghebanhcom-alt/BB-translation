@@ -1892,8 +1892,16 @@ class JobOrchestrator:
         # duoc gi ma xoa mat chu that.
         if self._needs_font_shrink:
             with fitz.open(chunk.output_path) as doc:
-                for page in doc:
-                    await font_shrink_page(page, overflow_entries, font_path=self._noto_font_path)
+                # BL-01: `chunk.output_path` points at the WHOLE document
+                # since Bug #7's fix (no longer chunk-scoped), so this must
+                # restrict itself to this chunk's own page range — otherwise
+                # every chunk re-shrinks the entire document (cost grows
+                # linearly with chunk count) and re-emits `OverflowReport`
+                # rows for pages that belong to other chunks.
+                for page_num in range(chunk.page_start - 1, min(chunk.page_end, doc.page_count)):
+                    await font_shrink_page(
+                        doc[page_num], overflow_entries, font_path=self._noto_font_path
+                    )
                 doc.saveIncr()
 
         for entry in overflow_entries:
@@ -2124,6 +2132,16 @@ class JobOrchestrator:
                     runaway_ratio,
                     len(missing_ids),
                 )
+                # BL-05 (Protocol 6, review-report.md finding lap lai 2 lan):
+                # tien that da tieu cho request nay (+ moi request truoc do
+                # trong chunk, da cong don vao `total_cost` qua
+                # `_accumulate_and_check_budget`) phai duoc ghi truoc khi
+                # raise — dung pattern EpubChunkCostCapExceeded o tren da lam
+                # dung, KHONG danh dau "completed" (chi ghi cost/token).
+                chunk.api_tokens_used = total_input_tokens + total_output_tokens
+                chunk.api_cost = total_cost
+                db_session.add(chunk)
+                await db_session.commit()
                 raise EpubRequestRunawayError(
                     f"Chunk {chunk.chunk_index}: request slice ({start}, {end}) sinh output "
                     f"runaway (ratio {runaway_ratio:.2f}x muc ky vong) VA thieu "
@@ -2344,6 +2362,15 @@ class JobOrchestrator:
             1, math.ceil(self._settings.epub_fallback_max_ratio_chunk * n_units_in_chunk)
         )
         if len(fallback_units) > chunk_fallback_allowed:
+            # BL-05 (Protocol 6, review-report.md finding lap lai 2 lan): moi
+            # request trong vong lap tren (kha nang gom ca request thanh cong
+            # lan request khien fallback) da tinh tien that qua
+            # `_accumulate_and_check_budget` — ghi `total_cost`/tokens vao
+            # chunk TRUOC khi raise, dung pattern EpubChunkCostCapExceeded.
+            chunk.api_tokens_used = total_input_tokens + total_output_tokens
+            chunk.api_cost = total_cost
+            db_session.add(chunk)
+            await db_session.commit()
             raise EpubBatchTranslationError(
                 f"Chunk {chunk.chunk_index}: {len(fallback_units)} unit khong dich duoc "
                 f"(fallback EN) vuot han muc cho phep {chunk_fallback_allowed} "
