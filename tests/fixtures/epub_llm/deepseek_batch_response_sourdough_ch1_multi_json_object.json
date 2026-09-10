@@ -1,0 +1,98 @@
+{
+  "captured_at": "2026-09-10T04:15:56.346845+00:00",
+  "source_book": "9d436d7b-e91e-4198-a12b-a2150f7dd362_Baking with Sourdough - Sara Pitzer.epub",
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "unit_ids_in_order": [
+    "ops/xhtml/chapter01.html#36",
+    "ops/xhtml/chapter01.html#37",
+    "ops/xhtml/chapter01.html#38",
+    "ops/xhtml/chapter01.html#39",
+    "ops/xhtml/chapter01.html#40",
+    "ops/xhtml/chapter01.html#41",
+    "ops/xhtml/chapter01.html#42",
+    "ops/xhtml/chapter01.html#43",
+    "ops/xhtml/chapter01.html#44",
+    "ops/xhtml/chapter01.html#45",
+    "ops/xhtml/chapter01.html#46"
+  ],
+  "local_id_to_unit_id": {
+    "0": "ops/xhtml/chapter01.html#36",
+    "1": "ops/xhtml/chapter01.html#37",
+    "2": "ops/xhtml/chapter01.html#38",
+    "3": "ops/xhtml/chapter01.html#39",
+    "4": "ops/xhtml/chapter01.html#40",
+    "5": "ops/xhtml/chapter01.html#41",
+    "6": "ops/xhtml/chapter01.html#42",
+    "7": "ops/xhtml/chapter01.html#43",
+    "8": "ops/xhtml/chapter01.html#44",
+    "9": "ops/xhtml/chapter01.html#45",
+    "10": "ops/xhtml/chapter01.html#46"
+  },
+  "expected_ids": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10"
+  ],
+  "request_payload": [
+    {
+      "id": "0",
+      "html": "To revive an over-aged starter, you need to sweeten the pot. When old-time western gamblers picked up that term, meaning to add more money to the pot, they must have been influenced by the sweetening process used to revive sickly starter. Simply throw away all but a few spoonsful of the old starter, wash the pot, and then mix the old starter with 2 cups each of flour and warm water. Let the mixture stand at room temperature until it bubbles and foams, as you did when beginning the original starter. When you can see that the mixture is active, growing, and full of bubbles, return it to the refrigerator. For truest sourdough flavor let it age a day or so before you use it again. And next time, remember to feed the starter a little sooner or, if you’re not going to use the starter for a while, freeze it."
+    },
+    {
+      "id": "1",
+      "html": "Using your starter regularly keeps it in good shape because when you use it you should also replenish (a kind of feeding) the pot."
+    },
+    {
+      "id": "2",
+      "html": "<em><a id=\"page_7\"/>Replenishing the Pot</em>"
+    },
+    {
+      "id": "3",
+      "html": "Replenishing is merely a matter of putting into the pot about the same amounts of flour and water as you take out. If, for instance, you use one-half to one cup of starter, stir in about a cup of flour and a little less than a cup of water. The exact amounts don’t matter; the idea is to maintain approximately the same amount of starter all the time, by replacing what you’ve used with fresh flour and water. Keeping a starter in good condition and following a few common sense rules guarantee successful sourdough baking."
+    },
+    {
+      "id": "4",
+      "html": "<em>Rules for Success</em>"
+    },
+    {
+      "id": "5",
+      "html": "Avoid metal utensils when working with sourdough because sourdough can be corrosive. (Remember those prospectors polished their brass with it.)"
+    },
+    {
+      "id": "6",
+      "html": "Make sure all utensils are clean so you don’t encourage the growth of some bacteria left over from last night’s supper. Use all ingredients at room temperature."
+    },
+    {
+      "id": "7",
+      "html": "Choose storage containers and mixing bowls large enough to allow for expansion to more than double in bulk, and never cover any sourdough container tightly. Not only does the starter need air to live, but also expanding starter could burst the container."
+    },
+    {
+      "id": "8",
+      "html": "Incubate your starter and set bread to rise in a draft-free place where the temperature is at least 80°F. and no more than 95°F. That is no problem in an Alabama summer, but in a cool climate, finding a continuously warm spot takes some doing. One of the simplest solutions is to make an incubator by placing a heating pad turned on low inside a styrofoam picnic chest. Use a rack or wooden trivet to hold the pot of starter above the heating pad, and keep a thermometer on top of the loosely covered bowl to monitor the temperature. You can adjust the temperature slightly by how tightly you settle the lid onto the styrofoam chest."
+    },
+    {
+      "id": "9",
+      "html": "Keep these few rules about sourdough in mind as you follow the basic procedures which are typical of working with sourdough and differ slightly from other kinds of baking."
+    },
+    {
+      "id": "10",
+      "html": "<a id=\"page_8\"/>Basic Procedures"
+    }
+  ],
+  "raw_response_text": "{\"0\": \"Để hồi sinh một men cái đã quá già, bạn cần phải \\\"làm ngọt nồi\\\". Khi những tay cờ bạc miền tây thời xưa dùng thuật ngữ đó, nghĩa là bỏ thêm tiền vào nồi, hẳn họ đã chịu ảnh hưởng từ quá trình \\\"làm ngọt\\\" dùng để hồi sinh men cái yếu ớt. Chỉ cần đổ bỏ hết men cái cũ, chừa lại vài thìa, rửa sạch nồi, rồi trộn men cái cũ với 2 cups bột mì và 2 cups nước ấm. Để hỗn hợp đứng ở nhiệt độ phòng cho đến khi nó sủi bọt và nổi bọt, giống như bạn đã làm khi bắt đầu men cái ban đầu. Khi bạn thấy hỗn hợp đang hoạt động, đang phát triển và đầy bọt khí, hãy đặt nó trở lại tủ lạnh. Để có hương vị sourdough chân thật nhất, hãy để nó ủ khoảng một ngày trước khi dùng lại. Và lần tới, hãy nhớ cho men cái ăn sớm hơn một chút hoặc, nếu bạn không định dùng men cái trong một thời gian, hãy đông lạnh nó.\"}\n{\"1\": \"Dùng men cái thường xuyên sẽ giữ nó ở trạng thái tốt vì khi dùng bạn cũng nên bổ sung lại (một kiểu cho ăn) cho nồi men.\"}\n{\"2\": \"<em><a id=\\\"page_7\\\"/>Bổ sung lại cho nồi men</em>\"}\n{\"3\": \"Bổ sung lại chỉ đơn giản là cho vào nồi lượng bột mì và nước xấp xỉ bằng lượng bạn lấy ra. Ví dụ, nếu bạn dùng nửa đến một cup men cái, hãy khuấy vào khoảng một cup bột mì và một chút ít hơn một cup nước. Lượng chính xác không quan trọng; ý tưởng là duy trì lượng men cái xấp xỉ như cũ mọi lúc, bằng cách thay thế phần bạn đã dùng bằng bột mì và nước mới. Giữ men cái trong tình trạng tốt và tuân theo một vài quy tắc thông thường sẽ đảm bảo việc nướng bánh sourdough thành công.\"}\n{\"4\": \"<em>Các quy tắc để thành công</em>\"}\n{\"5\": \"Tránh dùng dụng cụ kim loại khi làm việc với sourdough vì sourdough có thể ăn mòn. (Hãy nhớ những người tìm vàng đã đánh bóng đồng thau của họ bằng nó.)\"}\n{\"6\": \"Đảm bảo tất cả dụng cụ đều sạch để bạn không khuyến khích sự phát triển của một số vi khuẩn còn sót lại từ bữa tối hôm qua. Dùng tất cả nguyên liệu ở nhiệt độ phòng.\"}\n{\"7\": \"Chọn hộp đựng và tô trộn đủ lớn để cho phép khối bột nở ra gấp đôi về thể tích, và tuyệt đối không đậy kín bất kỳ hộp đựng sourdough nào. Men cái không chỉ cần không khí để sống, mà men cái đang nở ra còn có thể làm vỡ hộp đựng.\"}\n{\"8\": \"Ủ men cái và đặt bánh cho nở ở nơi không có gió lùa, nơi nhiệt độ ít nhất là 80°F và không quá 95°F. Điều đó không thành vấn đề vào mùa hè ở Alabama, nhưng ở vùng khí hậu mát, việc tìm một chỗ ấm liên tục cần chút công sức. Một trong những giải pháp đơn giản nhất là làm một tủ ủ bằng cách đặt một miếng đệm sưởi bật ở mức thấp bên trong một thùng giữ lạnh bằng xốp. Dùng giá hoặc đế gỗ để giữ nồi men cái phía trên miếng đệm sưởi, và đặt một nhiệt kế trên nắp đậy hờ của tô để theo dõi nhiệt độ. Bạn có thể điều chỉnh nhiệt độ một chút bằng cách đậy nắp lên thùng xốp chặt đến mức nào.\"}\n{\"9\": \"Hãy ghi nhớ vài quy tắc này về sourdough khi bạn làm theo các quy trình cơ bản vốn là điển hình khi làm việc với sourdough và hơi khác so với các kiểu nướng bánh khác.\"}\n{\"10\": \"<a id=\\\"page_8\\\"/>Các quy trình cơ bản\"}",
+  "json_decode_error_before_fix": "Extra data at pos 802",
+  "system_prompt_marker_check": true,
+  "input_tokens": 1994,
+  "output_tokens": 1279,
+  "estimated_cost_usd": 0.00128282,
+  "note": "Golden fixture DAY DU (khong phai partial capture) cho Bug #EPUB-B2-3 (docs/test-report.md, QA vong 2/5, 2026-09-10) - PM da duyet 1 lan goi API DeepSeek that de hoan thien fixture nay (2026-09-10), chi phi that input_tokens=1994 output_tokens=1279 estimated_cost_usd=0.00128282 (~0,13 cent USD, 1 lan goi, tai hien duoc ngay lan dau tien). Dung chinh xac slice da lam job that fail (chunk 1 / request slice unit index 45-55, 11 unit lien tiep chapter01.html#36..#46 cua sach Sourdough that) - khop dung vi tri QA da bao cao (vd id 'ops/xhtml/chapter01.html#37'). DeepSeek tra ve dung 11 object JSON top-level rieng biet noi tiep nhau bang dau xuong dong (khong phai 1 object gom 11 key) - json.loads() tho fail voi Extra data ngay tu vi tri ket thuc object dau tien. Thay the hoan toan fixture _multi_json_object_partial_capture.json cu (chi co placeholder cho id 1-8) - fixture nay la byte-for-byte THAT 100% cho toan bo 11 id, khong co placeholder nao."
+}

@@ -118,9 +118,20 @@ def plan_chunks(
 #: (vd trong test), giong het pattern CHUNK_THRESHOLD_PAGES/BYTES o tren.
 EPUB_CHUNK_CHAR_BUDGET = 8_000
 #: Gioi han kich thuoc 1 loi goi LLM (khac muc dich voi hang so tren — xem
-#: Z3): ~900 token noi dung + envelope + ~450 token system prompt, xa
-#: `max_tokens=8192` mac dinh cua ca 4 provider (Architecture.md 6.20.7 Z3).
-EPUB_REQUEST_CHAR_BUDGET = 3_000
+#: Z3). Architecture.md §6.20.14.2 A-1 (2026-09-10, sau khi cham gioi han
+#: Protocol 3 voi Bug #EPUB-B2-5): HA tu 3.000 xuong 1.100 — suy tu so lieu
+#: THAT (§6.20.14.0a): muc tieu giu `output_tokens` moi request ve vung DA
+#: QUAN SAT la sach (<= ~600 token). ⚠️ ASSUMED ve HIEU QUA giam tan suat loi
+#: (xac suat, khong phai nguong cung — xem §6.20.14.0 "bang chung NGUOC").
+EPUB_REQUEST_CHAR_BUDGET = 1_100
+#: MOI (Architecture.md §6.20.14.2 A-1) — tran thu HAI theo SO UNIT, khong
+#: chi ky tu: `EPUB_REQUEST_CHAR_BUDGET` do bang ky tu VAN BAN THUAN
+#: (`_plain_char_len()`, strip tag), nen 1 request co the chua rat nhieu unit
+#: ma van "trong ngan sach" neu moi unit chi la 1 dong tag HTML ngan (vd
+#: `<strong>1 cup starter</strong>`) — chinh xac hinh dang cua batch 32 unit
+#: da gay Bug #EPUB-B2-5. So KHOA JSON (= so unit) moi la thu model phai giu
+#: dung cu phap, khong phai so ky tu. ⚠️ ASSUMED.
+EPUB_REQUEST_MAX_UNITS = 6
 #: Y4 (Architecture.md 6.20.12): 1 unit vuot nguong nay -> job phai fail ro
 #: rang (khong cat cau o v1) — vuot ~13.000 ky tu EN lam output LLM bi cut,
 #: JSON hong, retry le van cut. Chua cham du lieu that (max unit cua file mau
@@ -143,6 +154,34 @@ EPUB_UNIT_HARD_MAX_CHARS = 10_000
 #: chi doi dau vao source_text_chars cua no (cost_gate.py).
 EPUB_INLINE_MARKUP_FACTOR = 1.15
 EPUB_JSON_ENVELOPE_CHARS_PER_UNIT = 30
+
+#: Architecture.md 6.20.13.3a (fix C-1) — tran so lan goi lai TUNG-ID rieng le
+#: khi 1 response bi thieu id. HA tu 5 xuong 2 boi §6.20.14.2 A-3
+#: (2026-09-10): voi slice chi con toi da `EPUB_REQUEST_MAX_UNITS` (=6) unit
+#: sau A-1, tran 5 gan nhu luon roi vao nhanh "retry TUNG id" (>=3/6 thieu
+#: van con duoi tran 5) — dat hon han 1 lan goi lai NGUYEN request. ⚠️ ASSUMED.
+EPUB_MAX_SINGLE_ID_RETRIES = 2
+#: Tran CUNG cho TOAN BO 1 slice (1 request trong `chunk_plan.requests`),
+#: dung CHUNG quota cho ca retry vi thieu id (tren) VA retry vi mat dau
+#: (Architecture.md 6.20.13.5) — 2 co che khong cong don. HA tu 6 xuong 3 boi
+#: §6.20.14.2 A-3 (dong bo voi slice nho hon sau A-1/A-2). ⚠️ ASSUMED.
+EPUB_MAX_EXTRA_REQUESTS_PER_SLICE = 3
+
+#: Architecture.md §6.20.14.4 C-2 (Lop C — E-09 tu "luat mac dinh" thanh
+#: "chot chan bat thuong"). Ngan CHUNK: 20% so unit cua chinh chunk do, cho
+#: phep toi thieu 1 unit (`allowed = max(1, ceil(0.20 * n_units_in_chunk))`)
+#: — sau Lop A, 1 chunk co ~55 unit / ~7-9 request; 1 request mat TRON VEN =
+#: 6 unit ~ 11% chunk, nen 20% chiu duoc 2 request hong hoan toan trong 1
+#: chunk nhung "ca chunk hong" van fail ngay. ⚠️ ASSUMED — PHAI do lai bang du
+#: lieu live.
+EPUB_FALLBACK_MAX_RATIO_CHUNK = 0.20
+#: Ngan JOB: 5% cong don tren toan sach. KHONG phai cam tinh — bi BR-EPUB-05
+#: (guard output §6.20.12 X3, fail khi < 90% unit khac ban goc) ep: unit
+#: fallback giu nguyen EN == giong het ban goc == dem vao dung 10% khe ho do.
+#: Dat tran o 5% de con nguyen mot nua khe ho cho cac nguyen nhan khac. Dat
+#: >= 10% se khien Lop C tu tay lam BR-EPUB-05 fail. ⚠️ ASSUMED (gia tri cu
+#: the), nhung TRAN TREN (< 10%) la bat buoc toan hoc, khong duoc tu y nang.
+EPUB_FALLBACK_MAX_RATIO_JOB = 0.05
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -183,6 +222,7 @@ def plan_epub_chunks(
     units: list[EpubUnit],
     char_budget: int = EPUB_CHUNK_CHAR_BUDGET,
     request_budget: int = EPUB_REQUEST_CHAR_BUDGET,
+    request_max_units: int = EPUB_REQUEST_MAX_UNITS,
 ) -> list[EpubChunkPlan]:
     """Chunk = 1 day unit LIEN TIEP theo thu tu spine (units da o dung thu tu
     do, vi EpubDocument.load() duyet spine truoc khi tra ve).
@@ -196,6 +236,14 @@ def plan_epub_chunks(
     Trong moi chunk, gom tiep cac unit lien tiep thanh REQUEST theo
     `request_budget` (Architecture.md 6.20.7/6.20.8) — day la muc goi LLM
     thuc su se dung o buoc 2/3, KHAC voi `char_budget` (checkpoint Lop 3).
+
+    `request_max_units` (Architecture.md §6.20.14.2 A-1/A-2, MOI): tran THU
+    HAI theo SO UNIT, cat request tai bat ky dieu kien nao (ky tu HOAC so
+    unit) cham truoc — can thiet vi `request_budget` do bang ky tu van ban
+    THUAN (`_plain_char_len()`), nen 1 request nhieu unit ma moi unit chi la
+    1 doan tag HTML ngan (vd 32 dong `<strong>1 cup starter</strong>`) van co
+    the "trong ngan sach ky tu" du sinh ra rat nhieu KHOA JSON — chinh xac
+    hinh dang batch da gay Bug #EPUB-B2-5.
     """
     if not units:
         return []
@@ -232,7 +280,10 @@ def plan_epub_chunks(
         req_running = 0
         for i in range(unit_start, unit_end + 1):
             unit_len = lengths[i]
-            if req_running > 0 and req_running + unit_len > request_budget:
+            req_units = i - req_start  # so unit DA gom vao request dang mo
+            if req_units > 0 and (
+                req_running + unit_len > request_budget or req_units >= request_max_units
+            ):
                 requests.append((req_start, i - 1))
                 req_start = i
                 req_running = 0

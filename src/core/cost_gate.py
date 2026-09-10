@@ -29,7 +29,7 @@ from src.core.config import Settings
 from src.core.cost_estimator import CostEstimate, estimate_job_cost_v2
 from src.core.glossary_manager import GlossaryManager
 from src.core.job_orchestrator import _count_pdf_pages, _count_text_segments, _extract_full_text
-from src.core.prompt_builder import build_prompt_text
+from src.core.prompt_builder import build_epub_batch_prompt, build_prompt_text, build_system_prompt
 from src.services.epub_document import EpubDocument
 from src.services.translation import TranslationProvider
 
@@ -60,6 +60,7 @@ async def estimate_translation_cost(
     batch_id: str | None,
     max_glossary_entries: int,
     file_type: str = "pdf_digital",
+    settings: Settings | None = None,
 ) -> DetailedCostEstimate:
     """`estimate_job_cost_v2()` fed with real measurements from `file_path`
     (Architecture.md 6.11.5 data lineage steps 1-4 for PDF; 6.20.6 for EPUB).
@@ -69,6 +70,18 @@ async def estimate_translation_cost(
     estimate_job_cost_v2()") — KHONG viet cong thuc chi phi thu hai. Default
     "pdf_digital" giu nguyen hanh vi cu cho moi call site chua duoc cap nhat
     truyen file_type rieng.
+
+    `settings` (Architecture.md §6.20.14.2 A-4, MOI — Protocol 6 R6-01 data
+    lineage): CHI duoc doc boi nhanh EPUB (`_estimate_epub_translation_cost()`)
+    de `plan_epub_chunks()` dung DUNG cung tham so ma
+    `job_orchestrator.run_epub_job()` dung khi chay that — truoc fix nay,
+    ham nay goi `plan_epub_chunks(doc.units)` VOI THAM SO MAC DINH trong khi
+    orchestrator goi voi gia tri tu `Settings`, khien 2 ben lech nhau sau khi
+    doi `EPUB_REQUEST_CHAR_BUDGET`/them `EPUB_REQUEST_MAX_UNITS` (§6.20.14.2
+    A-1) — `llm_request_count` (chinh la `segment_count` cua
+    `estimate_job_cost_v2()`) se bi UOC THAP, vi pham §6.11.6 ("duoc uoc cao,
+    CAM uoc thap"). `None` chi hop le cho nhanh PDF (khong dung); nhanh EPUB
+    BAT BUOC truyen `settings` that (call site: `jobs.py` da co san).
 
     NOTE — known gap (mirrors the accepted, documented gap in Architecture.md
     6.11.7 #3): for a `pdf_scan` file, `file_path` has no text layer yet (OCR
@@ -80,8 +93,14 @@ async def estimate_translation_cost(
     jobs at full strength, and scan jobs only after the first chunk.
     """
     if file_type == "epub":
+        if settings is None:
+            raise ValueError(
+                "estimate_translation_cost(file_type='epub') can 'settings' that "
+                "(Architecture.md §6.20.14.2 A-4) de dong bo tham so plan_epub_chunks() "
+                "voi job_orchestrator.run_epub_job() — khong duoc dung mac dinh module."
+            )
         return await _estimate_epub_translation_cost(
-            file_path, provider, db_session, batch_id, max_glossary_entries
+            file_path, provider, db_session, batch_id, max_glossary_entries, settings
         )
 
     full_text = _extract_full_text(file_path)
@@ -118,6 +137,7 @@ async def _estimate_epub_translation_cost(
     db_session: AsyncSession,
     batch_id: str | None,
     max_glossary_entries: int,
+    settings: Settings,
 ) -> DetailedCostEstimate:
     """Architecture.md 6.20.6 nhanh EPUB — goi CUNG `estimate_job_cost_v2()`
     voi 2 dau vao khac PDF:
@@ -125,20 +145,44 @@ async def _estimate_epub_translation_cost(
       (X5) — nhan `EPUB_INLINE_MARKUP_FACTOR` + cong envelope JSON/unit.
     - `segment_count`: SO REQUEST LLM (`sum(len(c.requests) for c in plan)`),
       KHONG PHAI so unit — lech 8,8x da do duoc neu dung nham (6.20.6).
+
+    `prompt_overhead_chars` (fix C-2, Architecture.md 6.20.13.6, Protocol 6
+    data lineage): TRUOC fix nay ham do bang `build_prompt_text()` — prompt
+    cua NHANH PDF (co placeholder `${text}`, footer rieng cua pdf2zh),
+    KHONG PHAI chuoi thuc su gui cho LLM o nhanh EPUB. Prompt THAT ma
+    `_process_epub_chunk()` gui (`job_orchestrator.py`) la
+    `build_epub_batch_prompt(build_system_prompt(...))`. Sua: do dung
+    CHINH artifact do — khong con tru `len("${text}")` vi chuoi EPUB
+    KHONG co placeholder nay.
+
+    `plan_epub_chunks(...)` (fix A-4, Architecture.md §6.20.14.2, Protocol 6
+    R6-01): PHAI goi VOI DUNG cac tham so tu `settings` — GIONG HET cach
+    `job_orchestrator.run_epub_job()` goi — thay vi tham so MAC DINH module.
+    Truoc fix nay 2 noi goi TINH CO khop nhau; sau khi doi
+    `EPUB_REQUEST_CHAR_BUDGET`/them `EPUB_REQUEST_MAX_UNITS` (A-1), va voi
+    bat ky override `.env` nao, chung se LECH — ma `llm_request_count` chinh
+    la `segment_count` cua `estimate_job_cost_v2()`, lech so request se uoc
+    THAP chi phi, vi pham §6.11.6.
     """
     doc = EpubDocument.load(file_path)
     full_text = doc.full_text()
 
     glossary_manager = GlossaryManager(db_session)
-    prompt_text = await build_prompt_text(
+    base_system_prompt = await build_system_prompt(
         glossary_manager,
         project_id=batch_id,
         only_terms_present_in=full_text,
         max_glossary_entries=max_glossary_entries,
     )
-    prompt_overhead_chars = max(len(prompt_text) - len("${text}"), 0)
+    real_prompt = build_epub_batch_prompt(base_system_prompt)
+    prompt_overhead_chars = len(real_prompt)
 
-    plan = plan_epub_chunks(doc.units)
+    plan = plan_epub_chunks(
+        doc.units,
+        char_budget=settings.epub_chunk_char_budget,
+        request_budget=settings.epub_request_char_budget,
+        request_max_units=settings.epub_request_max_units,
+    )
     llm_request_count = sum(len(c.requests) for c in plan)
     source_text_chars = (
         int(doc.total_chars * EPUB_INLINE_MARKUP_FACTOR)

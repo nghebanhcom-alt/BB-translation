@@ -381,6 +381,7 @@ async def _estimate_translation_cost_or_400(
             batch_id,
             settings.max_glossary_entries_in_prompt,
             file_type=file_type,
+            settings=settings,
         )
     except EpubDrmError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

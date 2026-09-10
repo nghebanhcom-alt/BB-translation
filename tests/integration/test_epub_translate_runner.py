@@ -260,9 +260,7 @@ async def test_run_epub_job_filters_glossary_by_full_text_matching_cost_gate(
         captured["max_glossary_entries"] = kwargs.get("max_glossary_entries")
         return await real_build_system_prompt(glossary_manager, **kwargs)
 
-    monkeypatch.setattr(
-        "src.core.job_orchestrator.build_system_prompt", _spy_build_system_prompt
-    )
+    monkeypatch.setattr("src.core.job_orchestrator.build_system_prompt", _spy_build_system_prompt)
 
     await orchestrator.run_job(job.id, session)
 
@@ -421,13 +419,17 @@ async def test_run_epub_job_missing_id_retried_individually_then_succeeds(
 async def test_run_epub_job_still_missing_after_retry_fails_chunk_no_empty_write(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """E-09/X4 diem 6: id van thieu sau 1 vong goi lai rieng le -> chunk that
-    bai, KHONG duoc ghi chuoi rong."""
+    """E-09/X4 diem 6, VAI TRO DOI boi Architecture.md §6.20.14.4 (Lop C,
+    2026-09-10): id van thieu sau vong goi lai KHONG con tu dong lam chunk
+    that bai (xem `test_epub_translate_guards.py` cho ca "trong han muc,
+    van completed") — chunk chi that bai khi so unit fallback VUOT han muc
+    CHUNK (20%). O day CA 2/2 id deu thieu (100% > 20%) nen van fail, dung
+    E-09 vai tro moi ("chot chan bat thuong"), KHONG duoc ghi chuoi rong."""
     epub_path = _build_epub(tmp_path / "book.epub", paragraphs_per_doc=2, n_docs=1)
     job = await _create_epub_job(session, epub_path)
 
     def _translate_fn(payload: list[dict]) -> dict[str, str]:
-        return {item["id"]: f"VI:{item['html']}" for item in payload if item["id"] != "1"}
+        return {}  # thieu ca 2/2 id -> vuot han muc chunk 20% (cho phep toi da 1)
 
     provider = _FakeEpubProvider(_translate_fn)
     orchestrator = JobOrchestrator(
@@ -440,7 +442,8 @@ async def test_run_epub_job_still_missing_after_retry_fails_chunk_no_empty_write
 
     assert result.status == "failed"
     await session.refresh(job)
-    assert "EpubBatchTranslationError" in job.error_message or "thieu ban dich" in job.error_message
+    assert "vuot han muc" in job.error_message
+    assert "fallback" in job.error_message
     assert job.output_path is None
 
 
@@ -474,15 +477,20 @@ async def test_run_epub_job_guard_fails_when_llm_returns_untranslated_text(
 
 
 @pytest.mark.asyncio
-async def test_run_epub_job_stops_at_cost_capped_mid_book_with_metered_cost(
+async def test_run_epub_job_stops_at_cost_capped_via_layer4_mid_first_chunk(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """Lop 3 (Architecture.md 6.11.4): 2 chunk (ngan sach nho), tran thap hon
-    chi phi CHUNK DAU -> dung ngay sau chunk 1, `chunk_index > 0` (dung y
-    BR-EPUB-02 doi hoi), `cost_source='metered'` (khac PDF 'estimated')."""
+    """Architecture.md 6.20.13.2 (Lop 4, them sau QA vong 1/5): voi 1 tran
+    THAP HON CA CHI PHI 1 REQUEST, Lop 4 bat truoc khi Lop 3 co co hoi chay —
+    job dung ngay GIUA CHUNG DAU (chunk 0 khong con kip "completed" nua, ma
+    'failed' voi `api_cost` da ghi nhan va `output_path=None`), khac hanh vi
+    CU (truoc 6.20.13.2) khi Lop 3 chi kiem SAU KHI 1 chunk hoan tat toan bo
+    — xem `test_run_epub_job_stops_at_cost_capped_via_layer3_between_chunks`
+    o duoi cho kich ban Lop 3 van hoat dong DOC LAP khi tran nam GIUA 2
+    chunk (khong bi Lop 4 chan truoc)."""
     epub_path = _build_epub(tmp_path / "book.epub", paragraphs_per_doc=2, n_docs=2)
     job = await _create_epub_job(session, epub_path)
-    job.cost_cap_usd = 0.0000001  # thap hon bat ky chi phi that nao cua fake provider
+    job.cost_cap_usd = 0.0000001  # thap hon bat ky chi phi 1 request nao cua fake provider
     session.add(job)
     await session.commit()
 
@@ -507,6 +515,22 @@ async def test_run_epub_job_stops_at_cost_capped_mid_book_with_metered_cost(
 
     chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
     chunks = list(chunks_result.all())
-    assert any(c.status == "completed" for c in chunks)
-    # Dung GIUA CHUNG (khong dich het) — dung y BR-EPUB-02.
-    assert any(c.status not in ("completed",) for c in chunks)
+    # G-4 (Architecture.md 6.20.13.10): Lop 4 dung GIUA chunk 0 -> chunk do
+    # KHONG con "completed", ma "failed" voi chi phi da ghi nhan va
+    # output_path=None (khong lam mat dau vet tai chinh, Protocol 6).
+    chunk0 = next(c for c in chunks if c.chunk_index == 0)
+    assert chunk0.status == "failed"
+    assert chunk0.api_cost is not None
+    assert chunk0.api_cost > 0
+    assert chunk0.output_path is None
+
+    # NOTE (Dev, Architecture.md 6.20.13.2): voi nhanh EPUB, Lop 4 kiem tra
+    # SAU MOI request trong 1 chunk bang CHINH bieu thuc `effective_cap` ma
+    # Lop 3 dung — vi vay bat ky truong hop nao Lop 3 (hau-chunk) se trigger
+    # thi Lop 4 (trong-chunk) DA trigger truoc do roi (Lop 4 la refinement
+    # chat hon, khong phai co che song song doc lap). Lop 3's check ben duoi
+    # trong `run_epub_job()` van GIU NGUYEN lam luoi phu (vd. cho nhanh PDF
+    # dung chung khung — `run_job()`'s Step 7 — noi KHONG co Lop 4), nhung
+    # tren nhanh EPUB no tro thanh khong con duong nao con lai de tu minh
+    # trigger truoc Lop 4 nua. Khong viet them test "Lop 3 rieng trigger
+    # doc lap tren EPUB" vi kich ban do khong con dat duoc sau fix nay.

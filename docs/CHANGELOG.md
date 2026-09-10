@@ -6832,3 +6832,527 @@ vòng 3/3). Đặc biệt cần Reviewer tự đánh giá: (1) 3 điểm yêu c�
 hiện JSON trailing-garbage ngoài yêu cầu — fix có đủ chặt không (chỉ nới lỏng đúng 1 dạng lỗi cụ
 thể "Extra data", giữ nguyên strict cho JSON hỏng thật), R5-04 checklist riêng cho
 `deepl_provider.py` (external contract) áp dụng lại cho nhánh 5xx mới.
+
+## US-22 EPUB — Fix Bug #EPUB-B2-1 (cost variance) + Bug #EPUB-4 (mất dấu tiếng Việt) — sau QA vòng 1/5 (2026-09-09)
+
+Implement đúng theo spec Tech Lead ở `docs/Architecture.md` §6.20.13 (toàn bộ §6.20.13.0 → .10).
+5 phần theo brief PM, đủ cả 5, theo đúng thứ tự bắt buộc §6.20.13.9.
+
+### 1. Fix root cause #EPUB-4 (V-1 — prompt tự dạy model bỏ dấu)
+
+`src/core/prompt_builder.py`: `_EPUB_BATCH_ONE_SHOT_EXAMPLE` (dòng ~427-433) — phần "Dau ra" đổi
+từ `"bot mi"`/`"muoi"`/`"nuong o 350F"` (không dấu) thành `"bột mì"`/`"muối"`/`"nướng ở 350F"` (có
+dấu, NFC). Phần "Dau vao" (tiếng Anh) giữ nguyên. Thêm rule 7 vào `_EPUB_BATCH_CONTRACT` (sau rule
+6): yêu cầu tường minh bản dịch phải là tiếng Việt CÓ DẤU đầy đủ, kèm ví dụ có dấu ngay trong rule
+(để không tự rơi vào chính cái bẫy V-1 khi mô tả suông về dấu). Không đổi phần còn lại của contract
+sang tiếng Việt có dấu (đánh đổi có tính được theo §6.20.13.4 mục 3: overhead tăng < $0,001/sách).
+
+### 2. Fix cost estimate undercounting (C-2, Protocol 6 data lineage)
+
+`src/core/cost_gate.py::_estimate_epub_translation_cost()` — trước fix đo `prompt_overhead_chars`
+bằng `build_prompt_text()` (prompt của NHÁNH PDF, có placeholder `${text}`, KHÔNG PHẢI chuỗi thật
+gửi cho LLM ở nhánh EPUB). Sửa: đo đúng `build_epub_batch_prompt(await build_system_prompt(...))`
+— CHÍNH artifact mà `_process_epub_chunk()` (`job_orchestrator.py`) gửi thật, không còn trừ
+`len("${text}")` (chuỗi EPUB không có placeholder này). Nhánh PDF không đổi 1 dòng.
+
+### 3. Trần số request phụ cho vòng gọi lại thiếu id (fix C-1)
+
+`src/core/chunking.py`: 2 hằng số mới cạnh `EPUB_REQUEST_CHAR_BUDGET` — `EPUB_MAX_SINGLE_ID_RETRIES
+= 5` (⚠️ ASSUMED) và `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE = 6` (⚠️ ASSUMED). `_process_epub_chunk()`:
+`len(missing_ids) <= 5` giữ nguyên pattern gọi lại riêng lẻ cũ; `> 5` gọi lại NGUYÊN request đó
+đúng 1 lần thay vì tối đa ~18 request lẻ. `extra_requests` là quota CHUNG cho cả retry-thiếu-id và
+retry-mất-dấu (§6.20.13.5) trong cùng 1 slice, không cộng dồn hai cơ chế.
+
+### 4. Guard runaway per-request (Bug #EPUB-B2-1, fix C-3) + Lớp 4 cost cap
+
+`src/core/cost_estimator.py`: thêm `EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0` (⚠️ ASSUMED), 
+`EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS = 1500` (⚠️ ASSUMED), `epub_expected_output_tokens()` (tái dùng
+`VI_CHAR_EXPANSION`/`CHARS_PER_TOKEN_VI` đã có, không viết công thức thứ hai) và
+`is_runaway_output()`. `job_orchestrator.py::_process_epub_chunk()` gọi ngay sau mỗi request chính
+(không phải các retry): runaway + `parse_epub_batch_response()` đủ id hợp lệ (R-a) → GIỮ kết quả,
+chỉ ghi nhận anomaly; runaway + thiếu id/hỏng (R-b) → `EpubRequestRunawayError` mới, abort NGAY
+(không tự động retry — brief câu hỏi 2: có, retry sau runaway hỏng là chính con đường khuếch đại
+C-1, xác suất thành công thấp nhất).
+
+Lớp 4 (§6.20.13.2, không phụ thuộc ngưỡng ⚠️ ASSUMED nào — lưới an toàn CHÍNH): `_process_epub_chunk()`
+đổi signature, thêm tham số có tên `cost_budget_remaining: float | None`; kiểm tra SAU MỖI lần cộng
+`total_cost` (request chính lẫn mọi retry) — vượt ngân sách còn lại cho CHUNK ĐANG CHẠY (không phải
+cả job) → ghi nhận `chunk.api_tokens_used`/`api_cost`/`status="failed"`/`output_path=None` (Protocol
+6, không mất dấu vết tài chính) rồi raise `EpubChunkCostCapExceeded` mới. `run_epub_job()` bắt riêng
+exception này TRƯỚC `except Exception` chung, đi vào đúng nhánh `cost_capped` đã có (không tạo
+trạng thái mới). `effective_cap` được tính 1 LẦN ở đầu vòng lặp mỗi chunk, dùng lại cho cả Lớp 4
+(trước khi xử lý chunk) và Lớp 3 (sau khi xử lý chunk) — không viết công thức trần thứ hai. Mức
+"vượt trần tối đa để lọt" giảm từ ~1 chunk xuống ~1 request (~2,7×).
+
+### 5. Guard mất dấu 2 tầng (Bug #EPUB-4)
+
+Module mới `src/core/text_quality.py`: `strip_html_for_measure()`, `diacritic_ratio()` (NFC-
+normalize TRƯỚC khi đếm — bẫy kỹ thuật §6.20.13.5 cảnh báo rõ: chuỗi tổ hợp NFD sẽ cho ratio sai về
+0 nếu không normalize trước), 4 hằng số ⚠️ ASSUMED: `EPUB_DIACRITIC_MIN_LETTERS_REQUEST=200`/
+`EPUB_DIACRITIC_RATIO_REQUEST=0.08` (tầng 1 — mức REQUEST, đo gộp toàn bộ `parsed` sau khi đã xử lý
+xong id thiếu) và `EPUB_DIACRITIC_MIN_LETTERS_UNIT=40`/`EPUB_DIACRITIC_RATIO_UNIT=0.02` (tầng 2 —
+mức UNIT, bắt phần sót lại). Tầng 1 hỏng → gọi lại NGUYÊN request 1 lần (dùng chung quota
+`EPUB_MAX_EXTRA_REQUESTS_PER_SLICE`); ratio bản retry cao hơn mới dùng, không thì giữ bản đầu. Tầng
+2 hỏng → gọi lại RIÊNG LẺ đúng unit đó, tối đa 1 lần, dùng CHUNG helper `_retry_single_unit()` với
+cơ chế thiếu-id ở phần 3 (2 cơ chế TÁCH vòng lặp nhưng CHIA SẺ helper, theo đúng "CHỐT" của
+§6.20.13.5 — 2 điều kiện kích hoạt ở 2 thời điểm khác nhau, gộp cứng là lặp lại kiểu lỗi "một biến,
+hai ý nghĩa" của Bug #5). Sau retry vẫn thiếu dấu → CHẤP NHẬN + ghi nhận, KHÔNG fail chunk (quyết
+định (a) của Tech Lead — mất dấu là lỗi chất lượng cục bộ, không phải lỗi phá huỷ nội dung như
+E-09).
+
+Ghi nhận anomaly (§6.20.13.7, trả lời câu hỏi 4 brief): `chunk_dir/anomalies.json` (chỉ ghi khi có
+≥1 anomaly: `runaway_requests`/`low_diacritic_requests`/`low_diacritic_units`) +
+`chunk_dir/requests.jsonl` (bắt buộc, 1 dòng cho MỌI request chính — payload_chars/input_tokens/
+output_tokens/ratio/diacritic_ratio — dữ liệu để chốt lại các ngưỡng ⚠️ ASSUMED ở vòng QA sau) +
+1 dòng `logger.warning()` mỗi anomaly (job.id + chunk_index + loại). Không đụng `job.error_message`
+khi job vẫn `completed`.
+
+### Test mới
+
+- `tests/test_text_quality.py` (7 test): `strip_html_for_measure()`/`diacritic_ratio()` — strip
+  tag+attribute, ratio cao/thấp/rỗng, bẫy NFD→NFC, false-positive thuật ngữ Anh, ngưỡng biên.
+- `tests/test_epub_cost_gate.py` (2 test): R6-02 — `prompt_overhead_chars` của Lớp 2 BẰNG đúng
+  `len(build_epub_batch_prompt(build_system_prompt(...)))` mà `_process_epub_chunk()` thực nhận
+  trên CÙNG job/glossary (không chỉ assert đã gọi); regression guard overhead mới > overhead theo
+  công thức cũ (`build_prompt_text()`).
+- `tests/test_epub_runaway_guard.py` (5 test): `epub_expected_output_tokens()`/`is_runaway_output()`
+  — dùng chung công thức estimator, false/true theo factor, floor cho payload nhỏ, biên đúng ngưỡng.
+- `tests/integration/test_epub_translate_guards.py` (9 test, `_ControllableEpubProvider` kiểm soát
+  chính xác `output_tokens`/nội dung trả về từng lần gọi): >5 id thiếu dùng đúng 1 lần gọi lại
+  nguyên request (không phải N lần lẻ); vẫn thiếu sau đó → fail chunk đúng 2 lần gọi (không vô hạn);
+  R-a runaway giữ kết quả + anomalies.json/requests.jsonl ghi đúng; R-b runaway+thiếu id → abort
+  ngay, không retry; tầng 1 mất dấu retry cải thiện → dùng bản retry; tầng 1 retry không cải thiện →
+  giữ bản đầu (không đổi lấy thứ tệ hơn); tầng 2 mất dấu unit retry resolved=True; tầng 2 retry vẫn
+  không dấu → resolved=False nhưng KHÔNG fail chunk; Lớp 4 dừng giữa chừng chunk đầu, chunk đó
+  `failed`/`api_cost>0`/`output_path=None`, đúng 1 lần gọi (G-4).
+- `tests/integration/test_epub_translate_runner.py`: sửa 1 test cũ
+  (`test_run_epub_job_stops_at_cost_capped_mid_book_with_metered_cost` →
+  `test_run_epub_job_stops_at_cost_capped_via_layer4_mid_first_chunk`) — hành vi CŨ (Lớp 3 để 1
+  chunk hoàn tất trọn vẹn dù đã vượt trần, rồi mới dừng) không còn đạt được nữa sau khi thêm Lớp 4 —
+  đây là thay đổi hành vi CÓ CHỦ ĐÍCH của chính fix này, không phải regression. Ghi chú thêm trong
+  test: với nhánh EPUB, do Lớp 4 dùng CHUNG `effective_cap` với Lớp 3 và kiểm tra sớm hơn (trong-
+  chunk thay vì hậu-chunk), Lớp 4 luôn trigger trước khi Lớp 3 có cơ hội tự trigger độc lập — Lớp 3
+  vẫn giữ nguyên trong code làm lưới phụ (dùng chung khung với nhánh PDF ở `run_job()` không có Lớp
+  4), nhưng không còn kịch bản nào trên nhánh EPUB để viết test "Lớp 3 tự trigger" tách biệt Lớp 4
+  nữa — không thêm test giả cho kịch bản không còn đạt được.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/  → All checks passed!
+uv run pytest tests/ -q        → 705 passed, 0 failed
+```
+705 = baseline 682 (đã xác nhận trước khi bắt đầu, khớp con số PM cho trong brief) + 23 test mới
+(7 + 2 + 5 + 9, đã liệt kê ở trên) + 0 net change cho test cũ bị sửa (1 sửa tại chỗ, không xoá/thêm
+số lượng).
+
+Không chạy live E2E thật (real API) cho vòng sửa này — task PM cho phép tuỳ chọn, không bắt buộc;
+cân nhắc chi phí + brief đã nói rõ 5 phần chỉ cần code đúng logic + dùng đúng số ⚠️ ASSUMED Tech Lead
+đã cho, không cần tự đo lại bằng tiền thật.
+
+### File đã sửa/thêm
+
+Sửa: `src/core/prompt_builder.py` (one-shot example + rule 7), `src/core/cost_gate.py`
+(`_estimate_epub_translation_cost()`), `src/core/chunking.py` (2 hằng số mới), `src/core/
+cost_estimator.py` (`EPUB_RUNAWAY_OUTPUT_FACTOR`/`EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS`/
+`epub_expected_output_tokens()`/`is_runaway_output()`), `src/core/job_orchestrator.py`
+(`EpubChunkCostCapExceeded`/`EpubRequestRunawayError` mới; `_retry_single_unit()`/
+`_retry_whole_epub_request()` helper mới; `_process_epub_chunk()` viết lại — Lớp 4, trần request
+phụ, runaway, guard mất dấu 2 tầng, anomalies/requests log; `run_epub_job()` — tính `effective_cap`
+1 lần/vòng lặp, nhánh bắt `EpubChunkCostCapExceeded` riêng).
+
+Thêm: `src/core/text_quality.py`, `tests/test_text_quality.py`, `tests/test_epub_cost_gate.py`,
+`tests/test_epub_runaway_guard.py`, `tests/integration/test_epub_translate_guards.py`.
+
+### Trạng thái
+
+**CHƯA báo "xong"/"sẵn sàng release"** — chưa có Reviewer thật review trong session này (R7-01).
+Không tự review, dừng lại ở đây theo đúng brief PM, chờ PM giao việc cho Reviewer riêng.
+
+Không có điểm nào của spec Tech Lead §6.20.13 không rõ/không khớp code thật khi implement — đọc
+toàn bộ §6.20.13.0 → .10 trước khi viết code, mọi tham chiếu dòng/tên hàm trong spec khớp đúng với
+code thật tại thời điểm implement. 2 quyết định kỹ thuật thuần (không ảnh hưởng threshold/hành vi
+nghiệp vụ) tự chọn theo convention: (1) thêm helper `_retry_whole_epub_request()` để DRY hoá 2 nơi
+gọi lại nguyên request (fix C-1 nhánh >5 id thiếu, và tầng 1 guard mất dấu) — spec chỉ bắt buộc chia
+sẻ helper cho retry-đơn-lẻ, không cấm thêm helper tương tự cho retry-nguyên-request; (2) hàm
+`epub_expected_output_tokens()` tách riêng khỏi `is_runaway_output()` để nơi ghi `requests.jsonl`
+tính lại đúng `ratio` mà không viết công thức thứ hai — spec chỉ đưa code mẫu inline, việc tách hàm
+là chi tiết implement thuần tuý.
+
+Known limitation đã có sẵn trong spec (không phải bug mới, giữ nguyên hành vi hiện có của mọi chunk
+`failed` ở nhánh PDF): tiền đã tiêu cho phần dở dang của 1 chunk bị Lớp 4 chặn giữa chừng sẽ bị
+GHI ĐÈ (không cộng dồn) nếu user bấm Retry — `retry_job()` reset chunk về `pending` và lần chạy mới
+gán đè `chunk.api_cost`, không phải cộng dồn (§6.20.13.2).
+
+---
+
+## Fix Bug #EPUB-B2-3 — mất id khi DeepSeek trả nhiều object JSON top-level rời rạc (2026-09-10)
+
+### Root cause
+
+QA vòng 2/5 (`docs/test-report.md`, mục "Bug #EPUB-B2-3") phát hiện + tái lập 2/2 lần trên sách
+Sourdough thật: DeepSeek đôi khi trả về batch reply dưới dạng **nhiều object JSON top-level rời rạc
+nối tiếp nhau** (mỗi object 1 hoặc vài id, phân tách bằng newline — ví dụ `{"0": "..."}\n{"1":
+"..."}\n...\n{"10": "..."}`) thay vì 1 object duy nhất gồm đủ key. Nhánh xử lý cũ trong
+`parse_epub_batch_response()` (`src/core/prompt_builder.py`) cho lỗi `json.JSONDecodeError` với
+`exc.msg == "Extra data"` chỉ parse lại `text[:exc.pos]` — tức CHỈ giữ object ĐẦU TIÊN, âm thầm vứt
+bỏ mọi id trong các object sau. Với ca QA log được (11 id kỳ vọng, object đầu chỉ có id "0"), 10 id
+còn lại — đã dịch đúng, ĐÃ TRẢ TIỀN — bị coi là "thiếu", kích hoạt gọi lại nguyên request (C-1), rồi
+DeepSeek lặp lại đúng kiểu tách-object đó ở lần gọi lại → vẫn thiếu đúng số id đó → chunk fail vĩnh
+viễn (E-09) dù nội dung đã dịch xong và đúng.
+
+Nhánh cũ (1 dấu `"` thừa sau `}` hợp lệ, fix trước đó cho 1 unit riêng lẻ) thực chất là 1 TRƯỜNG HỢP
+ĐẶC BIỆT của cùng 1 vấn đề tổng quát hơn (object thứ 2 trở đi không parse được) — chỉ khác ở chỗ
+"phần sau" trong ca cũ là rác thật (1 ký tự), còn ở Bug #EPUB-B2-3 "phần sau" là các object JSON
+HỢP LỆ khác chứa dữ liệu thật cần giữ lại.
+
+### Fix
+
+`parse_epub_batch_response()` (`src/core/prompt_builder.py`) — thay nhánh "Extra data" cũ bằng hàm
+`_decode_concatenated_json_objects()` mới: vòng lặp `json.JSONDecoder().raw_decode()` liên tục trên
+phần còn lại của chuỗi (bỏ qua whitespace giữa các object), gộp TẤT CẢ object JSON top-level tìm
+được vào 1 dict bằng `dict.update()` theo đúng thứ tự xuất hiện trong text, dừng khi hết chuỗi hoặc
+phần còn lại không parse được nữa (phần không parse được coi là rác, bỏ qua — giữ đúng tinh thần cũ
+"dung sai với phản hồi LLM không hoàn hảo", không nới lỏng để chấp nhận rác thật thành dữ liệu giả).
+Ca cũ (1 dấu `"` thừa) giờ là N=1 của vòng lặp tổng quát này — không viết 2 nhánh riêng.
+
+**Quyết định key trùng nhau**: nếu 2 object merge có CÙNG 1 key, object xuất hiện SAU trong text
+thắng (`dict.update()` tuần tự, đúng thứ tự xuất hiện) — chưa có bằng chứng thực tế nào cho thấy
+DeepSeek lặp lại 1 key với câu trả lời TỆ HƠN ở lần sau, và cách này giữ logic merge đơn giản nhất
+có thể; sẽ xem lại nếu có ca thật cho thấy điều ngược lại.
+
+**Giá trị JSON top-level không phải object** (vd 1 số/list lạc vào giữa 2 object dict hợp lệ) bị bỏ
+qua trong lúc merge, không làm crash vòng lặp và không làm mất các object dict hợp lệ khác.
+
+### Golden fixture — giới hạn phải escalate (Protocol 5 R5-01 mở rộng)
+
+PM brief chỉ định dùng nguyên văn raw response thật đã log tại
+`.../scratchpad/qa_round2/diagnostic_parse_calls.jsonl` để làm golden fixture. Đọc kỹ file này phát
+hiện: script log của QA (`test_live_epub_diagnostic.py`) **chỉ ghi `raw_text[:300]` và
+`raw_text[-300:]`**, KHÔNG BAO GIỜ ghi toàn bộ `raw_text` (2886 ký tự cho call_no=5, entry khớp mô
+tả bug — 11 id kỳ vọng, 10 id thiếu, `parsed_count=1` trước fix). Không có bất kỳ nơi nào khác trong
+scratchpad (`full_run.log`, `tmp_live*/`, `qa.db`) lưu lại full raw text. Dev đã thử tự chạy live 1
+lần để tự capture đầy đủ (Protocol 5 R5-02 — spike verification) bằng
+`.../scratchpad/dev_spike/capture_full_raw.py` (mirror `test_live_epub_diagnostic.py` nhưng log
+`raw_text_full` không cắt), nhưng bị **auto-mode financial-action classifier chặn** (lệnh gọi API
+DeepSeek thật = tốn tiền thật, cần permission người dùng theo safety rules, không được tự bypass).
+
+Vì vậy `tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_multi_json_object_partial_capture.json`
+là fixture **"partial capture"**, KHÔNG phải golden fixture đầy đủ đúng nghĩa Protocol 5 mục 3 —
+tự đánh dấu rõ trong field `protocol_5_status` của chính file JSON: giữ nguyên byte THẬT cho phần
+đầu id "0" (294 ký tự đầu, từ `raw_text_head`) và toàn bộ id "9"/"10" (nằm trọn trong 300 ký tự cuối
+`raw_text_tail`, THẬT 100%); phần còn lại (đuôi giá trị id "0", toàn bộ id "1".."8") là placeholder
+được gắn nhãn rõ ràng trong chính nội dung fixture, KHÔNG giả vờ là dữ liệu thật. Test dùng fixture
+này (`tests/test_epub_batch_golden_fixture.py`, 4 test mới) verify đúng thuật toán merge trên hình
+dạng ĐÃ XÁC NHẬN THẬT (nhiều object top-level rời rạc nối tiếp) và đúng nội dung ở các đoạn THẬT
+(id 0 prefix, id 9, id 10) — không chứng minh nội dung dịch thật của id 1-8 (không ai biết, kể cả
+QA, vì chưa từng được lưu lại).
+
+**Escalate lên PM/Tech Lead**: cần 1 trong hai để có golden fixture đầy đủ đúng chuẩn — (a) tìm lại
+full raw text nếu QA có lưu ở nơi khác ngoài scratchpad đã kiểm tra, hoặc (b) user cho phép Dev chạy
+1 lần live call thật (~vài phần nghìn USD, đã có `capture_full_raw.py` sẵn sàng chạy) để tự capture
+lại. Không blocking cho phần fix logic (đã có test tổng quát bảo vệ đúng thuật toán bằng chuỗi tổng
+hợp — xem mục Test mới), chỉ blocking cho việc có 1 bằng chứng golden-fixture-đầy-đủ đúng nghĩa đen
+của Protocol 5 cho riêng hình dạng phản hồi này.
+
+### Test mới
+
+- `tests/test_epub_batch_prompt.py` (5 test mới, chuỗi tổng hợp — kiểm logic thuật toán merge tổng
+  quát, không phụ thuộc dữ liệu thật của 1 lần gọi cụ thể): gộp nhiều object top-level rời rạc (2
+  object và 11 object — đúng dạng cụ thể QA quan sát được, 1 object/id); key trùng → object sau
+  thắng; rác thật sau vài object hợp lệ → giữ phần đã parse được, không crash, không "đoán" nội dung
+  rác; 1 giá trị JSON hợp lệ nhưng không phải object (số) lạc giữa 2 object dict → bị bỏ qua, không
+  làm mất 2 object dict hợp lệ.
+- `tests/test_epub_batch_golden_fixture.py` (4 test mới, dùng fixture "partial capture" nói trên):
+  xác nhận fixture tự gắn nhãn KHÔNG phải golden fixture đầy đủ + tự làm `json.loads()` thô fail
+  đúng kiểu "Extra data"; merge đủ 11/11 id; giữ đúng nguyên văn các đoạn THẬT (id 0 prefix, id 9,
+  id 10); loại bỏ đúng 1 key giả `_qa_log_tail_fragment_not_an_expected_id` (dùng để giữ nguyên byte
+  that của đoạn nối giữa 2 cửa sổ 300-ký-tự QA đã log, không thuộc id nào) — không lọt vào kết quả.
+- Test case cũ (`test_parse_recovers_single_trailing_character_after_valid_json`,
+  `test_trailing_garbage_fixture_file_exists_and_was_a_real_call`,
+  `test_raw_response_text_is_genuinely_malformed_before_parser_fix`,
+  `test_parse_epub_batch_response_recovers_from_trailing_garbage`) chạy lại PASS y nguyên, không
+  sửa — xác nhận không regression cho ca 1 dấu `"` thừa.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/  → All checks passed!
+uv run pytest tests/ -q        → 714 passed, 0 failed
+```
+714 = baseline 705 (CHANGELOG entry gần nhất, đã xác nhận khớp) + 9 test mới (5 +
+4, đã liệt kê ở trên).
+
+Không chạy live E2E full-book thật cho fix này (bị chặn bởi auto-mode classifier như đã nêu ở mục
+Golden fixture) — logic fix đã được verify qua fixture "partial capture" + test tổng hợp; hành vi
+model có còn lặp lại kiểu tách-object hay không nằm ngoài tầm kiểm soát của fix này.
+
+### File đã sửa/thêm
+
+Sửa: `src/core/prompt_builder.py` (`parse_epub_batch_response()` viết lại nhánh "Extra data" thành
+`_decode_concatenated_json_objects()`), `tests/test_epub_batch_prompt.py`,
+`tests/test_epub_batch_golden_fixture.py`, `tests/fixtures/epub_llm/README.md`.
+
+Thêm: `tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_multi_json_object_partial_capture.json`.
+
+### Trạng thái
+
+**CHƯA báo "xong"/"sẵn sàng release"** — chưa có Reviewer thật review trong session này (R7-01).
+Không tự review, dừng ở đây theo đúng brief PM, chờ PM giao việc cho Reviewer riêng.
+
+Không động tới guard runaway (C-3) hay guard mất dấu (`text_quality.py`) — đúng phạm vi brief, cả 2
+không liên quan tới bug này.
+
+**Cần PM quyết định trước khi đóng bug này hoàn toàn**: có cho phép Dev chạy 1 live call thật để có
+golden fixture đầy đủ hay không (xem mục Golden fixture ở trên) — không phải lỗi thiết kế/logic, mà
+là giới hạn dữ liệu QA đã log + giới hạn permission môi trường Dev đang chạy.
+
+## Increment 2026-09-10 — Golden fixture Bug #EPUB-B2-3: hoàn thiện qua live call thật (PM đã duyệt)
+
+**Bối cảnh**: tiếp nối entry ngay phía trên (fix `parse_epub_batch_response()`) — phần việc còn lại
+duy nhất là golden fixture đầy đủ, bị chặn trước đó vì gọi API DeepSeek thật là hành động tốn tiền
+cần permission người dùng. PM đã duyệt riêng 1 lần gọi (chi phí ước tính dưới 1 cent USD) trong
+phiên này.
+
+**Kết quả: TÁI HIỆN THÀNH CÔNG ngay ở lần gọi đầu tiên** (1/5 attempt cho phép). Script capture
+(`plan_epub_chunks()` thật trên sách Sourdough → xác nhận đúng chunk 1, request slice unit index
+(45, 55) = 11 unit `ops/xhtml/chapter01.html#36`..`#46`, khớp chính xác ví dụ QA đã trích
+`'ops/xhtml/chapter01.html#37'` trong `docs/test-report.md`) gọi trực tiếp
+`ProviderFactory.create("deepseek", settings).translate()` với đúng payload/system_prompt như
+`_process_epub_chunk()` dùng thật. DeepSeek trả về đúng 11 object JSON top-level rời rạc nối tiếp
+nhau bằng dấu xuống dòng — `json.loads()` thô fail với `Extra data at pos 802`, đúng hình dạng lỗi
+đã báo cáo. Toàn bộ 11 id có nội dung dịch tiếng Việt có dấu đầy đủ, không cần placeholder.
+
+**Chi phí thật đã phát sinh (đã được PM duyệt riêng)**: `input_tokens=1994`, `output_tokens=1279`,
+**`estimated_cost_usd=0.00128282`** (~0,13 cent USD), đúng 1 lần gọi API — không cần dùng hết 5
+lần cho phép.
+
+**Fixture cuối cùng dùng cho test**:
+`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_multi_json_object.json` (mới, đầy
+đủ, byte-for-byte thật 100% cho cả 11 id) — thay thế hoàn toàn
+`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_ch1_multi_json_object_partial_capture.json`
+(đã XOÁ khỏi repo). `tests/test_epub_batch_golden_fixture.py`: 3 test cũ dùng fixture cũ được sửa
+để dùng fixture mới với assertion nội dung thật (id "0" đầu, id "2" có `<em>`/`<a id=...>`, id
+"9"/"10" cuối) thay vì assertion "tự gắn nhãn partial"; không xoá test nào, không thêm/bớt số
+lượng test (714 → vẫn 714 sau khi chỉ đổi fixture). `tests/fixtures/epub_llm/README.md` (APPEND):
+thêm ghi chú "CẬP NHẬT 2026-09-10" vào mục fixture cũ (giữ nguyên lịch sử, không xoá — Protocol 1
+R7-03) trỏ sang mục mới, và thêm hẳn 1 mục mới ở cuối file mô tả fixture đầy đủ.
+
+**Kết quả chạy thật sau khi đổi fixture**:
+```
+uv run ruff check src/ tests/  → All checks passed!
+uv run pytest tests/ -q        → 714 passed, 0 failed
+```
+
+**Không động tới** `_decode_concatenated_json_objects()`/`parse_epub_batch_response()` — chỉ thay
+fixture + test/README tham chiếu fixture, đúng phạm vi PM giao.
+
+**Trạng thái**: đây CHỈ là hoàn thiện golden fixture cho Bug #EPUB-B2-3, KHÔNG phải "xong US-22 Bước
+2/3" hay "sẵn sàng release" — chưa có Reviewer thật review trong phiên này (R7-01), phần Reviewer
+cho toàn bộ fix Bug #EPUB-B2-3 (bao gồm cả thay đổi fixture này) vẫn do PM giao riêng sau, không tự
+báo cáo hoàn tất ở đây.
+
+---
+
+## Fix Bug #EPUB-B2-4 (2026-09-10) — Dev↔QA vòng 4/5, tổng quát hoá `_decode_concatenated_json_objects()`
+
+**Bối cảnh**: QA vòng 3/5 (`docs/test-report.md`, mục "Bug #EPUB-B2-4") phát hiện **CÙNG HỌ LỖI**
+với Bug #EPUB-B2-3 (DeepSeek trả nhiều JSON object top-level rời rạc thay vì 1 object gộp đủ id)
+nhưng **BIẾN THỂ KHÁC**: lần này 32 object nối nhau bằng **dấu phẩy** (`}, {`) thay vì xuống dòng.
+Fix B2-3 trước đó chỉ `str.lstrip()`/skip whitespace giữa 2 lần `raw_decode()`, nên dừng lại ngay
+tại dấu phẩy (không phải whitespace) và chỉ giữ được object đầu tiên (mất 31/32 id, dù nội dung đã
+dịch đúng và đã trả tiền — cùng loại silent-content-loss như B2-3).
+
+**Quyết định fix — TỔNG QUÁT HOÁ, không vá riêng dấu phẩy**: đã quan sát ít nhất 2 biến thể ký tự
+phân cách khác nhau (newline, dấu phẩy) cho CÙNG 1 loại lỗi tổng quát ("model trả nhiều JSON value
+rời rạc thay vì gộp"). Vá riêng lẻ từng ký tự phân cách cụ thể là cách tiếp cận không bền — không
+có gì đảm bảo đây là 2 biến thể duy nhất. Sửa `_decode_concatenated_json_objects()`
+(`src/core/prompt_builder.py`): sau mỗi lần `raw_decode()` thành công tại vị trí `end`, thay vì chỉ
+skip whitespace rồi thử decode tiếp tại `end`, tìm vị trí ký tự MỞ JSON tiếp theo (`{` hoặc `[` —
+2 ký tự duy nhất có thể mở đầu 1 JSON value hợp lệ) bằng regex `_NEXT_JSON_VALUE_START_RE =
+re.compile(r"[{\[]")`, bỏ qua BẤT KỲ thứ gì nằm giữa (whitespace, dấu phẩy, hay ký tự rác khác chưa
+từng quan sát) — rồi thử `raw_decode()` tiếp từ đó. Nếu không tìm thấy `{`/`[` nào nữa, hoặc decode
+tại vị trí tìm được vẫn thất bại, dừng lại NGAY (không tìm `{` xa hơn nữa) và giữ nguyên mọi object
+đã parse được trước đó — đúng tinh thần "dung sai có chủ đích" đã có (chấp nhận ký tự phân cách lạ,
+không tự bịa/đoán nội dung rác thành dữ liệu thật). Hành vi cũ cho trường hợp phổ biến nhất (response
+chỉ có đúng 1 object hợp lệ, `raw_decode()` tiêu thụ hết chuỗi) không đổi.
+
+**Golden fixture (Protocol 5 R5-01)**: raw response thật (dấu phẩy) vẫn còn trong file log chẩn
+đoán QA vòng 3/5 để lại
+(`scratchpad/.../qa_round3/diagnostic_calls.jsonl`, `call_no: 17`) — KHÔNG cần gọi API mới, dùng
+lại nguyên văn `raw_text` đó làm
+`tests/fixtures/epub_llm/deepseek_batch_response_sourdough_comma_separated_json_objects.json` (32
+id, `"0"`..`"31"`, kèm 1 dấu `}` thừa ở cuối — vừa là ca dấu phẩy vừa là 1 ca "trailing garbage"
+khác). Chi phí `input_tokens=2299`/`output_tokens=1392`/`estimated_cost_usd=0.0014245` đã phát
+sinh THẬT từ trước (trong phiên QA vòng 3/5), không phát sinh chi phí mới ở bước lấy fixture này.
+Fixture thiếu `request_payload`/`unit_ids_in_order` đầy đủ (script chẩn đoán của QA không log lại
+các field này) — đã ghi rõ giới hạn này trong chính fixture (`note_on_missing_request_payload`) và
+`tests/fixtures/epub_llm/README.md` (APPEND, không xoá lịch sử — Protocol 1 R7-03); không ảnh hưởng
+tới mục đích test (`raw_response_text` vẫn byte-for-byte thật, `expected_ids` suy trực tiếp từ các
+id thật xuất hiện trong chính response).
+
+**Test mới** (`tests/test_epub_batch_golden_fixture.py`, APPEND):
+- 5 test dùng fixture dấu phẩy: fixture là 1 lần gọi thật + `Extra data` (sanity), parse đủ 32/32
+  id, nội dung id `"0"`/`"31"` đúng, xác nhận có trailing `}` thừa ở cuối.
+- **2 test tổng hợp dùng ký tự phân cách CHƯA TỪNG gặp** (`;` và khoảng-trắng+tab+newline trộn
+  lẫn) — bằng chứng quan trọng nhất rằng fix đã tổng quát thật: **cả 2 test PASS ngay, không cần
+  sửa thêm bất kỳ dòng code nào** ngoài fix đã mô tả ở trên.
+
+**Regression — toàn bộ test cũ liên quan `_decode_concatenated_json_objects()`/
+`parse_epub_batch_response()` (ca newline B2-3, ca 1 dấu `"` thừa, ca key trùng, ca rác thật, ca
+leading-prose, ca truncated JSON) vẫn PASS không sửa gì — thuật toán mới tương thích ngược hoàn
+toàn.
+
+**Kết quả chạy thật**:
+```
+uv run ruff check src/ tests/     → All checks passed!
+uv run pytest tests/ -q           → 720 passed, 0 failed (714 baseline + 6 test mới)
+```
+
+**Trạng thái**: đây là vòng Dev↔QA thứ **4/5** cho Bug #EPUB-B2-3/B2-4 (còn đúng 1 vòng trước giới
+hạn Protocol 3) — chưa có Reviewer thật review trong phiên này (R7-01), KHÔNG tự báo cáo "xong"/
+"sẵn sàng release". Chờ PM giao Reviewer trước khi chuyển tiếp cho QA vòng 5/5.
+
+---
+
+## Chiến lược MỚI cho lỗi "DeepSeek trả JSON malformed" — Lớp A + B + C (2026-09-10, sau khi chạm giới hạn Protocol 3)
+
+**Bối cảnh**: US-22 Bước 2/3 đã dùng hết **5/5 vòng Dev↔QA** (Protocol 3, xem `docs/escalation-log.md`)
+cho cùng 1 chuỗi lỗi "DeepSeek trả JSON hỏng cú pháp khi response dài" — 3 biến thể vá đúng
+(B2-3 newline, B2-4 dấu phẩy, B2-5 `}` thừa) nhưng mỗi vòng lại lộ biến thể mới, chứng minh hướng "vá
+tiếp từng biến thể cú pháp" không hội tụ. Đây **KHÔNG phải thêm 1 bản vá biến thể thứ 4** — Tech Lead
+thiết kế lại toàn bộ chiến lược tại `docs/Architecture.md` §6.20.14, dựa trên chỉ đạo của user
+(chuyển tiếp qua PM, 2026-09-10): *"Ưu tiên nhanh, tiết kiệm, độ chính xác của bản dịch có thể chấp
+nhận dung sai nhỏ."* Hệ quả: E-09 (chunk fail ngay khi thiếu 1 unit) đổi vai trò từ "luật mặc định"
+thành "chốt chặn khi vượt ngưỡng bất thường" — implement theo đúng thứ tự Tech Lead chốt: **Lớp B
+trước** (rẻ nhất, verify offline ngay được), rồi **Lớp A**, rồi **Lớp C**.
+
+### Lớp B — parser "lỏng" `_salvage_epub_id_pairs()` (§6.20.14.3)
+
+Bất biến nền tảng khác hẳn 3 fix cũ (B2-3/B2-4/B2-5 đều giả định "response là N giá trị JSON HỢP
+LỆ, chỉ khác ký tự nối"): **mỗi bản dịch luôn xuất hiện dưới dạng 1 cặp `"<id>": "<chuỗi JSON hợp
+lệ>"`, id nằm trong tập id ngắn cục bộ đã gửi** — không giả định gì về dấu ngoặc/dấu phẩy/cấu trúc
+lồng nhau xung quanh cặp đó. `src/core/prompt_builder.py` (APPEND, không xoá/sửa
+`_decode_concatenated_json_objects()` hiện có — Lớp B chỉ là lớp cứu hộ SAU parser chặt):
+- `_salvage_epub_id_pairs(text, expected_ids)`: quét toàn văn tìm cặp id bằng regex
+  `_EPUB_ID_PAIR_RE = re.compile(r'"(\d{1,3})"\s*:\s*"')`, decode giá trị bằng CHÍNH
+  `json.decoder.scanstring` (không phải regex — escape `\"`/`\n`/`\uXXXX` xử lý đúng như JSON thật),
+  con trỏ luôn tiến tới `end` sau mỗi lần ăn thành công (không bao giờ quét lại bên trong giá trị đã
+  lấy — 1 đoạn `"12": "` nằm TRONG nội dung dịch không thể tạo cặp giả).
+- `EpubParseOutcome` (dataclass) + `parse_epub_batch_response_detailed()`: trả thêm `strict_ids`/
+  `salvaged_ids` cho telemetry. `parse_epub_batch_response()` (chữ ký cũ, mọi caller hiện có không
+  đổi) nay chỉ là `.translations` của hàm `_detailed`. Salvage CHỈ chạy khi `len(result) <
+  len(expected_ids)` sau parser chặt — response lành không bao giờ kích hoạt nhánh này (zero
+  regression risk cho đường đi thường).
+
+**Test** (`tests/test_epub_batch_golden_fixture.py`, APPEND) — chạy trên **CẢ 5 golden fixture thật
+đã có, KHÔNG gọi thêm API nào**:
+- 4 fixture cũ (5-unit sạch, trailing-garbage, B2-3, B2-4): `salvaged_ids` rỗng — parser chặt đã tự
+  cứu đủ, Lớp B không cần kích hoạt.
+- **`..._single_object_spurious_closing_braces.json` (Bug #EPUB-B2-5, CHƯA TỪNG có test nào xác
+  nhận trước đây)**: parser chặt MỘT MÌNH chỉ cứu được **1/32 id** (`strict_ids == {"0"}`, bằng
+  chứng cụ thể B2-5 là giới hạn CẤU TRÚC thật của hướng "tìm `{`/`[` tiếp theo", không phải lỗi
+  triển khai fix B2-4). Sau Lớp B: **32/32 id**, 31 id còn lại đến từ salvage, nội dung id `"31"`
+  đúng `<strong>¼ cup hạt cắt nhỏ</strong>` — khớp chính xác kỳ vọng Tech Lead.
+- 3 test tổng hợp (không phụ thuộc fixture): salvage KHÔNG tạo cặp giả từ chuỗi con `"7": "` nằm
+  trong 1 giá trị đã dịch; response cụt giữa chừng chỉ giữ cặp hoàn chỉnh trước đó; id ngoài
+  `expected_ids` bị loại.
+- **2 test cũ trong `tests/test_epub_batch_prompt.py` đổi hành vi có chủ đích** (không còn đúng sau
+  Lớp B, đã sửa tên + assertion): `test_parse_strips_leading_prose` và
+  `test_parse_genuinely_truncated_json_recovers_only_the_complete_pair` (tên cũ:
+  `..._still_returns_empty_dict`) — Lớp B cứu được cặp id HOÀN CHỈNH dù nằm sau prose dẫn đầu, hoặc
+  dù response bị cắt cụt Ở CẶP KHÁC phía sau; đây là giới hạn ĐÃ BIẾT và mong muốn của Lớp B
+  (§6.20.14.3: không cứu được CHÍNH cặp bị cắt cụt, không phải "không cứu được gì trong cả response").
+
+### Lớp A — giảm kích thước batch + fix lineage bug cost gate (§6.20.14.2)
+
+Hằng số (`src/core/chunking.py` + mirror `src/core/config.py::Settings`):
+- `EPUB_REQUEST_CHAR_BUDGET`: 3.000 → **1.100** (suy từ số đo thật §6.20.14.0a: mục tiêu giữ
+  `output_tokens`/request ≤ ~600, vùng đã quan sát là sạch).
+- `EPUB_REQUEST_MAX_UNITS` (MỚI) = **6** — trần THỨ HAI theo SỐ UNIT, không chỉ ký tự thuần: batch
+  32 unit gây Bug #EPUB-B2-5 có RẤT ÍT ký tự thuần (nhiều tag HTML ngắn kiểu
+  `<strong>1 cup starter</strong>`) nên vẫn "trong ngân sách ký tự" — số KHOÁ JSON mới là thứ model
+  phải giữ đúng cú pháp. `plan_epub_chunks()` nhận thêm tham số này, cắt request khi VƯỢT MỘT TRONG
+  HAI điều kiện (ký tự hoặc số unit), điều kiện nào chạm trước.
+- `EPUB_MAX_SINGLE_ID_RETRIES`: 5 → **2**; `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE`: 6 → **3** — slice
+  giờ chỉ tối đa 6 unit, trần 5 gần như luôn rơi vào nhánh "retry từng id" (đắt hơn hẳn 1 lần gọi lại
+  nguyên request).
+
+**A-4 (bug lineage Protocol 6 R6-01, BẮT BUỘC sửa cùng lúc)**: `cost_gate.py::
+_estimate_epub_translation_cost()` trước đây gọi `plan_epub_chunks(doc.units)` với tham số MẶC ĐỊNH
+MODULE, trong khi `job_orchestrator.run_epub_job()` gọi với giá trị từ `Settings` — 2 nơi tình cờ
+khớp nhau trước khi đổi budget ở trên, sau đó (và với bất kỳ override `.env` nào) sẽ LỆCH, khiến
+`llm_request_count` (= `segment_count` của `estimate_job_cost_v2()`) bị ước THẤP, vi phạm §6.11.6.
+Sửa: `estimate_translation_cost()`/`_estimate_epub_translation_cost()` nhận thêm `settings: Settings`
+(bắt buộc cho nhánh `file_type="epub"`, raise `ValueError` rõ ràng nếu thiếu thay vì âm thầm dùng
+mặc định — không cho phép tái diễn bug này), gọi `plan_epub_chunks(doc.units,
+char_budget=settings.epub_chunk_char_budget, request_budget=settings.epub_request_char_budget,
+request_max_units=settings.epub_request_max_units)`. Call site `src/api/routes/jobs.py` (đã có sẵn
+`settings` tại đó) cập nhật truyền vào.
+
+**Test** (`tests/test_chunking.py`, `tests/test_epub_cost_gate.py`, APPEND + sửa 2 test hằng số cũ
+để khớp giá trị mới): hằng số đúng giá trị; `plan_epub_chunks()` cắt đúng theo trần unit (tái hiện
+kịch bản 32 unit ngắn); R6-02 — đổi `epub_request_max_units` trong `Settings` làm
+`estimated_input_tokens`/`segment_count` THAY ĐỔI theo (không chỉ `assert_called()`), và
+`segment_count` khớp CHÍNH XÁC với `plan_epub_chunks()` gọi trực tiếp cùng tham số.
+
+### Lớp C — ngưỡng dung sai, E-09 từ "luật mặc định" thành "chốt chặn bất thường" (§6.20.14.4)
+
+Unit không cứu được (kể cả sau Lớp B) → giữ nguyên tiếng Anh gốc, đánh dấu, KHÔNG làm chunk/job fail
+ngay — trong hạn mức. `EpubBatchTranslationError` đổi vai trò (docstring cập nhật), phần "TUYỆT ĐỐI
+không ghi chuỗi rỗng" của E-09 KHÔNG đổi.
+
+- **C-1** (`job_orchestrator.py::_process_epub_chunk()`): unit còn thiếu sau vòng gọi lại được gom
+  vào `fallback_units` (list riêng, KHÔNG đưa vào `parsed`) thay vì raise ngay — đúng thứ tự bắt buộc
+  (fallback không lọt vào 2 guard mất dấu phía sau, tránh đốt tiền retry nhầm unit đã quyết định bỏ
+  qua).
+- **C-2**: 2 hằng số MỚI `EPUB_FALLBACK_MAX_RATIO_CHUNK = 0.20`, `EPUB_FALLBACK_MAX_RATIO_JOB = 0.05`
+  (mirror `Settings`). Ngưỡng CHUNK kiểm ngay sau vòng lặp request trong `_process_epub_chunk()`
+  (`allowed = max(1, ceil(0.20 × n_units_chunk))`), vượt → `EpubBatchTranslationError` (E-09 dạng
+  mới). Ngưỡng JOB (5%) bị BR-EPUB-05 ép cận trên < 10% (unit fallback = giống bản gốc = tính vào
+  đúng khe hở 10% mà guard output cho phép) — đặt 5% để còn nguyên nửa khe hở cho nguyên nhân khác.
+- **C-3**: mỗi chunk ghi `fallback_units.json` vào `chunk_dir` (chỉ khi non-empty). Helper mới
+  `_collect_epub_fallback_units()` đọc lại file này cho MỌI `Chunk` `completed` (kể cả từ lần chạy
+  trước) — đây là cơ chế khiến ngưỡng JOB sống sót qua resume (BR-CHUNK-05), không dựa vào biến đếm
+  trong bộ nhớ. `run_epub_job()` kiểm SAU MỖI chunk (không đợi hết job) — fail sớm, tiết kiệm tiền
+  cho các chunk còn lại, đúng tinh thần Lớp 3/4 đã có. Nhân bản vào `anomalies.json` dưới khoá
+  `fallback_units`.
+- **C-4**: `EpubDocument.write_translated()` nhận thêm `untranslated_ids: set[str] | None = None` —
+  đánh dấu class `bb-untranslated` + `lang="en"` NGAY TRÊN node gốc (không chèn node mới, không bọc
+  `<span>`). Đã verify 2 tác dụng phụ: không đổi số unit đọc lại ở `load()` (chỉ bỏ qua theo class
+  `bb-vi`), không ảnh hưởng `count_bb_vi_pairs()` (chỉ đếm `bb-vi`).
+- **C-5**: `untranslated_units.json` ở `<output_dir>/<job_id>/` (cạnh `translated_vi.epub`), chứa
+  `unit_id`/`doc_href`/`reason`/`slice`/`excerpt`. `logger.warning` tổng kết khi có fallback.
+
+**Test** (`tests/integration/test_epub_translate_guards.py`, `tests/integration/test_epub_translate_runner.py`,
+`tests/test_epub_document.py` — APPEND + sửa 3 test cũ để khớp vai trò mới của E-09):
+- Trong hạn mức chunk/job → job `completed`, unit fallback có class `bb-untranslated` trong output,
+  có mặt trong `untranslated_units.json`.
+- Vượt hạn mức CHUNK (100% thiếu) → vẫn `EpubBatchTranslationError`, KHÔNG ghi chuỗi rỗng (E-09 chưa
+  chết, chỉ đổi vai trò).
+- Vượt hạn mức JOB **cộng dồn qua nhiều chunk** (không chỉ 1 chunk) → job fail NGAY SAU chunk vượt
+  ngưỡng, các chunk sau KHÔNG được xử lý (tiết kiệm tiền).
+- **Test resume THẬT** (2 `JobOrchestrator` instance riêng biệt, mô phỏng đúng cách `retry_job()` API
+  reset chunk `failed`→`pending`): fallback của chunk hoàn thành ở lần chạy TRƯỚC (ghi trên đĩa) cộng
+  dồn đúng với fallback của lần chạy SAU (instance hoàn toàn mới, không còn biến đếm cũ) — chứng
+  minh cơ chế đọc từ đĩa, không phải bộ nhớ.
+- `EpubDocument.write_translated()`: đánh dấu đúng node, không đổi số unit đọc lại, không ảnh hưởng
+  `count_bb_vi_pairs()`, giữ nguyên lineage guard (R6-02) cho `untranslated_ids` lạ.
+
+### Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/     → All checks passed!
+uv run pytest tests/ -q           → 744 passed, 0 failed (baseline 720 trước vòng này + ~24 test mới/sửa)
+```
+
+Không có regression cho test cũ liên quan JSON parsing/chunk/cost gate/EPUB translate guard — mọi
+test đổi hành vi (do Lớp B/C đổi kỳ vọng có chủ đích) đã được sửa và ghi rõ LÝ DO trong chính test
+(không xoá coverage, chỉ cập nhật để phản ánh đúng chiến lược mới).
+
+**Chưa chạy live E2E full-book** ở bước Dev này (không bắt buộc theo brief PM — để QA làm ở vòng sau
+với đầy đủ ngân sách đã duyệt, tham chiếu gate H-1..H-5 tại Architecture.md §6.20.14.9).
+
+**Trạng thái**: implement đủ cả 3 lớp theo đúng thứ tự Tech Lead chốt (B → A-4 → A-1/2/3 → C). Chưa
+có Reviewer thật review trong phiên này (R7-01) — **KHÔNG tự báo cáo "xong"/"sẵn sàng release"**. Chờ
+PM giao Reviewer trước khi chuyển tiếp cho QA.

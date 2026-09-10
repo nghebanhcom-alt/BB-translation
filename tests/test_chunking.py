@@ -4,7 +4,12 @@ import pytest
 
 from src.core.chunking import (
     EPUB_CHUNK_CHAR_BUDGET,
+    EPUB_FALLBACK_MAX_RATIO_CHUNK,
+    EPUB_FALLBACK_MAX_RATIO_JOB,
+    EPUB_MAX_EXTRA_REQUESTS_PER_SLICE,
+    EPUB_MAX_SINGLE_ID_RETRIES,
     EPUB_REQUEST_CHAR_BUDGET,
+    EPUB_REQUEST_MAX_UNITS,
     EPUB_UNIT_HARD_MAX_CHARS,
     EpubUnitTooLargeError,
     calculate_chunks,
@@ -157,14 +162,48 @@ def test_plan_epub_chunks_requests_never_split_a_single_unit_across_two_requests
 
 
 def test_plan_epub_chunks_request_budget_grouping() -> None:
-    units = _units("chapter.html", [1_000, 1_000, 1_500, 1_000])  # request_budget=3_000 mac dinh
+    """Truyen `request_budget=3_000` tuong minh (KHONG con la default sau
+    Architecture.md §6.20.14.2 A-1 — default gio la 1.100) de kiem RIENG
+    logic cat theo NGAN SACH KY TU, doc lap voi tran so unit moi (A-1/A-2,
+    xem `test_plan_epub_chunks_request_max_units_cuts_before_char_budget`)."""
+    units = _units("chapter.html", [1_000, 1_000, 1_500, 1_000])
 
-    plans = plan_epub_chunks(units, char_budget=100_000)  # ep ve 1 chunk duy nhat
+    plans = plan_epub_chunks(units, char_budget=100_000, request_budget=3_000)
 
     assert len(plans) == 1
     # 1000+1000=2000 (<=3000), +1500 se la 3500>3000 -> cat; unit con lai
     # (1500, 1000) gop tiep vi 1500+1000=2500<=3000.
     assert plans[0].requests == [(0, 1), (2, 3)]
+
+
+def test_plan_epub_chunks_request_max_units_cuts_before_char_budget() -> None:
+    """Architecture.md §6.20.14.2 A-1/A-2 (MOI) — tai hien dung ca 32 unit
+    Bug #EPUB-B2-5: nhieu tag HTML NGAN (it ky tu thuan) van phai bi cat theo
+    SO UNIT du con rat xa ngan sach ky tu, vi so KHOA JSON moi la thu model
+    phai giu dung cu phap."""
+    units = _units("chapter.html", [10] * 32)  # 320 ky tu tong, RAT xa budget
+
+    plans = plan_epub_chunks(
+        units, char_budget=100_000, request_budget=100_000, request_max_units=6
+    )
+
+    assert len(plans) == 1
+    for r_start, r_end in plans[0].requests:
+        assert r_end - r_start + 1 <= 6
+    # Phu het 32 unit, khong trung, khong thieu.
+    covered = [i for r in plans[0].requests for i in range(r[0], r[1] + 1)]
+    assert covered == list(range(32))
+
+
+def test_plan_epub_chunks_request_max_units_default_caps_at_six() -> None:
+    """Default `request_max_units` (khong truyen tuong minh) phai la
+    `EPUB_REQUEST_MAX_UNITS` (=6) — dung gia tri MOI cua §6.20.14.2 A-1."""
+    units = _units("chapter.html", [10] * 32)
+
+    plans = plan_epub_chunks(units, char_budget=100_000, request_budget=100_000)
+
+    for r_start, r_end in plans[0].requests:
+        assert r_end - r_start + 1 <= EPUB_REQUEST_MAX_UNITS
 
 
 def test_plan_epub_chunks_oversized_unit_sent_alone_in_its_own_request() -> None:
@@ -191,8 +230,17 @@ def test_plan_epub_chunks_raises_for_unit_over_hard_max() -> None:
 
 
 def test_epub_budget_constants_match_architecture_values() -> None:
-    """Architecture.md 6.20.7: 8_000 / 3_000 / 10_000 — khoa lai bang test de
-    doi gia tri phai la 1 quyet dinh co chu dich, khong phai vo tinh."""
+    """Architecture.md §6.20.14.2/§6.20.14.4/§6.20.14.6 (2026-09-10, sau khi
+    cham gioi han Protocol 3) — khoa lai bang test de doi gia tri phai la 1
+    quyet dinh co chu dich, khong phai vo tinh. `EPUB_REQUEST_CHAR_BUDGET` HA
+    tu 3.000 xuong 1.100 (A-1); `EPUB_REQUEST_MAX_UNITS` MOI = 6 (A-1);
+    `EPUB_MAX_SINGLE_ID_RETRIES` HA tu 5 xuong 2, `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE`
+    HA tu 6 xuong 3 (A-3); `EPUB_FALLBACK_MAX_RATIO_CHUNK`/`_JOB` MOI (C-2)."""
     assert EPUB_CHUNK_CHAR_BUDGET == 8_000
-    assert EPUB_REQUEST_CHAR_BUDGET == 3_000
+    assert EPUB_REQUEST_CHAR_BUDGET == 1_100
+    assert EPUB_REQUEST_MAX_UNITS == 6
     assert EPUB_UNIT_HARD_MAX_CHARS == 10_000
+    assert EPUB_MAX_SINGLE_ID_RETRIES == 2
+    assert EPUB_MAX_EXTRA_REQUESTS_PER_SLICE == 3
+    assert EPUB_FALLBACK_MAX_RATIO_CHUNK == 0.20
+    assert EPUB_FALLBACK_MAX_RATIO_JOB == 0.05

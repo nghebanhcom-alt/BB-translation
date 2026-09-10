@@ -107,6 +107,11 @@ UNIT_TAG_NAMES: tuple[str, ...] = (
 _BB_VI_CLASS = "bb-vi"
 _BB_VI_LANG = "vi"
 
+#: Architecture.md §6.20.14.4 C-4 (Lop C, 2026-09-10) — danh dau unit fallback
+#: (giu nguyen tieng Anh vi khong cuu duoc ke ca sau Lop B, §6.20.14.3).
+_BB_UNTRANSLATED_CLASS = "bb-untranslated"
+_BB_UNTRANSLATED_LANG = "en"
+
 _ALL_DIGITS_WS_RE = re.compile(r"^[\d\s]*$")
 _URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 # Y8 (Architecture.md 6.20.12): rule la unit CHI chua ISBN, khong phai "chua
@@ -362,6 +367,23 @@ def _mark_bb_vi(node: Tag) -> None:
         node["class"] = [*existing, _BB_VI_CLASS]
 
 
+def _mark_bb_untranslated(node: Tag) -> None:
+    """Architecture.md §6.20.14.4 C-4 (Lop C) — danh dau 1 unit KHONG dich
+    duoc (fallback, giu nguyen tieng Anh) NGAY TREN chinh node goc: them
+    class `bb-untranslated` + `lang="en"`. KHONG chen node moi, KHONG boc
+    `<span>` — day la cach RE NHAT khong dung cau truc file (khac han
+    `_mark_bb_vi()`, vi khong co noi dung MOI nao de chen, node da la ban
+    goc). Da kiem 2 tac dung phu (Architecture.md C-4): `EpubDocument.load()`
+    chi bo qua node theo class `bb-vi` -> them `bb-untranslated` KHONG doi so
+    unit doc lai; `count_bb_vi_pairs()` chi dem node `bb-vi` -> khong bi anh
+    huong.
+    """
+    node["lang"] = _BB_UNTRANSLATED_LANG
+    existing = _node_classes(node)
+    if _BB_UNTRANSLATED_CLASS not in existing:
+        node["class"] = [*existing, _BB_UNTRANSLATED_CLASS]
+
+
 def _fragment_children(soup: BeautifulSoup, html: str, parser_name: str) -> list:
     fragment = BeautifulSoup(f"<bb-fragment-root>{html}</bb-fragment-root>", parser_name)
     root = fragment.find("bb-fragment-root")
@@ -597,13 +619,24 @@ class EpubDocument:
         translations: dict[str, str],
         output_path: Path,
         bilingual: bool = False,
+        untranslated_ids: set[str] | None = None,
     ) -> None:
         """Ghi đè tại chỗ bằng `zipfile` (B-07) — KHÔNG dùng
         `epub.write_epub()` (§6.20.5/6.20.12: nó dời đường dẫn + ghi lại mọi
         entry, phá tinh thần "giữ nguyên cấu trúc gốc" của BR-EPUB-01).
+
+        `untranslated_ids` (Architecture.md §6.20.14.4 C-4, MỚI — Lớp C):
+        tập `unit_id` KHÔNG có trong `translations` mà vẫn cần đánh dấu
+        trong file output vì bị giữ nguyên tiếng Anh (fallback, sau khi đã
+        thử hết cơ chế cứu vãn tổng quát — Lớp B). Với mỗi id trong tập này,
+        thêm class `bb-untranslated` + `lang="en"` NGAY TRÊN chính node gốc
+        (không chèn node mới, không bọc `<span>`) — KHÔNG được lẫn với
+        `translations` (2 tập này rời nhau theo thiết kế: 1 unit hoặc có bản
+        dịch, hoặc bị đánh dấu fallback, không bao giờ cả hai).
         """
         output_path = Path(output_path)
         units_by_id = {unit.unit_id: unit for unit in self._units}
+        untranslated_ids = untranslated_ids or set()
 
         unknown_ids = [uid for uid in translations if uid not in units_by_id]
         if unknown_ids:
@@ -614,24 +647,36 @@ class EpubDocument:
                 f"load() nay (vd '{unknown_ids[0]}') — co the do load() lai "
                 "voi bo loc tag khac, hoac dung sai EpubDocument instance"
             )
+        unknown_untranslated_ids = [uid for uid in untranslated_ids if uid not in units_by_id]
+        if unknown_untranslated_ids:
+            raise EpubParseError(
+                f"untranslated_ids co {len(unknown_untranslated_ids)} unit_id khong thuoc "
+                f"lan load() nay (vd '{unknown_untranslated_ids[0]}')"
+            )
 
         by_doc: dict[str, list[tuple[int, str]]] = {}
         for uid, vi_html in translations.items():
             unit = units_by_id[uid]
             by_doc.setdefault(unit.doc_href, []).append((unit.ordinal, vi_html))
 
+        by_doc_untranslated: dict[str, list[int]] = {}
+        for uid in untranslated_ids:
+            unit = units_by_id[uid]
+            by_doc_untranslated.setdefault(unit.doc_href, []).append(unit.ordinal)
+
         with zipfile.ZipFile(self.path) as src_zf:
             names = set(src_zf.namelist())
-            for doc_href in by_doc:
+            all_doc_hrefs = set(by_doc) | set(by_doc_untranslated)
+            for doc_href in all_doc_hrefs:
                 if doc_href not in names:
                     raise EpubParseError(f"doc_href '{doc_href}' khong con ton tai trong zip goc")
 
             modified_entries: dict[str, bytes] = {}
-            for doc_href, items in by_doc.items():
+            for doc_href in all_doc_hrefs:
                 raw_bytes = src_zf.read(doc_href)
                 soup, parser_used = _parse_xhtml(raw_bytes)
                 candidates = _collect_candidate_nodes(soup)
-                for ordinal, vi_html in items:
+                for ordinal, vi_html in by_doc.get(doc_href, []):
                     if ordinal >= len(candidates):
                         raise EpubParseError(
                             f"'{doc_href}': ordinal {ordinal} vuot qua so unit "
@@ -642,6 +687,14 @@ class EpubDocument:
                     _apply_translation(
                         soup, node, vi_html, bilingual=bilingual, parser_name=parser_used
                     )
+                for ordinal in by_doc_untranslated.get(doc_href, []):
+                    if ordinal >= len(candidates):
+                        raise EpubParseError(
+                            f"'{doc_href}': ordinal {ordinal} (untranslated) vuot qua so unit "
+                            f"do lai duoc ({len(candidates)}) — cau truc tai lieu "
+                            "co the da doi so voi luc load()"
+                        )
+                    _mark_bb_untranslated(candidates[ordinal])
                 output_bytes = str(soup).encode("utf-8")
                 _validate_wellformed(output_bytes, doc_href)
                 modified_entries[doc_href] = output_bytes

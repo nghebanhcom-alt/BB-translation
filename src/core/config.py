@@ -278,8 +278,17 @@ class Settings(BaseSettings):
     # Settings), field o day la duong override qua .env cho luc wire that vao
     # Job Orchestrator (buoc 2/3 cua US-22, NGOAI PHAM VI increment nay).
     epub_chunk_char_budget: int = 8_000
-    epub_request_char_budget: int = 3_000
+    # Architecture.md §6.20.14.2 A-1 (2026-09-10) — ha tu 3.000 xuong 1.100 +
+    # them tran unit moi, sau khi Protocol 3 cham gioi han (5/5 vong Dev<->QA)
+    # vi DeepSeek lien tuc sinh JSON hong voi batch lon (docs/escalation-log.md).
+    epub_request_char_budget: int = 1_100
+    epub_request_max_units: int = 6
     epub_unit_hard_max_chars: int = 10_000
+    # Architecture.md §6.20.14.4 C-2 (Lop C) — mirror EPUB_FALLBACK_MAX_RATIO_*
+    # trong src/core/chunking.py, override qua .env giong pattern cac hang so
+    # EPUB khac o tren.
+    epub_fallback_max_ratio_chunk: float = 0.20
+    epub_fallback_max_ratio_job: float = 0.05
     # Architecture.md 6.20.8: "chi la cho moc cho tuong lai" — buoc 2/3 nay
     # (`_process_epub_chunk()`) chay TUAN TU trong 1 chunk du bao nhieu, gia
     # tri nay CHUA duoc doc o dau ca. Ly do khong AIMD cho EPUB: app goi API

@@ -31,7 +31,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from src.core.chunking import EpubChunkPlan, plan_chunks, plan_epub_chunks
+from src.core.chunking import (
+    EPUB_MAX_EXTRA_REQUESTS_PER_SLICE,
+    EPUB_MAX_SINGLE_ID_RETRIES,
+    EpubChunkPlan,
+    plan_chunks,
+    plan_epub_chunks,
+)
 from src.core.concurrency_controller import (
     ADAPTIVE_THREAD_FLOOR,
     BABELDOC_THREAD_FLOOR,
@@ -40,7 +46,11 @@ from src.core.concurrency_controller import (
     next_thread_count,
 )
 from src.core.config import Settings, get_settings
-from src.core.cost_estimator import estimate_chunk_cost
+from src.core.cost_estimator import (
+    epub_expected_output_tokens,
+    estimate_chunk_cost,
+    is_runaway_output,
+)
 from src.core.file_router import FileType
 from src.core.glossary_manager import GlossaryManager
 from src.core.ocr_warning import build_ocr_warning
@@ -51,6 +61,13 @@ from src.core.prompt_builder import (
     parse_epub_batch_response,
     write_babeldoc_prompt_file,
     write_prompt_file,
+)
+from src.core.text_quality import (
+    EPUB_DIACRITIC_MIN_LETTERS_REQUEST,
+    EPUB_DIACRITIC_MIN_LETTERS_UNIT,
+    EPUB_DIACRITIC_RATIO_REQUEST,
+    EPUB_DIACRITIC_RATIO_UNIT,
+    diacritic_ratio,
 )
 from src.models.batch import Batch
 from src.models.chunk import Chunk
@@ -64,7 +81,7 @@ from src.postprocess.image_compress import compress_pdf_images
 from src.postprocess.rotated_text_overlay import overlay_rotated_text
 from src.preprocess.searchable_pdf import build_searchable_pdf
 from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
-from src.services.epub_document import EpubDocument, count_bb_vi_pairs
+from src.services.epub_document import EpubDocument, EpubUnit, count_bb_vi_pairs
 from src.services.layout_qa import persist_findings
 from src.services.mineru_det_probe import probe_and_flag_rotated_text
 from src.services.mineru_runner import (
@@ -115,11 +132,36 @@ class EpubNotSupportedError(NotImplementedError):
 
 
 class EpubBatchTranslationError(RuntimeError):
-    """US-22 buoc 2/3 (Architecture.md 6.20.8/6.20.12 X4): sau 1 vong goi lai
-    RIENG LE cho tung id thieu, van con it nhat 1 unit khong co ban dich.
-    E-09's exact shape (bilingual_book_maker/Bug #5): TUYET DOI khong duoc
-    ghi chuoi rong cho unit thieu — chunk phai that bai ro rang thay vi vay.
+    """US-22 buoc 2/3 (Architecture.md 6.20.8/6.20.12 X4), VAI TRO DOI boi
+    Architecture.md §6.20.14.4 (Lop C, 2026-09-10, sau khi cham gioi han
+    Protocol 3): sau 1 vong goi lai RIENG LE cho tung id thieu, unit van
+    khong co ban dich KHONG con tu dong lam chunk that bai — no duoc giu
+    nguyen tieng Anh, co danh dau (fallback), va job van chay tiep TRONG HAN
+    MUC (`EPUB_FALLBACK_MAX_RATIO_CHUNK`/`_JOB`). Loi nay gio CHI raise khi
+    so unit fallback VUOT han muc chunk — E-09 tu "luat mac dinh" thanh "chot
+    chan bat thuong". Phan "TUYET DOI khong ghi chuoi rong" KHONG doi: ban
+    goc tieng Anh khong phai chuoi rong, cam ghi chuoi rong van la bat bien
+    tuyet doi.
     """
+
+
+class EpubChunkCostCapExceeded(RuntimeError):
+    """Architecture.md 6.20.13.2 (Lop 4) — kiem tran chi phi SAU MOI REQUEST
+    LLM trong `_process_epub_chunk()`, khong doi het 1 chunk nhu Lop 3
+    (`run_epub_job()`'s existing check). Muc "vuot tran toi da de lot" tut tu
+    chi phi 1 chunk xuong chi phi 1 request (~2,7x). `run_epub_job()` bat
+    rieng loi nay TRUOC khoi `except Exception` chung va di vao dung nhanh
+    `cost_capped` da co, khong tao trang thai moi."""
+
+
+class EpubRequestRunawayError(RuntimeError):
+    """Architecture.md 6.20.13.3b (fix C-3, Bug #EPUB-B2-1) — 1 request LLM
+    sinh output "runaway" (vuot xa muc ky vong cho chinh payload cua no,
+    `is_runaway_output()`) VA ket qua khong dung duoc (thieu id/parse hong)
+    sau khi parse (ca R-b). Khac EpubChunkCostCapExceeded: day la loi THONG
+    THUONG cho chunk (khong phai trang thai tai chinh moi) — `run_epub_job()`
+    xu ly no qua nhanh `except Exception` chung da co san (chunk `failed`,
+    resumable qua BR-CHUNK-05), khong can nhanh rieng."""
 
 
 class EpubEmptyOutputError(RuntimeError):
@@ -850,6 +892,7 @@ class JobOrchestrator:
             doc.units,
             char_budget=self._settings.epub_chunk_char_budget,
             request_budget=self._settings.epub_request_char_budget,
+            request_max_units=self._settings.epub_request_max_units,
         )
         chunks = await self._load_or_create_epub_chunks(job, chunk_plan, db_session)
         plan_by_index: dict[int, EpubChunkPlan] = {p.index: p for p in chunk_plan}
@@ -872,7 +915,25 @@ class JobOrchestrator:
         # E5/E6: voi moi chunk chua completed — COPY NGUYEN thu tu 3 buoc cua
         # run_job() Step 7 (progress -> Lop 3 -> cancel) sau MOI chunk.
         for position, chunk in enumerate(chunks, start=1):
+            # Dung LAI DUNG bieu thuc effective_cap nay cho ca Lop 4 (truoc
+            # khi xu ly chunk) VA Lop 3 (sau khi xu ly chunk) — Architecture.md
+            # 6.20.13.2: "khong viet cong thuc tran thu hai".
+            effective_cap = (
+                job.cost_cap_usd
+                if job.cost_cap_usd is not None
+                else self._settings.max_cost_per_job_usd
+            )
             if chunk.status != "completed":
+                # Lop 4 (Architecture.md 6.20.13.2): ngan sach chi phi CON LAI
+                # cho chunk nay, kiem tra SAU MOI request LLM ben trong
+                # `_process_epub_chunk()` thay vi doi het ca chunk (Lop 3
+                # ben duoi) — tut muc "vuot tran toi da de lot" tu 1 chunk
+                # xuong 1 request (~2,7x).
+                cost_budget_remaining = (
+                    effective_cap - sum(c.api_cost or 0.0 for c in chunks[: position - 1])
+                    if self._settings.cost_cap_enabled
+                    else None
+                )
                 try:
                     await self._process_epub_chunk(
                         job,
@@ -882,6 +943,38 @@ class JobOrchestrator:
                         system_prompt,
                         pricing_provider,
                         db_session,
+                        cost_budget_remaining=cost_budget_remaining,
+                    )
+                except EpubChunkCostCapExceeded:
+                    # `_process_epub_chunk()` da ghi `chunk.api_tokens_used`/
+                    # `api_cost`/`status="failed"`/`output_path=None` truoc
+                    # khi raise (Protocol 6 — khong mat dau vet tai chinh).
+                    # Di vao DUNG nhanh cost_capped, khong tao trang thai moi.
+                    completed_cost = sum(c.api_cost or 0.0 for c in chunks[:position])
+                    job.actual_cost = completed_cost
+                    job.cost_source = "metered"
+                    job.status = "cost_capped"
+                    job.error_message = (
+                        f"Job dung GIUA chunk {chunk.chunk_index} (Lop 4 — tran per-request): "
+                        f"chi phi THAT tich luy ${completed_cost:.4f} da vuot tran "
+                        f"${effective_cap:.2f}. Cac chunk da dich duoc giu nguyen — tang tran "
+                        "trong Settings roi bam Retry de chay tiep."
+                    )
+                    job.finished_at = datetime.now(
+                        UTC
+                    )  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+                    db_session.add(job)
+                    await db_session.commit()
+
+                    await self._broadcast_job_cost_capped(job, position, total_chunks)
+
+                    return JobResult(
+                        job_id=job.id,
+                        status="cost_capped",
+                        output_path=job.output_path,
+                        bilingual_path=job.bilingual_path,
+                        actual_cost=job.actual_cost,
+                        error_message=job.error_message,
                     )
                 except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7
                     chunk.status = "failed"
@@ -916,11 +1009,6 @@ class JobOrchestrator:
             # `estimate_chunk_cost()`), nen `cost_source` duoi day la
             # "metered" thay vi "estimated" — dung voi ban chat cua con so.
             completed_cost = sum(c.api_cost or 0.0 for c in chunks[:position])
-            effective_cap = (
-                job.cost_cap_usd
-                if job.cost_cap_usd is not None
-                else self._settings.max_cost_per_job_usd
-            )
             if self._settings.cost_cap_enabled and completed_cost > effective_cap:
                 job.actual_cost = completed_cost
                 job.cost_source = "metered"
@@ -939,6 +1027,44 @@ class JobOrchestrator:
                 return JobResult(
                     job_id=job.id,
                     status="cost_capped",
+                    output_path=job.output_path,
+                    bilingual_path=job.bilingual_path,
+                    actual_cost=job.actual_cost,
+                    error_message=job.error_message,
+                )
+
+            # Architecture.md §6.20.14.4 C-3 (Lop C) — nguong JOB: 5% cong
+            # don TREN TOAN SACH, doc lai `fallback_units.json` cua MOI chunk
+            # `completed` (ke ca chunk hoan thanh tu LAN CHAY TRUOC — day
+            # chinh la diem khien resume/BR-CHUNK-05 van cong don DUNG) thay
+            # vi chi cong don bien dem trong bo nho cua LAN CHAY NAY. Kiem
+            # SAU MOI chunk (khong doi den cuoi) — fail som, tiet kiem tien
+            # cho cac chunk con lai, dung tinh than Lop 3/4 da co.
+            job_fallback_units = self._collect_epub_fallback_units(job, chunks[:position])
+            job_fallback_allowed = max(
+                1,
+                math.ceil(self._settings.epub_fallback_max_ratio_job * (job.total_units or 0)),
+            )
+            if len(job_fallback_units) > job_fallback_allowed:
+                completed_cost = sum(c.api_cost or 0.0 for c in chunks[:position])
+                job.actual_cost = completed_cost
+                job.cost_source = "metered"
+                job.status = "failed"
+                job.error_message = (
+                    f"Job that bai: {len(job_fallback_units)} unit khong dich duoc (fallback "
+                    f"EN) tren toan sach, vuot han muc cho phep {job_fallback_allowed} "
+                    f"({self._settings.epub_fallback_max_ratio_job:.0%} cua {job.total_units} "
+                    "unit) — Architecture.md §6.20.14.4 C-3. Cac chunk da dich duoc giu nguyen."
+                )
+                job.finished_at = datetime.now(UTC)  # US-19/BR-HIST-01/02, Architecture.md 6.17.2
+                db_session.add(job)
+                await db_session.commit()
+
+                await self._broadcast_job_failed(job, position, total_chunks)
+
+                return JobResult(
+                    job_id=job.id,
+                    status="failed",
                     output_path=job.output_path,
                     bilingual_path=job.bilingual_path,
                     actual_cost=job.actual_cost,
@@ -977,6 +1103,14 @@ class JobOrchestrator:
                 )
                 translations.update(chunk_translations)
 
+        # Architecture.md §6.20.14.4 C-4/C-5 (Lop C) — gom LAI TOAN BO
+        # fallback_units.json cua moi chunk (da qua kiem tra nguong JOB o
+        # tren, nen den day chac chan duoi han muc) de: (a) danh dau trong
+        # chinh file EPUB output (C-4), (b) ghi `untranslated_units.json` cap
+        # job (C-5).
+        all_fallback_units = self._collect_epub_fallback_units(job, chunks)
+        untranslated_ids = {entry["unit_id"] for entry in all_fallback_units}
+
         # E8: `bilingual=True` mac dinh cho EPUB (CHOT, Architecture.md
         # 6.20.11 muc 2 — PM/user da xac nhan qua AskUserQuestion). Chua co
         # duong UI nao cho phep chon monolingual rieng cho EPUB o buoc nay
@@ -989,7 +1123,12 @@ class JobOrchestrator:
         merged_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            doc.write_translated(translations, merged_path, bilingual=bilingual)
+            doc.write_translated(
+                translations,
+                merged_path,
+                bilingual=bilingual,
+                untranslated_ids=untranslated_ids,
+            )
             # E9 — Guard BR-EPUB-05 (X3): doc lai CHINH `merged_path` vua ghi,
             # KHONG tin `translations` con trong bo nho.
             _check_epub_output_guard(doc, merged_path, bilingual=bilingual)
@@ -1012,6 +1151,23 @@ class JobOrchestrator:
             )
 
         job.output_path = str(merged_path)
+
+        # C-5: `untranslated_units.json` cap JOB (§6.20.14.4), cung thu muc
+        # voi `translated_vi.epub` — ban EPUB cua "file findings" ma guard
+        # mat dau (6.20.13.5) da dung. UI hien thi len man hinh la viec cua
+        # Buoc 3/3, khong mo rong scope o day.
+        if all_fallback_units:
+            untranslated_units_path = merged_path.parent / "untranslated_units.json"
+            untranslated_units_path.write_text(
+                json.dumps(all_fallback_units, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.warning(
+                "EPUB job co %d unit fallback (giu nguyen EN): job=%s -> %s",
+                len(all_fallback_units),
+                job.id,
+                untranslated_units_path,
+            )
 
         # E10: `cost_source='metered'` — lan dau tien trong du an, chi phi
         # THAT tu `TranslationResult` cua tung request, khong phai uoc tinh
@@ -1710,6 +1866,54 @@ class JobOrchestrator:
         db_session.add(chunk)
         await db_session.commit()
 
+    async def _retry_single_unit(
+        self,
+        pricing_provider: TranslationProvider,
+        system_prompt: str,
+        local_id: str,
+        unit: EpubUnit,
+    ) -> tuple[str | None, int, int, float]:
+        """Helper CHIA SE giua 2 co che retry-rieng-le KHAC nghia
+        (Architecture.md 6.20.13.5's "CHOT: TACH, nhung dung CHUNG 1
+        helper"): id thieu (X4/6.20.13.3a) VA unit mat dau tang 2
+        (6.20.13.5). Tra `(ban_dich_hoac_None, input_tokens, output_tokens,
+        cost_usd)` — caller tu cong don token/chi phi va tu kiem tran Lop 4.
+        """
+        single_payload = json.dumps([{"id": local_id, "html": unit.text}], ensure_ascii=False)
+        retry_result = await with_retry(
+            lambda p=single_payload: pricing_provider.translate(p, system_prompt, "en", "vi")
+        )
+        retry_parsed = parse_epub_batch_response(retry_result.text, {local_id})
+        return (
+            retry_parsed.get(local_id),
+            retry_result.input_tokens,
+            retry_result.output_tokens,
+            retry_result.estimated_cost_usd,
+        )
+
+    async def _retry_whole_epub_request(
+        self,
+        pricing_provider: TranslationProvider,
+        system_prompt: str,
+        payload_json: str,
+        expected_ids: set[str],
+    ) -> tuple[dict[str, str], int, int, float]:
+        """Goi lai NGUYEN 1 request (payload/expected_ids y het) dung 1 lan —
+        dung chung cho ca nhanh C-1 (qua nua batch thieu id, Architecture.md
+        6.20.13.3a) va tang 1 cua guard mat dau (6.20.13.5). Tra
+        `(parsed, input_tokens, output_tokens, cost_usd)`.
+        """
+        retry_result = await with_retry(
+            lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
+        )
+        retry_parsed = parse_epub_batch_response(retry_result.text, expected_ids)
+        return (
+            retry_parsed,
+            retry_result.input_tokens,
+            retry_result.output_tokens,
+            retry_result.estimated_cost_usd,
+        )
+
     async def _process_epub_chunk(
         self,
         job: Job,
@@ -1719,14 +1923,21 @@ class JobOrchestrator:
         system_prompt: str,
         pricing_provider: TranslationProvider,
         db_session: AsyncSession,
+        *,
+        cost_budget_remaining: float | None,
     ) -> None:
-        """US-22 buoc 2/3 (Architecture.md 6.20.8 `_process_epub_chunk()`).
-        Moi lat request trong `chunk_plan.requests` chay TUAN TU (khong AIMD
-        — app goi API TRUC TIEP, nhan `RateLimitError` THAT qua `with_retry`,
-        khac PDF phai *doan* tin hieu tu stdout subprocess, Architecture.md
-        6.20.8 "Concurrency"). Id ngan cuc bo `0..N` trong TUNG request
-        (X4/X5) — map nguoc sang `unit_id` that ngay tai day, KHONG bao gio
-        ghi id ngan vao `translations`/`units.json`.
+        """US-22 buoc 2/3 (Architecture.md 6.20.8 `_process_epub_chunk()`,
+        sua boi 6.20.13). Moi lat request trong `chunk_plan.requests` chay
+        TUAN TU (khong AIMD — app goi API TRUC TIEP, nhan `RateLimitError`
+        THAT qua `with_retry`, khac PDF phai *doan* tin hieu tu stdout
+        subprocess, Architecture.md 6.20.8 "Concurrency"). Id ngan cuc bo
+        `0..N` trong TUNG request (X4/X5) — map nguoc sang `unit_id` that
+        ngay tai day, KHONG bao gio ghi id ngan vao `translations`/`units.json`.
+
+        `cost_budget_remaining` (Architecture.md 6.20.13.2, Lop 4): ngan sach
+        chi phi CON LAI cho CHUNK NAY (`None` khi `cost_cap_enabled=False`) —
+        kiem tra SAU MOI lan cong `total_cost`, raise `EpubChunkCostCapExceeded`
+        ngay khi vuot thay vi doi het ca chunk.
         """
         chunk.status = "translating"
         chunk.started_at = datetime.now(UTC)
@@ -1738,57 +1949,329 @@ class JobOrchestrator:
         total_input_tokens = 0
         total_output_tokens = 0
         total_cost = 0.0
+        # Anomaly log (Architecture.md 6.20.13.7) — chi ghi file neu co >=1
+        # anomaly; requests.jsonl ghi CHO MOI request chinh (khong ke retry).
+        runaway_requests: list[dict] = []
+        low_diacritic_requests: list[dict] = []
+        low_diacritic_units: list[dict] = []
+        request_log: list[dict] = []
+        # Architecture.md §6.20.14.4 C-1/C-3 (Lop C) — unit KHONG cuu duoc
+        # (ke ca sau Lop B, §6.20.14.3) trong CA CHUNK nay, gom lai de:
+        # (a) kiem tra nguong CHUNK (20%) NGAY SAU vong lap request ben duoi;
+        # (b) ghi `fallback_units.json` cho `run_epub_job()` cong don nguong
+        # JOB (5%) sau moi chunk, song sot qua resume (C-3).
+        fallback_units: list[dict] = []
+
+        async def _accumulate_and_check_budget(
+            input_tokens: int, output_tokens: int, cost: float
+        ) -> None:
+            nonlocal total_input_tokens, total_output_tokens, total_cost
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            total_cost += cost
+            if cost_budget_remaining is not None and total_cost > cost_budget_remaining:
+                # Protocol 6 — ghi nhan tien da tieu DO DANG truoc khi raise,
+                # khong bao gio danh dau "completed" cho chunk do (buoc merge
+                # chi doc chunk `completed` + co `output_path`).
+                chunk.api_tokens_used = total_input_tokens + total_output_tokens
+                chunk.api_cost = total_cost
+                chunk.status = "failed"
+                chunk.output_path = None
+                db_session.add(chunk)
+                await db_session.commit()
+                raise EpubChunkCostCapExceeded(
+                    f"Chunk {chunk.chunk_index}: chi phi THAT tich luy trong chunk nay "
+                    f"(${total_cost:.4f}) da vuot ngan sach con lai (${cost_budget_remaining:.4f}) "
+                    "— Lop 4, Architecture.md 6.20.13.2."
+                )
 
         for start, end in chunk_plan.requests:
             slice_units = units[start : end + 1]
             payload = [{"id": str(i), "html": u.text} for i, u in enumerate(slice_units)]
             expected_ids = {str(i) for i in range(len(slice_units))}
             payload_json = json.dumps(payload, ensure_ascii=False)
+            # Trần cứng cho TOÀN BỘ 1 slice (Architecture.md 6.20.13.3a) — dùng
+            # CHUNG quota cho cả retry vì thiếu id VÀ retry vì mất dấu
+            # (6.20.13.5), KHÔNG cộng dồn.
+            extra_requests = 0
 
             result = await with_retry(
                 lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
             )
-            total_input_tokens += result.input_tokens
-            total_output_tokens += result.output_tokens
-            total_cost += result.estimated_cost_usd
+            await _accumulate_and_check_budget(
+                result.input_tokens, result.output_tokens, result.estimated_cost_usd
+            )
+
+            # Fix C-3 (Architecture.md 6.20.13.3b, Bug #EPUB-B2-1): phat hien
+            # runaway output SO VOI CHINH payload cua request nay.
+            runaway = is_runaway_output(len(payload_json), result.output_tokens)
+            expected_output_tokens = epub_expected_output_tokens(len(payload_json))
+            runaway_ratio = result.output_tokens / max(expected_output_tokens, 1)
+
             parsed = parse_epub_batch_response(result.text, expected_ids)
-
-            # X4 (Architecture.md 6.20.12): id thieu -> goi lai RIENG LE, toi
-            # da 1 vong. E-09: TUYET DOI khong ghi chuoi rong cho id thieu.
             missing_ids = expected_ids - parsed.keys()
-            for local_id in sorted(missing_ids):
-                unit = slice_units[int(local_id)]
-                single_payload = json.dumps(
-                    [{"id": local_id, "html": unit.text}], ensure_ascii=False
-                )
-                retry_result = await with_retry(
-                    lambda p=single_payload: pricing_provider.translate(
-                        p, system_prompt, "en", "vi"
-                    )
-                )
-                total_input_tokens += retry_result.input_tokens
-                total_output_tokens += retry_result.output_tokens
-                total_cost += retry_result.estimated_cost_usd
-                retry_parsed = parse_epub_batch_response(retry_result.text, {local_id})
-                if local_id in retry_parsed:
-                    parsed[local_id] = retry_parsed[local_id]
 
+            if runaway and missing_ids:
+                # R-b (Architecture.md 6.20.13.3b): runaway VA hong/thieu ->
+                # abort NGAY, KHONG chay vong goi lai tung-id/nguyen request —
+                # do dung con duong C-1 dan den khuech dai chi phi.
+                logger.warning(
+                    "EPUB runaway output (aborted): job=%s chunk=%s slice=(%s,%s) "
+                    "ratio=%.2f missing=%d",
+                    job.id,
+                    chunk.chunk_index,
+                    start,
+                    end,
+                    runaway_ratio,
+                    len(missing_ids),
+                )
+                raise EpubRequestRunawayError(
+                    f"Chunk {chunk.chunk_index}: request slice ({start}, {end}) sinh output "
+                    f"runaway (ratio {runaway_ratio:.2f}x muc ky vong) VA thieu "
+                    f"{len(missing_ids)} id sau parse — abort, khong tu dong goi lai "
+                    "(Architecture.md 6.20.13.3b R-b)."
+                )
+            if runaway:
+                # R-a: giu ket qua (dung duoc), chi ghi nhan anomaly.
+                logger.warning(
+                    "EPUB runaway output (kept): job=%s chunk=%s slice=(%s,%s) ratio=%.2f",
+                    job.id,
+                    chunk.chunk_index,
+                    start,
+                    end,
+                    runaway_ratio,
+                )
+                runaway_requests.append(
+                    {
+                        "slice": [start, end],
+                        "payload_chars": len(payload_json),
+                        "output_tokens": result.output_tokens,
+                        "ratio": round(runaway_ratio, 4),
+                        "action": "kept",
+                    }
+                )
+
+            # X4/C-1 (Architecture.md 6.20.12/6.20.13.3a): id thieu -> goi lai.
+            # <= EPUB_MAX_SINGLE_ID_RETRIES: RIENG LE (pattern cu, khong doi).
+            # > EPUB_MAX_SINGLE_ID_RETRIES: NGUYEN request 1 lan (qua nua batch
+            # thieu gan nhu luon la ca response hong/cut).
+            if missing_ids:
+                if len(missing_ids) <= EPUB_MAX_SINGLE_ID_RETRIES:
+                    for local_id in sorted(missing_ids):
+                        if extra_requests >= EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
+                            break
+                        unit = slice_units[int(local_id)]
+                        translated, it, ot, cost = await self._retry_single_unit(
+                            pricing_provider, system_prompt, local_id, unit
+                        )
+                        extra_requests += 1
+                        await _accumulate_and_check_budget(it, ot, cost)
+                        if translated is not None:
+                            parsed[local_id] = translated
+                elif extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
+                    retry_parsed, it, ot, cost = await self._retry_whole_epub_request(
+                        pricing_provider, system_prompt, payload_json, expected_ids
+                    )
+                    extra_requests += 1
+                    await _accumulate_and_check_budget(it, ot, cost)
+                    parsed.update(retry_parsed)
+
+            # Architecture.md §6.20.14.4 C-1 (Lop C) — THU TU BAT BUOC, khong
+            # duoc dao: unit con thieu sau vong goi lai KHONG con lam chunk
+            # fail ngay, ma giu nguyen tieng Anh (fallback), co danh dau.
+            # TUYET DOI khong dua vao `parsed` (danh dau bang bien `fallback_ids`
+            # RIENG, khong dung `parsed`) — text EN co `diacritic_ratio` ~ 0,
+            # neu lot vao `parsed` se bi 2 guard mat dau BEN DUOI (Architecture.md
+            # 6.20.13.5) retry nham dung nhung unit vua quyet dinh bo qua, dot
+            # tien vo ich.
             still_missing = expected_ids - parsed.keys()
             if still_missing:
-                missing_unit_ids = [slice_units[int(i)].unit_id for i in sorted(still_missing)]
-                raise EpubBatchTranslationError(
-                    f"Chunk {chunk.chunk_index}: thieu ban dich cho {len(missing_unit_ids)} "
-                    f"unit sau 1 vong goi lai rieng le (vd '{missing_unit_ids[0]}') — "
-                    "TUYET DOI khong ghi chuoi rong, chunk that bai (E-09)."
+                for local_id in sorted(still_missing):
+                    unit = slice_units[int(local_id)]
+                    fallback_units.append(
+                        {
+                            "unit_id": unit.unit_id,
+                            "doc_href": unit.doc_href,
+                            "reason": "missing_after_retry",
+                            "slice": [start, end],
+                            "excerpt": unit.text[:120],
+                        }
+                    )
+                logger.warning(
+                    "EPUB fallback EN (giu nguyen goc): job=%s chunk=%s slice=(%s,%s) n=%d",
+                    job.id,
+                    chunk.chunk_index,
+                    start,
+                    end,
+                    len(still_missing),
                 )
+
+            # Guard mat dau tang 1 — muc REQUEST (Architecture.md 6.20.13.5,
+            # Bug #EPUB-4): do gop TOAN BO gia tri `parsed` cua request nay
+            # (het missing id da duoc xu ly o tren).
+            combined_html = "".join(parsed.values())
+            request_ratio, request_letters = diacritic_ratio(combined_html)
+            final_diacritic_ratio = request_ratio
+            if (
+                request_letters >= EPUB_DIACRITIC_MIN_LETTERS_REQUEST
+                and request_ratio < EPUB_DIACRITIC_RATIO_REQUEST
+            ):
+                retried_tier1 = False
+                ratio_after: float | None = None
+                if extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
+                    retry_parsed, it, ot, cost = await self._retry_whole_epub_request(
+                        pricing_provider, system_prompt, payload_json, expected_ids
+                    )
+                    extra_requests += 1
+                    await _accumulate_and_check_budget(it, ot, cost)
+                    retried_tier1 = True
+                    retry_combined = "".join(
+                        retry_parsed.get(i, parsed[i]) for i in expected_ids if i in parsed
+                    )
+                    ratio_after, _letters_after = diacritic_ratio(retry_combined)
+                    if ratio_after > request_ratio:
+                        # Chi thay the id THAT SU co trong ban retry — dung
+                        # doi lay thu te hon cho id retry khong tra ve.
+                        for retried_id, retried_val in retry_parsed.items():
+                            parsed[retried_id] = retried_val
+                        final_diacritic_ratio = ratio_after
+                logger.warning(
+                    "EPUB low diacritic ratio (request): job=%s chunk=%s slice=(%s,%s) "
+                    "ratio=%.4f letters=%d retried=%s",
+                    job.id,
+                    chunk.chunk_index,
+                    start,
+                    end,
+                    request_ratio,
+                    request_letters,
+                    retried_tier1,
+                )
+                low_diacritic_requests.append(
+                    {
+                        "slice": [start, end],
+                        "ratio": round(request_ratio, 4),
+                        "retried": retried_tier1,
+                        "ratio_after": round(ratio_after, 4) if ratio_after is not None else None,
+                    }
+                )
+
+            # Guard mat dau tang 2 — muc UNIT (Architecture.md 6.20.13.5): bat
+            # phan sot lai sau tang 1, retry RIENG LE toi da 1 lan/unit, dung
+            # CHUNG helper voi X4/C-1.
+            for local_id in list(parsed.keys()):
+                unit_ratio, unit_letters = diacritic_ratio(parsed[local_id])
+                if (
+                    unit_letters < EPUB_DIACRITIC_MIN_LETTERS_UNIT
+                    or unit_ratio >= EPUB_DIACRITIC_RATIO_UNIT
+                ):
+                    continue
+                unit = slice_units[int(local_id)]
+                retried_tier2 = False
+                if extra_requests < EPUB_MAX_EXTRA_REQUESTS_PER_SLICE:
+                    translated, it, ot, cost = await self._retry_single_unit(
+                        pricing_provider, system_prompt, local_id, unit
+                    )
+                    extra_requests += 1
+                    await _accumulate_and_check_budget(it, ot, cost)
+                    retried_tier2 = True
+                    if translated is not None:
+                        parsed[local_id] = translated
+                final_ratio, final_letters = diacritic_ratio(parsed[local_id])
+                resolved = not (
+                    final_letters >= EPUB_DIACRITIC_MIN_LETTERS_UNIT
+                    and final_ratio < EPUB_DIACRITIC_RATIO_UNIT
+                )
+                logger.warning(
+                    "EPUB low diacritic ratio (unit): job=%s chunk=%s unit=%s ratio=%.4f "
+                    "retried=%s resolved=%s",
+                    job.id,
+                    chunk.chunk_index,
+                    unit.unit_id,
+                    unit_ratio,
+                    retried_tier2,
+                    resolved,
+                )
+                low_diacritic_units.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "ratio": round(unit_ratio, 4),
+                        "retried": retried_tier2,
+                        "resolved": resolved,
+                    }
+                )
+
+            request_log.append(
+                {
+                    "slice": [start, end],
+                    "payload_chars": len(payload_json),
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "ratio": round(runaway_ratio, 4),
+                    "diacritic_ratio": round(final_diacritic_ratio, 4),
+                }
+            )
 
             for local_id, vi_html in parsed.items():
                 unit = slice_units[int(local_id)]
                 translations[unit.unit_id] = vi_html
 
+        # Architecture.md §6.20.14.4 C-2 (Lop C) — nguong CHUNK: toi da 20%
+        # so unit CUA CHINH chunk nay duoc phep fallback (giu nguyen EN), toi
+        # thieu 1 unit. Vuot -> E-09 dung shape cu (chunk that bai ro rang);
+        # khac biet duy nhat voi truoc day la LY DO gio la "vuot han muc dung
+        # sai co chu dich", khong phai "1 unit thieu ban dich la fail ngay".
+        n_units_in_chunk = chunk_plan.unit_end - chunk_plan.unit_start + 1
+        chunk_fallback_allowed = max(
+            1, math.ceil(self._settings.epub_fallback_max_ratio_chunk * n_units_in_chunk)
+        )
+        if len(fallback_units) > chunk_fallback_allowed:
+            raise EpubBatchTranslationError(
+                f"Chunk {chunk.chunk_index}: {len(fallback_units)} unit khong dich duoc "
+                f"(fallback EN) vuot han muc cho phep {chunk_fallback_allowed} "
+                f"({self._settings.epub_fallback_max_ratio_chunk:.0%} cua {n_units_in_chunk} "
+                f"unit trong chunk) — vd '{fallback_units[0]['unit_id']}'. TUYET DOI khong ghi "
+                "chuoi rong, chunk that bai (E-09, Architecture.md §6.20.14.4 C-2)."
+            )
+
         # F9 (chung bai hoc voi pdf2zh_runner): 1 thu muc rieng cho MOI chunk.
         chunk_dir = self._processing_dir / job.id / f"chunk_{chunk.chunk_index}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
+
+        # Architecture.md 6.20.13.7 — anomalies.json CHI ghi khi co >=1 anomaly;
+        # requests.jsonl BAT BUOC, ghi cho MOI request (ke ca binh thuong), la
+        # du lieu de chot lai cac nguong ⚠️ ASSUMED o vong sau. §6.20.14.4 C-3:
+        # khoa `fallback_units` nhan ban lai TRONG anomalies.json (cho 1 cho
+        # chan doan chung) VA rieng 1 file `fallback_units.json` (C-3 — de
+        # `run_epub_job()` cong don qua resume ma khong can doc/parse ca
+        # anomalies.json).
+        if runaway_requests or low_diacritic_requests or low_diacritic_units or fallback_units:
+            anomalies_path = chunk_dir / "anomalies.json"
+            anomalies_path.write_text(
+                json.dumps(
+                    {
+                        "chunk_index": chunk.chunk_index,
+                        "runaway_requests": runaway_requests,
+                        "low_diacritic_requests": low_diacritic_requests,
+                        "low_diacritic_units": low_diacritic_units,
+                        "fallback_units": fallback_units,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        if fallback_units:
+            fallback_units_path = chunk_dir / "fallback_units.json"
+            fallback_units_path.write_text(
+                json.dumps(fallback_units, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        requests_jsonl_path = chunk_dir / "requests.jsonl"
+        requests_jsonl_path.write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in request_log),
+            encoding="utf-8",
+        )
+
         units_json_path = chunk_dir / "units.json"
         units_json_path.write_text(
             json.dumps(translations, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1921,6 +2404,29 @@ class JobOrchestrator:
         for db_chunk in chunks:
             await db_session.refresh(db_chunk)
         return chunks
+
+    def _collect_epub_fallback_units(self, job: Job, chunks: list[Chunk]) -> list[dict]:
+        """Architecture.md §6.20.14.4 C-3 — doc lai `fallback_units.json` cua
+        MOI `Chunk` `completed` trong `chunks` (goi voi `chunks[:position]`
+        tu `run_epub_job()`, KHONG phai chi chunk vua chay). Day la co che
+        khien nguong JOB (5%) SONG SOT qua resume (BR-CHUNK-05): 1 chunk hoan
+        thanh tu LAN CHAY TRUOC van co `status == "completed"` va van co file
+        nay tren dia — khong dua vao bien dem trong bo nho cua lan chay hien
+        tai (bien do se mat sau resume).
+        """
+        collected: list[dict] = []
+        for db_chunk in chunks:
+            if db_chunk.status != "completed":
+                continue
+            path = (
+                self._processing_dir
+                / job.id
+                / f"chunk_{db_chunk.chunk_index}"
+                / "fallback_units.json"
+            )
+            if path.exists():
+                collected.extend(json.loads(path.read_text(encoding="utf-8")))
+        return collected
 
     async def _load_or_create_epub_chunks(
         self, job: Job, chunk_plan: list[EpubChunkPlan], db_session: AsyncSession

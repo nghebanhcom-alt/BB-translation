@@ -5618,6 +5618,857 @@ doc_href  = posixpath.normpath(posixpath.join(opf_dir, item.file_name))
 §6.20.10 mục 1 **trước** khi viết implementation đầy đủ; (b) `lxml` + `ebooklib` + `bs4` +
 `markdownify` được thêm vào `pyproject.toml` và **pin version** trong cùng commit đầu tiên.
 
+#### 6.20.13. Fix Bug #EPUB-B2-1 (cost variance) + Bug #EPUB-4 (mất dấu tiếng Việt) — sau QA vòng 1/5 (2026-09-09)
+
+**Tác giả**: Tech Lead — thiết kế, KHÔNG implement. **Quan hệ tài liệu**: mục này **bổ sung** vào
+§6.20.6/§6.20.8/§6.20.12; không thay thế điều gì đã chốt ở đó, trừ 2 điểm được ghi rõ là "SỬA" tại
+§6.20.13.4 (một-shot example của X4) và §6.20.13.6 (`prompt_overhead_chars` của nhánh EPUB). Khi
+mâu thuẫn, mục này thắng.
+
+**Nguồn bằng chứng đầu vào**: `docs/test-report.md`, 3 section US-22 Bước 2/3 ngày 2026-09-09 (QA
+vòng 1/5 + 2 phiên độc lập). **Ranh giới bằng chứng phải nhớ suốt mục này**: cả 2 bug đều chỉ có
+**1–2 điểm dữ liệu quan sát**, chưa lần nào tái lập có kiểm soát. Mọi hằng số ngưỡng đề xuất dưới
+đây vì thế là **ước lượng thận trọng, `⚠️ ASSUMED — chưa đo trên corpus/nhiều lần chạy`** (R5-01),
+KHÔNG phải số đã verify. Điều đã verify và điều mới suy ra được phân biệt tường minh ở từng mục.
+
+##### 6.20.13.0. Ba điều Tech Lead tự verify khi thiết kế (đọc source thật, không suy đoán)
+
+| # | Sự thật | Nguồn xác thực (đọc trực tiếp trong phiên này) |
+|---|---|---|
+| **V-1** | **One-shot example của contract X4 đang dạy model trả về tiếng Việt KHÔNG DẤU.** `_EPUB_BATCH_ONE_SHOT_EXAMPLE` (`src/core/prompt_builder.py:427-433`) có `'Dau ra: {"0": "<strong>2 cups</strong> bot mi, 1<sup>1</sup>/<sub>3</sub> tsp muoi, nuong o 350F."}'` — `bot mi`, `muoi`, `nuong o` là tiếng Việt không dấu. Quét toàn khối `_EPUB_BATCH_CONTRACT` + one-shot (dòng 409-433): **0 ký tự có dấu tiếng Việt**, ký tự non-ASCII duy nhất là dấu gạch ngang `—` | tự chạy script đếm ký tự trên `src/core/prompt_builder.py` dòng 409-433 |
+| **V-2** | **`max_tokens=8192` là trần CHO MỖI REQUEST** (`deepseek_provider.py:37` → `OpenAIProvider`), nên **134.274 token của 1 chunk KHÔNG THỂ đến từ 1 request duy nhất**. Chunk 0 (31 unit, ~3 request theo `EPUB_CHUNK_CHAR_BUDGET=8.000`/`EPUB_REQUEST_CHAR_BUDGET=3.000`) chỉ có thể đạt con số đó qua **vòng gọi lại RIÊNG LẺ** ở `job_orchestrator.py:1758-1774` — vòng này hiện **không có trần số lần**: 1 response hỏng/cụt → `parse_epub_batch_response()` trả `{}` → **mọi** id thiếu → tối đa `len(slice_units)` ≈ 18 request phụ **cho mỗi request hỏng**, mỗi request phụ lại gánh nguyên system prompt | đọc `job_orchestrator.py:1742-1783`, `deepseek_provider.py:29-47`, `prompt_builder.py:455-493` |
+| **V-3** | **`TranslationResult` KHÔNG có `finish_reason`** (`src/services/translation.py:27-32`), và §6.20.12 X4 cấm đổi signature `provider.translate()` (interface chung 5 provider). ⇒ Mọi cơ chế phát hiện runaway ở mục này **bắt buộc** chỉ được dùng `input_tokens`/`output_tokens` đã có, KHÔNG được dựa vào cờ truncation của SDK | đọc `src/services/translation.py:27-46` |
+
+##### 6.20.13.1. Phân tích lại Bug #EPUB-B2-1 — tách 3 nguyên nhân KHÁC NHAU bị gộp làm một
+
+Brief giao việc mô tả B2-1 như "hành vi ngẫu nhiên của model". Đọc lại số liệu QA thì đó chỉ là
+**1 trong 3** thành phần, và **2 thành phần còn lại là tất định** (deterministic), lặp lại ở mọi
+lần chạy:
+
+| Thành phần | Bằng chứng | Tính chất |
+|---|---|---|
+| **C-1. Khuếch đại bởi vòng gọi lại từng-id không giới hạn** | V-2 ở trên: 1 response hỏng → tối đa ~18 request phụ. Đây là con đường DUY NHẤT (do trần `max_tokens`) để 1 chunk 31 unit đạt 134.274 token | Tất định **khi** có 1 response hỏng; hiện không có trần |
+| **C-2. Ước tính THẤP có hệ thống, không phải chỉ ở lần chạy bất thường** | Lần chạy full-book **bình thường** (không có sự cố): `actual = $0,0626` cho cả 7 chunk vs `estimate = $0,034` → **1,84× ước tính**. Vi phạm trực tiếp §6.11.6 ("được ước cao, **cấm** ước thấp"). Brief nói "không có bằng chứng công thức sai" — số liệu của chính QA nói ngược lại | **Tất định**, xem §6.20.13.6 |
+| **C-3. Model sinh dư/lặp output (runaway) ở 1 request cụ thể** | Không tái hiện ở lần 2 | Ngẫu nhiên, chỉ chặn được bằng heuristic |
+
+**Hệ quả cho thứ tự ưu tiên fix**: C-1 và C-2 phải fix trước và **không cần ngưỡng đoán mò nào**;
+C-3 mới là chỗ phải dùng heuristic có ngưỡng ⚠️ ASSUMED. Nếu chỉ fix C-3 (đúng nguyên văn brief)
+thì phần tất định — vốn là phần chắc chắn tái diễn mỗi lần chạy — vẫn còn nguyên.
+
+##### 6.20.13.2. Lớp 4 — kiểm trần chi phí sau MỖI REQUEST (không ngưỡng đoán, ưu tiên cao nhất)
+
+Đây là cơ chế trả lời trực tiếp yêu cầu "phát hiện sớm hơn, không đợi hết chunk", và là cơ chế
+**duy nhất trong mục này không phụ thuộc một hằng số ⚠️ ASSUMED nào** — vì thế nó là lưới an toàn
+chính, còn §6.20.13.3 chỉ là lưới phụ.
+
+Hiện tại Lớp 3 (`job_orchestrator.py:912-925`) chỉ chạy **sau khi 1 chunk hoàn tất**; mức "vượt
+trần tối đa để lọt" = chi phí đúng 1 chunk (§6.20.7 Z3). Thêm **Lớp 4** ngay trong
+`_process_epub_chunk()` để mức đó tụt xuống còn **chi phí đúng 1 request**:
+
+- Đổi signature (`job_orchestrator.py:1713-1721`), thêm tham số **có tên**:
+  ```python
+  async def _process_epub_chunk(
+      self, job, chunk, doc, chunk_plan, system_prompt, pricing_provider, db_session,
+      *, cost_budget_remaining: float | None,   # MỚI — Lop 4
+  ) -> None:
+  ```
+  Caller (`run_epub_job()`, ngay trước lời gọi `_process_epub_chunk`) tính:
+  ```python
+  cost_budget_remaining = (
+      effective_cap - sum(c.api_cost or 0.0 for c in chunks[:position - 1])
+      if self._settings.cost_cap_enabled else None
+  )
+  ```
+  **Dùng LẠI đúng biểu thức `effective_cap` đã có ở dòng 917-921** (`job.cost_cap_usd` else
+  `settings.max_cost_per_job_usd`) — không viết công thức trần thứ hai (cùng lý do
+  `estimate_job_cost_v2()`/`estimate_chunk_cost()` phải dùng chung `_estimate_input_tokens()`).
+
+- Trong vòng `for start, end in chunk_plan.requests:` — **ngay sau mỗi lần cộng
+  `total_cost += result.estimated_cost_usd`** (dòng 1752, và cả dòng 1770 của nhánh gọi lại
+  từng-id): nếu `cost_budget_remaining is not None and total_cost > cost_budget_remaining` →
+  `raise EpubChunkCostCapExceeded(...)` (exception MỚI, đặt cạnh `EpubBatchTranslationError`).
+
+- `run_epub_job()` bắt `EpubChunkCostCapExceeded` **riêng, trước** khối `except Exception` chung
+  (dòng ~890), và đi vào **đúng nhánh `cost_capped` đã có** (dòng 926-945) — không tạo trạng thái
+  mới, không đổi UI: `job.status='cost_capped'`, `cost_source='metered'`,
+  `actual_cost = <chi phí các chunk completed> + <chi phí dở dang của chunk này>`.
+
+- **Ghi nhận tiền đã tiêu dở dang (Protocol 6 — không để mất dấu vết tài chính)**: trước khi raise,
+  ghi vào chính row chunk đang chạy: `chunk.api_tokens_used = total_input_tokens +
+  total_output_tokens`, `chunk.api_cost = total_cost`, `chunk.status = "failed"`,
+  **`chunk.output_path` để NGUYÊN `None`**. Không bao giờ đặt `status="completed"` cho chunk dở —
+  bước merge (dòng 972-977) chỉ đọc chunk `completed` + có `output_path`, nên bản dịch dở không
+  bao giờ lọt vào file output.
+  - **Không double-count**: accumulator Lớp 3 là `sum(c.api_cost or 0.0 for c in chunks[:position])`
+    — cộng theo row, mỗi row đúng 1 lần. Khi user bấm Retry, `retry_job()` reset chunk về `pending`
+    và lần chạy mới **GÁN ĐÈ** (`=`, không phải `+=`) `chunk.api_cost` → vẫn không cộng đôi.
+  - **Known limitation phải ghi vào `docs/CHANGELOG.md`** (đây là hệ quả có chủ đích, không phải
+    bug): tiền đã tiêu cho phần dở dang của 1 chunk bị **quên** sau khi resume ghi đè row đó. Đây
+    đúng hành vi hiện có của mọi chunk `failed` ở nhánh PDF — giữ nhất quán, không mở rộng schema
+    (thêm cột = phải xoá/tạo lại DB, xem §6.20.11 mục 1).
+
+- **Hiệu quả định lượng**: mức vượt trần tối đa giảm từ "1 chunk" (~8.000 ký tự nguồn) xuống
+  "1 request" (~3.000 ký tự nguồn) = **giảm ~2,7×**. Với đúng sự cố QA gặp: cap $0,015, chunk 0 tốn
+  $0,0663 → Lớp 4 sẽ dừng ở request đầu tiên vượt $0,015 thay vì để chạy hết chunk.
+
+##### 6.20.13.3. Trần số request phụ (fix C-1) + phát hiện runaway per-request (fix C-3)
+
+**(a) Trần số request phụ — không ngưỡng đoán, sửa trực tiếp V-2.** Thay vòng
+`for local_id in sorted(missing_ids):` (dòng 1759) bằng logic 2 nhánh, **hằng số MỚI trong
+`src/core/chunking.py` cạnh `EPUB_REQUEST_CHAR_BUDGET`**:
+
+```python
+EPUB_MAX_SINGLE_ID_RETRIES = 5      # ⚠️ ASSUMED (xem lý do chọn ngay dưới)
+```
+
+- `len(missing_ids) <= EPUB_MAX_SINGLE_ID_RETRIES` → giữ **nguyên** pattern hiện có (dòng
+  1759-1774), không sửa một dòng nào.
+- `len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES` → **KHÔNG** gọi lại từng id. Thiếu quá nửa batch
+  gần như luôn là "cả response hỏng/cụt", không phải "model bỏ sót vài mục" — gọi lại **NGUYÊN
+  request đó đúng 1 lần** (payload y hệt, `expected_ids` y hệt), rồi merge kết quả vào `parsed`.
+  Vẫn thiếu sau lần đó → giữ nguyên đường `still_missing` → `EpubBatchTranslationError` (E-09).
+- **Trần cứng cho toàn bộ 1 slice**, đếm bằng biến cục bộ `extra_requests` trong vòng
+  `for start, end`: `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE = 6` (= 1 lần gọi lại nguyên request + tối
+  đa 5 lần gọi lại từng-id, hoặc 6 lần từng-id). Vượt trần → không gọi thêm, đi thẳng vào đường
+  `still_missing`/chấp nhận (tuỳ mục 6.20.13.5). Trần này áp cho **cả** retry vì thiếu id **và**
+  retry vì mất dấu (§6.20.13.5) — 2 cơ chế **dùng chung một quota**, không cộng dồn.
+- **Hiệu quả định lượng**: worst case token của 1 slice giảm từ `1 + 18` request xuống `1 + 6`
+  request = **giảm ~2,7×** phần khuếch đại C-1.
+- **Cơ sở chọn số 5 — `⚠️ ASSUMED`**: 5 ≈ 28% của slice điển hình (18 unit). Không có dữ liệu đo
+  phân bố "số id thiếu mỗi response" (QA không giữ log per-request). Dev/QA khi chạy live phải log
+  giá trị `len(missing_ids)` mỗi lần > 0 để vòng sau có số thật mà chỉnh; ghi rõ trong
+  `test-report.md`.
+
+**(b) Phát hiện runaway per-request (C-3).** Helper MỚI, **đặt trong `src/core/cost_estimator.py`**
+(không phải `job_orchestrator.py`) — vì nó phải dùng lại **đúng 2 hằng số của estimator**, và để 2
+công thức không bao giờ trôi khỏi nhau (cùng lý do §6.11.4 mục 3):
+
+```python
+# src/core/cost_estimator.py
+EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0        # ⚠️ ASSUMED — xem "Cơ sở chọn ngưỡng"
+EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS = 1_500  # ⚠️ ASSUMED — chống false-positive ở payload nhỏ
+
+def is_runaway_output(payload_chars: int, output_tokens: int) -> bool:
+    """True khi output_tokens vuot xa muc ky vong cho CHINH payload nay
+    (Architecture.md 6.20.13.3b). Dung DUNG 2 hang so cua estimator
+    (VI_CHAR_EXPANSION, CHARS_PER_TOKEN_VI) — khong duoc viet cong thuc thu 2.
+    """
+    expected = int(payload_chars * VI_CHAR_EXPANSION / CHARS_PER_TOKEN_VI)
+    return output_tokens > max(EPUB_RUNAWAY_OUTPUT_FACTOR * expected,
+                               EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS)
+```
+
+Gọi tại `_process_epub_chunk()` **ngay sau dòng 1752** (sau khi cộng token/cost, trước
+`parse_epub_batch_response`), với `payload_chars = len(payload_json)` — tức là so với **input của
+chính request đó**, không phải ước tính cả sách (đúng yêu cầu brief).
+
+**Cơ sở chọn `EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0` — `⚠️ ASSUMED, chỉ có 1 điểm dữ liệu`:**
+- Mức kỳ vọng lấy từ chính công thức đã dùng cho cost gate: `output ≈ chars × VI_CHAR_EXPANSION
+  (1,16) / CHARS_PER_TOKEN_VI (2,0)` = `chars × 0,58`. Payload đầy 3.000 ký tự → kỳ vọng ~1.740
+  output token.
+- **Trần vật lý** `max_tokens = 8192` (V-2) → tỉ lệ tối đa mà 1 request đầy có thể đạt là
+  `8192 / 1740 = 4,7×`. Chọn **3,0×** để cơ chế **kích hoạt TRƯỚC khi chạm trần** (bắt được runaway
+  lúc nó còn đang sinh, không phải sau khi đã bị cắt cụt), mà vẫn còn biên **≥ 3×** so với dao động
+  bình thường (công thức estimator vốn ước **cao**, nên tỉ lệ thật của 1 response lành mạnh kỳ vọng
+  **< 1,0×**).
+- **Ngưỡng này CHƯA được đo trên phân bố thật.** Không ai có `output_tokens` per-request của lần
+  chạy bình thường (QA chỉ ghi tổng theo chunk). **Bắt buộc**: lần chạy live đầu tiên sau khi Dev
+  implement phải log `(payload_chars, output_tokens, ratio)` cho **mọi** request vào
+  `chunk_dir/requests.jsonl`, và QA ghi vào `test-report.md` giá trị **max ratio quan sát được**.
+  Nếu max ratio thật của lần chạy lành mạnh > 1,5 → ngưỡng 3,0 quá sát, phải nâng và ghi lại.
+  Đây chính là bước "đo thêm trước khi tự tin vào con số" của R5-02.
+
+**Hành động khi phát hiện runaway — TRẢ LỜI CÂU HỎI 2 CỦA BRIEF: KHÔNG tự động retry.** Chia 2 ca,
+theo tiêu chí "kết quả có dùng được không", vì trade-off khác hẳn nhau:
+
+| Ca | Điều kiện | Hành động | Lý do |
+|---|---|---|---|
+| **R-a** | Runaway **nhưng** `parse_epub_batch_response()` trả đủ id, giá trị hợp lệ | **GIỮ kết quả**, chỉ ghi nhận anomaly (§6.20.13.7). Không retry | Tiền đã tiêu rồi và nội dung dùng được. Vứt đi + gọi lại = trả tiền lần 2 để đổi lấy đúng thứ đang có. Retry chỉ có nghĩa khi kết quả **không dùng được** |
+| **R-b** | Runaway **và** thiếu id / parse hỏng | **Abort ngay**: `raise EpubRequestRunawayError` → chunk `failed` → user bấm Retry (BR-CHUNK-05, resumable, không mất chunk đã xong). **KHÔNG** chạy vòng gọi lại từng-id, **KHÔNG** gọi lại nguyên request | Đây đúng con đường C-1: 1 response runaway + hỏng mà đi vào vòng retry sẽ đẻ ra tối đa 6 request phụ **sau khi đã** tiêu bất thường. Brief hỏi "retry có thể tốn thêm tiền thật không?" — có, và đây là ca duy nhất chắc chắn tốn thêm mà xác suất thành công thấp nhất (model vừa chứng minh nó đang không ổn định trên đúng payload này) |
+
+**Khuyến nghị chốt**: abort (R-b), không auto-retry. Cơ chế resumable của BR-CHUNK-05 đã đủ để user
+tự quyết định có trả thêm tiền hay không — và đó là quyết định của **người trả tiền**, không phải
+của heuristic có ngưỡng ⚠️ ASSUMED.
+
+**Trả lời câu hỏi 3 của brief (cấu hình được hay hardcode)**: `EPUB_RUNAWAY_OUTPUT_FACTOR` và
+`EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS` **hardcode** ở `cost_estimator.py` (tiền lệ BR-IMGCOMP-03), KHÔNG
+đưa vào `.env`. Lý do: đây là **ngưỡng chẩn đoán nội bộ chưa có dữ liệu**, không phải chính sách
+tài chính của user — chính sách tài chính là `max_cost_per_job_usd` (đã cấu hình được, và Lớp 4 ở
+§6.20.13.2 đã làm nó có hiệu lực sớm hơn ~2,7×). Đưa 1 hằng số chưa đo vào `.env` là mời user chỉnh
+một con số mà chính team chưa hiểu, rồi khó lần lại được nguyên nhân khi sự cố tái diễn. Khi có đủ
+dữ liệu đo (yêu cầu log ở trên) → xem lại quyết định này, ghi vào §6.20.13 vòng sau.
+
+##### 6.20.13.4. Bug #EPUB-4 — nguyên nhân gốc gần như chắc chắn: prompt tự dạy model bỏ dấu (V-1)
+
+QA đặt giả thuyết "hành vi model với batch lớn". Đọc source thì có một nguyên nhân **cụ thể hơn,
+verify được, và rẻ hơn nhiều để sửa** (V-1): **toàn bộ khối contract + one-shot example gửi cho
+model không có một ký tự tiếng Việt có dấu nào**, và ví dụ one-shot — thứ model bắt chước mạnh nhất
+— **demo output là `bot mi`, `muoi`, `nuong o 350F`**.
+
+> **Ranh giới bằng chứng (R5-01)**: sự thật "prompt không có dấu, one-shot demo output không dấu"
+> là **ĐÃ VERIFY** (đọc + quét ký tự trên `prompt_builder.py:409-433`). Còn "đó **là** nguyên nhân
+> của 30-37% unit mất dấu" là **`⚠️ ASSUMED`** — chưa có A/B test. Nó **giải thích được** đặc điểm
+> QA quan sát: batch lớn → tỉ lệ instruction/example (không dấu) so với ngữ cảnh sinh ra càng lớn,
+> và mất dấu xuất hiện theo **cụm liên tiếp trong cùng 1 request** (QA đo được), tức là hiện tượng
+> ở mức **response**, đúng chỗ one-shot example tác động.
+
+**Sửa (bắt buộc, làm TRƯỚC mọi guard — rẻ nhất, tác động lớn nhất):**
+
+1. **Viết lại `_EPUB_BATCH_ONE_SHOT_EXAMPLE`** (`prompt_builder.py:427-433`) sao cho phần "Dau ra"
+   là **tiếng Việt có dấu đầy đủ, NFC**: `"<strong>2 cups</strong> bột mì, 1<sup>1</sup>/<sub>3</sub>
+   tsp muối, nướng ở 350F."`. Phần "Dau vao" giữ nguyên tiếng Anh.
+2. **Thêm rule 7 vào `_EPUB_BATCH_CONTRACT`** (sau rule 6, dòng 423-424), viết ASCII như 6 rule
+   hiện có để không đội `prompt_overhead_chars`:
+   `"7. Ban dich PHAI la tieng Viet CO DAU day du (Unicode NFC). TUYET DOI KHONG tra ve tieng Viet
+   khong dau (vi du: phai la \"bột mì\", KHONG duoc la \"bot mi\")."` — cặp ví dụ trong rule này
+   **bắt buộc** có bản có dấu, vì rule mô tả suông về dấu mà không cho model thấy dấu thì lại đúng
+   cái bẫy V-1.
+3. **KHÔNG** chuyển toàn bộ instruction sang tiếng Việt có dấu. Lý do định lượng: prompt được gửi
+   lại **mỗi request** (~18 lần/sách); tiếng Việt có dấu tokenize ~2 ký tự/token vs ~4 của ASCII
+   (`CHARS_PER_TOKEN_VI`/`CHARS_PER_TOKEN_EN`), nên bỏ dấu-hoá cả khối 1.149 ký tự sẽ **gấp đôi**
+   token overhead của nó. Chỉ ~110 ký tự có dấu được thêm (ví dụ ở rule 7 + one-shot) → tăng
+   ~55 token/request → ~1.000 token/sách → **< $0,001** với DeepSeek. Đây là đánh đổi có tính được,
+   không phải cảm tính.
+4. **Ảnh hưởng tới cost estimate**: `prompt_overhead_chars` được đo từ **chuỗi thật** lúc chạy, nên
+   thay đổi độ dài tự phản ánh — nhưng chỉ khi §6.20.13.6 được làm. Đọc §6.20.13.6 trước khi sửa.
+
+##### 6.20.13.5. Guard MỚI: `_check_epub_diacritics()` — 2 tầng, KHÔNG đụng BR-EPUB-05
+
+Guard này là **lớp phòng thủ độc lập**, không sửa `_check_epub_output_guard()`
+(`job_orchestrator.py:229`) — guard đó bắt lớp lỗi khác (Bug #5 dạng EPUB) và đang PASS đúng thiết
+kế của nó.
+
+**Helper MỚI — module MỚI `src/core/text_quality.py`** (không nhét vào `prompt_builder.py`: đây là
+đo chất lượng output, không phải dựng prompt):
+
+```python
+_VN_DIACRITIC_CHARS = frozenset(
+    "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợ"
+    "ùúủũụưừứửữựỳýỷỹỵđ"
+)
+
+def strip_html_for_measure(html: str) -> str:
+    """Bo THE va MOI thuoc tinh (href/class/alt tieng Anh khong duoc tinh
+    vao mau do — do la nguon false-positive lon nhat)."""
+
+def diacritic_ratio(html: str) -> tuple[float, int]:
+    """Tra (ty le ky tu co dau / tong ky tu chu cai, so ky tu chu cai) tren
+    text da strip tag, da NFC-normalize va lower()."""
+```
+
+**Ghi chú kỹ thuật bắt buộc cho Dev**: `unicodedata.normalize("NFC", s)` **trước** khi đếm — tiếng
+Việt tổ hợp (NFD) sẽ cho ra chữ cái base ASCII + combining mark, đếm ra tỉ lệ 0 và tạo
+false-positive hàng loạt. Đây là bẫy có thật của chính lớp lỗi đang đo.
+
+**Tầng 1 — mức REQUEST (đặt ngay sau `parse_epub_batch_response`, dòng 1754, sau bước xử lý
+missing id).** Bug là hiện tượng ở mức response (QA đo: mất dấu theo cụm liên tiếp trong cùng
+request), nên đo gộp **toàn bộ giá trị `parsed` của request đó** cho mẫu lớn, ổn định:
+
+```python
+EPUB_DIACRITIC_MIN_LETTERS_REQUEST = 200   # ⚠️ ASSUMED
+EPUB_DIACRITIC_RATIO_REQUEST       = 0.08  # ⚠️ ASSUMED
+```
+`letters >= 200` và `ratio < 0,08` → coi **cả request** là hỏng dấu → gọi lại **nguyên request đó
+đúng 1 lần** (dùng chung quota `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE`, §6.20.13.3a). Nếu bản retry có
+`ratio` **cao hơn** → dùng bản retry; nếu không → giữ bản đầu (đừng đổi lấy thứ tệ hơn).
+
+**Tầng 2 — mức UNIT (đặt ngay trước vòng `for local_id, vi_html in parsed.items():`, dòng 1785).**
+Bắt phần sót lại sau tầng 1:
+```python
+EPUB_DIACRITIC_MIN_LETTERS_UNIT = 40    # ⚠️ ASSUMED
+EPUB_DIACRITIC_RATIO_UNIT       = 0.02  # ⚠️ ASSUMED — gần như là "0 dấu tuyệt đối"
+```
+Unit có `letters >= 40` và `ratio < 0,02` → gọi lại **riêng lẻ unit đó**, tối đa 1 lần, **tái dùng
+ĐÚNG pattern code dòng 1759-1774**.
+
+> **Hợp nhất hay tách 2 vòng retry? — CHỐT: TÁCH, nhưng dùng CHUNG 1 helper.** Rút phần thân của
+> vòng hiện có (dòng 1760-1774) thành `async def _retry_single_unit(...) -> str | None` (trả bản
+> dịch hoặc `None`), rồi cả 2 chỗ đều gọi nó. Không gộp thành 1 vòng vì 2 điều kiện kích hoạt xảy
+> ra ở **2 thời điểm khác nhau** (thiếu id: biết ngay sau parse; mất dấu: chỉ biết sau khi đã có
+> giá trị) và ngữ nghĩa lỗi khác nhau (thiếu = phải có gì đó; mất dấu = có rồi nhưng kém). Gộp
+> cứng 2 ý nghĩa vào 1 vòng là đúng loại "một biến, hai ý nghĩa" mà §6.20.7 và Bug #5 đã trả giá.
+> Chia sẻ code ở tầng helper, không ở tầng vòng lặp.
+
+**Cơ sở chọn ngưỡng — `⚠️ ASSUMED, chưa đo trên corpus tiếng Việt thật của ngành bánh`:**
+- Đo được trong phiên này: 1.084 đoạn văn tiếng Việt trong `docs/PRD.md` + `docs/Architecture.md`
+  (corpus tiếng Việt **duy nhất** có sẵn tại chỗ, **đã lẫn nhiều code/bảng/thuật ngữ Anh** nên
+  thiên **thấp**): median `0,219`, mean `0,216`, **p5 = `0,122`**, min `0,053` (min rơi đúng vào 1
+  dòng bảng Markdown gần như toàn tiếng Anh).
+- Ngưỡng request `0,08` = **thấp hơn p5 của corpus ~1,5×** và thấp hơn median ~2,7× → biên an toàn
+  rộng cho các unit hợp lệ giàu thuật ngữ Anh (`sourdough starter`, `450F`, tên riêng).
+- Ngưỡng unit `0,02` với sàn 40 chữ cái ≈ "gần như không có dấu nào", cùng tinh thần với tiêu chí
+  **QA đã dùng và đã kiểm bằng mắt** (`0 ký tự có dấu`, ≥3 chữ cái) — nhưng nâng sàn từ 3 lên 40
+  chữ cái để loại đúng lớp false-positive brief cảnh báo (`"2 tsp"`, tên riêng, `"350F"`, số liệu).
+  QA đo 116-143 unit dương tính bằng tiêu chí lỏng hơn và **xác nhận bằng mắt là dương tính thật**
+  → tiêu chí này gần như không có false-positive, chỉ có thể sót (false-negative), và sót là chiều
+  an toàn: sót chỉ mất chất lượng 1 unit, false-positive tốn tiền thật.
+- **Corpus dùng để chốt là docs của chính dự án, KHÔNG phải văn bản dịch xuất bản.** Trước khi
+  release, QA phải đo lại `diacritic_ratio` trên **các unit ĐÃ dịch tốt** của lần chạy live (dữ
+  liệu này QA đã có sẵn: `chunk_N/units.json` của lần full-book thành công) và ghi phân vị p1/p5
+  thật vào `test-report.md`. Nếu p1 thật < 0,10 → phải hạ ngưỡng request xuống dưới p1.
+
+**Trả lời câu hỏi 2 của brief (retry 1 lần vẫn thiếu dấu thì sao) — CHỐT: (a) chấp nhận + ghi
+nhận, KHÔNG fail chunk.** Lý do, so trực tiếp với E-09/`EpubBatchTranslationError`:
+
+| | E-09 (thiếu bản dịch) | Mất dấu |
+|---|---|---|
+| Nội dung | **Không tồn tại** — ghi vào file là **phá huỷ** nội dung gốc | Tồn tại, đúng nghĩa (QA xác nhận), chỉ kém chất lượng |
+| Người dùng có cứu được không | Không — chữ đã mất | Có — đọc vẫn hiểu, có thể dịch lại chương đó sau |
+| Fail cứng thì mất gì | Không mất gì thêm | Vứt cả chunk **đã trả tiền**, và với bug tái phát nhiều lần thì **sách không bao giờ dịch xong** |
+
+Fail cứng vì mất dấu biến 1 lỗi chất lượng cục bộ thành 1 lỗi chặn toàn job, đúng lúc user đã trả
+tiền — sai hướng đánh đổi. Ghi nhận thay vì chặn (§6.20.13.7), và để BR-EPUB-05 tiếp tục giữ vai
+trò lớp fail-cứng cho lớp lỗi phá huỷ nội dung.
+
+**Trả lời câu hỏi 3 của brief (overhead)**: phần **đo** là `O(số ký tự)` thuần Python, không gọi
+LLM — chạy cho **mọi** unit vẫn không đáng kể (~57.000 ký tự/sách, < 50 ms tổng). Chi phí chỉ phát
+sinh khi **phải retry**. Ước tính worst case theo đúng số QA đo (30% unit hỏng, mất dấu theo cụm
+trong ~30% request): tầng 1 bắt hầu hết → **~+30% số request** (≈ +6 request/sách ≈ **+$0,003**
+với DeepSeek). Nếu §6.20.13.4 sửa đúng gốc thì tầng 1 gần như không bao giờ kích hoạt → overhead
+≈ 0. **Không cần cơ chế "chỉ check khi nghi ngờ"** — không có phép đo nào rẻ hơn phép đo này.
+
+##### 6.20.13.6. SỬA `prompt_overhead_chars` của nhánh EPUB (fix C-2, Protocol 6 data lineage)
+
+**Sai lệch tất định, đọc code là thấy** — không phải giả thuyết:
+- `cost_gate.py:133-139` ước bằng `build_prompt_text(...)` = prompt **của pdf2zh** (có `${text}`
+  placeholder, footer riêng).
+- `job_orchestrator.py:840-846` gửi thật `build_epub_batch_prompt(build_system_prompt(...))` =
+  `glossary_prompt` + `_EPUB_BATCH_CONTRACT` (**1.149 ký tự**, tự đếm) + one-shot (**~250 ký tự**).
+
+⇒ **~1.400 ký tự/request không bao giờ được đếm vào ước tính**, và theo `_estimate_input_tokens()`
+số hạng này được nhân với `segment_count` (~18 request) → **~+6.300 input token bị bỏ sót** so với
+28.257 input token đã ước ⇒ ước thấp ~22% **chỉ riêng ở phần input**. Đây là vi phạm §6.11.6 nằm
+đúng trên lớp bảo vệ tài chính, và là **cùng loại lỗi** với X5 (§6.20.6) — chỉ khác là X5 sót phần
+nội dung, chỗ này sót phần prompt.
+
+**Sửa (Protocol 6: bên ước tính phải tiêu thụ ĐÚNG artifact mà bên thực thi gửi đi)** — trong
+`_estimate_epub_translation_cost()` (`cost_gate.py:115-155`), thay khối `build_prompt_text` bằng:
+
+```python
+base_system_prompt = await build_system_prompt(
+    glossary_manager, project_id=batch_id,
+    only_terms_present_in=full_text, max_glossary_entries=max_glossary_entries,
+)
+real_prompt = build_epub_batch_prompt(base_system_prompt)   # CHINH chuoi _process_epub_chunk() gui
+prompt_overhead_chars = len(real_prompt)
+```
+Không còn trừ `len("${text}")` — chuỗi EPUB **không có** placeholder đó. Nhánh PDF (dòng 87-105)
+**không đổi một dòng nào**.
+
+**Test bắt buộc (R6-02, assert giá trị cụ thể, không chỉ `assert_called`)**: 1 test so **bằng nhau**
+chuỗi prompt mà `_estimate_epub_translation_cost()` đo với chuỗi `system_prompt` mà
+`_process_epub_chunk()` thực sự nhận, trên cùng 1 job/glossary — đây đúng loại "sợi dây nối 2 bước"
+mà Protocol 6 sinh ra để bảo vệ.
+
+**Phần CÒN LẠI của C-2 — chưa giải thích được, cấm đoán bừa.** Sau khi cộng ~6.300 input token bị
+sót, số học vẫn không khớp: để đạt `actual = $0,0626` thì output thật phải ~83.000 token, so với
+42.122 đã ước → **output thật ~2× ước tính**. Giả thuyết mạnh nhất, **`⚠️ ASSUMED, CHƯA VERIFY`**:
+`CHARS_PER_TOKEN_VI = 2,0` được đo trên **`cl100k_base` (OpenAI)** cho sự cố pdf2zh
+(`cost_estimator.py:36-42` ghi rõ nguồn), rồi được áp cho **DeepSeek** — tokenizer **khác**, chưa
+ai đo. Nếu DeepSeek tokenize tiếng Việt có dấu ở ~1,0-1,2 ký tự/token thì output token gấp đôi,
+khớp đúng độ lệch quan sát được.
+
+**KHÔNG đổi `CHARS_PER_TOKEN_VI` trong đợt này.** Thay vào đó, 1 task đo **rẻ và tất định** cho Dev,
+dùng **dữ liệu QA đã giữ lại** (không tốn thêm 1 đồng API nào):
+> Với lần chạy full-book thành công: `chars = tổng độ dài mọi value trong mọi `chunk_N/units.json``;
+> `tokens = sum(chunk.api_tokens_used)` trừ phần input ước được. Tính `chars/token` **thật của
+> DeepSeek trên tiếng Việt**, ghi vào Architecture.md kèm nguồn. Nếu < 2,0 → thêm hằng số
+> **theo provider** (không sửa hằng số dùng chung của nhánh PDF — nhánh đó đã được verify bằng
+> golden file `cost_golden_howbakingworks.json`, đổi nó là phá bằng chứng cũ).
+
+##### 6.20.13.7. Ghi nhận anomaly (trả lời câu hỏi 4 của brief)
+
+Cân nhắc mức độ: EPUB **chưa có** UI hiển thị report như `layout_qa_findings` của PDF, và Bước 3/3
+mới làm UI. Vì vậy chọn mức **nhẹ nhất mà vẫn không mất dấu vết**, không thêm cột DB, không thêm
+endpoint:
+
+1. **File `chunk_dir/anomalies.json`** (cạnh `units.json`, cùng thư mục chunk theo pattern F9), ghi
+   **sau vòng request, trước khi ghi `units.json`**, và **chỉ ghi khi có ≥1 anomaly**:
+   ```json
+   {"chunk_index": 0,
+    "runaway_requests":   [{"slice": [0, 17], "payload_chars": 2980, "output_tokens": 6120, "ratio": 3.5, "action": "kept|aborted"}],
+    "low_diacritic_requests": [{"slice": [0, 17], "ratio": 0.01, "retried": true, "ratio_after": 0.23}],
+    "low_diacritic_units":    [{"unit_id": "ops/xhtml/chapter01.html#17", "ratio": 0.0, "retried": true, "resolved": false}]}
+   ```
+2. **`chunk_dir/requests.jsonl`** — 1 dòng `{"slice": [s,e], "payload_chars": …, "input_tokens": …,
+   "output_tokens": …, "ratio": …, "diacritic_ratio": …}` cho **mọi** request (kể cả bình thường).
+   Đây là **dữ liệu để chốt lại các ngưỡng ⚠️ ASSUMED ở vòng sau**, và là thứ QA vòng 1/5 không có
+   nên phải suy đoán. Bắt buộc, không phải tuỳ chọn.
+3. **Log WARN** 1 dòng/anomaly qua logger sẵn có, có `job.id` + `chunk_index` + loại anomaly.
+4. **KHÔNG** đụng `job.error_message` khi job vẫn `completed` — trường đó là thông điệp lỗi hiển thị
+   cho user, nhét cảnh báo chất lượng vào đó sẽ làm job thành công trông như job hỏng.
+5. Bước 3/3 (UI) có thể đọc `anomalies.json` để hiện cảnh báo mềm — **ngoài phạm vi Bước 2/3**, ghi
+   vào `docs/CHANGELOG.md` như một hook đã chuẩn bị sẵn.
+
+##### 6.20.13.8. Danh sách hằng số MỚI (tổng hợp cho Dev)
+
+| Hằng số | Giá trị | Ở đâu | Cấu hình `.env`? | Trạng thái bằng chứng |
+|---|---|---|---|---|
+| `EPUB_MAX_SINGLE_ID_RETRIES` | 5 | `core/chunking.py` | Không | ⚠️ ASSUMED |
+| `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE` | 6 | `core/chunking.py` | Không | ⚠️ ASSUMED |
+| `EPUB_RUNAWAY_OUTPUT_FACTOR` | 3.0 | `core/cost_estimator.py` | Không | ⚠️ ASSUMED (có phân tích trần `max_tokens=8192` — V-2 đã verify) |
+| `EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS` | 1500 | `core/cost_estimator.py` | Không | ⚠️ ASSUMED |
+| `EPUB_DIACRITIC_MIN_LETTERS_REQUEST` | 200 | `core/text_quality.py` | Không | ⚠️ ASSUMED |
+| `EPUB_DIACRITIC_RATIO_REQUEST` | 0.08 | `core/text_quality.py` | Không | ⚠️ ASSUMED (corpus docs nội bộ, p5 = 0,122) |
+| `EPUB_DIACRITIC_MIN_LETTERS_UNIT` | 40 | `core/text_quality.py` | Không | ⚠️ ASSUMED |
+| `EPUB_DIACRITIC_RATIO_UNIT` | 0.02 | `core/text_quality.py` | Không | ⚠️ ASSUMED (khớp tiêu chí QA đã kiểm bằng mắt) |
+
+Exception MỚI (đặt cạnh `EpubBatchTranslationError`): `EpubChunkCostCapExceeded`,
+`EpubRequestRunawayError`.
+
+##### 6.20.13.9. Thứ tự implement bắt buộc cho Dev
+
+1. §6.20.13.4 (sửa one-shot + rule 7) — rẻ nhất, có thể tự nó xoá phần lớn Bug #EPUB-4.
+2. §6.20.13.6 (`prompt_overhead_chars`) — phải làm **cùng lúc** với (1), vì (1) đổi độ dài prompt.
+3. §6.20.13.2 (Lớp 4 trần chi phí per-request) — cost-safety, không phụ thuộc ngưỡng đoán.
+4. §6.20.13.3a (trần số request phụ) → 3b (runaway detect).
+5. §6.20.13.5 (guard dấu 2 tầng) → §6.20.13.7 (anomalies/requests log).
+6. Task đo `chars/token` thật của DeepSeek (§6.20.13.6, dùng dữ liệu QA đã giữ, **không tốn API**).
+
+##### 6.20.13.10. Gate release bổ sung cho vòng QA kế tiếp
+
+Cộng vào checklist §6.20.10 (không thay thế):
+- **G-1 (R6-03)**: chạy live full-book 1 lần, rồi đo lại **tỉ lệ unit mất dấu** trên file output
+  bằng đúng script QA vòng 1/5 đã dùng. **Tiêu chí pass: 0 unit** thoả `letters ≥ 40 và
+  ratio < 0,02`. Đây là điều kiện đóng Bug #EPUB-4, không phải "có tiếng Việt là được".
+- **G-2 (R5-03)**: nộp `requests.jsonl` thật vào `test-report.md`, gồm **max output-ratio** và
+  **p1/p5 của `diacritic_ratio`** đo được. Không có 2 số này → **không được** đánh dấu
+  `ready_for_release`: mọi ngưỡng ở §6.20.13 vẫn còn là ⚠️ ASSUMED cho tới khi có chúng.
+- **G-3 (cost)**: so `actual_cost` metered với `estimated_cost` của **cùng file đó** sau khi sửa
+  §6.20.13.6. Tiêu chí §6.11.6: tỉ lệ `actual/estimate` phải **≤ 1,0** (được ước cao, cấm ước
+  thấp). Lần đo trước fix là **1,84** — nếu vẫn > 1,0 thì phần C-2 chưa đóng, ghi rõ số đo và
+  escalate Tech Lead thay vì tự chỉnh hằng số.
+- **G-4 (Lớp 4)**: đặt `cost_cap` thấp hơn chi phí **1 request** → xác nhận job dừng
+  `cost_capped` **giữa chừng 1 chunk** (chunk đó `failed`, `api_cost` khác 0, `output_path` là
+  `NULL`), và file output **không** chứa bản dịch dở của chunk đó.
+
+---
+
+### 6.20.14. Chiến lược MỚI cho lớp lỗi "DeepSeek trả JSON malformed" sau khi chạm giới hạn Protocol 3 (Tech Lead, 2026-09-10)
+
+**Bối cảnh**: `docs/escalation-log.md` (2026-09-10) — US-22 Bước 2/3 đã dùng hết 5/5 vòng Dev↔QA
+(Protocol 3) cho cùng một chuỗi lỗi. Ba biến thể JSON hỏng đã được vá đúng (B2-3 newline, B2-4 dấu
+phẩy, B2-5 `}` thừa — biến thể thứ 3 CHƯA fix), nhưng mỗi vòng lại lộ ra biến thể mới. Section này
+thay thế hướng "vá tiếp từng biến thể cú pháp" bằng 3 lớp phòng thủ độc lập, không lớp nào giả định
+biết trước hình dạng lỗi tiếp theo.
+
+**Chỉ đạo của user (ràng buộc thiết kế, không phải gợi ý)** — quyết định ngày 2026-09-10, PM chuyển
+tiếp: *"Ưu tiên nhanh, tiết kiệm, độ chính xác của bản dịch có thể chấp nhận dung sai nhỏ."*
+Hệ quả trực tiếp lên thiết kế này:
+1. Không đổi kiến trúc lớn (không bỏ JSON, không tích hợp JSON-mode) ở vòng này — xem §6.20.14.8.
+2. **E-09 không còn là chính sách mặc định tuyệt đối**: một unit không dịch được sau khi đã thử hết
+   cơ chế tổng quát → được phép giữ nguyên tiếng Anh, có đánh dấu, thay vì làm hỏng cả chunk/job.
+   E-09 chuyển vai trò: từ "luật mặc định" thành "chốt chặn khi vượt ngưỡng bất thường" (§6.20.14.4).
+
+---
+
+##### 6.20.14.0. Nguồn xác thực cho mọi con số dưới đây
+
+Toàn bộ số liệu trong section này **tự đo lại** từ golden fixture THẬT đã có trong repo
+(`tests/fixtures/epub_llm/*.json`) + `docs/test-report.md` (QA vòng 3/5, 5/5) — **không gọi thêm API
+lần nào**, đúng tinh thần "tiết kiệm". Cách đo: đọc `request_payload` của từng fixture, `json.dumps(...,
+ensure_ascii=False)` để lấy đúng số ký tự payload thật đã gửi, đối chiếu `input_tokens`/`output_tokens`/
+`estimated_cost_usd` do chính provider trả về.
+
+**(a) Bảng tương quan "kích thước response ↔ JSON hỏng"** — mọi dòng đều là dữ liệu thật đã capture:
+
+| Fixture / nguồn | Số unit | Payload chars | `output_tokens` | Kết quả JSON |
+|---|---|---|---|---|
+| `..._ch1_trailing_garbage.json` | 1 | 997 | 420 | Hỏng NHẸ (thừa đúng 1 dấu `"`) — cứu được |
+| `..._ch1_5units.json` | 5 | 1.061 | 459 | **SẠCH hoàn toàn** |
+| `..._ch1_multi_json_object.json` (B2-3) | 11 | 3.209 | 1.279 | Hỏng NẶNG — 11 object rời |
+| `..._comma_separated_json_objects.json` (B2-4) | 32 | ~4.425 (suy từ `input_tokens`) | 1.392 | Hỏng NẶNG — 32 object rời, nối bằng `, ` |
+| `..._single_object_spurious_closing_braces.json` (B2-5) | 32 | ~4.425 | 1.398 | Hỏng NẶNG — 1 `{`, 32 `}` |
+
+**Giả thuyết chốt (⚠️ ASSUMED, chưa đủ mẫu để coi là quy luật)**: xác suất DeepSeek sinh JSON hỏng
+NẶNG tăng theo ĐỘ DÀI OUTPUT, không theo độ dài input. Bằng chứng ủng hộ: cả 3 biến thể thảm hoạ đều
+xảy ra ở `output_tokens ≥ 1.279`; chưa từng quan sát biến thể thảm hoạ nào ở `output_tokens ≤ 459`.
+**Bằng chứng NGƯỢC lại phải ghi rõ, không được giấu**: QA vòng 5/5 lần chạy 2 có **14 lần gọi THÀNH
+CÔNG** cho chunk 0-3 (173/384 unit → trung bình ~12,4 unit/request) — tức batch ~12 unit KHÔNG phải
+lúc nào cũng hỏng. Vậy đây là quan hệ **xác suất**, không phải ngưỡng cứng: giảm batch làm GIẢM tần
+suất lỗi, **không** loại bỏ được lỗi. Đó chính là lý do Lớp A một mình là không đủ và phải có Lớp B + C.
+
+**(b) Đơn giá DeepSeek thật, suy ngược từ 2 fixture** (giải hệ 2 phương trình từ `input_tokens`,
+`output_tokens`, `estimated_cost_usd` của `_ch1_5units` và `_multi_json_object`):
+
+```
+input  ≈ $0,22 / 1M token
+output ≈ $0,66 / 1M token
+```
+Kiểm chứng độc lập trên fixture thứ 3 (B2-4, không dùng để giải hệ):
+`2.299 × 2,2e-7 + 1.392 × 6,6e-7 = $0,0014245` — **khớp tuyệt đối** với `estimated_cost_usd` đã ghi
+trong fixture. Hai đơn giá này do đó là VERIFIED, không phải suy đoán.
+
+**(c) Chi phí cố định mỗi request (system prompt overhead)** — đây là con số quyết định "giảm batch
+size tốn thêm bao nhiêu". Giải hệ `input_tokens = O + payload_chars / k` trên 2 fixture cùng đời
+prompt (5 unit và 11 unit):
+
+```
+k ≈ 3,99 ký tự / token   (payload EN + markup)
+O ≈ 1.190 input token / request   →  ≈ $0,000262 / request
+```
+
+---
+
+##### 6.20.14.1. Chẩn đoán lại: vì sao hướng vá cũ KHÔNG hội tụ
+
+Cả 3 fix B2-3/B2-4/B2-5 đều thuộc cùng một họ giả định: *"response là N giá trị JSON HỢP LỆ, chỉ khác
+nhau ở thứ nối giữa chúng"*. B2-5 phá đúng giả định nền đó (chỉ có 1 dấu `{` trong toàn bộ response),
+nên `_decode_concatenated_json_objects()` — dù đã tổng quát hoá đúng phạm vi nó nhắm tới — không thể
+cứu được, đúng như Reviewer đã tiên liệu.
+
+**Nhận định gốc**: `json.JSONDecoder` là công cụ **kiểm tra ngữ pháp**, mà thứ đang hỏng chính là ngữ
+pháp. Mọi fix xây trên nó đều phải đoán trước hình dạng hỏng. Nội dung cần lấy ra thì lại **không hề
+hỏng** ở cả 3 biến thể: 31/32 bản dịch của B2-5 đều đúng nghĩa, đủ dấu, đã trả tiền (QA tự mắt kiểm
+tra `raw_text`). Điều BẤT BIẾN qua cả 3 biến thể — và là thứ duy nhất đáng dựa vào — là:
+
+> mỗi bản dịch luôn xuất hiện dưới dạng một cặp `"<id>" : "<chuỗi JSON hợp lệ>"`, id nằm trong tập
+> id ngắn cục bộ đã gửi đi.
+
+Lớp B (§6.20.14.3) xây đúng trên bất biến đó và **không giả định gì về dấu ngoặc, dấu phẩy, hay cấu
+trúc lồng nhau** — đó là điểm khác biệt về bản chất so với 3 fix trước, không phải "vá biến thể thứ 4".
+
+---
+
+##### 6.20.14.2. Lớp A — Ép nhỏ request để GIẢM TẦN SUẤT sinh lỗi (rẻ nhất, làm trước)
+
+**A-1. Hai trần thay vì một.** `plan_epub_chunks()` hiện chỉ cắt request theo `request_budget` đo bằng
+**ký tự văn bản thuần** (`_plain_char_len()` strip hết tag). Đó là lý do một request có thể chứa **32
+unit** mà vẫn "trong ngân sách 3.000": 32 dòng `<strong>1 cup starter</strong>` có rất ít ký tự thuần
+nhưng sinh ra 32 khoá JSON — mà số KHOÁ mới là thứ model phải giữ đúng cú pháp. Vì vậy thêm trần thứ
+hai theo SỐ UNIT.
+
+Chốt giá trị (suy từ §6.20.14.0(a), không đoán): mục tiêu giữ `output_tokens` mỗi request về vùng đã
+quan sát là sạch, **≤ ~600 token**. Từ dữ liệu thật, `output_tokens ≈ 0,42 × payload_chars`
+(459/1.061 = 0,43; 1.279/3.209 = 0,40) và `payload_chars ≈ plain_chars × 1,15 +
+30 × số_unit` (dùng đúng `EPUB_INLINE_MARKUP_FACTOR`/`EPUB_JSON_ENVELOPE_CHARS_PER_UNIT` đã có, không
+viết công thức thứ hai):
+
+```
+plain 1.100 chars + 6 unit  →  payload ≈ 1.100×1,15 + 180 = 1.445 chars  →  output ≈ 607 token
+```
+
+- `EPUB_REQUEST_CHAR_BUDGET`: **3.000 → 1.100** (`src/core/chunking.py`, và
+  `Settings.epub_request_char_budget` trong `src/core/config.py`).
+- **MỚI** `EPUB_REQUEST_MAX_UNITS = 6` (`src/core/chunking.py`), kèm
+  `Settings.epub_request_max_units: int = 6` để override qua `.env` — đúng pattern 2 hằng số hiện có.
+
+**A-2. Sửa `plan_epub_chunks()`** (`src/core/chunking.py`, bước 2 "gom unit thành REQUEST"): thêm tham
+số `request_max_units: int = EPUB_REQUEST_MAX_UNITS` và đổi đúng 1 điều kiện cắt:
+
+```python
+req_units = i - req_start          # số unit đã gom vào request đang mở
+if req_units > 0 and (
+    req_running + unit_len > request_budget or req_units >= request_max_units
+):
+    ...cắt request tại đây...
+```
+Không đụng bước 1 (ranh giới CHUNK) — `EPUB_CHUNK_CHAR_BUDGET = 8.000` **giữ nguyên**, vì nó là
+granularity checkpoint chi phí (Z3), không phải giới hạn context. Hệ quả phụ đã kiểm: mỗi chunk giờ có
+nhiều request hơn (~7 thay vì ~2-3), không ảnh hưởng resume (BR-CHUNK-05 vẫn checkpoint theo chunk).
+
+**A-3. Hạ trần retry cho khớp batch nhỏ (bắt buộc, nếu quên sẽ ĂN NGƯỢC phần tiết kiệm).** Với slice
+chỉ 6 unit, `EPUB_MAX_SINGLE_ID_RETRIES = 5` nghĩa là gần như luôn rơi vào nhánh "retry TỪNG id" — 5
+request phụ để cứu 5/6 unit, đắt hơn hẳn 1 lần gọi lại nguyên request. Chốt:
+
+- `EPUB_MAX_SINGLE_ID_RETRIES`: **5 → 2** (≥3 id thiếu trên tổng 6 ⇒ coi là cả response hỏng ⇒ gọi lại
+  nguyên request 1 lần, rẻ hơn).
+- `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE`: **6 → 3** (trần cứng dùng chung cho retry-thiếu-id VÀ
+  retry-mất-dấu, không cộng dồn — giữ nguyên ngữ nghĩa §6.20.13.3a).
+
+**A-4. Data lineage bắt buộc sửa cùng lúc (Protocol 6 R6-01) — nếu bỏ sót sẽ làm cost gate ước SAI.**
+`cost_gate.py::_estimate_epub_translation_cost()` đang gọi `plan_epub_chunks(doc.units)` **với tham số
+MẶC ĐỊNH**, trong khi `job_orchestrator.run_epub_job()` gọi với giá trị từ `Settings`. Hôm nay hai bên
+tình cờ khớp nhau; sau A-1 (và với bất kỳ override `.env` nào) chúng sẽ lệch, mà `llm_request_count`
+chính là `segment_count` của `estimate_job_cost_v2()` — lệch số request ⇒ ước THẤP chi phí ⇒ vi phạm
+§6.11.6 ("được ước cao, CẤM ước thấp"). **Sửa**: `_estimate_epub_translation_cost()` nhận `settings` (đã
+có sẵn ở call-site) và gọi
+`plan_epub_chunks(doc.units, char_budget=settings.epub_chunk_char_budget, request_budget=settings.epub_request_char_budget, request_max_units=settings.epub_request_max_units)`.
+Test bắt buộc kèm theo (R6-02): đổi `epub_request_max_units` trong `Settings` → assert
+`DetailedCostEstimate.estimate.estimated_input_tokens` THAY ĐỔI theo, không phải chỉ `assert_called()`.
+
+**A-5. Đánh đổi — tính bằng số học từ §6.20.14.0, không đoán.**
+
+| | Hiện tại (3.000 chars, không trần unit) | Sau A-1 (1.100 chars + 6 unit) |
+|---|---|---|
+| Số request cho sách mẫu 384 unit | ≈ 31 (đo: 14 request cho 173 unit ⇒ 12,4 unit/request) | ≈ 64-68 (trần 6 unit gần như luôn chặn trước: 52.369 plain chars / 384 ≈ 136 chars/unit ⇒ 1.100 chars ≈ 8 unit) |
+| Chi phí overhead system prompt | 31 × $0,000262 = $0,0081 | ≈ 68 × $0,000262 = $0,0178 |
+| **Tổng chi phí/sách** | ≈ **$0,0387** (ngoại suy QA vòng 5/5) | ≈ **$0,0484** |
+| **Chênh lệch** | — | **+$0,0097/sách ≈ +25%** |
+
+Phần payload input và toàn bộ output token **không đổi** (cùng nội dung, cùng bản dịch) — chỉ phần
+overhead nhân lên theo số request. Tuyệt đối: **thêm ~1 cent Mỹ cho mỗi cuốn sách**.
+
+**Thời gian** (⚠️ ASSUMED — chưa đo trực tiếp, suy từ QA vòng 5/5: 16 request/99,2s): request EPUB chạy
+TUẦN TỰ (không AIMD, §6.20.8). Tổng output token không đổi nên phần thời gian sinh chữ không đổi; chỉ
+phần latency cố định mỗi request (~1,5s) nhân lên: `(68−31) × 1,5s ≈ +55s` trên một cuốn ~230s ⇒ **+20-30%
+thời gian**, tức ~4 phút → ~5 phút cho sách 384 unit. Chấp nhận được so với hiện trạng "chạy 3 lần đều
+fail, không bao giờ xong".
+
+---
+
+##### 6.20.14.3. Lớp B — Đổi chiến lược parse: trích cặp `"id": "chuỗi"`, KHÔNG dựa vào ngữ pháp JSON
+
+**Đây là thay đổi chiến lược thật sự, không phải biến thể thứ 4 của cùng một hướng** — lý do ở
+§6.20.14.1. Vị trí code: `src/core/prompt_builder.py`, ngay dưới `_decode_concatenated_json_objects()`
+(hàm cũ **GIỮ NGUYÊN, không xoá, không sửa** — nó vẫn là đường đi đúng và chặt cho response lành).
+
+**B-1. Hàm mới `_salvage_epub_id_pairs(text, expected_ids) -> dict[str, str]`**:
+
+```python
+#: Chi khop khoa la ID NGAN CUC BO app tu sinh ("0".."N", N < 1000) — khong
+#: bao gio khop mot chuoi bat ky trong noi dung dich.
+_EPUB_ID_PAIR_RE = re.compile(r'"(\d{1,3})"\s*:\s*"')
+
+def _salvage_epub_id_pairs(text: str, expected_ids: set[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    pos = 0
+    while (m := _EPUB_ID_PAIR_RE.search(text, pos)) is not None:
+        try:
+            # scanstring nhan vi tri NGAY SAU dau nhay mo, tra (chuoi, vi_tri_ket_thuc).
+            value, end = json.decoder.scanstring(text, m.end())
+        except (ValueError, json.JSONDecodeError):
+            pos = m.end()      # cap nay hong -> bo qua, di tiep
+            continue
+        pos = end              # KHONG BAO GIO quet lai ben trong gia tri da an
+        key = m.group(1)
+        if key in expected_ids and value.strip():
+            out[key] = value   # trung khoa: cai SAU thang, dong bo voi dict.update() cua ham cu
+    return out
+```
+
+Bốn tính chất khiến hàm này an toàn (phải giữ đủ cả 4 khi implement, không được "đơn giản hoá"):
+1. **Chỉ nhận khoá thuộc `expected_ids`** — id ngắn cục bộ `0..N` do chính app sinh mỗi request.
+2. **Giá trị được decode bằng chính `json.decoder.scanstring`**, không phải regex — escape (`\"`,
+   `\n`, `\uXXXX`) xử lý đúng như JSON thật; chuỗi cụt/escape hỏng thì `scanstring` raise và cặp đó bị
+   bỏ, không bao giờ "đoán".
+3. **`pos = end` sau mỗi lần ăn thành công** — con trỏ không bao giờ quét lại bên trong một giá trị đã
+   lấy, nên một đoạn `"12": "` nằm TRONG nội dung bản dịch không thể tạo cặp giả.
+4. **Không bao giờ tự chế nội dung**: mọi giá trị trả về là byte thật của response.
+
+**B-2. Ghép vào `parse_epub_batch_response()` — CHỈ như lớp cứu hộ, không thay đường chính**:
+
+```python
+strict = _decode_concatenated_json_objects(text)      # nguyen si, khong doi
+result = {...}                                        # loc expected_ids/str/non-empty nhu hien tai
+if len(result) < len(expected_ids):                   # CHI khi con thieu
+    for key, value in _salvage_epub_id_pairs(text, expected_ids).items():
+        result.setdefault(key, value)                 # KHONG BAO GIO de len gia tri da parse chat
+```
+Response lành ⇒ nhánh salvage không bao giờ chạy ⇒ **zero regression risk** cho đường đi thường.
+
+**B-3. Telemetry (bắt buộc — nếu không có, vòng QA sau lại không chốt được ngưỡng nào).** Giữ nguyên
+chữ ký `parse_epub_batch_response()` (nhiều caller/test đang dùng) và thêm hàm chi tiết bên cạnh:
+
+```python
+@dataclass(frozen=True)
+class EpubParseOutcome:
+    translations: dict[str, str]
+    strict_ids: frozenset[str]     # lay duoc qua duong JSON chuan
+    salvaged_ids: frozenset[str]   # chi lay duoc nho _salvage_epub_id_pairs()
+
+def parse_epub_batch_response_detailed(raw_text, expected_ids) -> EpubParseOutcome: ...
+def parse_epub_batch_response(raw_text, expected_ids) -> dict[str, str]:
+    return parse_epub_batch_response_detailed(raw_text, expected_ids).translations
+```
+`_process_epub_chunk()` dùng bản `_detailed`, ghi `salvaged_count` vào mỗi dòng `requests.jsonl`
+(§6.20.13.7) và `logger.warning` khi `salvaged_ids` khác rỗng. `salvaged_count > 0` là **tín hiệu sức
+khoẻ**: nó nói "model vẫn đang sinh JSON hỏng, chỉ là ta cứu được" — nếu tỉ lệ này cao, Lớp A cần siết
+thêm.
+
+**B-4. Test bắt buộc — chạy trên CẢ 5 golden fixture đã có, KHÔNG tốn 1 đồng API nào** (đây là điểm
+"nhanh + tiết kiệm" mạnh nhất của Lớp B: bằng chứng đã nằm sẵn trong repo):
+
+| Fixture | Kỳ vọng sau Lớp B |
+|---|---|
+| `..._ch1_5units.json` | 5/5 id, **`salvaged_ids` rỗng** (đường chuẩn, không đụng salvage) |
+| `..._ch1_trailing_garbage.json` | 1/1 id, `salvaged_ids` rỗng |
+| `..._ch1_multi_json_object.json` (B2-3) | 11/11 id, `salvaged_ids` rỗng |
+| `..._comma_separated_json_objects.json` (B2-4) | 32/32 id, `salvaged_ids` rỗng |
+| `..._single_object_spurious_closing_braces.json` (**B2-5, chưa từng có test**) | **32/32 id**, `salvaged_ids` = 31 id (`"1"`..`"31"`), nội dung id `"31"` = `<strong>¼ cup hạt cắt nhỏ</strong>` |
+
+Cộng thêm 3 test tổng hợp (không phụ thuộc fixture) chứng minh hàm không nuốt rác thành dữ liệu:
+(a) giá trị chứa chuỗi con `"7": "` bên trong bản dịch ⇒ **không** sinh cặp giả; (b) response cụt giữa
+một giá trị ⇒ giữ các cặp hoàn chỉnh trước đó, bỏ cặp cụt; (c) id lạ ngoài `expected_ids` ⇒ bị loại.
+
+**Giới hạn đã biết, ghi rõ để không ai kỳ vọng quá**: Lớp B cứu được mọi biến thể mà nội dung dịch vẫn
+còn nguyên trong response. Nó **không** cứu được response bị cắt cụt vì `max_tokens`, hay response mà
+model không hề trả bản dịch. Đó chính là phần việc của Lớp C.
+
+---
+
+##### 6.20.14.4. Lớp C — Chính sách dung sai có ngưỡng: E-09 từ "luật mặc định" thành "chốt chặn bất thường"
+
+**Thay đổi chính sách so với §6.20.12 X4 / E-09 gốc.** Trước: thiếu bản dịch cho 1 unit sau vòng gọi
+lại ⇒ `EpubBatchTranslationError` ⇒ chunk fail ⇒ job fail. Sau: unit đó **giữ nguyên tiếng Anh, có đánh
+dấu**, job vẫn chạy tiếp — **nhưng chỉ trong hạn mức**. Vượt hạn mức thì E-09 vẫn nổ y như cũ.
+
+Phần "TUYỆT ĐỐI không ghi chuỗi rỗng" của E-09 **KHÔNG hề nới lỏng** — bản gốc tiếng Anh không phải
+chuỗi rỗng, và cấm ghi chuỗi rỗng vẫn là bất biến tuyệt đối.
+
+**C-1. Điểm chèn** — `job_orchestrator.py::_process_epub_chunk()`, đúng chỗ đang `raise
+EpubBatchTranslationError` (khối `if still_missing:`). Thay bằng:
+
+```python
+still_missing = expected_ids - parsed.keys()
+fallback_ids: set[str] = set()          # KHONG cho vao `parsed`
+if still_missing:
+    for local_id in sorted(still_missing):
+        unit = slice_units[int(local_id)]
+        fallback_units.append({                    # gom cho ca chunk
+            "unit_id": unit.unit_id,
+            "reason": "missing_after_retry",
+            "slice": [start, end],
+        })
+        fallback_ids.add(local_id)
+    logger.warning("EPUB fallback EN (giu nguyen goc): job=%s chunk=%s n=%d ...", ...)
+```
+
+**Thứ tự thực thi là bắt buộc, không được đảo** (nếu đảo sẽ đốt tiền vô ích): unit fallback
+**KHÔNG** được đưa vào `parsed` trước 2 guard mất dấu (§6.20.13.5). Văn bản EN có `diacritic_ratio`
+≈ 0 ⇒ nếu lọt vào `parsed`, guard tầng 2 sẽ retry lẻ từng unit đúng những unit ta vừa quyết định bỏ
+qua. Fallback chỉ được ghép vào ở **bước ghi cuối cùng** của vòng lặp request:
+
+```python
+for local_id, vi_html in parsed.items():
+    translations[slice_units[int(local_id)].unit_id] = vi_html
+# fallback KHONG ghi vao `translations` — xem C-4 ve cach danh dau trong output
+```
+
+**C-2. Hai ngưỡng, hai vai trò khác nhau** (hằng số mới trong `src/core/chunking.py`, cạnh các hằng
+EPUB hiện có, và mirror sang `Settings`):
+
+```python
+#: ⚠️ ASSUMED — xem lap luan chon so o duoi, PHAI do lai bang du lieu live.
+EPUB_FALLBACK_MAX_RATIO_CHUNK = 0.20
+EPUB_FALLBACK_MAX_RATIO_JOB = 0.05
+```
+
+- **Ngưỡng CHUNK = 20%**, tính trên số unit của chính chunk đó, cho phép tối thiểu 1 unit:
+  `allowed = max(1, ceil(0.20 × n_units_in_chunk))`. Vượt ⇒ `raise EpubBatchTranslationError` với
+  đúng shape thông điệp E-09 cũ (thêm số liệu fallback). **Cơ sở chọn 20%**: sau Lớp A, một chunk có
+  ~55 unit / ~7-9 request; một request mất TRỌN VẸN = 6 unit ≈ 11% chunk. 20% ⇒ chịu được 2 request
+  hỏng hoàn toàn trong 1 chunk, nhưng "cả chunk hỏng" thì vẫn fail ngay — đúng điều PM yêu cầu chặn
+  ("response hỏng hoàn toàn biến thành chấp nhận mọi thứ").
+- **Ngưỡng JOB = 5%**, tính cộng dồn trên toàn sách. **Cơ sở chọn 5% không phải cảm tính** — nó bị
+  BR-EPUB-05 ép: guard output (§6.20.12 X3) fail khi **dưới 90% unit khác bản gốc**. Unit fallback
+  giữ nguyên EN ⇒ giống hệt bản gốc ⇒ **đếm vào đúng 10% khe hở đó**. Đặt trần job ở 5% để còn nguyên
+  một nửa khe hở cho các nguyên nhân khác (unit vốn không có chữ để dịch, v.v.). Đặt ≥10% sẽ khiến
+  Lớp C tự tay làm BR-EPUB-05 fail — biến "dung sai" thành lỗi khác, tệ hơn.
+
+**C-3. Kiểm ngưỡng JOB phải sống sót qua resume (BR-CHUNK-05).** Không thêm cột DB (tránh migration —
+"nhanh/rẻ"): mỗi chunk ghi `fallback_units.json` vào `chunk_dir` (cạnh `units.json`/`anomalies.json`
+sẵn có) **chỉ khi danh sách khác rỗng**. `run_epub_job()`, sau mỗi chunk `completed`, cộng dồn bằng
+cách đọc lại các file đó trên **mọi** chunk dir (kể cả chunk đã hoàn thành từ lần chạy trước — đây
+chính là điểm khiến resume vẫn đếm đúng), so với `max(1, ceil(0.05 × len(doc.units)))`; vượt ⇒ job
+`failed` với thông điệp nêu rõ số unit fallback và ngưỡng. Danh sách fallback cũng được nhân bản vào
+`anomalies.json` dưới khoá mới `fallback_units` để dùng chung một chỗ chẩn đoán (§6.20.13.7).
+
+**C-4. Đánh dấu trong file EPUB output** — người đọc phải nhận ra được đoạn nào chưa dịch, và đây phải
+là cách RẺ NHẤT không đụng cấu trúc file:
+`EpubDocument.write_translated()` nhận thêm `untranslated_ids: set[str] | None = None`; với mỗi
+`unit_id` trong tập đó, **thêm class `bb-untranslated` vào chính node gốc** (không chèn node mới,
+không bọc `<span>`) và đặt `lang="en"`. Đã kiểm 2 tác dụng phụ:
+- `EpubDocument.load()` chỉ bỏ qua node theo class `bb-vi` ⇒ thêm `bb-untranslated` **không** đổi số
+  unit đọc lại ⇒ BR-EPUB-05 điều kiện "số unit khớp" không bị ảnh hưởng.
+- `count_bb_vi_pairs()` chỉ đếm node `bb-vi` ⇒ không bị ảnh hưởng.
+Thêm 1 dòng CSS `.bb-untranslated { opacity: .75; }`? **KHÔNG** — v1 không đụng stylesheet của sách
+(rủi ro epubcheck không tương xứng lợi ích). Class + `lang="en"` là đủ để truy vết.
+
+**C-5. Báo cho người dùng.** Ghi `untranslated_units.json` ở cấp job
+(`<output_dir>/<job_id>/untranslated_units.json`, cùng chỗ `translated_vi.epub`) gồm `unit_id`,
+`reason`, `doc_href`, và trích 120 ký tự đầu của bản gốc. Đây là bản EPUB của "file findings" mà guard
+mất dấu đã dùng. Nếu tổng số fallback > 0, `run_epub_job()` `logger.warning` một dòng tổng kết —
+việc hiển thị lên UI để **Bước 3/3** làm, không mở rộng scope ở đây.
+
+**C-6. Điều KHÔNG được làm**: không dùng fallback cho unit bị guard mất dấu (guard đó tự có 2 tầng
+retry và đang hoạt động 0/107 — không đụng vào), không dùng fallback khi
+`EpubRequestRunawayError`/`EpubChunkCostCapExceeded` (2 lỗi tài chính, phải abort ngay như cũ), và
+không tự nới `EPUB_UNIT_HARD_MAX_CHARS`.
+
+---
+
+##### 6.20.14.5. Tương tác với các guard đang có — bảng kiểm bắt buộc đọc trước khi code
+
+Theo tinh thần Protocol 8 R8-01 (audit TỪNG bước có sẵn khi thêm hành vi mới vào một đường ống dùng
+chung), không chỉ bước mới:
+
+| Bước có sẵn | Có bị Lớp A/B/C ảnh hưởng? | Kết luận |
+|---|---|---|
+| Guard runaway C-3 (`is_runaway_output`) | Có — tỉ lệ tính trên `payload_chars` của chính request, batch nhỏ ⇒ `expected` nhỏ ⇒ ngưỡng có `EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS` che | **KHÔNG sửa** (floor đã đúng vai trò này). QA phải đo lại số false-positive từ `requests.jsonl` |
+| Guard mất dấu tầng 1 (request) | Có — request ít unit hơn ⇒ `request_letters` nhỏ hơn ⇒ dễ tụt dưới `EPUB_DIACRITIC_MIN_LETTERS_REQUEST` ⇒ guard **im lặng bỏ qua** nhiều request hơn | **KHÔNG sửa ngưỡng** ở vòng này (tầng 2 mức unit không đổi, vẫn phủ). Ghi vào gate: QA báo số request bị bỏ qua vì thiếu chữ |
+| Guard mất dấu tầng 2 (unit) | Không — đo trên từng unit, không phụ thuộc kích thước batch | Giữ nguyên |
+| BR-EPUB-05 (output guard) | Có — unit fallback = giống bản gốc | Đã tính: ngưỡng job 5% < khe hở 10% (C-2) |
+| Lớp 4 trần chi phí per-request | Có — nhiều request hơn ⇒ kiểm nhiều lần hơn, mỗi lần rẻ hơn | Tốt hơn, không sửa |
+| Resume BR-CHUNK-05 | Không — checkpoint vẫn theo chunk | Giữ nguyên; C-3 đọc lại file để đếm đúng sau resume |
+| Cost gate Lớp 2 | **Có — sẽ SAI nếu quên A-4** | Bắt buộc sửa cùng lúc |
+
+---
+
+##### 6.20.14.6. Tổng hợp hằng số & artifact mới (cho Dev)
+
+| Hằng số | Cũ | Mới | File | Trạng thái |
+|---|---|---|---|---|
+| `EPUB_REQUEST_CHAR_BUDGET` | 3.000 | **1.100** | `chunking.py` + `config.py` | Suy từ số đo thật (§6.20.14.0a), vẫn ⚠️ ASSUMED về hiệu quả |
+| `EPUB_REQUEST_MAX_UNITS` | — | **6** | `chunking.py` + `config.py` | MỚI, ⚠️ ASSUMED |
+| `EPUB_MAX_SINGLE_ID_RETRIES` | 5 | **2** | `chunking.py` | ⚠️ ASSUMED |
+| `EPUB_MAX_EXTRA_REQUESTS_PER_SLICE` | 6 | **3** | `chunking.py` | ⚠️ ASSUMED |
+| `EPUB_FALLBACK_MAX_RATIO_CHUNK` | — | **0,20** | `chunking.py` + `config.py` | MỚI, ⚠️ ASSUMED |
+| `EPUB_FALLBACK_MAX_RATIO_JOB` | — | **0,05** | `chunking.py` + `config.py` | MỚI — trần trên bị BR-EPUB-05 ép (≤10%), giá trị cụ thể ⚠️ ASSUMED |
+
+Artifact mới: `_salvage_epub_id_pairs()`, `EpubParseOutcome`,
+`parse_epub_batch_response_detailed()` (`prompt_builder.py`); `fallback_units.json` (mỗi chunk dir);
+`untranslated_units.json` (job output dir); khoá `fallback_units` trong `anomalies.json`; trường
+`salvaged_count` trong `requests.jsonl`; tham số `untranslated_ids` của
+`EpubDocument.write_translated()`; tham số `request_max_units` của `plan_epub_chunks()`.
+
+---
+
+##### 6.20.14.7. Thứ tự implement bắt buộc
+
+1. **Lớp B trước** — offline hoàn toàn, 0 đồng API, verify ngay được trên 5 golden fixture đã có
+   (gồm B2-5 hiện chưa có test nào). Đây là lớp duy nhất cứu được tiền đã trả cho response hỏng.
+2. **A-4** (lineage cost gate) — làm cùng lúc với A-1/A-2, không được tách ra sau.
+3. **A-1, A-2, A-3** — thuần config + 1 điều kiện cắt; test `plan_epub_chunks()` bằng unit giả có
+   nhiều tag ngắn (tái hiện đúng ca 32 unit) ⇒ assert không request nào quá 6 unit.
+4. **Lớp C** — C-1 → C-2 → C-3 → C-4 → C-5, theo đúng thứ tự đó (C-1 sai thứ tự sẽ làm guard mất dấu
+   retry nhầm unit fallback).
+5. Test R6-02 cho Lớp C: giả lập provider luôn trả thiếu đúng 1 id ⇒ assert job **completed**, file
+   output chứa unit EN đó **có class `bb-untranslated`**, và `untranslated_units.json` có đúng 1 dòng.
+   Giả lập trả thiếu 100% ⇒ assert vẫn `EpubBatchTranslationError` (E-09 chưa chết).
+
+---
+
+##### 6.20.14.8. Đã cân nhắc và HOÃN (giữ lại để không mất dấu vết suy nghĩ)
+
+- **Bỏ JSON, dùng delimiter dạng `<<<ID>>>…<<<END>>>`** (hướng 2 của escalation-log): về lý thuyết xoá
+  hẳn lớp lỗi "JSON syntax". Hoãn vì: phải viết lại contract prompt + parser + toàn bộ golden fixture
+  (5 file, capture lại tốn API thật), và Lớp B đã lấy được ~90% lợi ích đó với ~30 dòng code, 0 đồng.
+  Nếu sau khi có A+B+C mà tỉ lệ `salvaged_count > 0` vẫn cao trên dữ liệu live, đây là hướng tiếp theo.
+- **`response_format={"type": "json_object"}` của DeepSeek** (hướng 3): hấp dẫn nhưng
+  `TranslationProvider.translate()` là interface CHUNG cho 5 provider (Increment 3) — thêm tham số
+  riêng cho 1 provider là sửa contract chéo, và bản thân khả năng hỗ trợ **chưa verify** với nguồn thật
+  (R5-01). Không có số đo nào chứng minh nó tốt hơn A+B. Hoãn.
+- **Chấp nhận rủi ro, dựa vào Retry của user** (hướng 4): bị chính chỉ đạo "ưu tiên nhanh" loại — QA đã
+  chạy 3 lần full-book và không lần nào xong.
+
+---
+
+##### 6.20.14.9. Gate release cho vòng QA kế tiếp (cộng vào §6.20.10 và §6.20.13.10, không thay thế)
+
+- **H-1 (R6-03, quan trọng nhất)**: chạy live full-book Sourdough **1 lần**, yêu cầu `job.status =
+  completed` và **mở file `.epub` output ra xem chữ thật** — không tin field `status`.
+- **H-2**: báo cáo từ `requests.jsonl`: tổng số request, phân bố `output_tokens` (max/p95), **số
+  request có `salvaged_count > 0`**. Đây là bộ số duy nhất chốt được các ngưỡng ⚠️ ASSUMED ở
+  §6.20.14.6 — thiếu nó thì mọi hằng số trên vẫn là giả định.
+- **H-3**: báo cáo tổng số unit fallback (`untranslated_units.json`) và tỉ lệ trên 384 unit. **Tiêu chí
+  pass đề xuất: ≤ 2%** cho lần chạy đầu tiên; > 5% thì job đã tự fail theo C-2 và phải escalate lại.
+- **H-4 (cost)**: `actual/estimate` phải **≤ 1,0** (§6.11.6). Sau A-4, `estimate` sẽ tăng theo số
+  request — nếu tỉ lệ này lần đầu tiên xuống dưới 1,0 thì đó chính là bằng chứng A-4 đã đóng đúng
+  phần còn lại của C-2.
+- **H-5**: diacritic ratio đo trên **384/384 unit** (mục tiêu 3 vòng QA trước chưa lần nào đạt vì job
+  chưa từng chạy xong) — tiêu chí giữ nguyên: 0 unit thoả `letters ≥ 40 và ratio < 0,02`.
+
 ---
 
 ### 6.21. Giữ chuẩn công thức toán/lý/hoá khi chiếu sang Markdown (yêu cầu xuyên suốt của user, 2026-09-08)

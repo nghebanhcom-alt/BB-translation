@@ -77,14 +77,18 @@ def test_parse_strips_plain_code_fence_without_json_hint() -> None:
 
 
 def test_parse_strips_leading_prose() -> None:
+    """Architecture.md §6.20.14.3 (Lop B, them sau khi cham gioi han Protocol 3
+    voi Bug #EPUB-B2-5) DOI hanh vi cu o day co chu dich: truoc Lop B, prose
+    dan dau lam ca `json.loads()` that bai tu dau -> `{}` (id "0" mat oan du
+    noi dung van con nguyen trong response). Lop B khong quan tam ky tu nao
+    dung TRUOC cap `"id": "gia tri"`, chi can chinh cap do con nguyen ven —
+    nen gio day id "0" duoc cuu, dung tinh than "tiet kiem, chap nhan dung
+    sai nho" cua chi dao user 2026-09-10."""
     raw = 'Here is the translation:\n{"0": "Xin chao"}'
 
     result = parse_epub_batch_response(raw, expected_ids={"0"})
 
-    # Leading prose before the JSON is NOT stripped by design (only fences +
-    # surrounding whitespace) — json.loads() then fails on the whole string,
-    # so this must come back empty (id "missing"), not raise or crash.
-    assert result == {}
+    assert result == {"0": "Xin chao"}
 
 
 def test_parse_missing_id_is_excluded_not_defaulted() -> None:
@@ -191,12 +195,89 @@ def test_parse_recovers_trailing_prose_after_valid_json_with_multiple_ids() -> N
     assert result == {"0": "Xin chao", "1": "Tam biet"}
 
 
-def test_parse_genuinely_truncated_json_still_returns_empty_dict() -> None:
-    """Phan biet voi ca "Extra data": JSON bi CAT CUT GIUA CHUNG (vd het
-    max_tokens) khong phai loi "Extra data" -- van phai ve `{}` nhu cu, KHONG
-    duoc am tham "phuc hoi" 1 phan noi dung dang do dang/co the sai."""
+def test_parse_genuinely_truncated_json_recovers_only_the_complete_pair() -> None:
+    """Architecture.md §6.20.14.3 (Lop B) DOI hanh vi cu o day co chu dich
+    (ten test cu la "...still_returns_empty_dict" — khong con dung sau Lop B):
+    id "0" HOAN CHINH trong response (khong tu no bi cat cut) khong con phai
+    chiu "thiet hai lien doi" chi vi id "1" phia sau bi cat cut giua chung (vd
+    het max_tokens). Lop B chi cuu CAP HOAN CHINH ("0"), TUYET DOI khong doan
+    noi dung con thieu cua cap bi cat ("1") — dung gioi han da biet cua Lop B
+    (§6.20.14.3: "khong cuu duoc response bi cat cut vi max_tokens" nghia la
+    KHONG cuu duoc CHINH id bi cat, khong phai "khong cuu duoc bat ky id nao
+    trong ca response")."""
     raw = '{"0": "Xin chao", "1": "Tam bi'  # cat cut, thieu dau " va } dong
 
     result = parse_epub_batch_response(raw, expected_ids={"0", "1"})
 
-    assert result == {}
+    assert result == {"0": "Xin chao"}
+    assert "1" not in result
+
+
+# ---------------------------------------------------------------------------
+# Bug #EPUB-B2-3 (test-report.md, QA vong 2/5, 2026-09-10): DeepSeek doi khi
+# tra ve NHIEU object JSON top-level roi rac noi tiep nhau (khong chi 1 object
+# thua 1 ky tu nhu ca "trailing garbage" o tren) trong CUNG 1 response, thay vi
+# 1 object duy nhat gom du id. `tests/test_epub_batch_golden_fixture.py` co
+# fixture rieng (tu QA log that, tuy chi la "partial capture" - xem README)
+# cho dung ca that; cac test duoi day dung chuoi tong hop de kiem tra logic
+# merge tong quat (bao gom ca bien: key trung, rac that o cuoi) ma khong phu
+# thuoc vao dung du lieu that cua 1 lan goi cu the nao.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_merges_multiple_separate_top_level_json_objects() -> None:
+    """Truoc fix: chi giu object DAU TIEN (id "0"), mat toan bo id con lai --
+    day chinh la nguyen nhan Bug #EPUB-B2-3 (10/11 id bi mat, du da dich dung
+    va da tra tien). Sau fix: gop TAT CA object top-level tim duoc."""
+    raw = '{"0": "Xin chao"}\n{"1": "Tam biet"}\n{"2": "Cam on"}'
+
+    result = parse_epub_batch_response(raw, expected_ids={"0", "1", "2"})
+
+    assert result == {"0": "Xin chao", "1": "Tam biet", "2": "Cam on"}
+
+
+def test_parse_merges_many_single_key_objects_like_real_bug_shape() -> None:
+    """Dang cu the QA quan sat duoc: 1 object rieng cho MOI id (khong phai chi
+    2 object), vi du 11 object rieng cho 11 id."""
+    raw = "".join(f'{{"{i}": "gia tri {i}"}}\n' for i in range(11))
+    expected_ids = {str(i) for i in range(11)}
+
+    result = parse_epub_batch_response(raw, expected_ids=expected_ids)
+
+    assert set(result.keys()) == expected_ids
+    assert result["7"] == "gia tri 7"
+
+
+def test_parse_multi_object_later_object_wins_on_duplicate_key() -> None:
+    """Quyet dinh cua Dev (ghi trong CHANGELOG): neu 2 object co CUNG 1 key,
+    object xuat hien SAU trong text thang the (dict.update() tuan tu theo thu
+    tu xuat hien), khong can logic phuc tap hon."""
+    raw = '{"0": "ban dich cu"}\n{"0": "ban dich moi hon"}'
+
+    result = parse_epub_batch_response(raw, expected_ids={"0"})
+
+    assert result == {"0": "ban dich moi hon"}
+
+
+def test_parse_multi_object_stops_at_genuine_garbage_but_keeps_earlier_objects() -> None:
+    """Neu phan con lai SAU 1 vai object hop le la rac THAT (khong phai JSON),
+    van phai giu nhung gi da parse duoc TRUOC do -- khong duoc vi rac o cuoi ma
+    vut bo ca nhung id da dich dung, cung khong duoc co "doan" noi dung rac
+    thanh du lieu gia."""
+    raw = '{"0": "Xin chao"}\n{"1": "Tam biet"}\nday la rac khong phai JSON @@@'
+
+    result = parse_epub_batch_response(raw, expected_ids={"0", "1", "2"})
+
+    assert result == {"0": "Xin chao", "1": "Tam biet"}
+    assert "2" not in result
+
+
+def test_parse_multi_object_non_dict_object_among_valid_ones_is_skipped() -> None:
+    """1 gia tri JSON hop le nhung KHONG phai object (vd 1 con so/list lac vao
+    giua 2 object dict that) bi bo qua, khong lam crash vong lap va khong lam
+    mat cac object dict hop le khac."""
+    raw = '{"0": "Xin chao"}\n42\n{"1": "Tam biet"}'
+
+    result = parse_epub_batch_response(raw, expected_ids={"0", "1"})
+
+    assert result == {"0": "Xin chao", "1": "Tam biet"}

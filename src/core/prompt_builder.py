@@ -33,6 +33,7 @@ split from Architecture.md 6.6.2 R1/R3:
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from src.core.glossary_manager import GlossaryManager
@@ -422,14 +423,20 @@ khong duoc rut gon/gop lai.
 5. KHONG dich noi dung nam trong the <code> hoac <pre> — giu nguyen nhu ban goc.
 6. Neu 1 muc khong the dich duoc, tra ve NGUYEN VAN "html" cua chinh muc do cho dung "id" ay — \
 TUYET DOI KHONG tra ve chuoi rong cho bat ky "id" nao.
+7. Ban dich PHAI la tieng Viet CO DAU day du (Unicode NFC). TUYET DOI KHONG tra ve tieng Viet \
+khong dau (vi du: phai la "bột mì", KHONG duoc la "bot mi").
 """.strip()
 
+# Architecture.md 6.20.13.4 (fix Bug #EPUB-4, V-1): ban truoc cua vi du one-shot
+# nay co phan "Dau ra" la tieng Viet KHONG DAU ("bot mi", "muoi", "nuong o") —
+# vi day la thu model bat chuoc MANH NHAT, no tu day model bo dau. Sua thanh
+# co dau day du (NFC) — GIU NGUYEN phan "Dau vao" (tieng Anh).
 _EPUB_BATCH_ONE_SHOT_EXAMPLE = (
     "Vi du (co the inline, con so, va phan so <sup>/<sub>):\n"
     'Dau vao: [{"id": "0", "html": "<strong>2 cups</strong> flour, '
     '1<sup>1</sup>/<sub>3</sub> tsp salt, bake at 350F."}]\n'
-    'Dau ra: {"0": "<strong>2 cups</strong> bot mi, '
-    '1<sup>1</sup>/<sub>3</sub> tsp muoi, nuong o 350F."}'
+    'Dau ra: {"0": "<strong>2 cups</strong> bột mì, '
+    '1<sup>1</sup>/<sub>3</sub> tsp muối, nướng ở 350F."}'
 )
 
 
@@ -450,6 +457,104 @@ class EpubBatchResponseError(ValueError):
     """Raised only when the caller cannot proceed at all (currently unused —
     `parse_epub_batch_response()` is deliberately tolerant, see its
     docstring — kept as a named exception for a future stricter mode)."""
+
+
+@dataclass(frozen=True)
+class EpubParseOutcome:
+    """Architecture.md §6.20.14.3 B-3 — telemetry cho parse 1 response EPUB.
+
+    `strict_ids`: id lay duoc qua duong JSON chuan (`_decode_concatenated_json_objects()`).
+    `salvaged_ids`: id CHI lay duoc nho lop cuu ho `_salvage_epub_id_pairs()` (B-1/B-2)
+    — id nam trong `strict_ids` KHONG bao gio trung voi id trong `salvaged_ids` (mot id
+    da co ket qua tu duong chuan thi khong bao gio bi salvage ghi de, xem B-2).
+    `salvaged_count > 0` la tin hieu suc khoe: model van dang sinh JSON hong, chi la
+    da cuu duoc — dung de `_process_epub_chunk()` ghi vao `requests.jsonl` va canh bao.
+    """
+
+    translations: dict[str, str]
+    strict_ids: frozenset[str]
+    salvaged_ids: frozenset[str]
+
+
+#: Architecture.md §6.20.14.3 B-1 — lop cuu ho SAU parser chat hien co, KHONG
+#: thay the no. Bat bien nen tang (khac han 3 fix B2-3/B2-4/B2-5 truoc, tat ca
+#: deu gia dinh "response la N gia tri JSON HOP LE noi voi nhau"): moi ban dich
+#: LUON xuat hien duoi dang 1 cap `"<id>": "<chuoi JSON hop le>"`, id nam trong
+#: tap id ngan cuc bo da gui di — KHONG gia dinh gi ve dau ngoac/dau phay/cau
+#: truc long nhau xung quanh cap do.
+#: Chi khop khoa la ID NGAN CUC BO app tu sinh ("0".."999", da du du cho batch
+#: <= EPUB_REQUEST_MAX_UNITS) — khong bao gio khop mot chuoi bat ky trong noi
+#: dung dich (id that su cua unit_id EPUB co dang "doc_href#ordinal", khong
+#: bao gio la thuan so nam trong dau nhay ngay truoc dau ":").
+_EPUB_ID_PAIR_RE = re.compile(r'"(\d{1,3})"\s*:\s*"')
+
+
+def _salvage_epub_id_pairs(text: str, expected_ids: set[str]) -> dict[str, str]:
+    """Quet `text` tim moi cap `"<id>": "<chuoi>"` voi id thuoc `expected_ids`,
+    decode gia tri BANG CHINH `json.decoder.scanstring` (khong phai regex) —
+    escape (`\\"`, `\\n`, `\\uXXXX`) duoc xu ly dung y het JSON that; chuoi
+    cut/escape hong thi `scanstring` raise va cap do bi bo qua, khong bao gio
+    "doan". Con tro LUON tien toi `end` sau moi lan an thanh cong (khong bao
+    gio quet lai BEN TRONG mot gia tri da lay) — mot doan `"12": "` nam TRONG
+    noi dung ban dich (vi du unit chua chinh cau truc JSON lam vi du) khong
+    the tao ra 1 cap gia vi con tro da di qua no. Trung khoa: cai SAU trong
+    text thang (dong bo voi ngu nghia `dict.update()` cua parser chat).
+    """
+    out: dict[str, str] = {}
+    pos = 0
+    while (match := _EPUB_ID_PAIR_RE.search(text, pos)) is not None:
+        try:
+            value, end = json.decoder.scanstring(text, match.end())
+        except (ValueError, json.JSONDecodeError):
+            pos = match.end()
+            continue
+        pos = end
+        key = match.group(1)
+        if key in expected_ids and value.strip():
+            out[key] = value
+    return out
+
+
+def parse_epub_batch_response_detailed(raw_text: str, expected_ids: set[str]) -> EpubParseOutcome:
+    """Nhu `parse_epub_batch_response()` nhung tra ve them telemetry
+    (Architecture.md §6.20.14.3 B-3) phan biet id lay duoc qua duong JSON
+    chuan (`strict_ids`) voi id CHI cuu duoc nho lop salvage (`salvaged_ids`,
+    §6.20.14.3 Lop B). Response lanh (moi id deu qua duoc parser chat) khong
+    bao gio kich hoat nhanh salvage — `len(result) < len(expected_ids)` la
+    False ngay tu dau, nen zero regression risk cho duong di thuong.
+    """
+    text = _CODE_FENCE_RE.sub("", raw_text.strip()).strip()
+    data = _decode_concatenated_json_objects(text)
+
+    result: dict[str, str] = {}
+    strict_ids: set[str] = set()
+    for key, value in data.items():
+        str_key = str(key)
+        if str_key not in expected_ids:
+            continue
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped:
+            continue
+        result[str_key] = value
+        strict_ids.add(str_key)
+
+    salvaged_ids: set[str] = set()
+    if len(result) < len(expected_ids):
+        for key, value in _salvage_epub_id_pairs(text, expected_ids).items():
+            if key in result:
+                # KHONG BAO GIO de len gia tri da parse chat (B-2) — duong
+                # chuan luon thang neu ca 2 deu tim thay cung 1 id.
+                continue
+            result[key] = value
+            salvaged_ids.add(key)
+
+    return EpubParseOutcome(
+        translations=result,
+        strict_ids=frozenset(strict_ids),
+        salvaged_ids=frozenset(salvaged_ids),
+    )
 
 
 def parse_epub_batch_response(raw_text: str, expected_ids: set[str]) -> dict[str, str]:
@@ -474,46 +579,104 @@ def parse_epub_batch_response(raw_text: str, expected_ids: set[str]) -> dict[str
       existing "missing id -> retry individually, still missing -> chunk
       failed" path (Architecture.md 6.20.8) handles it uniformly instead of
       needing a separate "totally malformed" branch;
-    - a reply that is a genuinely well-formed JSON object plus TRAILING
-      GARBAGE after the closing `}` (Dev tu bat gap that su khi chay live E2E
-      US-22 Buoc 2/3, khong nam trong review-report goc: DeepSeek tra ve
-      thua 1 dau `"` sau `}` dung 1 lan, deterministic, cho 1 unit chua nhieu
-      `<a href>` voi thuoc tinh da escape `\"` — vi du raw text:
-      `{"0": "...</a>)."}"`  — `json.loads` fail voi "Extra data" tai vi tri
-      NGAY SAU `}` hop le) van duoc CHAP NHAN bang cach parse lai dung phan
-      truoc vi tri loi — day la 1 loai "real-world imperfect reply" khac,
-      cung tinh than voi viec strip code fence o tren, KHONG phai noi long
-      validation cho JSON THAT SU hong (vd thieu dong ngoac, cat cut giua
-      chung — nhung truong hop do van raise JSONDecodeError voi msg khac
-      "Extra data" hoac fail lai o lan thu 2, roi ve `{}` nhu cu).
+    - a reply that is one or more genuinely well-formed top-level JSON
+      OBJECTS concatenated back-to-back (`json.loads()` on the whole string
+      fails with "Extra data") is MERGED, not truncated to the first object.
+      Two real-world shapes confirmed so far, both handled by the SAME
+      general loop (`json.JSONDecoder().raw_decode()` repeated over the
+      remainder of the string, skipping only whitespace between objects):
+        1. Bug fixed 2026-09-09 (`deepseek_batch_response_sourdough_ch1_trailing_garbage.json`):
+           1 well-formed object + 1 stray `"` after the closing `}` — the
+           "second object" never parses, so the loop naturally degrades to
+           "keep the first object, drop the trailing garbage" (this is now
+           just the N=1 case of the general loop, not a separate branch).
+        2. Bug #EPUB-B2-3 (QA vong 2/5, 2026-09-10): DeepSeek splits a single
+           batch reply into SEVERAL separate top-level JSON objects (one or
+           more ids each), e.g. `{"0": "..."}\n{"1": "..."}\n...\n{"10": "..."}`
+           instead of 1 object with 11 keys. The OLD code kept only the
+           FIRST object and silently discarded every id in the rest — real,
+           already-translated, already-PAID-FOR content — which then made
+           the id-level retry (C-1) fail identically (DeepSeek reproduces
+           the same split on retry), permanently failing the whole chunk
+           (E-09) despite every id actually being translated correctly.
+      When two merged objects share the same key, the LATER one in the text
+      wins (plain `dict.update()` semantics, in text order) — no evidence
+      seen of DeepSeek repeating a key with a WORSE answer the second time,
+      and this keeps the merge trivially simple; revisit only if a real case
+      ever shows the opposite.
+      A chunk of the tail that is genuine garbage (not parseable JSON at
+      all) stops the loop there and is dropped — everything parsed BEFORE
+      it is still kept (this is the "dung sai" tolerance philosophy above,
+      not a relaxation that accepts junk as data: junk after the last valid
+      object is ignored, junk is never invented or guessed at).
+    - Architecture.md §6.20.14.3 (Lop B, sau khi cham gioi han Protocol 3 voi
+      Bug #EPUB-B2-5 — response chi co 1 dau `{` nhung nhieu dau `}` thua, gay
+      "khong con `{`/`[` nao de tim tiep" cho thuat toan tren): NEU sau khi
+      parse chat con thieu id, thu them lop cuu ho `_salvage_epub_id_pairs()`
+      truoc khi coi la thieu that su — xem `parse_epub_batch_response_detailed()`.
 
     Returns only `{id: text}` pairs that passed validation — the caller
     computes `expected_ids - returned.keys()` to find what still needs a
     single-id retry.
     """
-    text = _CODE_FENCE_RE.sub("", raw_text.strip()).strip()
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, TypeError) as exc:
-        if isinstance(exc, json.JSONDecodeError) and exc.msg == "Extra data" and exc.pos > 0:
-            try:
-                data = json.loads(text[: exc.pos])
-            except (json.JSONDecodeError, TypeError):
-                return {}
-        else:
-            return {}
-    if not isinstance(data, dict):
-        return {}
+    return parse_epub_batch_response_detailed(raw_text, expected_ids).translations
 
-    result: dict[str, str] = {}
-    for key, value in data.items():
-        str_key = str(key)
-        if str_key not in expected_ids:
-            continue
-        if not isinstance(value, str):
-            continue
-        stripped = value.strip()
-        if not stripped:
-            continue
-        result[str_key] = value
-    return result
+
+#: Bug #EPUB-B2-4 (test-report.md, QA vong 3/5, 2026-09-10): fix B2-3 chi skip
+#: whitespace giua 2 object — DeepSeek cung duoc quan sat noi 2 object bang dau
+#: phay (`}, {`), khien fix cu dung lai ngay tai dau phay (khong phai whitespace)
+#: va chi giu duoc object dau tien. Day la 1 HO LOI TONG QUAT hon ("model tra ve
+#: nhieu JSON value roi rac, noi voi nhau bang BAT KY ky tu phan cach nao — chua
+#: chac chi 2 bien the newline/phay da quan sat duoc la duy nhat"), khong phai 1
+#: ky tu phan cach cu the — nen fix nay khong con giu danh sach ky tu phan cach
+#: hop le, ma tim thang vi tri bat dau 1 JSON value tiep theo (`{` hoac `[`, 2 ky
+#: tu duy nhat co the mo dau object/array hop le) bo qua TOAN BO moi thu nam giua
+#: 2 object (whitespace, dau phay, hay bat ky rac gi khac).
+_NEXT_JSON_VALUE_START_RE = re.compile(r"[{\[]")
+
+
+def _decode_concatenated_json_objects(text: str) -> dict:
+    """Decode `text` as 1+ top-level JSON values concatenated back-to-back,
+    merging every dict found via `dict.update()` in text order (later key
+    wins). Non-dict top-level values are skipped (kept out of the merge,
+    same as the old "not a dict" check).
+
+    Giua 2 object khong bat buoc CHI co whitespace nua (xem Bug #EPUB-B2-4):
+    sau khi decode xong 1 object tai vi tri `end`, ta tim vi tri `{`/`[` gan
+    nhat trong phan con lai (`_NEXT_JSON_VALUE_START_RE`) — bo qua whitespace,
+    dau phay, hay bat ky ky tu phan cach nao khac model chen vao — roi thu
+    `raw_decode()` tiep tu do. Neu khong tim thay `{`/`[` nao nua, hoac decode
+    tai vi tri tim duoc THAT BAI, dung lai NGAY (khong tim tiep 1 vi tri `{`
+    khac xa hon) va giu nguyen nhung gi da parse duoc — day la "dung sai co
+    chu dich" (chap nhan ky tu phan cach la), khong phai noi long de doan/dung
+    rac thanh du lieu that. Truong hop pho bien nhat (response chi co dung 1
+    object) khong doi hanh vi: `raw_decode()` tieu thu het chuoi, vong lap
+    dung o dieu kien `pos >= length` nhu cu.
+    """
+    decoder = json.JSONDecoder()
+    merged: dict = {}
+    pos = 0
+    length = len(text)
+    found_any = False
+    # Chi lan dau tien, cho phep whitespace dan dau truoc gia tri JSON dau
+    # tien (khop hanh vi cu — KHONG strip prose/rac dan dau, chi whitespace).
+    while pos < length and text[pos].isspace():
+        pos += 1
+    while pos < length:
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            break
+        found_any = True
+        if isinstance(obj, dict):
+            merged.update(obj)
+        pos = end
+        if pos >= length:
+            break
+        match = _NEXT_JSON_VALUE_START_RE.search(text, pos)
+        if match is None:
+            break
+        pos = match.start()
+    if not found_any:
+        return {}
+    return merged

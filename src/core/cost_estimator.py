@@ -49,6 +49,38 @@ CHARS_PER_TOKEN_VI = 2.0
 #: incident this section exists to prevent.
 VI_CHAR_EXPANSION = 1.16
 
+#: Architecture.md 6.20.13.3b (fix C-3, Bug #EPUB-B2-1) — heuristic phat
+#: hien 1 request LLM sinh output "runaway" (du/lap) so voi CHINH payload
+#: cua request do. ⚠️ ASSUMED, chi co 1 diem du lieu (xem ly do chon o
+#: Architecture.md 6.20.13.3b): muc ky vong = `payload_chars * VI_CHAR_EXPANSION
+#: / CHARS_PER_TOKEN_VI`; tran vat ly `max_tokens=8192` -> ti le toi da 1
+#: request day co the dat la ~4,7x, chon 3,0x de kich hoat TRUOC khi cham
+#: tran ma van con bien so voi dao dong binh thuong (uoc luong von da CAO).
+EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0
+#: Chong false-positive o payload nho (vd 1 request retry rieng le chi 1
+#: unit ngan) — muc ky vong qua thap se lam moi dao dong nho bi bao runaway.
+EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS = 1_500
+
+
+def epub_expected_output_tokens(payload_chars: int) -> int:
+    """Muc output token KY VONG cho 1 request EPUB voi payload dai
+    `payload_chars` ky tu — CHIA SE cong thuc voi `is_runaway_output()` va
+    voi caller can log ti le thuc (Architecture.md 6.20.13.3b: "dung DUNG 2
+    hang so cua estimator ... khong duoc viet cong thuc thu hai")."""
+    return int(payload_chars * VI_CHAR_EXPANSION / CHARS_PER_TOKEN_VI)
+
+
+def is_runaway_output(payload_chars: int, output_tokens: int) -> bool:
+    """True khi `output_tokens` vuot xa muc ky vong cho CHINH payload nay
+    (Architecture.md 6.20.13.3b). Dung DUNG 2 hang so cua estimator
+    (`VI_CHAR_EXPANSION`, `CHARS_PER_TOKEN_VI`) qua `epub_expected_output_tokens()`
+    — khong duoc viet cong thuc thu hai.
+    """
+    expected = epub_expected_output_tokens(payload_chars)
+    return output_tokens > max(
+        EPUB_RUNAWAY_OUTPUT_FACTOR * expected, EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS
+    )
+
 
 @dataclass
 class CostEstimate:
@@ -87,7 +119,9 @@ def estimate_job_cost(total_pages: int, provider: TranslationProvider) -> CostEs
     )
 
 
-def _estimate_input_tokens(source_text_chars: int, segment_count: int, prompt_overhead_chars: int) -> int:
+def _estimate_input_tokens(
+    source_text_chars: int, segment_count: int, prompt_overhead_chars: int
+) -> int:
     """Shared core of the input-token formula (Architecture.md 6.11.3/6.11.4:
     `estimate_chunk_cost()` and `estimate_job_cost_v2()` "phai dung chung 1
     ham loi" — pdf2zh re-sends the whole prompt file for every segment

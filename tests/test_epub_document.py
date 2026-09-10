@@ -742,6 +742,116 @@ def test_write_translated_rejects_unit_id_not_from_this_load(tmp_path: Path) -> 
         doc.write_translated({"nonexistent-doc.html#0": "VI"}, out, bilingual=False)
 
 
+# ---------------------------------------------------------------------------
+# Architecture.md §6.20.14.4 C-4 (Lop C, 2026-09-10) — `untranslated_ids`.
+# ---------------------------------------------------------------------------
+
+
+def test_write_translated_marks_untranslated_ids_with_class_and_lang(tmp_path: Path) -> None:
+    """C-4: unit trong `untranslated_ids` (KHONG co trong `translations`)
+    phai duoc danh dau NGAY TREN chinh node goc bang class `bb-untranslated`
+    + `lang="en"` — khong chen node moi, khong boc `<span>`."""
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    doc = EpubDocument.load(src)
+    all_units = doc.units
+    fallback_unit = all_units[0]
+    translated_units = all_units[1:]
+    translations = {u.unit_id: f"VI {u.ordinal}" for u in translated_units}
+
+    doc.write_translated(
+        translations,
+        out,
+        bilingual=True,
+        untranslated_ids={fallback_unit.unit_id},
+    )
+
+    raw = zipfile.ZipFile(out).read(fallback_unit.doc_href).decode("utf-8")
+    assert "bb-untranslated" in raw
+    assert 'lang="en"' in raw
+
+
+def test_write_translated_untranslated_ids_does_not_change_reloaded_unit_count(
+    tmp_path: Path,
+) -> None:
+    """C-4 tac dung phu (1): `EpubDocument.load()` chi bo qua node theo class
+    `bb-vi` — them `bb-untranslated` KHONG duoc doi so unit doc lai duoc
+    (BR-EPUB-05 dieu kien "so unit khop" khong bi anh huong)."""
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    doc = EpubDocument.load(src)
+    fallback_unit = doc.units[0]
+    translations = {u.unit_id: f"VI {u.ordinal}" for u in doc.units[1:]}
+
+    doc.write_translated(
+        translations,
+        out,
+        bilingual=True,
+        untranslated_ids={fallback_unit.unit_id},
+    )
+
+    doc_reloaded = EpubDocument.load(out)
+    assert len(doc_reloaded.units) == len(doc.units)
+
+
+def test_write_translated_untranslated_ids_does_not_affect_bb_vi_count(tmp_path: Path) -> None:
+    """C-4 tac dung phu (2): `count_bb_vi_pairs()` chi dem node `bb-vi` —
+    them `bb-untranslated` khong duoc lam so cap bb-vi thay doi."""
+    from src.services.epub_document import count_bb_vi_pairs
+
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    doc = EpubDocument.load(src)
+    fallback_unit = doc.units[0]
+    translated_units = doc.units[1:]
+    translations = {u.unit_id: f"VI {u.ordinal}" for u in translated_units}
+
+    doc.write_translated(
+        translations,
+        out,
+        bilingual=True,
+        untranslated_ids={fallback_unit.unit_id},
+    )
+
+    total, _differing = count_bb_vi_pairs(out)
+    assert total == len(translated_units)
+
+
+def test_write_translated_untranslated_ids_rejects_unknown_unit_id(tmp_path: Path) -> None:
+    """`untranslated_ids` phai chiu cung ky luat lineage (R6-02) voi
+    `translations` — unit_id khong thuoc lan load() nay bi tu choi ro rang."""
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    doc = EpubDocument.load(src)
+    with pytest.raises(EpubParseError):
+        doc.write_translated({}, out, bilingual=True, untranslated_ids={"nonexistent-doc.html#0"})
+
+
+def test_write_translated_untranslated_ids_default_none_behaves_like_before(
+    tmp_path: Path,
+) -> None:
+    """Khong truyen `untranslated_ids` (mac dinh `None`) phai giu nguyen
+    hanh vi cu — khong co node nao bi danh dau `bb-untranslated`."""
+    src = tmp_path / "src.epub"
+    src.write_bytes(SOURDOUGH_PATH.read_bytes())
+    out = tmp_path / "out.epub"
+
+    doc = EpubDocument.load(src)
+    translations = {u.unit_id: f"VI {u.ordinal}" for u in doc.units}
+    doc.write_translated(translations, out, bilingual=True)
+
+    chapter_raw = zipfile.ZipFile(out).read("ops/xhtml/chapter01.html").decode("utf-8")
+    assert "bb-untranslated" not in chapter_raw
+
+
 def test_write_translated_monolingual_preserves_img_child_single_text_run(
     tmp_path: Path,
 ) -> None:
