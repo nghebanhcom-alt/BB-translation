@@ -12,7 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from src.api.routes import download, glossary, jobs, settings, upload
 from src.api.websocket import router as websocket_router
 from src.core.config import get_settings
-from src.models.database import init_db
+from src.core.job_recovery import fail_orphaned_jobs
+from src.models.database import get_session_factory, init_db
 
 _WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -79,6 +80,11 @@ def _read_app_version() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
+    # Bug #EPUB-3 (Architecture.md §E3): phai chay SAU init_db() (bang/cot
+    # phai ton tai truoc khi query) va TRUOC yield (xong truoc khi nhan
+    # request dau tien -> khong co race voi job moi tao).
+    async with get_session_factory()() as session:
+        await fail_orphaned_jobs(session)
     yield
 
 

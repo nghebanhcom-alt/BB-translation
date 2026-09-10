@@ -7602,3 +7602,72 @@ logic"). Riêng hành vi `markdownify.markdownify()` re-parse lại toàn bộ c
 rò rỉ XML declaration/`<title>`) LÀ một phát hiện Protocol 5-flavor tự đo được khi implement (không
 có trong Architecture.md) — đã ghi lại ở mục 1 và đổi sang `convert_soup(body)` để tránh phụ thuộc
 hành vi ngầm định đó.
+
+## Bug #EPUB-3 — Quét job "mồ côi" (orphan) lúc server startup (2026-09-10)
+
+Fix theo đúng spec Tech Lead tại `docs/Architecture.md` §E3 (append). Job "mồ côi" là job bị kẹt
+vĩnh viễn ở 1 trạng thái đang chạy (`created`/`queued`/`chunking`/`parsing`/`translating`/
+`post_processing`/`merging`) nếu process uvicorn chết giữa chừng (crash/deploy/`--reload`) — không
+phải bug riêng EPUB, ảnh hưởng mọi `file_type` lẫn `job_type=parse_only` (E3.1).
+
+### 1. Việc đã làm
+
+- **File mới `src/core/job_recovery.py`**: `fail_orphaned_jobs(session) -> int` — query mọi `Job`
+  có `status` trong `_ORPHAN_JOB_STATUSES` (7 giá trị, đúng §E3.3, khai báo riêng KHÔNG import lại
+  `_ACTIVE_JOB_STATUSES` của `src/api/routes/jobs.py` — trùng giá trị vì trùng ngữ cảnh, không phải
+  cùng business rule, theo đúng lý do §E3.3), mark `status="failed"` + `error_message` (đúng câu
+  chữ Tech Lead đã chốt, không diễn đạt lại) + `finished_at`/`updated_at`. Dùng SQLModel
+  `select(...).where(col(Job.status).in_(...))`, không raw SQL. KHÔNG đụng `progress`/
+  `current_chunk`/`total_chunks`/`actual_cost` (giữ nguyên tiến độ cũ) và KHÔNG đụng `Chunk.status`
+  (E3.5: resume đã tự skip chunk `completed` sẵn, reset thêm là code thừa). KHÔNG quét `Batch`
+  (E3.4: `created` là trạng thái vĩnh viễn hợp lệ của Batch cho job đơn lẻ). 1 `session.commit()`
+  duy nhất sau vòng lặp. Idempotent — lần gọi thứ 2 trả về 0, không ghi đè `finished_at` cũ (dùng
+  `or`).
+- **`src/api/main.py::lifespan()`**: gọi `fail_orphaned_jobs()` ngay sau `await init_db()`, trước
+  `yield` — đúng thứ tự bắt buộc (bảng phải tồn tại trước khi query; chạy xong trước khi uvicorn
+  nhận request đầu tiên nên không có race với job mới tạo, dựa trên giả định single-worker đã verify
+  ở §E3.3 qua `.claude/launch.json`).
+- **`src/models/job.py:32-34`**: sửa comment liệt kê status — thêm `parsing` (bị thiếu dù được gán
+  thật 2 chỗ trong `job_orchestrator.py`, cùng loại lỗi với S15-12 cũ) + ghi chú lý do để tránh lặp
+  lại.
+- **Retry endpoint (`src/api/routes/jobs.py`)**: KHÔNG sửa — `_RETRYABLE_STATUSES` đã có `"failed"`
+  từ Increment 6, tương thích sẵn với job orphan (đã verify lại bằng test, không suy đoán, xem mục
+  2 test 5/7 dưới đây).
+
+### 2. Test — `tests/integration/test_orphan_job_recovery.py` (file mới, 7 test)
+
+Theo đúng 6 case §E3.8 (mở rộng thêm 1 test cho `lifespan()` theo yêu cầu brief PM):
+
+1. `test_marks_every_orphan_status_as_failed` — 7 Job, mỗi job 1 status trong
+   `_ORPHAN_JOB_STATUSES`; assert cả 7 chuyển `failed` + đúng `error_message` + `finished_at`.
+2. `test_does_not_touch_terminal_status_jobs` — 4 Job ở trạng thái cuối, `error_message`/
+   `finished_at` đặt sẵn; assert cả 2 giá trị **không đổi** (so sánh giá trị cụ thể).
+3. `test_keeps_progress_fields_unchanged` — assert `progress`/`current_chunk`/`total_chunks`/
+   `actual_cost` y nguyên sau khi mark.
+4. `test_second_call_is_idempotent` — gọi 2 lần, lần 2 trả 0 và không ghi đè `finished_at` lần 1.
+5. `test_retry_after_orphan_mark_succeeds` (R6-02, nối 2 bước) — dùng `TestClient` thật + DB thật
+   (tmp_path), mark orphan xong → `POST /api/jobs/{id}/retry` → assert KHÔNG 400, `status="queued"`,
+   `error_message is None`, `cancel_requested is False`.
+6. `test_completed_chunks_survive_orphan_mark` — job có 3 Chunk (`completed`/`translating`/
+   `pending`); sau `fail_orphaned_jobs()`, assert cả 3 `Chunk.status` không đổi (chứng minh E3.5).
+7. `test_lifespan_marks_orphan_jobs_before_serving_requests` — seed 1 job orphan vào DB TRƯỚC khi
+   khởi tạo `TestClient(app)` (kích hoạt `lifespan()` thật), assert job đã bị mark `failed` ngay khi
+   `TestClient` khởi tạo xong — xác nhận đúng thứ tự "sau `init_db()`, trước `yield`".
+
+Test 5 và 7 dùng lại đúng pattern `client` fixture (`monkeypatch.chdir(tmp_path)` + reset
+`database_module._engine`/`_session_factory` + `get_settings.cache_clear()`) đã có sẵn ở
+`tests/integration/test_estimate_and_cancel_api.py` — DB test cô lập theo `tmp_path`, không rác lẫn
+giữa các test khác dùng `TestClient`.
+
+### 3. Kết quả chạy thật
+
+```
+uv run ruff check src/ tests/     → All checks passed!
+uv run pytest tests/integration/test_orphan_job_recovery.py -q → 7 passed
+uv run pytest tests/ -q           → đang chạy full suite, xem báo cáo PM
+```
+
+### 4. Trạng thái
+
+**Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo "xong"/"sẵn sàng
+release". Chờ PM giao Reviewer.

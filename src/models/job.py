@@ -29,8 +29,11 @@ class Job(SQLModel, table=True):
     # NULL cho moi job PDF. Cot moi, them qua `_NEW_NULLABLE_COLUMNS`
     # (src/models/database.py) — GIU DU LIEU DB hien co, khong xoa/tao lai.
     status: str = Field(default="created")
-    # created | queued | chunking | translating |
+    # created | queued | chunking | parsing | translating |
     # post_processing | merging | completed | failed | cancelled | cost_capped
+    # ("parsing" was missing from this comment before Bug #EPUB-3 (Architecture.md
+    # §E3.2) even though src/core/job_orchestrator.py assigns it — same class of
+    # drift as S15-12's missing `parsing` in web/js/app.js. Keep this list in sync.)
     # "cost_capped" (Architecture.md 6.11.4 Lop 3) — the system stopped the
     # job because accumulated `actual_cost` crossed `effective_cap`. NOT
     # "failed" (nothing errored) and NOT "cancelled" (the user didn't ask) —

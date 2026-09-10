@@ -5902,3 +5902,131 @@ Script/artifact phiên này (scratchpad, không commit):
 `extracted/` (zip giải nén), `api_download.zip`, `tiny_qa.epub`/`tiny_qa_b64.txt` (fixture UI tối
 thiểu tự dựng) — tại
 `/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/fdb2c2d6-8d19-46e6-9002-56e408e83320/scratchpad/qa_us15_epub/`.
+
+## Fix Bug #EPUB-3 (job mồ côi khi server restart) — QA live (2026-09-10)
+
+Xác nhận trước khi bắt đầu: `curl http://localhost:8000/health` → `{"status":"ok"}` — server dev thật
+đang sống. Không đụng vào (không restart/kill), không dùng `data/bb_translation.db` thật. Toàn bộ test
+dưới đây chạy trên **1 process uvicorn THẬT riêng** (không phải `TestClient` in-process — khác với 7
+test integration của Dev), port `8099`, trỏ vào 1 file SQLite scratch riêng qua env `DATABASE_URL`
+(đọc `src/core/config.py:81` xác nhận `Settings.database_url` đọc từ env đúng cơ chế
+`pydantic-settings`). Không sửa `.env` thật.
+
+Mục tiêu: xác nhận `lifespan()` (`src/api/main.py:80-87`) chạy đúng trong 1 tiến trình process thật —
+điểm Dev/Reviewer chưa tự verify (Reviewer chỉ chạy `TestClient`, xem mục 6.7 review-report.md).
+
+### 1. Dựng kịch bản orphan thật
+
+Script seed (`/private/tmp/.../scratchpad/epub3_qa/seed.py`) tự import `src.models.database.init_db()`
+(đúng bảng/cột thật qua SQLModel metadata, không tự bịa schema) để tạo file
+`qa_scratch.db`, insert trực tiếp qua `AsyncSession`, KHÔNG chạy job thật qua LLM/OCR:
+
+| Job id | `status` | `job_type` | Mục đích |
+|---|---|---|---|
+| `qa-orphan-translating` | `translating` | `translate` | Xác nhận mark orphan cơ bản + field không bị đụng (`progress=0.4`, `current_chunk=2`, `total_chunks=5`) |
+| `qa-orphan-parseonly` | `parsing` | `parse_only` | Dùng để test retry thật qua HTTP (bỏ qua cost gate, tránh phải giả provider) |
+| `qa-completed-untouched` | `completed` | `translate` | Job ĐÃ xong trước khi server sống lại — kiểm tra KHÔNG bị đụng |
+
+`qa-orphan-translating` kèm 2 `Chunk` con: 1 `completed` (`output_path` giả), 1 `translating` — mô
+phỏng job dịch dở như brief yêu cầu.
+
+Baseline đọc trực tiếp bằng `sqlite3` TRƯỚC khi khởi động server: đúng như seed (`translating`,
+`parsing`, `completed`, không `error_message`, không `finished_at` cho 2 job orphan).
+
+### 2. Khởi động uvicorn THẬT trỏ DB scratch
+
+```
+DATABASE_URL="sqlite+aiosqlite:///.../qa_scratch.db" \
+  nohup uv run uvicorn src.api.main:app --host 127.0.0.1 --port 8099 > uvicorn.log 2>&1 &
+```
+
+Poll `curl http://127.0.0.1:8099/health` tới khi `{"status":"ok"}` (lên ngay lần poll đầu). Log thật
+của tiến trình (không phải log test) in đúng dòng cảnh báo Tech Lead đã chốt ở §E3.7:
+
+```
+2026-09-10 18:32:05,452 WARNING src.core.job_recovery: Startup: da danh dau 2 job mo coi thanh failed (server restart)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8099 (Press CTRL+C to quit)
+```
+
+Số `2` khớp đúng số job orphan đã seed (không đếm `qa-completed-untouched`, đúng kỳ vọng) — xác nhận
+`fail_orphaned_jobs()` chạy đúng trong process thật, đúng vị trí sau `init_db()` trước khi nhận
+request đầu tiên (dòng log "Application startup complete." xuất hiện SAU dòng warning, khớp thứ tự
+code thật).
+
+### 3. Xác nhận field sau khi mark — đọc trực tiếp DB scratch bằng `sqlite3` (không qua API)
+
+```
+qa-orphan-translating: status=failed
+  error_message = "Job bi gian doan do server khoi dong lai (restart/crash) trong luc dang chay.
+                    Cac chunk da dich xong duoc giu nguyen — bam Retry de chay tiep tu cho dang do."
+  finished_at = 2026-09-10 11:32:05.451473   (set, trước đó rỗng)
+  updated_at  = 2026-09-10 11:32:05.451473
+  progress=0.4, current_chunk=2, total_chunks=5   (KHÔNG bị đụng, đúng §E3.4)
+
+qa-orphan-parseonly: status=failed, cùng error_message y hệt, finished_at set,
+  progress=0.2, current_chunk=NULL, total_chunks=NULL (KHÔNG bị đụng)
+```
+
+`error_message` đối chiếu bằng mắt từng ký tự với chuỗi Tech Lead chốt ở Architecture.md §E3.4 —
+khớp 100%, kể cả dấu gạch ngang em-dash `—`. **PASS.**
+
+### 4. Test resume thật qua API (không qua `TestClient`)
+
+```
+curl -X POST http://127.0.0.1:8099/api/jobs/qa-orphan-parseonly/retry -d '{}'
+→ HTTP 200, {"job_id":"qa-orphan-parseonly","status":"queued"}
+```
+
+Không bị 400 — đúng kỳ vọng (`_RETRYABLE_STATUSES` chứa `failed`). Đọc lại DB ngay sau: `status`
+chuyển `queued` rồi ngay sau đó `_run_job_background()` (task nền thật trong tiến trình thật) tự chạy
+tiếp và fail lại với `error_message="no such file: '/nonexistent/orphan_scan.pdf'"` — **đúng như kỳ
+vọng** vì file trong seed là đường dẫn giả (không phải bug của fix Bug #EPUB-3 — chứng minh ngược
+lại: cơ chế resume/schedule background task hoạt động đúng, orchestrator thực sự cố đọc file, không
+bị chặn ở tầng retry/orphan). **PASS cho phần cần verify** (retry chuyển `queued` đúng, không 400,
+background task thật được schedule lại trong tiến trình thật).
+
+### 5. Kịch bản job KHÔNG bị đụng
+
+Đọc lại `qa-completed-untouched` SAU KHI server scratch đã lên VÀ sau bước retry ở mục 4: `status`,
+`error_message`, `finished_at`, `updated_at` — **y nguyên byte-for-byte** so với baseline trước khi
+khởi động server (`completed`, rỗng, `2026-09-01 12:00:00.000000` cho cả 2 timestamp). **PASS** —
+đúng §E3.4 (không quét job đã terminal).
+
+### 6. Regression suite
+
+```
+uv run pytest tests/ -q       → 767 passed, 1040 warnings (103.91s)
+uv run ruff check src/ tests/ → All checks passed!
+```
+
+Khớp đúng số Dev/Reviewer đã báo cáo (767/767). Không có test nào fail, không regression.
+
+### Dọn dẹp
+
+`kill` tiến trình uvicorn scratch (PID riêng, port 8099) ngay sau bước 6 — xác nhận `lsof -i:8099`
+không còn tiến trình app nào lắng nghe. `curl http://localhost:8000/health` xác nhận lại lần cuối:
+server dev thật port 8000 vẫn sống nguyên, không bị đụng vào suốt phiên QA này. Không có tiến trình
+nền nào bị bỏ treo.
+
+### Kết luận
+
+**`ready_for_release: YES`**
+
+- Hành vi thật khi khởi động 1 process uvicorn THẬT (không phải `TestClient`) khớp chính xác thiết kế
+  §E3: quét đúng 2 job orphan, mark `failed` với `error_message`/`finished_at`/`updated_at` đúng,
+  KHÔNG đụng `progress`/`current_chunk`/`total_chunks`/`Chunk.status`.
+- Job đã `completed` trước khi restart hoàn toàn không bị đụng — xác nhận bằng so sánh trực tiếp giá
+  trị field trước/sau (không chỉ tin field `status` nằm trong tập terminal).
+- Retry qua HTTP thật (không `TestClient`) chuyển `queued` đúng, không bị 400, background task được
+  schedule lại thật trong tiến trình thật.
+- Regression suite đầy đủ: 767/767 test pass, ruff sạch.
+- Không đụng `data/bb_translation.db` thật, không làm gián đoạn server dev thật đang chạy ở port 8000,
+  không để lại tiến trình treo.
+- Đây KHÔNG phải pipeline nhiều bước external-tool nối tiếp nhau (job_recovery.py chỉ đụng DB nội bộ,
+  không gọi MinerU/pdf2zh/LLM provider nào) nên Protocol 6 R6-03 (live E2E xuyên suốt chuỗi) không áp
+  dụng cho chính fix này — Protocol 5 R5-03 cũng N/A theo đúng ghi nhận của Reviewer (không có
+  external tool contract nào trong `job_recovery.py`/thay đổi ở `main.py`/`job.py`).
+
+Script/artifact phiên này (scratchpad, không commit): `seed.py`, `qa_scratch.db`, `uvicorn.log` — tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/fdb2c2d6-8d19-46e6-9002-56e408e83320/scratchpad/epub3_qa/`.
