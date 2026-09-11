@@ -4,7 +4,7 @@
   "phase": "build",
   "version": "1.3.2",
   "released_at": "2026-09-10",
-  "updated_at": "2026-09-10",
+  "updated_at": "2026-09-11",
   "team": {
     "persistent": [
       "pm",
@@ -37,7 +37,7 @@
       "document": "docs/PRD.md",
       "status": "approved",
       "approved_version": "2.0",
-      "approved_commit": null,
+      "approved_commit": "d946e0cc1a370f67221e37d6ee016169ac96f445",
       "approved_at": "2026-09-11",
       "current_version": "2.0",
       "status_reason": "Hiếu duyệt lại baseline v2.0 trong chat 2026-09-11 — approved_commit điền sau khi commit đổi header, xem docs/design-log.md"
@@ -47,7 +47,7 @@
       "document": "docs/Architecture.md",
       "status": "approved",
       "approved_version": "2.0",
-      "approved_commit": null,
+      "approved_commit": "d946e0cc1a370f67221e37d6ee016169ac96f445",
       "approved_at": "2026-09-11",
       "current_version": "2.0",
       "status_reason": "Hiếu duyệt lại baseline v2.0 trong chat 2026-09-11 — approved_commit điền sau khi commit đổi header, xem docs/design-log.md"
@@ -169,8 +169,8 @@
       "owner_role": "dev",
       "status": "done",
       "blocked_by": [],
-      "output": "APPROVE vòng 2/3 (docs/review-report.md, section VÒNG 2/3) — 2 blocking vòng 1 đã đóng, 773 test pass, ruff sạch; chờ commit gộp",
-      "closed_commit": null
+      "output": "APPROVE vòng 2/3 (docs/review-report.md, section VÒNG 2/3) — 2 blocking vòng 1 đã đóng, 773 test pass, ruff sạch",
+      "closed_commit": "d946e0cc1a370f67221e37d6ee016169ac96f445"
     },
     {
       "id": "S3",
@@ -178,8 +178,8 @@
       "owner_role": "tech-lead",
       "status": "done",
       "blocked_by": [],
-      "output": "DONE. Reviewer APPROVE 1/3, QA PASS ready_for_release YES — QA tự dựng ca drop thật qua babeldoc CLI thật (LLM server giả cục bộ), lần đầu quan sát trọn vẹn nhánh type=drop. 816 test pass. Chờ commit gộp cùng S2. ⚠️ Architecture.md 8111/8000 dòng — VƯỢT trần Protocol C.3, cần rotate.",
-      "closed_commit": null
+      "output": "DONE. Reviewer APPROVE 1/3, QA PASS ready_for_release YES — QA tự dựng ca drop thật qua babeldoc CLI thật (LLM server giả cục bộ), lần đầu quan sát trọn vẹn nhánh type=drop. 816 test pass. ⚠️ Architecture.md 8111/8000 dòng — VƯỢT trần Protocol C.3, cần rotate.",
+      "closed_commit": "d946e0cc1a370f67221e37d6ee016169ac96f445"
     }
   ],
   "loops": [
