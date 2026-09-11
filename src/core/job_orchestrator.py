@@ -28,7 +28,7 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlmodel import select
+from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.chunking import (
@@ -37,6 +37,7 @@ from src.core.chunking import (
     EpubChunkPlan,
     plan_chunks,
     plan_epub_chunks,
+    surviving_page_range,
 )
 from src.core.concurrency_controller import (
     ADAPTIVE_THREAD_FLOOR,
@@ -74,6 +75,7 @@ from src.models.batch import Batch
 from src.models.chunk import Chunk
 from src.models.concurrency_state import ConcurrencyState
 from src.models.job import Job
+from src.models.layout_qa import LayoutQaFinding
 from src.models.overflow import OverflowReport
 from src.postprocess.bilingual_merge import create_bilingual_pdf
 from src.postprocess.chunk_merge import merge_chunk_pdfs
@@ -81,9 +83,22 @@ from src.postprocess.font_shrink import OverflowEntry, font_shrink_page
 from src.postprocess.image_compress import compress_pdf_images
 from src.postprocess.rotated_text_overlay import overlay_rotated_text
 from src.preprocess.searchable_pdf import build_searchable_pdf
-from src.services.babeldoc_runner import BabeldocError, BabeldocRunner, BabeldocTimeoutError
+from src.services.babeldoc_runner import (
+    BabeldocDropReport,
+    BabeldocError,
+    BabeldocRunner,
+    BabeldocTimeoutError,
+)
 from src.services.epub_document import EpubDocument, EpubUnit, count_bb_vi_pairs
-from src.services.layout_qa import persist_findings
+from src.services.layout_qa import (
+    _SEVERITY_BY_CHECK,
+    BABELDOC_DROP_REPORT_INCOMPLETE_CHECK,
+    BABELDOC_DROP_REPORT_MISMATCH_CHECK,
+    BABELDOC_DROP_REPORT_UNAVAILABLE_CHECK,
+    BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK,
+    LayoutQaFindingData,
+    persist_findings,
+)
 from src.services.mineru_det_probe import probe_and_flag_rotated_text
 from src.services.mineru_runner import (
     MinerUCancelledError,
@@ -258,6 +273,187 @@ def _count_text_segments(file_path: Path, page_start: int, page_end: int) -> int
     return max(count, 1)
 
 
+#: BL-04 (Architecture.md 6.22.6.1 "Rang buoc hinh thuc chong mo mo") — moi
+#: noi he thong phat ra so unfit_drops PHAI kem cau nay, khong duoc phep phat
+#: ra chuoi "0 drop" tran.
+_BABELDOC_DROP_REPORT_SCOPE_NOTE = (
+    '— PHAM VI: chi do kenh "khong vua khung"; chu bi loc o\n'
+    "    ActiveILCreater.project_native_char (xoay/thieu font id) KHONG duoc do boi\n"
+    "    co che nay (Architecture.md 6.22.6.1)"
+)
+
+
+@dataclass
+class _BabeldocDropMappingResult:
+    """Ket qua `_map_babeldoc_drop_report_to_findings()` — findings + so lieu
+    can cho dong log R-1 (Architecture.md 6.22.6.2), tach rieng de khong phai
+    tinh lai."""
+
+    findings: list[LayoutQaFindingData]
+    available: bool
+    expected_pages: set[int]
+    observed_pages: frozenset[int]
+    surviving_range: tuple[int, int]
+    suppressed_overlap_count: int
+    checksum_mismatch_pages: list[int]
+    unfit_drop_count: int
+    is_incomplete: bool
+
+
+def _map_babeldoc_drop_report_to_findings(
+    drop_report: BabeldocDropReport, chunk: Chunk
+) -> _BabeldocDropMappingResult:
+    """Architecture.md 6.22.6 — anh xa `BabeldocDropReport` sang
+    `LayoutQaFindingData` theo dung BON trang thai (khong phai ba — F2/X5):
+    (1) do duoc/tron ven/0 drop, (2) do duoc/tron ven/co drop, (3) do duoc
+    NHUNG khong tron ven (thieu trang HOAC checksum lech — X5), (4) KHONG do
+    duoc. `severity` LUON tra tu `_SEVERITY_BY_CHECK` (layout_qa.py, F6),
+    khong bao gio hardcode chuoi o day.
+    """
+    expected_pages = set(range(chunk.page_start, chunk.page_end + 1))
+    surviving_range = surviving_page_range(chunk, is_first_in_merge=(chunk.chunk_index == 0))
+    surviving_start, surviving_end = surviving_range
+
+    if not drop_report.available:
+        # Trang thai 4 (Architecture.md 6.22.6 bang "BON trang thai").
+        finding = LayoutQaFindingData(
+            page_number=chunk.page_start,
+            check_type=BABELDOC_DROP_REPORT_UNAVAILABLE_CHECK,
+            severity=_SEVERITY_BY_CHECK[BABELDOC_DROP_REPORT_UNAVAILABLE_CHECK],
+            detail={
+                "reason": (
+                    "khong co dong header hop le nao trong sidecar JSONL "
+                    f"(header_count={drop_report.header_count}, "
+                    f"malformed_line_count={drop_report.malformed_line_count})"
+                )
+            },
+        )
+        return _BabeldocDropMappingResult(
+            findings=[finding],
+            available=False,
+            expected_pages=expected_pages,
+            observed_pages=drop_report.observed_pages,
+            surviving_range=surviving_range,
+            suppressed_overlap_count=0,
+            checksum_mismatch_pages=[],
+            unfit_drop_count=0,
+            is_incomplete=False,
+        )
+
+    # F1 (6.22.5.1) — chi tin drop trong dai trang SONG SOT (bo qua vung
+    # chong lan da bi merge_chunk_pdfs() vut di, chong false positive + dem 2
+    # lan tren ~20 trang/cuon).
+    dropped_in_surviving = [
+        d for d in drop_report.dropped if surviving_start <= d.page_number <= surviving_end
+    ]
+    suppressed_overlap_count = len(drop_report.dropped) - len(dropped_in_surviving)
+
+    # Checksum cheo (6.22.6, "Checksum PHAI luon co cho di — X5"): dung TOAN
+    # BO drop_report.dropped (KHONG loc theo dai song sot) — day la kiem tra
+    # tinh toan ven cua CHINH file sidecar, khong phai cua bo loc merge.
+    actual_drop_counts: dict[int, int] = {}
+    for dropped in drop_report.dropped:
+        actual_drop_counts[dropped.page_number] = actual_drop_counts.get(dropped.page_number, 0) + 1
+    checksum_mismatch_pages = sorted(
+        page
+        for page, declared in drop_report.page_dropped_counts.items()
+        if declared != actual_drop_counts.get(page, 0)
+    )
+
+    findings: list[LayoutQaFindingData] = [
+        LayoutQaFindingData(
+            page_number=dropped.page_number,
+            check_type=BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK,
+            severity=_SEVERITY_BY_CHECK[BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK],
+            detail={
+                "cause": "typeset_unfit",
+                "debug_id": dropped.debug_id,
+                "layout_label": dropped.layout_label,
+                "box": list(dropped.box) if dropped.box is not None else None,
+                "optimal_scale": dropped.optimal_scale,
+                "scale": dropped.scale,
+                "text_excerpt": dropped.text_excerpt,
+                "text_len": dropped.text_len,
+                "source": "babeldoc_shim/v2",
+            },
+        )
+        for dropped in dropped_in_surviving
+    ]
+
+    is_incomplete = drop_report.observed_pages != expected_pages or bool(checksum_mismatch_pages)
+    if is_incomplete:
+        # Trang thai 3 — "vẫn ghi các finding drop đã quan sát được... CỘNG
+        # đúng 1 finding" (6.22.6): findings o tren da co san, chi them 1.
+        findings.append(
+            LayoutQaFindingData(
+                page_number=chunk.page_start,
+                check_type=BABELDOC_DROP_REPORT_INCOMPLETE_CHECK,
+                severity=_SEVERITY_BY_CHECK[BABELDOC_DROP_REPORT_INCOMPLETE_CHECK],
+                detail={
+                    "expected": sorted(expected_pages),
+                    "observed": sorted(drop_report.observed_pages),
+                    "missing": sorted(expected_pages - drop_report.observed_pages),
+                    "unexpected": sorted(drop_report.observed_pages - expected_pages),
+                    "checksum_mismatch_pages": checksum_mismatch_pages,
+                },
+            )
+        )
+
+    # F5 — doi chieu 1 CHIEU voi TOAN BO drop_report.dropped (truoc khi loc
+    # chong lan), dung `>` (khong dung `!=` — EvictQueue tu vut bot log khi
+    # day, sentinel <= structured la binh thuong, khong phai loi, 6.22.6).
+    if drop_report.stdout_sentinel_count > len(drop_report.dropped):
+        findings.append(
+            LayoutQaFindingData(
+                page_number=chunk.page_start,
+                check_type=BABELDOC_DROP_REPORT_MISMATCH_CHECK,
+                severity=_SEVERITY_BY_CHECK[BABELDOC_DROP_REPORT_MISMATCH_CHECK],
+                detail={
+                    "sentinel": drop_report.stdout_sentinel_count,
+                    "structured": len(drop_report.dropped),
+                },
+            )
+        )
+
+    return _BabeldocDropMappingResult(
+        findings=findings,
+        available=True,
+        expected_pages=expected_pages,
+        observed_pages=drop_report.observed_pages,
+        surviving_range=surviving_range,
+        suppressed_overlap_count=suppressed_overlap_count,
+        checksum_mismatch_pages=checksum_mismatch_pages,
+        unfit_drop_count=len(dropped_in_surviving),
+        is_incomplete=is_incomplete,
+    )
+
+
+def _log_babeldoc_drop_report_r1(
+    job_id: str, chunk: Chunk, mapping: _BabeldocDropMappingResult
+) -> None:
+    """R-1 (Architecture.md 6.22.6.2) — 1 dong log/chunk, dung DUNG dinh dang
+    bat buoc cua 6.22.6.1 (co mau so + pham vi, khong bao gio "0 drop" tran).
+    WARNING khi unfit_drops > 0 HOAC trang thai 3 (chua tron ven); INFO khi
+    trang thai 1 (do duoc/tron ven/0 drop). Trang thai 4 (available=False)
+    cung la WARNING (tin trong finding rieng da noi ro ly do)."""
+    surviving_start, surviving_end = mapping.surviving_range
+    message = (
+        f"babeldoc drop report: job={job_id} chunk={chunk.chunk_index} "
+        f"pages={chunk.page_start}-{chunk.page_end} "
+        f"observed={len(mapping.observed_pages)}/{len(mapping.expected_pages)}\n"
+        f"  unfit_drops={mapping.unfit_drop_count} "
+        f"(surviving {surviving_start}-{surviving_end}, "
+        f"suppressed_overlap={mapping.suppressed_overlap_count}, "
+        f"checksum_mismatch={len(mapping.checksum_mismatch_pages)})\n"
+        f"  {_BABELDOC_DROP_REPORT_SCOPE_NOTE}"
+    )
+    is_state_1 = mapping.available and mapping.unfit_drop_count == 0 and not mapping.is_incomplete
+    if is_state_1:
+        logger.info(message)
+    else:
+        logger.warning(message)
+
+
 def _check_epub_output_guard(
     source_doc: EpubDocument, merged_path: Path, *, bilingual: bool
 ) -> None:
@@ -405,6 +601,7 @@ class JobOrchestrator:
                 numbered_list_split_enabled=self._settings.babeldoc_numbered_list_split_enabled,
                 toc_split_enabled=self._settings.babeldoc_toc_split_enabled,
                 word_wrap_fix_enabled=self._settings.babeldoc_word_wrap_fix_enabled,
+                drop_report_enabled=self._settings.babeldoc_drop_report_enabled,
             )
         return self._pdf2zh_runner
 
@@ -430,6 +627,25 @@ class JobOrchestrator:
                 f"nhan duoc {value!r}. Neu day la test dung AsyncMock(spec=...), phai set "
                 "tuong minh `runner.needs_font_shrink = True/False` cho dung nhanh dang test "
                 "(Architecture.md Bug #9 B9.4)."
+            )
+        return value
+
+    @property
+    def _reports_own_paragraph_drops(self) -> bool:
+        """BL-04 (Architecture.md 6.22.7 R8-03) — hoi NANG LUC cua engine da
+        chon, khong hoi TEN engine. Cung khuon voi `_needs_font_shrink` o
+        tren: `isinstance` guard la CO CHU DICH — `AsyncMock(spec=...)` chi
+        copy TEN thuoc tinh, khong copy GIA TRI class attribute, nen mot test
+        babeldoc quen set thuoc tinh se am tham chay nhanh pdf2zh (0 finding)
+        va van PASS neu khong co guard nay.
+        """
+        value = self._translator_runner.reports_own_paragraph_drops
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self._translator_runner).__name__}.reports_own_paragraph_drops phai "
+                f"la bool, nhan duoc {value!r}. Neu day la test dung AsyncMock(spec=...), phai "
+                "set tuong minh `runner.reports_own_paragraph_drops = True/False` cho dung "
+                "nhanh dang test (Architecture.md BL-04 6.22.7 R8-03)."
             )
         return value
 
@@ -804,6 +1020,42 @@ class JobOrchestrator:
         # Step 10: finalize cost (UOC LUONG — pdf2zh khong xuat token that, 6.6.6).
         job.actual_cost = sum(chunk.api_cost or 0.0 for chunk in chunks)
         job.cost_source = "estimated"
+
+        # BL-04 R-2 (Architecture.md 6.22.6.2) — mat hien thi DUY NHAT cua
+        # BL-04 (chua co UI/API — BL-09). BAT BUOC dem bang 1 cau SELECT COUNT
+        # tren DB, KHONG dem tu list in-memory tich luy qua _process_chunk():
+        # Buoc 7 (`if chunk.status != "completed":`) bo qua chunk da xong khi
+        # job resume sau crash — finding cua lan chay truoc da nam trong DB
+        # nhung KHONG di qua _process_chunk() lan nay, nen accumulator
+        # in-memory se bao thieu dung o kich ban rui ro cao nhat (X7).
+        # Best-effort (giong overlay_rotated_text o Buoc 8): 1 loi o day
+        # khong duoc lam fail job da hoan tat that su.
+        try:
+            babeldoc_finding_count = (
+                await db_session.exec(
+                    select(func.count())
+                    .select_from(LayoutQaFinding)
+                    .where(LayoutQaFinding.job_id == job.id)
+                    .where(col(LayoutQaFinding.check_type).like("babeldoc_%"))
+                )
+            ).one()
+            r2_message = (
+                f"babeldoc drop report (job-level, R-2): job={job.id} "
+                f"babeldoc_finding_count={babeldoc_finding_count}\n"
+                f"  {_BABELDOC_DROP_REPORT_SCOPE_NOTE}"
+            )
+            if babeldoc_finding_count == 0:
+                logger.info(r2_message)
+            else:
+                logger.warning(r2_message)
+        except Exception:
+            logger.warning(
+                "BL-04 R-2 (dem babeldoc_finding_count tu DB) that bai cho job %s — "
+                "khong anh huong ket qua job (best-effort).",
+                job.id,
+                exc_info=True,
+            )
+
         job.status = "completed"
         job.progress = 1.0
         job.current_chunk = total_chunks
@@ -1919,6 +2171,34 @@ class JobOrchestrator:
                 )
             )
 
+        # BL-04 (Architecture.md 6.22) — babeldoc tu bao cao doan bi bo vi
+        # KHONG VUA KHUNG, kenh KHAC voi Bug #9/font_shrink o tren (audit
+        # Protocol 8 tai 6.22.7: 2 duong ghi song song, khong chia se code).
+        # Capability hoi tu runner (R8-03), khong re nhanh theo ten engine —
+        # cung khuon voi `_needs_font_shrink` ngay tren. Best-effort: 1 loi o
+        # day khong duoc lam fail ca chunk (cung tinh than voi
+        # overlay_rotated_text/persist_findings o Buoc 8, `:749-770`).
+        if self._reports_own_paragraph_drops:
+            try:
+                mapping = _map_babeldoc_drop_report_to_findings(pdf2zh_result.drop_report, chunk)
+                if mapping.findings:
+                    await persist_findings(
+                        db_session,
+                        mapping.findings,
+                        job_id=job.id,
+                        source_file=Path(source_path).name,
+                    )
+                _log_babeldoc_drop_report_r1(job.id, chunk, mapping)
+            except Exception:
+                logger.warning(
+                    "BL-04 (babeldoc drop report) that bai cho chunk %s cua job %s — tiep "
+                    "tuc khong co canh bao paragraph-drop cho chunk nay (best-effort, khong "
+                    "lam fail job)",
+                    chunk.chunk_index,
+                    job.id,
+                    exc_info=True,
+                )
+
         source_text = _extract_chunk_text(source_path, chunk)
         segment_count = _count_text_segments(source_path, chunk.page_start, chunk.page_end)
         input_tokens, output_tokens, cost_usd = estimate_chunk_cost(
@@ -1938,9 +2218,7 @@ class JobOrchestrator:
         await db_session.commit()
 
     @staticmethod
-    def _log_epub_parse_salvage(
-        job_id: str, chunk_index: int, outcome: EpubParseOutcome
-    ) -> None:
+    def _log_epub_parse_salvage(job_id: str, chunk_index: int, outcome: EpubParseOutcome) -> None:
         """Architecture.md §6.20.14.3 mucB-3 — observability cho lop cuu ho
         (`_salvage_epub_id_pairs()`). `salvaged_count > 0` la tin hieu suc
         khoe (model van sinh JSON hong, chi la da cuu duoc) nen len muc
@@ -1949,8 +2227,7 @@ class JobOrchestrator:
         salvaged_count = len(outcome.salvaged_ids)
         if salvaged_count > 0:
             logger.warning(
-                "EPUB parse salvage (Lop B): job=%s chunk=%s salvaged_count=%d "
-                "salvaged_ids=%s",
+                "EPUB parse salvage (Lop B): job=%s chunk=%s salvaged_count=%d salvaged_ids=%s",
                 job_id,
                 chunk_index,
                 salvaged_count,

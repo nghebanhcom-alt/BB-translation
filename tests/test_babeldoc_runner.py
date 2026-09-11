@@ -22,9 +22,13 @@ import fitz  # PyMuPDF
 import pytest
 
 from src.services.babeldoc_runner import (
+    BabeldocDroppedParagraph,
     BabeldocError,
+    BabeldocResult,
     BabeldocRunner,
     BabeldocTimeoutError,
+    _parse_drop_report_file,
+    _parse_drop_report_lines,
     _resolve_openai_compat,
 )
 from src.services.pdf2zh_service_map import Pdf2zhService, UnsupportedForPdfPipelineError
@@ -669,3 +673,272 @@ def test_golden_mono_output_filename_matches_live_spike_listing() -> None:
     expected_dual = f"{stem}.no_watermark.{lang_out}.dual.pdf"
     assert expected_mono in listing
     assert expected_dual in listing
+
+
+# --- BL-04 (Architecture.md 6.22.4/6.22.5) — sidecar drop report ------------
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_sets_drop_report_env_vars_inside_output_dir(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(drop_report_enabled=True)
+    input_path = tmp_path / "input.pdf"
+    output_dir = tmp_path / "out"
+    await runner.translate_pages(
+        input_path=input_path,
+        output_dir=output_dir,
+        page_range="199-240",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert env["BABELDOC_SHIM_DROP_REPORT"] == "1"
+    # Architecture.md 6.22.4 "Vi tri file" — BAT BUOC nam TRONG output_dir
+    # (== chunk_output_dir cua _call_translator()), voi page_range trong ten
+    # file de 2 chunk chay song song khong ghi de nhau.
+    expected_path = output_dir / "input.199-240.drops.jsonl"
+    assert env["BABELDOC_SHIM_DROP_REPORT_PATH"] == str(expected_path)
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_drop_report_env_flag_0_when_disabled(tmp_path: Path, mocker) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(drop_report_enabled=False)
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert env["BABELDOC_SHIM_DROP_REPORT"] == "0"
+    # Path VAN duoc truyen (shim doc _drop_report_enabled() rieng) — chi co
+    # gia tri BAT/TAT thay doi, khong phai su co mat cua bien path.
+    assert "BABELDOC_SHIM_DROP_REPORT_PATH" in env
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_drop_report_env_absent_when_shim_disabled(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    create_exec = mocker.patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process)
+    )
+    runner = BabeldocRunner(line_split_shim_enabled=False, drop_report_enabled=True)
+    await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    env = create_exec.call_args.kwargs["env"]
+    assert "BABELDOC_SHIM_DROP_REPORT" not in env
+    assert "BABELDOC_SHIM_DROP_REPORT_PATH" not in env
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_reads_drop_report_from_exact_sidecar_path(
+    tmp_path: Path, mocker
+) -> None:
+    """`BabeldocRunner` phai doc DUNG file sidecar ma no vua truyen duong dan
+    qua env cho subprocess — khong tu doan duong dan khac, khong doc stdout."""
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    mocker.patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process))
+
+    runner = BabeldocRunner()
+    input_path = tmp_path / "input.pdf"
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True)
+    sidecar_path = output_dir / "input.1-10.drops.jsonl"
+    sidecar_path.write_text(
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}\n'
+        '{"type":"page","page_number_1based":1,"paragraph_count":2,"dropped_count":1}\n'
+        '{"type":"drop","page_number_1based":1,"debug_id":"abc12","layout_label":"plain text",'
+        '"box":[1.0,2.0,3.0,4.0],"optimal_scale":0.1,"scale":null,'
+        '"text_excerpt":"mat het roi","text_len":11}\n',
+        encoding="utf-8",
+    )
+
+    result = await runner.translate_pages(
+        input_path=input_path,
+        output_dir=output_dir,
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+
+    assert result.drop_report.available is True
+    assert result.drop_report.observed_pages == frozenset({1})
+    assert len(result.drop_report.dropped) == 1
+    assert result.drop_report.dropped[0].debug_id == "abc12"
+    assert result.drop_report.dropped[0].page_number == 1
+    assert result.drop_report.dropped[0].box == (1.0, 2.0, 3.0, 4.0)
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_missing_sidecar_file_yields_unavailable_report(
+    tmp_path: Path, mocker
+) -> None:
+    fake_process = _FakeProcess(returncode=0, stderr=b"")
+    mocker.patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process))
+    runner = BabeldocRunner()
+    result = await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    assert result.drop_report.available is False
+    assert result.drop_report.dropped == []
+    assert result.drop_report.header_count == 0
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_counts_drop_sentinel_from_stdout_and_stderr(
+    tmp_path: Path, mocker
+) -> None:
+    sentinel = "Unable to export paragraphs that have not yet been formatted"
+    stdout_payload = f"{sentinel}: foo\n{sentinel}: bar\n".encode()
+    fake_process = _FakeProcess(returncode=0, stdout=stdout_payload, stderr=b"")
+    mocker.patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process))
+    runner = BabeldocRunner()
+    result = await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-10",
+        service=_DEEPSEEK_SERVICE,
+    )
+    assert result.drop_report.stdout_sentinel_count == 2
+
+
+# --- _parse_drop_report_lines / _parse_drop_report_file (thuan) ------------
+
+
+def test_parse_drop_report_lines_multiple_headers_are_normal() -> None:
+    """macOS `mp.set_start_method("spawn")` -> moi process con re-import
+    sitecustomize -> co the co N dong header. Parser CHI can >=1 dong hop
+    le, KHONG gia dinh dung 1 dong (Architecture.md 6.22.4 "Quy tac parse")."""
+    lines = [
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}',
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":2}',
+        '{"type":"page","page_number_1based":1,"paragraph_count":1,"dropped_count":0}',
+    ]
+    report = _parse_drop_report_lines(lines)
+    assert report.available is True
+    assert report.header_count == 2
+    assert report.observed_pages == frozenset({1})
+    assert report.dropped == []
+
+
+def test_parse_drop_report_lines_malformed_line_counted_not_fatal() -> None:
+    lines = [
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}',
+        "not valid json {{{",
+        '{"type":"page","page_number_1based":1,"paragraph_count":1,"dropped_count":0}',
+    ]
+    report = _parse_drop_report_lines(lines)
+    assert report.available is True
+    assert report.malformed_line_count == 1
+    assert report.observed_pages == frozenset({1})
+
+
+def test_parse_drop_report_lines_no_header_is_unavailable() -> None:
+    lines = ['{"type":"page","page_number_1based":1,"paragraph_count":1,"dropped_count":0}']
+    report = _parse_drop_report_lines(lines)
+    assert report.available is False
+
+
+def test_parse_drop_report_lines_blank_lines_ignored() -> None:
+    lines = [
+        "",
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}',
+        "   ",
+    ]
+    report = _parse_drop_report_lines(lines)
+    assert report.available is True
+    assert report.malformed_line_count == 0
+
+
+def test_parse_drop_report_file_missing_file_is_unavailable(tmp_path: Path) -> None:
+    report = _parse_drop_report_file(tmp_path / "does-not-exist.jsonl")
+    assert report.available is False
+    assert report.dropped == []
+    assert report.header_count == 0
+    assert report.malformed_line_count == 0
+
+
+def test_parse_drop_report_file_reads_real_written_file(tmp_path: Path) -> None:
+    path = tmp_path / "real.jsonl"
+    path.write_text(
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}\n'
+        '{"type":"page","page_number_1based":230,"paragraph_count":9,"dropped_count":1}\n'
+        '{"type":"drop","page_number_1based":230,"debug_id":"z9","layout_label":"plain text",'
+        '"box":[61.5,223.6,332.3,466.6],"optimal_scale":0.1,"scale":null,'
+        '"text_excerpt":"The term feuilletage...","text_len":614}\n',
+        encoding="utf-8",
+    )
+    report = _parse_drop_report_file(path)
+    assert report.available is True
+    assert report.observed_pages == frozenset({230})
+    assert report.page_dropped_counts == {230: 1}
+    assert len(report.dropped) == 1
+    dropped = report.dropped[0]
+    assert dropped == BabeldocDroppedParagraph(
+        page_number=230,
+        debug_id="z9",
+        layout_label="plain text",
+        box=(61.5, 223.6, 332.3, 466.6),
+        optimal_scale=0.1,
+        scale=None,
+        text_excerpt="The term feuilletage...",
+        text_len=614,
+    )
+
+
+def test_parse_drop_report_file_reads_real_live_e2e_golden_fixture() -> None:
+    """Gate test 1 (`test_drop_report_parse`, Architecture.md 6.22.9) — parses
+    `tests/fixtures/babeldoc/drop_report_v2.jsonl`, the REAL sidecar written
+    by a real `babeldoc` 0.6.4 subprocess during the live E2E harness
+    (`scripts/bl04_live_e2e_chunk5.py`, 2026-09-11, chunk 5/`--pages
+    199-240`/job `1ee1fdee`'s source file) — not hand-typed (R5-03/R6-03).
+
+    That live run did NOT reproduce a `type=drop` line this time (dịch máy
+    không tất định — see `tests/fixtures/babeldoc/README.md` "drop_report_v2.jsonl"
+    for the full investigation, including live confirmation via PyMuPDF that
+    the real feuilletage sidebar IS missing from that run's translated page
+    230 output anyway, just via a different, out-of-scope-for-BL-04 channel).
+    So this test only covers the `header`/`page`/`observed_pages` branches
+    against real bytes; the `type=drop` field-shape branch stays covered by
+    `test_parse_drop_report_file_reads_real_written_file` above (schema
+    verified against source per R5-01, not live-captured).
+    """
+    report = _parse_drop_report_file(_FIXTURES / "drop_report_v2.jsonl")
+
+    assert report.available is True
+    assert report.header_count == 4  # 4 multiprocessing workers re-imported sitecustomize
+    assert report.malformed_line_count == 0
+    assert report.observed_pages == frozenset(range(199, 241))  # 42/42
+    assert report.dropped == []
+    assert all(count == 0 for count in report.page_dropped_counts.values())
+    assert report.page_dropped_counts[230] == 0  # the page Domain Expert found the real drop on
+
+
+def test_babeldoc_drop_report_dataclass_default_is_unavailable_not_zero_drops() -> None:
+    """`BabeldocResult.drop_report` default (call sites khong truyen field
+    nay) PHAI la trang thai 4 'KHONG do duoc', KHONG duoc coi la '0 drop
+    that su' — chinh la phan biet chinh cua Architecture.md 6.22.6."""
+    result = BabeldocResult(
+        success=True,
+        mono_path=Path("/tmp/x.pdf"),
+        dual_path=None,
+        stderr="",
+        duration_seconds=0.1,
+    )
+    assert result.drop_report.available is False

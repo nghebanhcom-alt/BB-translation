@@ -142,6 +142,34 @@ rollback DOC LAP hoan toan (BA10.7 rang buoc #1): babeldoc doi cau truc
 `typesetting.py` khong lam hong 3 patch Bug #7, va nguoc lai. Doc lap voi
 bien BABELDOC_SHIM_WORD_WRAP_FIX (mac dinh "1" — BAT, KHAC TOC-1 v2: day la
 fix so hoc dung/sai, khong phai heuristic can tune truoc khi bat mac dinh).
+
+BL-04 — OBSERVER PARAGRAPH-DROP KHONG VUA KHUNG (Architecture.md 6.22.4)
+-------------------------------------------------------------------------
+Vá THEM, o MODULE KHAC nua (`babeldoc.format.pdf.document_il.backend.
+pdf_creater`, giai doan GHI PDF — chay SAU CA typesetting) — KHONG co phu
+thuoc thu tu voi 3 patch tren. Bug #9 da tat `font_shrink_page()` cho engine
+babeldoc (babeldoc tu bop chu toi `min_scale=0.1` roi BO HAN doan neu van
+khong vua khung — KHONG BAO GIO ve tran ra ngoai box, xem 6.22.2), nen nhanh
+babeldoc khong con cach nao de app tu phat hien doan bi bo. Patch nay CHI
+DOC (khong sua hanh vi typeset/render — khac han 3 patch tren): boc
+`PDFCreater.create_render_units_for_page` de, sau khi ham goc chay xong,
+duyet `page.pdf_paragraph` tim doan thoa predicate drop
+(`drop_report.is_dropped`, sao chep dung dinh nghia cua chinh babeldoc) va
+ghi ra file sidecar JSONL (duong dan do app truyen qua bien moi truong
+BABELDOC_SHIM_DROP_REPORT_PATH) — app doc file nay sau khi subprocess ket
+thuc (`BabeldocRunner`), KHONG doc qua stdout (stdout dung rich wrap, khong
+tin cay duoc de trich payload — xem Architecture.md 6.22.3).
+
+Thuat toan thuan (predicate + dung dict record + ghi JSONL) nam trong
+`drop_report.py`, dung chung voi test golden fixture (Protocol 6 R6-02).
+Toan bo phan QUAN SAT trong wrapper o day bi bao trong try/except RIENG
+(khac 3 patch tren): mot loi trong observer khong bao gio duoc lam hong viec
+render PDF — ham goc LUON duoc goi va ket qua LUON duoc tra ve dung, bat ke
+buoc ghi sidecar co thanh cong hay khong.
+
+Doc lap voi bien BABELDOC_SHIM_DROP_REPORT (mac dinh "1" — bat), tuong ung
+Settings.babeldoc_drop_report_enabled. Chi co tac dung khi shim tong
+(line_split_shim_enabled) cung bat, vi PYTHONPATH do no set.
 """
 
 from __future__ import annotations
@@ -165,6 +193,12 @@ _PARAGRAPH_FINDER_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.paragrap
 #: patch ParagraphFinder (BA10.7 rang buoc #1): neu babeldoc doi cau truc
 #: `typesetting.py`, 3 patch Bug #7 van phai chay binh thuong, va nguoc lai.
 _TYPESETTING_MODULE_NAME = "babeldoc.format.pdf.document_il.midend.typesetting"
+#: BL-04 (Architecture.md 6.22.4). Module RIENG nua — patch nay vá
+#: `PDFCreater.create_render_units_for_page` (giai doan ghi PDF, chay SAU
+#: typesetting) va rollback DOC LAP hoan toan voi 2 module tren (BA10.7 rang
+#: buoc #1: babeldoc doi cau truc `pdf_creater.py` khong duoc lam hong 2
+#: patch kia, va nguoc lai).
+_PDF_CREATER_MODULE_NAME = "babeldoc.format.pdf.document_il.backend.pdf_creater"
 
 
 def _numbered_list_split_enabled() -> bool:
@@ -182,6 +216,20 @@ def _word_wrap_fix_enabled() -> bool:
     # fix so hoc dung/sai (bo 1 phep cong thua), khong phai heuristic doan y
     # do layout can tune truoc khi bat mac dinh (Architecture.md BA10.8).
     return os.environ.get("BABELDOC_SHIM_WORD_WRAP_FIX", "1") != "0"
+
+
+def _drop_report_enabled() -> bool:
+    # BL-04 (Architecture.md 6.22.4): mac dinh "1" (BAT), tuong ung
+    # Settings.babeldoc_drop_report_enabled.
+    return os.environ.get("BABELDOC_SHIM_DROP_REPORT", "1") != "0"
+
+
+def _drop_report_path() -> str | None:
+    # BL-04: duong dan sidecar JSONL do `BabeldocRunner` quyet dinh (BAT BUOC
+    # nam trong chunk_output_dir — Architecture.md 6.22.4 "Vi tri file"), gui
+    # qua bien moi truong nay. `None` (bien khong duoc set) = khong ghi gi ca
+    # ke ca khi _drop_report_enabled() la True.
+    return os.environ.get("BABELDOC_SHIM_DROP_REPORT_PATH")
 
 
 def _is_whitespace_char(char: object) -> bool:
@@ -599,6 +647,98 @@ def _apply_typesetting_patch(typesetting_module: ModuleType) -> None:
     )
 
 
+def _build_patched_create_render_units_for_page(pdf_creater_module: ModuleType):
+    """Boc `PDFCreater.create_render_units_for_page` (BL-04, Architecture.md
+    6.22.4): CHI DOC — chay ham goc TRUOC, luon tra ve dung ket qua cua ham
+    goc; phan quan sat (ghi sidecar JSONL) nam trong try/except RIENG cua no
+    de mot loi o day KHONG BAO GIO lam hong viec render PDF (khac han 3 patch
+    Bug #7/#10 vi day la patch quan sat thuan tuy, khong sua hanh vi).
+
+    `PYTHONPATH` (truyen tu `BabeldocRunner`) tro THANG vao thu muc nay, nen
+    import module anh em bang ten tran — xem giai thich chi tiet o
+    `_build_patched_split_paragraph_into_lines` phia tren.
+    """
+    from drop_report import append_jsonl_record, collect_page_records
+
+    original = pdf_creater_module.PDFCreater.create_render_units_for_page
+
+    def patched(self, page, translation_config):
+        render_units = original(self, page, translation_config)
+        try:
+            if not _drop_report_enabled():
+                return render_units
+            path = _drop_report_path()
+            if not path:
+                return render_units
+            # Architecture.md 6.22.4 "So trang" — 0-based trong tai lieu GOC,
+            # +1 thanh 1-based truoc khi ghi ra ngoai.
+            page_number_1based = page.page_number + 1
+            page_record, drop_records = collect_page_records(page, page_number_1based)
+            append_jsonl_record(path, page_record)
+            for record in drop_records:
+                append_jsonl_record(path, record)
+        except Exception:
+            logger.warning(
+                "babeldoc_shim: BL-04 drop-report observer that bai tren 1 "
+                "trang — bo qua, KHONG anh huong render PDF.",
+                exc_info=True,
+            )
+        return render_units
+
+    return patched
+
+
+def _apply_pdf_creater_patch(pdf_creater_module: ModuleType) -> None:
+    """Ap patch OBSERVER (BL-04) len `PDFCreater.create_render_units_for_page`.
+
+    Goi tu `exec_module` wrapper cua import hook RIENG cho module
+    `pdf_creater` (rollback DOC LAP voi patch ParagraphFinder cua Bug #7 va
+    patch Typesetting cua Bug #10 — BA10.7 rang buoc #1). Boc trong
+    try/except o noi goi (`_PatchingLoader`), giong het co che fail-safe cua
+    2 patch kia — neu `PDFCreater` doi cau truc, patch nay khong duoc ap,
+    babeldoc chay voi hanh vi GOC (khong co drop report, KHONG anh huong
+    render).
+    """
+    PDFCreater = pdf_creater_module.PDFCreater
+    if not hasattr(PDFCreater, "create_render_units_for_page"):
+        raise AttributeError(
+            "PDFCreater khong co method create_render_units_for_page — cau "
+            "truc babeldoc co the da doi, khong ap patch BL-04."
+        )
+    PDFCreater.create_render_units_for_page = _build_patched_create_render_units_for_page(
+        pdf_creater_module
+    )
+    if _drop_report_enabled():
+        path = _drop_report_path()
+        if path:
+            # Architecture.md 6.22.4 "Dong header": ghi luc patch duoc ap
+            # thanh cong (import module), TRUOC khi render bat ky trang nao.
+            # Boc try/except RIENG: neu ghi header that bai (vd duong dan
+            # khong hop le), patch OBSERVER van duoc ap (moi lan goi sau se tu
+            # bat loi tuong tu va bo qua qua try/except cua chinh no o tren)
+            # — khong lam that bai toan bo viec ap patch cac module khac.
+            try:
+                from drop_report import append_jsonl_record, build_header_record
+
+                append_jsonl_record(
+                    path, build_header_record(_EXPECTED_BABELDOC_VERSION, os.getpid())
+                )
+            except Exception:
+                logger.warning(
+                    "babeldoc_shim: BL-04 khong ghi duoc dong header vao %s — "
+                    "drop report se bao available=False (khong co header hop "
+                    "le nao) cho toi khi ghi duoc.",
+                    path,
+                    exc_info=True,
+                )
+    logger.warning(
+        "babeldoc_shim: da vá PDFCreater.create_render_units_for_page (BL-04 "
+        "— observer paragraph-drop khong vua khung, %s). PYTHONPATH shim "
+        "dang hoat dong.",
+        "bat" if _drop_report_enabled() else "TAT qua BABELDOC_SHIM_DROP_REPORT=0",
+    )
+
+
 class _PatchingLoader(importlib.abc.Loader):
     """Boc loader that cua module muc tieu de chay patch NGAY SAU khi module
     duoc exec xong (khong dung truoc do — cac class/ham chua ton tai).
@@ -735,6 +875,11 @@ def _install_hook_if_version_matches() -> None:
         _TYPESETTING_MODULE_NAME,
         _apply_typesetting_patch,
         f"Typesetting (Bug #10, {_TYPESETTING_MODULE_NAME})",
+    )
+    _install_patch_hook(
+        _PDF_CREATER_MODULE_NAME,
+        _apply_pdf_creater_patch,
+        f"PDFCreater (BL-04, {_PDF_CREATER_MODULE_NAME})",
     )
 
 

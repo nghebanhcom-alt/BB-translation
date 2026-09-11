@@ -133,3 +133,37 @@ dùng bởi `tests/test_image_compress.py`.
   `Indexed` — `Pixmap.colorspace.name` không bao giờ trả `'Indexed(...)'` vì PyMuPDF tự expand
   Indexed sang base colorspace ngay khi dựng `Pixmap` (Architecture.md W1/X2). Test gọi với
   `min_recompress_bytes=0` để cô lập đúng guard colorspace, không lẫn với guard kích thước.
+
+### `drop_report_v2.jsonl`
+
+- **Job**: live E2E gate BL-04 (Architecture.md 6.22.9, X8 harness) — `JobOrchestrator._process_chunk()`
+  gọi TRỰC TIẾP (không qua `run_job()`), `chunk_index=5, page_start=199, page_end=240,
+  overlap_start=199, overlap_end=200`, engine `babeldoc` 0.6.4, model `deepseek`, nguồn
+  `data/uploads/f07b3194-b98e-4227-9516-198c6c91ff75_Le-Cordon-Bleu-Patisserie-and-Baking-Foundations
+  (1).pdf` (418 trang) — script tái tạo: `scripts/bl04_live_e2e_chunk5.py`.
+- **Ngày trích**: 2026-09-11.
+- **Nguồn**: copy nguyên văn sidecar JSONL thật do `BabeldocRunner` ghi ra (không sửa tay) tại
+  `data/bl04_live_e2e/processing/<job_id>/chunk_5/<stem>.199-240.drops.jsonl` sau khi
+  `process.wait()`.
+- **Nội dung xác nhận**: 4 dòng `header` (multiprocessing worker, `pid` khác nhau — đúng thiết kế
+  "không giả định chỉ 1 dòng header", Architecture.md 6.22.4), 42 dòng `page` (199-240 đủ 42/42,
+  `dropped_count=0` cho MỌI trang kể cả trang 230). **Không có dòng `type=drop` nào** — lần chạy
+  live này KHÔNG tái hiện được ca drop kênh (1) mà Domain Expert từng đo trên job `1ee1fdee` (xem
+  Architecture.md 6.22.9 "Nếu không tái hiện được... không kết luận thiết kế sai", dịch máy không
+  tất định). **Đã xác nhận bằng PyMuPDF** (mở `chunk.output_path`, trang index 31 = trang nguồn
+  230): đoạn sidebar 614 ký tự ("The term feuilletage appeared in the 15th century...") THẬT SỰ
+  vắng mặt khỏi bản dịch — nhưng đây là kênh (2) (BL-08, ngoài phạm vi BL-04), KHÔNG phải kênh (1)
+  mà file sidecar này đo — khớp với `dropped_count=0` ở trang 230 trong chính file này và với ghi
+  chú phạm vi trong log R-1 ("chữ bị lọc ở `ActiveILCreater.project_native_char`... KHÔNG được đo
+  bởi cơ chế này"). Đã thử thêm 1 lần live fallback (b) — `scripts/bl04_live_e2e_synthetic_drop.py`,
+  PDF 1 trang tái tạo đúng hình học (bbox 61.5,223.6,332.3,466.6, 271×243pt) + đúng 614 ký tự gốc —
+  babeldoc KHÔNG dịch trang này (giữ nguyên tiếng Anh, `dropped_count=0`), nhiều khả năng do trang
+  đơn lẻ không có ngữ cảnh layout xung quanh khiến bộ phân loại layout của babeldoc xử lý khác đi;
+  không kết luận được gì thêm từ lần thử này, không lặp lại thêm (chi phí gọi API thật).
+- **Dùng để test**: gate test 1 (`test_drop_report_parse`, §6.22.9) — CHỈ phủ được nhánh
+  `header`/`page`/`observed_pages`/`available=True` từ dữ liệu thật; nhánh `type=drop` (field
+  `text_excerpt`, v.v.) vẫn dựa vào unit test hiện có
+  (`test_parse_drop_report_file_reads_real_written_file`,
+  `tests/test_babeldoc_runner.py`) — dùng dữ liệu MÔ PHỎNG đúng schema đã verify qua source
+  (Architecture.md 6.22.4/6.22.5, R5-01), không phải byte live-capture, vì 2 lần thử live ở trên
+  đều không tạo ra dòng `drop` thật nào để capture.

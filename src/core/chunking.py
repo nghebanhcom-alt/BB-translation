@@ -8,6 +8,7 @@ imports both (the Job Orchestrator does).
 
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
 from src.services.epub_document import EpubUnit
 
@@ -101,6 +102,62 @@ def plan_chunks(
             )
         ]
     return calculate_chunks(total_pages, chunk_size=chunk_size, overlap=overlap)
+
+
+# ---------------------------------------------------------------------------
+# BL-04 (Architecture.md 6.22.5.1) — dai trang song sot sau merge, dung
+# CHUNG boi `merge_chunk_pdfs()` (src/postprocess/chunk_merge.py) va
+# `JobOrchestrator._process_chunk()` (loc drop report). Dat o day (module
+# dinh nghia luat chong lan `calculate_chunks`) chu khong o chunk_merge.py
+# hay job_orchestrator.py, de tranh 2 ban sao lech nhau (dung khuon Bug #5).
+# ---------------------------------------------------------------------------
+
+
+class _ChunkLike(Protocol):
+    """Structural typing — hop ca `ChunkPlan` (trong module nay) lan
+    `src.models.chunk.Chunk` (SQLModel) MA KHONG import model do (tranh phu
+    thuoc nguoc tu module thuan sang tang DB).
+
+    `int | None` (KHONG phai `int`) — X2, 2026-09-11: `Chunk.page_start`/
+    `page_end` la NULLABLE tu 6.20.7 (chunk EPUB dung `unit_start`/`unit_end`
+    thay the). Khai `int` o day se la khai SAI su that ve kieu du lieu that
+    su duoc truyen vao (`merge_chunk_pdfs(chunks: Sequence[Chunk])` truyen
+    CHINH model do).
+    """
+
+    page_start: int | None
+    page_end: int | None
+    overlap_start: int | None
+    overlap_end: int | None
+
+
+def surviving_page_range(chunk: _ChunkLike, *, is_first_in_merge: bool) -> tuple[int, int]:
+    """Dai trang 1-based (INCLUSIVE) cua `chunk` THUC SU co mat trong file da
+    merge (Architecture.md 6.22.5.1).
+
+    Chi so huu quy tac `start` (`actual_start = chunk.overlap_end + 1` khi
+    KHONG phai chunk dau tien VA co du overlap_start/overlap_end) — quy tac
+    `end` (kep theo `chunk_doc.page_count` cua file PDF that) phu thuoc file
+    tren dia nen O LAI `chunk_merge.py`, KHONG chuyen vao day (X3, 2026-09-11).
+
+    `start > end` tra ve nghia la chunk khong dong gop trang nao vao file
+    cuoi (vd chunk chi toan overlap). Raise `ValueError` neu `page_start`/
+    `page_end` la `None` — chunk EPUB khong co dai trang, khong dung duoc ham
+    nay (X2): loi phai no ro rang o day, khong duoc de `None + 1` no
+    `TypeError` mat dau vet o mot cho khac.
+    """
+    if chunk.page_start is None or chunk.page_end is None:
+        raise ValueError(
+            "surviving_page_range: chunk khong co page_start/page_end (chunk EPUB dung "
+            "unit_start/unit_end thay the, Architecture.md 6.20.7) — khong dung duoc ham "
+            "nay cho chunk EPUB."
+        )
+
+    actual_start = chunk.page_start
+    if not is_first_in_merge and chunk.overlap_start is not None and chunk.overlap_end is not None:
+        actual_start = chunk.overlap_end + 1
+
+    return actual_start, chunk.page_end
 
 
 # ---------------------------------------------------------------------------

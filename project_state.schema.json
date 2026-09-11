@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "project_state (BB-Translation)",
+  "description": "Trạng thái chung của dự án — Protocol 4 (mở rộng, CLAUDE.md project). Dữ liệu CÓ CẤU TRÚC, KHÔNG chứa văn xuôi tự do mô tả sự kiện. Mô tả sự kiện/lý do thuộc docs/CHANGELOG.md, docs/design-log.md, docs/decisions-archive.md, docs/escalation-log.md.",
+  "type": "object",
+  "required": [
+    "project_name",
+    "phase",
+    "version",
+    "updated_at",
+    "team",
+    "documents",
+    "checkpoints",
+    "open_questions",
+    "backlog",
+    "steps",
+    "loops",
+    "infra_pending",
+    "blockers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "project_name": { "type": "string", "maxLength": 80 },
+    "project_description": { "type": "string", "maxLength": 200 },
+    "phase": {
+      "type": "string",
+      "enum": ["planning", "design", "build", "verify", "released"]
+    },
+    "version": { "type": "string", "maxLength": 20 },
+    "released_at": {
+      "type": ["string", "null"],
+      "format": "date",
+      "description": "Ngày release GẦN NHẤT — độc lập với phase. phase=build + released_at đã set là hợp lệ (đang làm tiếp trên nền đã release)."
+    },
+    "updated_at": { "type": "string" },
+    "team": {
+      "type": "object",
+      "required": ["persistent", "checkpoint_experts"],
+      "additionalProperties": false,
+      "properties": {
+        "persistent": { "type": "array", "items": { "type": "string" } },
+        "checkpoint_experts": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "documents": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "document", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 20 },
+          "document": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "approved", "stale"] },
+          "approved_version": { "type": ["string", "null"] },
+          "approved_commit": { "type": ["string", "null"] },
+          "approved_at": { "type": ["string", "null"] },
+          "current_version": { "type": ["string", "null"] },
+          "status_reason": { "type": ["string", "null"], "maxLength": 200 }
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "asked_by", "status", "blocks"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^(HOI|BUG)-[0-9]+[a-zA-Z0-9]*$" },
+          "text": { "type": "string", "maxLength": 220 },
+          "asked_by": { "type": "string", "maxLength": 40 },
+          "origin": { "type": ["string", "null"], "maxLength": 80 },
+          "blocks": { "type": "array", "items": { "type": "string" } },
+          "default": { "type": ["string", "null"], "maxLength": 200 },
+          "status": { "type": "string", "enum": ["open", "answered", "deferred"] },
+          "answered_in": { "type": ["string", "null"], "maxLength": 120 },
+          "clarify_rounds": { "type": "integer", "minimum": 0, "maximum": 2 }
+        }
+      }
+    },
+    "backlog": {
+      "type": "array",
+      "description": "Finding non-blocking từ Reviewer/QA. KHÔNG chặn release, nhưng không được im lặng biến mất.",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "source", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^BL-[0-9]+$" },
+          "text": { "type": "string", "maxLength": 220 },
+          "source": { "type": "string", "maxLength": 40 },
+          "ref": { "type": ["string", "null"], "maxLength": 160 },
+          "status": { "type": "string", "enum": ["open", "done", "wontfix"] }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "owner_role", "status", "blocked_by"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 12 },
+          "title": { "type": "string", "maxLength": 100 },
+          "owner_role": { "type": "string", "maxLength": 30 },
+          "status": {
+            "type": "string",
+            "enum": ["todo", "in_progress", "blocked", "review", "done"]
+          },
+          "blocked_by": { "type": "array", "items": { "type": "string" } },
+          "output": { "type": ["string", "null"] },
+          "closed_commit": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "loops": {
+      "type": "array",
+      "description": "Bộ đếm Circuit Breaker (Protocol 3 mở rộng) cho MỌI cặp agent trả việc qua lại, không chỉ Dev↔Reviewer/QA.",
+      "items": {
+        "type": "object",
+        "required": ["pair", "item", "count", "limit"],
+        "additionalProperties": false,
+        "properties": {
+          "pair": { "type": "string", "maxLength": 40 },
+          "item": { "type": "string", "maxLength": 40 },
+          "count": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1 },
+          "escalated_at": { "type": ["string", "null"] },
+          "reset_reason": { "type": ["string", "null"], "maxLength": 160 }
+        }
+      }
+    },
+    "infra_pending": {
+      "type": "array",
+      "description": "Protocol E — thay đổi đã áp dụng lên môi trường thật (.env, data/, version tool bên thứ 3, model/provider config) nhưng chưa có commit tương ứng.",
+      "items": {
+        "type": "object",
+        "required": ["id", "applied_at", "target", "description", "commit"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "maxLength": 20 },
+          "applied_at": { "type": "string" },
+          "target": { "type": "string", "maxLength": 60 },
+          "description": { "type": "string", "maxLength": 160 },
+          "commit": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 20 },
+      "description": "CHỈ chứa id trỏ tới open_questions[].id / infra_pending[].id / checkpoints[].id — không chứa câu văn."
+    }
+  }
+}

@@ -2226,3 +2226,253 @@ Cả 4 mục BL-01/02/03/05 đều PASS khi verify bằng dữ liệu/tool thậ
   `get_effective_settings()`.
 - Regression suite đầy đủ: 773/773 pass, ruff sạch.
 - Không đụng `data/bb_translation.db` thật, không để lại tiến trình treo.
+
+---
+
+# Test Report — BL-04 (babeldoc drop report) — QA Vòng 1
+
+- **QA**: QA (Sonnet)
+- **Phạm vi**: BL-04 (Architecture.md §6.22), sau khi Dev implement xong + Reviewer APPROVE vòng 1/3
+  (`docs/review-report.md`, mục "Review Report — BL-04 Implementation..."). QA vòng đầu tiên — re-run
+  độc lập theo đúng Protocol 5 điểm 4 ("QA phải re-run trước khi duyệt"), không tin số Dev/Reviewer
+  báo cáo.
+
+## Bối cảnh nhận việc
+
+Dev đã chạy live E2E 2 lần thật (`scripts/bl04_live_e2e_chunk5.py`, `--pages 199-240`, babeldoc 0.6.4
++ DeepSeek thật) trên job thật `1ee1fdee`/chunk 5 của Le Cordon Bleu — **cả 2 lần đều KHÔNG tái hiện
+được ca drop kênh 1** tại trang 230 (`unfit_drops=0`), dù sidebar 614 ký tự vẫn xác nhận vắng mặt
+khỏi bản dịch (kênh khác, ngoài phạm vi BL-04 — xem CHANGELOG mục BL-04). Nghĩa là tại thời điểm QA
+nhận việc, **chưa từng có 1 lần chạy thật nào quan sát trọn vẹn nhánh `type=drop`** (từ babeldoc dừng
+thật → shim ghi dòng `drop` thật → orchestrator map sang `LayoutQaFinding` thật) — nhánh này mới chỉ
+được phủ ở mức "schema verified qua source + mapping test dùng sidecar dựng tay đúng schema", theo
+đúng ghi nhận trung thực của Dev/Reviewer.
+
+Theo brief PM: **không cần cố tái hiện ca drop kênh 1 thật qua DeepSeek** (tốn tiền, PM đã chấp nhận
+mức verify hiện tại cho phần "positive case" real-book). Việc của QA là tự dựng 1 ca "drop chắc chắn
+xảy ra" bằng cách RẺ HƠN — vẫn đi qua babeldoc CLI thật + shim thật, nhưng dùng LLM backend giả (local,
+miễn phí) để không tốn tiền — nhằm tự verify độc lập rằng cơ chế (shim quan sát + parse sidecar + map
+sang finding + log R-1/R-2) THỰC SỰ hoạt động đúng khi có input rõ ràng.
+
+## Đọc trước khi test
+
+- `docs/Architecture.md` §6.22.9 "Gate kiểm thử" (dòng 7578-7702) — đặc biệt khối "Live E2E (R5-03 +
+  R6-03)" và câu "Vẫn chưa verify tại thời điểm viết: bản thân cơ chế đo (shim + sidecar) chưa chạy
+  end-to-end lần nào".
+- `docs/CHANGELOG.md` mục "BL-04 — babeldoc không ghi finding..." (cuối file trước đợt này) — đọc để
+  biết Dev đã làm gì, KHÔNG tin để thay verify.
+- `docs/review-report.md` mục "Review Report — BL-04 Implementation... VÒNG 1/3" (cuối file trước đợt
+  này) — Reviewer đã tự đọc source babeldoc 0.6.4 thật (R5-04 YES), tự trace lineage
+  `pdf2zh_result.drop_report` (R6-04), audit 12 test gate — APPROVE, không có blocking issue.
+- Source thật: `src/babeldoc_shim/drop_report.py`, `src/babeldoc_shim/sitecustomize.py` (đọc trực
+  tiếp, không suy đoán), `src/services/babeldoc_runner.py`, `src/core/job_orchestrator.py`
+  (`_process_chunk()`, `_map_babeldoc_drop_report_to_findings`, R-1/R-2 log), `src/services/
+  layout_qa.py`.
+
+## Cách tiếp cận: fake OpenAI-compat LLM backend local (không mock BabeldocRunner/shim)
+
+`BabeldocRunner.translate_pages()` chỉ hỗ trợ backend qua bộ 3 flag `--openai-*` (đọc trực tiếp
+`_resolve_openai_compat()`); không có translator offline/miễn phí nào (không có Ollama cài trên máy
+QA — đã tự kiểm `which ollama` → not found). Để tránh gọi DeepSeek/OpenAI thật (tốn tiền) mà **vẫn**
+chạy `babeldoc` CLI **thật** (subprocess thật, binary `/Users/hieutt/.local/bin/babeldoc` 0.6.4 đã
+cài) + shim **thật** (patch qua `PYTHONPATH`/`sitecustomize.py`, xác nhận qua log
+`"babeldoc_shim: da vá PDFCreater.create_render_units_for_page (BL-04...)"` xuất hiện thật trong
+stderr của mọi lần chạy), QA tự viết 1 HTTP server giả lập OpenAI-compat
+(`fake_openai_server.py`, stdlib `http.server` thuần, không thêm dependency) chạy tại
+`127.0.0.1:<port>`, rồi trỏ `Pdf2zhService.envs["OPENAI_BASE_URL"]` vào đó. Đây **không phải** mock
+`BabeldocRunner`/shim class nào — chỉ thay THAY THẾ NHÀ CUNG CẤP LLM mạng ngoài bằng 1 server cục bộ
+free/instant, giống hệt cách người dùng thật trỏ `--openai-base-url` vào bất kỳ endpoint OpenAI-compat
+nào khác. Server parse đúng 2 hình dạng prompt thật của babeldoc 0.6.4 (đọc trực tiếp source, không
+đoán): prompt JSON hàng loạt (`il_translator_llm_only.py`, marker `"## Here is the input:"`) và
+prompt đơn từng đoạn khi babeldoc tự fallback (`il_translator.py`, marker `"Now translate the
+following text:\n\n"`), rồi trả về bản "dịch" dài hơn NHIỀU LẦN bản gốc (cùng nội dung gốc lặp lại +
+filler tiếng Việt) — ép babeldoc's typesetting thật (không sửa gì cơ chế này) tự phát hiện KHÔNG VỪA
+KHUNG dù đã bóp tới `min_scale=0.1` (đọc trực tiếp `typesetting.py`, không đoán).
+
+**Quá trình dò tham số hình học (ghi lại trung thực, kể cả các lần thất bại)**:
+1. Lần 1 (box 156×156pt gần kín trang, `REPEAT_FACTOR=8`): babeldoc dịch thật, shim ghi sidecar
+   thật, nhưng **0 drop** — `text_len` dịch ra chỉ ~8434 ký tự, vẫn fit ở scale=0.2 (chưa chạm sàn
+   `min_scale=0.1`). Bài học: `min_scale=0.1` cho phép diện tích hiển thị tăng ~100 lần so với baseline
+   scale=1 — repeat factor nhỏ không đủ.
+2. Lần 2 (cùng box, `REPEAT_FACTOR=400`, bật `ignore_cache=True`): tiến trình `babeldoc` treo >3 phút
+   ở 99.9% CPU, phải `kill -9`. Nguyên nhân xác định được qua đọc source
+   (`il_translator_llm_only.py:781-793`): output vượt quá xa khoảng `0.3 < output_tokens/input_tokens
+   < 3` cho phép → rơi vào nhánh fallback dịch từng đoạn + `Levenshtein.distance(input, output)` —
+   với input ban đầu bị parse SAI (do regex marker chưa khớp, echo nguyên cả prompt ~2000 ký tự) nhân
+   với output ~130.000 ký tự, ma trận Levenshtein quá lớn. **Bài học ghi vào code**: giữ tổng ký tự
+   dịch ra trong khoảng thấp (chục nghìn), tránh vừa input vừa output đều lớn.
+3. Lần 3 (trang cực nhỏ 210×14pt / 200×33pt): babeldoc chạy xong nhưng sidecar **không có dòng
+   `type=page` nào cả** — không phải "0 drop", mà là **toàn bộ trang bị bỏ qua hoàn toàn** (không
+   paragraph nào được layout-detector nhận ra). Bài học: có ngưỡng kích thước trang tối thiểu ngầm
+   để layout detector (DocLayout-YOLO, model cache sẵn tại `~/.cache/babeldoc/models/`) còn nhận diện
+   được vùng văn bản.
+4. Lần 4 (trang 100×100pt gần kín, `REPEAT_FACTOR=10`): trang ĐƯỢC nhận diện (3 paragraph), nhưng
+   `0 drop` — repeat factor còn thấp.
+5. **Lần 5 (cấu hình chốt): trang 100×100pt, box (4,4,96,96), 1 câu 62 ký tự tại 8pt,
+   `REPEAT_FACTOR=60`, `ignore_cache=True`** → **THÀNH CÔNG, ca drop thật, tái lập được**: 2 đoạn bị
+   babeldoc tự bỏ, `optimal_scale=0.1` (đúng sàn floor), `text_len` 8279/8339, `layout_label=
+   "fallback_line"` — đúng predicate `is_dropped` thật (`not has_rendered_chars(p) and p.unicode and
+   p.debug_id`).
+
+Toàn bộ script (`fake_openai_server.py`, `step1_force_drop.py`, `step1b_process_chunk.py`,
+`step2_pdf2zh_untouched.py`, `step3_r2_resume.py`) nằm ở scratchpad, không commit — xem mục "Dọn dẹp"
+cuối report.
+
+## 1. Force 1 ca drop thật qua babeldoc CLI thật + shim thật (mục 1 của brief)
+
+**`step1_force_drop.py`** — gọi trực tiếp `BabeldocRunner().translate_pages()` (không qua
+`JobOrchestrator`) với cấu hình chốt ở trên. Kết quả log thật:
+
+```
+success=True
+drop_report.available=True
+drop_report.observed_pages=[1]
+drop_report.header_count=4
+drop_report.page_dropped_counts={1: 2}
+drop_report.dropped count=2
+  DROP page=1 debug_id=uzq5M layout_label=fallback_line box=(4.392, 83.9276, 85.0, 93.744)
+       optimal_scale=0.1 scale=None text_len=8279
+  DROP page=1 debug_id=LQBJw layout_label=fallback_line box=(4.256, 72.1112, 85.272, 81.9276)
+       optimal_scale=0.1 scale=None text_len=8339
+```
+
+Sidecar JSONL thật trên đĩa (`work/output/source_tiny.1-1.drops.jsonl`) khớp đúng nội dung trên,
+đọc trực tiếp bằng `Path.read_text()` (không qua parser production, xác nhận ĐỘC LẬP với
+`_parse_drop_report_file`).
+
+**`step1b_process_chunk.py`** — feed ĐÚNG hình học này vào `JobOrchestrator._process_chunk()` thật
+(DB in-memory thật, `BabeldocRunner` thật, `pdf_translate_engine="babeldoc"`), verify:
+- **2 `LayoutQaFinding` row** được persist thật, `check_type=babeldoc_paragraph_drop_unfit`,
+  `page_number=1` (khớp `chunk.page_start`), `detail["text_excerpt"]` khớp đúng nội dung đoạn bị mất
+  (`"Short overflow probe Bien dich..."` / `"sentence for BL-04 QA Bien dich..."`).
+- **Log R-1 xuất hiện đúng format bắt buộc**, đọc trực tiếp từ log thật:
+  ```
+  WARNING src.core.job_orchestrator: babeldoc drop report: job=9539307a... chunk=0 pages=1-1
+    observed=1/1
+    unfit_drops=2 (surviving 1-1, suppressed_overlap=0, checksum_mismatch=0)
+    — PHAM VI: chi do kenh "khong vua khung"; chu bi loc o
+      ActiveILCreater.project_native_char (xoay/thieu font id) KHONG duoc do boi
+      co che nay (Architecture.md 6.22.6.1)
+  ```
+  Có mẫu số `observed=1/1` đúng như 6.22.6.1 yêu cầu (không "0 drop" trần), có câu PHẠM VI.
+- **Capability guard**: `BabeldocRunner.reports_own_paragraph_drops is True`,
+  `Pdf2zhRunner.reports_own_paragraph_drops is False` — đọc trực tiếp class attribute (không qua
+  subprocess), khớp R8-03.
+
+**Kết luận mục 1: PASS.** Đây là lần đầu tiên nhánh `type=drop` (babeldoc dừng thật → shim ghi dòng
+`drop` thật → orchestrator map sang `LayoutQaFinding` thật, R-1 log thật) được quan sát TRỌN VẸN qua
+1 lần chạy thật — trước đó (kể cả 2 lần live E2E của Dev với DeepSeek thật) nhánh này chưa từng được
+kích hoạt (2 lần đều `unfit_drops=0`), chỉ được phủ bằng mapping test dùng sidecar dựng tay.
+
+## 2. Nhánh pdf2zh KHÔNG bị ảnh hưởng (mục 2 của brief)
+
+**`step2_pdf2zh_untouched.py`** — job PDF 7 trang thật, `pdf_translate_engine="pdf2zh"`,
+`Pdf2zhRunner` giả (fake provider, không cần LLM thật — đúng brief), trang 0 dùng kỹ thuật ép overflow
+đã verify thật của chính Dev (`"|" * 30` @ 14pt qua `insert_text()` mặc định "helv", tận dụng đúng
+metric-mismatch với NotoSerif mà `font_shrink_page()` dùng để đo lại — tái sử dụng HẰNG SỐ đã verify,
+không tự đoán lại từ đầu). Kết quả chạy thật qua `JobOrchestrator.run_job()` đầy đủ (không chỉ
+`_process_chunk()`):
+
+```
+job status=completed
+OverflowReport rows: 1
+  page=0 still_overflow=True font_orig=14.0
+LayoutQaFinding rows total=0 babeldoc_*=0
+```
+
+**Kết luận mục 2: PASS.** `OverflowReport` vẫn được ghi đúng như trước BL-04 (hồi quy Bug #9 không
+xảy ra), và **0** finding `babeldoc_*` nào xuất hiện trên nhánh pdf2zh — capability guard
+(`reports_own_paragraph_drops`) hoạt động đúng, không rẽ nhánh `if engine==` rải rác nào bị lộ ra
+ngoài ý muốn.
+
+## 3. R-2 đếm qua DB SELECT COUNT, không phải in-memory list (mục 3 của brief — X7)
+
+**`step3_r2_resume.py`** — kịch bản khác hẳn con số Dev dùng (60 trang, `chunk_size_used=40` → 2
+chunk `[1-40]`/`[39-60]`, không phải test có sẵn của Dev) để là 1 verify độc lập thật sự:
+
+1. **Lần chạy 1** (mô phỏng crash): `BabeldocRunner` giả — chunk 0 (call index 0) THÀNH CÔNG, sinh 1
+   finding tại trang 15; chunk 1 (call index 1) raise `BabeldocError` (mô phỏng crash giữa job). Kết
+   quả thật: `job.status="failed"`, `chunk statuses=['completed','failed']`, **1** finding
+   `babeldoc_*` đã persist trong DB (thuộc chunk 0).
+2. **Resume**: thay `orchestrator._babeldoc_runner` bằng 1 instance MỚI hoàn toàn (mô phỏng restart
+   process, không còn state in-memory nào từ lần 1), sinh 1 finding mới tại trang 45 (trong dải sống
+   sót `41-60` của chunk 1, tránh bị lọc bởi F1). Gọi lại `run_job()` lần 2.
+3. Kết quả thật:
+   - `resumed_runner.translate_pages.await_count == 1` — xác nhận chunk 0 **KHÔNG** bị chạy lại
+     (đúng "Buoc 7", `if chunk.status != "completed":`).
+   - `job.status="completed"`, tổng **2** finding `babeldoc_*` trong DB (1 cũ + 1 mới).
+   - **Log R-2 thật** (bắt qua `logging.Handler` gắn trực tiếp vào logger
+     `src.core.job_orchestrator`, không parse `caplog` của pytest vì đây là script độc lập):
+     ```
+     babeldoc drop report (job-level, R-2): job=e07a0712... babeldoc_finding_count=2
+     ```
+     — **đúng 2**, KHÔNG phải 1 (nếu R-2 vô tình đếm từ 1 accumulator in-memory chỉ tích luỹ qua lần
+     `_process_chunk()` CỦA LẦN CHẠY NÀY, kết quả sẽ ra 1 — vì lần chạy resume chỉ đi qua
+     `_process_chunk()` đúng 1 lần cho chunk 1).
+
+**Kết luận mục 3: PASS.** Xác nhận R-2 dùng đúng 1 câu `SELECT func.count()` trên DB (đọc lại
+`job_orchestrator.py:1032-1038` khớp với hành vi quan sát được) — đúng X7, đây chính là bug lớp
+"đếm thiếu khi resume sau crash" mà BL-04 X7 sinh ra để phòng.
+
+## 4. Regression suite — tự chạy lại, không tin số Dev/Reviewer báo
+
+```
+uv run pytest tests/ -q       → 816 passed, 1098 warnings, 94.69s   (khớp đúng số Dev/Reviewer báo)
+uv run ruff check src/ tests/ → All checks passed!
+```
+
+## 5. Checklist Protocol 5/6 (CLAUDE.md project)
+
+- **R5-03**: đã có tổng cộng **4 lần gọi thật KHÔNG mock** tới babeldoc CLI 0.6.4 (2 lần của Dev với
+  DeepSeek thật trên sách thật, đã tốn tiền thật; + 2 script của QA — `step1_force_drop.py`,
+  `step1b_process_chunk.py` — babeldoc CLI thật + shim thật, LLM backend là server local free (miễn
+  phí, không phải "release blocked pending live verification" vì đây KHÔNG PHẢI external LLM contract
+  cần verify — contract cần verify là babeldoc↔shim↔sidecar, và contract đó ĐÃ được verify sống ở
+  step1/step1b). Không mock `BabeldocRunner`/shim class nào trong 2 script QA.
+- **R6-02**: `step3_r2_resume.py` assert **giá trị cụ thể** truyền giữa các lần chạy
+  (`resumed_runner.translate_pages.await_count == 1`, `babeldoc_finding_count=2` trong log thật,
+  không chỉ `assert_called()`), đúng tinh thần R6-02.
+- **R6-03**: `step1b_process_chunk.py` là 1 pipeline 2 bước nối tiếp thật (babeldoc dịch → shim ghi
+  sidecar → orchestrator đọc file + persist DB) chạy XUYÊN SUỐT với babeldoc thật, và QA đã **mở
+  `LayoutQaFinding.detail` thật** ra xem `text_excerpt` có đúng đoạn bị mất hay không (không chỉ tin
+  `chunk.status="completed"`).
+- Không phát hiện bug mới. Không cần vòng Dev↔QA nào (Circuit Breaker Protocol 3 không bị chạm tới).
+
+## Dọn dẹp
+
+Không đụng `data/bb_translation.db` thật (xác nhận bằng timestamp: `Sep 10 18:41`, không đổi trước/
+sau phiên QA). Không có tiến trình nền nào bị bỏ treo (fake HTTP server tự `server.shutdown()` cuối
+mỗi script; tiến trình `babeldoc` bị treo ở lần thử tham số thứ 2 đã bị `kill -9` xác nhận sạch qua
+`ps aux | grep babeldoc` trước khi tiếp tục). Không đụng `project_state.json`.
+
+Script/artifact phiên này (scratchpad, không commit):
+`fake_openai_server.py`, `step1_force_drop.py`, `step1b_process_chunk.py`,
+`step2_pdf2zh_untouched.py`, `step3_r2_resume.py`, `work*/` (PDF/DB tạm) — tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/acbb162e-2741-49c5-8146-ca9366358e84/scratchpad/bl04_qa/`.
+
+## Kết luận
+
+**PASS** — cả 3 nhiệm vụ đều PASS bằng dữ liệu/tool THẬT (babeldoc CLI thật, shim thật, DB thật), không
+phát hiện bug nào Dev/Reviewer bỏ sót.
+
+**`ready_for_release: YES`**
+
+Lý do đủ điều kiện, khác với trạng thái "release blocked pending live verification" mà Dev/Reviewer để
+ngỏ ở vòng trước:
+- Khoảng trống lớn nhất còn lại trước vòng QA này là: **nhánh `type=drop` (babeldoc dừng thật → shim
+  ghi dòng `drop` thật → map sang `LayoutQaFinding` thật → log R-1 thật) chưa từng được quan sát trọn
+  vẹn qua 1 lần chạy thật nào** — 2 lần live E2E của Dev (dù tốn tiền DeepSeek thật) đều tình cờ không
+  kích hoạt được nhánh này (`unfit_drops=0` cả 2 lần). QA đã đóng đúng khoảng trống này ở mục 1/2 phía
+  trên bằng babeldoc CLI thật + shim thật (chỉ thay LLM backend mạng ngoài bằng local server free —
+  không phải mock nội bộ nào của app).
+- Riêng ca "positive case" cụ thể của cuốn Le Cordon Bleu (trang 230, sidebar feuilletage, qua DeepSeek
+  thật) **vẫn chưa tái hiện được** — nhưng đây là đặc thù dữ liệu/mô hình dịch không tất định của 1
+  cuốn sách cụ thể, không phải khoảng trống về CƠ CHẾ. QA đồng ý với đánh giá của Dev/Reviewer rằng mức
+  verify hiện tại cho ca cụ thể này (2 lần thử live thật, ghi nhận trung thực, có escalate rõ ràng) là
+  đủ, KHÔNG cần chặn release vì lý do này — R5-03 chỉ yêu cầu tối thiểu 1 lần gọi thật cho MỖI external
+  dependency (babeldoc + DeepSeek), điều kiện đó đã thoả từ trước, và QA đã bổ sung xác nhận sống cho
+  chính CƠ CHẾ (phần rủi ro cao hơn) mà 2 lần chạy đó chưa chạm tới.
+- R6-03 (live E2E xuyên suốt pipeline nhiều bước, kiểm tra nội dung output cuối — không chỉ tin
+  `status`): thoả qua `step1b_process_chunk.py` (đã mở `text_excerpt` thật ra xem).
+- Regression suite đầy đủ: 816/816 pass, ruff sạch. Nhánh pdf2zh không hồi quy (Bug #9). R-2 đếm đúng
+  từ DB khi resume sau crash (X7).

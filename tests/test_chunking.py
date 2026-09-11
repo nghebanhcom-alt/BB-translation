@@ -15,6 +15,7 @@ from src.core.chunking import (
     calculate_chunks,
     plan_chunks,
     plan_epub_chunks,
+    surviving_page_range,
 )
 from src.services.epub_document import EpubUnit
 
@@ -244,3 +245,82 @@ def test_epub_budget_constants_match_architecture_values() -> None:
     assert EPUB_MAX_EXTRA_REQUESTS_PER_SLICE == 3
     assert EPUB_FALLBACK_MAX_RATIO_CHUNK == 0.20
     assert EPUB_FALLBACK_MAX_RATIO_JOB == 0.05
+
+
+# --- BL-04 (Architecture.md 6.22.5.1) — surviving_page_range() -------------
+#
+# Gate test #5 (6.22.9): dai song sot cua toan bo 1 chunk plan 418 trang
+# phai ROI NHAU va HOP LAI dung [1, 418], va gia tri `start` phai bang dung
+# `actual_start` ma `merge_chunk_pdfs()` tinh ra — dam bao bang REFACTOR
+# (`src/postprocess/chunk_merge.py` goi CHINH ham nay, khong chep lai cong
+# thuc), khong phai bang cach test tinh lai cong thuc mot lan nua.
+
+
+def test_surviving_range_raises_for_epub_chunk_without_page_range() -> None:
+    """X2 (2026-09-11) — `page_start`/`page_end` la `None` cho chunk EPUB
+    (6.20.7). Phai raise `ValueError` ro rang, KHONG de `None + 1` no
+    `TypeError` mat dau vet o mot cho khac."""
+
+    class _EpubLikeChunk:
+        page_start = None
+        page_end = None
+        overlap_start = None
+        overlap_end = None
+
+    with pytest.raises(ValueError, match="page_start"):
+        surviving_page_range(_EpubLikeChunk(), is_first_in_merge=True)
+
+
+def test_surviving_range_first_chunk_starts_at_page_start() -> None:
+    plan = calculate_chunks(total_pages=418, chunk_size=40, overlap=2)[0]
+    assert plan.page_start == 1
+    start, end = surviving_page_range(plan, is_first_in_merge=True)
+    assert (start, end) == (1, 40)
+
+
+def test_surviving_range_subsequent_chunk_starts_after_overlap_end() -> None:
+    plan = calculate_chunks(total_pages=418, chunk_size=40, overlap=2)[1]
+    assert (plan.page_start, plan.page_end, plan.overlap_start, plan.overlap_end) == (
+        39,
+        80,
+        39,
+        40,
+    )
+    start, end = surviving_page_range(plan, is_first_in_merge=False)
+    assert (start, end) == (41, 80)
+
+
+def test_surviving_range_covers_whole_418_page_document_disjointly() -> None:
+    """Gate test #5 — dai song sot cua TOAN BO chunk plan phai ROI NHAU va
+    HOP LAI dung [1, total_pages] (Architecture.md 6.22.5.1 "Vi sao loai ma
+    KHONG de lai lo hong quan sat")."""
+    plans = calculate_chunks(total_pages=418, chunk_size=40, overlap=2)
+
+    ranges = [surviving_page_range(plan, is_first_in_merge=(plan.index == 0)) for plan in plans]
+
+    # Roi nhau + lien tuc: end cua dai truoc + 1 == start cua dai sau.
+    for (_, prev_end), (next_start, _) in pairwise(ranges):
+        assert next_start == prev_end + 1
+
+    assert ranges[0][0] == 1
+    assert ranges[-1][1] == 418
+    covered = sum(end - start + 1 for start, end in ranges)
+    assert covered == 418
+
+
+def test_surviving_range_matches_merge_chunk_pdfs_actual_start() -> None:
+    """`merge_chunk_pdfs()` (`src/postprocess/chunk_merge.py`) da duoc
+    refactor de goi CHINH `surviving_page_range()` thay vi tu tinh
+    `actual_start` — nen gia tri `start` tra ve o day CHINH LA gia tri
+    `merge_chunk_pdfs()` se dung, khong phai mot cong thuc chep lai. Kiem tra
+    tuong duong nay bang cach doc source (khong the "assert code goi ham
+    nao" tu test) — xem `src/postprocess/chunk_merge.py` dong goi
+    `surviving_page_range(chunk, is_first_in_merge=(position == 0))`.
+    """
+    import inspect
+
+    from src.postprocess import chunk_merge
+
+    source = inspect.getsource(chunk_merge.merge_chunk_pdfs)
+    assert "surviving_page_range(chunk, is_first_in_merge=(position == 0))" in source
+    assert "actual_start = chunk.page_start" not in source  # cong thuc CU da bi thay the

@@ -35,22 +35,22 @@
     {
       "id": "C1",
       "document": "docs/PRD.md",
-      "status": "stale",
-      "approved_version": "1.0",
+      "status": "approved",
+      "approved_version": "2.0",
       "approved_commit": null,
-      "approved_at": "2026-09-03",
-      "current_version": null,
-      "status_reason": "PRD đã bổ sung US-15/17→22 sau bản duyệt gốc 1.0 mà không đánh version mới — nợ Protocol C, cần Hiếu duyệt lại baseline"
+      "approved_at": "2026-09-11",
+      "current_version": "2.0",
+      "status_reason": "Hiếu duyệt lại baseline v2.0 trong chat 2026-09-11 — approved_commit điền sau khi commit đổi header, xem docs/design-log.md"
     },
     {
       "id": "C2",
       "document": "docs/Architecture.md",
-      "status": "stale",
-      "approved_version": "1.0",
+      "status": "approved",
+      "approved_version": "2.0",
       "approved_commit": null,
-      "approved_at": "2026-09-03",
-      "current_version": null,
-      "status_reason": "Header vẫn ghi Version 1.0 trong khi tài liệu đã tăng lên 12.818 dòng — không có mốc duyệt nào truy vết được, cần đặt lại baseline theo Protocol C"
+      "approved_at": "2026-09-11",
+      "current_version": "2.0",
+      "status_reason": "Hiếu duyệt lại baseline v2.0 trong chat 2026-09-11 — approved_commit điền sau khi commit đổi header, xem docs/design-log.md"
     }
   ],
   "open_questions": [
@@ -61,9 +61,9 @@
       "origin": "blockers[] cũ B2 — Architecture.md §6.12.6",
       "blocks": [],
       "default": "Giữ [UNVERIFIED], chỉ dùng DeepSeek/Ollama cho job thật — không chặn release",
-      "status": "open",
-      "answered_in": null,
-      "clarify_rounds": 0
+      "status": "answered",
+      "answered_in": "docs/design-log.md — Final Decision 2026-09-11: Hiếu xác nhận chưa cấp API thật, giữ [UNVERIFIED] (= mặc định)",
+      "clarify_rounds": 1
     },
     {
       "id": "HOI-02",
@@ -72,9 +72,9 @@
       "origin": "blockers[] cũ B5 — CHANGELOG.md:4545, chạm 5/5 vòng Protocol 3",
       "blocks": [],
       "default": "Ghi nhận là giới hạn đã biết của nhánh pdf_scan, không mở thêm vòng Dev-QA",
-      "status": "open",
-      "answered_in": null,
-      "clarify_rounds": 0
+      "status": "answered",
+      "answered_in": "docs/design-log.md — Final Decision 2026-09-11: chưa có kế hoạch dùng PDF scan, chấp nhận giới hạn (mặc định)",
+      "clarify_rounds": 1
     },
     {
       "id": "HOI-03",
@@ -83,9 +83,9 @@
       "origin": "blockers[] cũ B10 — docs/escalation-log.md",
       "blocks": [],
       "default": "Phương án 1 — giảm EPUB_REQUEST_CHAR_BUDGET và đo thật trước khi đầu tư đổi format",
-      "status": "open",
-      "answered_in": null,
-      "clarify_rounds": 0
+      "status": "answered",
+      "answered_in": "docs/design-log.md — Final Decision 2026-09-11: Hiếu chọn Phương án 1 (= mặc định)",
+      "clarify_rounds": 1
     }
   ],
   "backlog": [
@@ -112,10 +112,10 @@
     },
     {
       "id": "BL-04",
-      "text": "Sau khi tắt font_shrink_page() cho engine babeldoc, nhánh babeldoc không còn ghi OverflowReport nào — khoảng trống đã biết, chấp nhận có ý thức",
+      "text": "DONE 2026-09-11: babeldoc giờ ghi LayoutQaFinding khi tự drop đoạn (kênh 1/unfit). Qua 2 vòng Domain Expert, Dev implement, Reviewer APPROVE, QA PASS ready_for_release YES",
       "source": "domain-expert",
-      "ref": "docs/design-log.md — Bug #9 mục B9.7",
-      "status": "open"
+      "ref": "docs/Architecture.md §6.22, docs/test-report.md 'BL-04 QA Vòng 1', docs/review-report.md 'BL-04 Implementation VÒNG 1/3'",
+      "status": "done"
     },
     {
       "id": "BL-05",
@@ -123,6 +123,34 @@
       "source": "reviewer",
       "ref": "Reviewer nhắc lần 2 — vòng B2-1/#EPUB-4 — DONE: 2026-09-10, ghi chunk.api_cost/api_tokens_used trước cả 2 điểm raise; QA verify sống bằng DeepSeek thật",
       "status": "done"
+    },
+    {
+      "id": "BL-07",
+      "text": "job_orchestrator.py:1901 (pdf2zh, OverflowReport) cũng đếm 2 lần trên ~20 trang/cuốn do chunk chồng lấn — cùng lỗi F1 đã sửa cho babeldoc ở BL-04, nhưng §6.22.7 chốt không đụng nhánh pdf2zh/Bug #9",
+      "source": "tech-lead",
+      "ref": "docs/design-log.md:5946-5949, docs/Architecture.md:7162",
+      "status": "open"
+    },
+    {
+      "id": "BL-08",
+      "text": "ƯU TIÊN NGAY SAU BL-04 (X6). Kênh (2) mất ~976 ký tự/52 trang. 2 lần E2E thật trên trang 230 đều 0 drop kênh 1 dù nội dung vẫn mất — nghi ca trang 230 là kênh 2, cần xác nhận trước khi chọn tài liệu test BL-08",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.22.6.1.a, docs/design-log.md BL4.15",
+      "status": "open"
+    },
+    {
+      "id": "BL-09",
+      "text": "layout_qa_findings không có route API/UI đọc — BL-04 chỉ giao log (chunk-level + job-level tại bước hoàn tất + SQL cho QA), chưa có layout_qa_finding_counts trong JobDetail hay badge UI",
+      "source": "tech-lead",
+      "ref": "docs/design-log.md:6043, docs/Architecture.md:7357",
+      "status": "open"
+    },
+    {
+      "id": "BL-06",
+      "text": "scripts/validate_state.py: check_* nghiệp vụ crash (TypeError chưa bắt) khi field sai type thay vì báo lỗi sạch — exit=1 nên không phá gate, nhưng mất thông điệp lỗi, chỉ báo lỗi đầu tiên",
+      "source": "reviewer",
+      "ref": "docs/review-report.md — Review Report Port Protocol A–F VÒNG 2/3 (2026-09-11), non-blocking",
+      "status": "open"
     }
   ],
   "steps": [
@@ -139,9 +167,18 @@
       "id": "S2",
       "title": "Bước 2 — Port Protocol A–F + mở rộng 2/3/4 từ AB-RnD sang BB-Translation",
       "owner_role": "dev",
-      "status": "in_progress",
+      "status": "done",
       "blocked_by": [],
-      "output": null,
+      "output": "APPROVE vòng 2/3 (docs/review-report.md, section VÒNG 2/3) — 2 blocking vòng 1 đã đóng, 773 test pass, ruff sạch; chờ commit gộp",
+      "closed_commit": null
+    },
+    {
+      "id": "S3",
+      "title": "Bước 3 — BL-04: babeldoc không ghi OverflowReport (thiết kế + implement)",
+      "owner_role": "tech-lead",
+      "status": "done",
+      "blocked_by": [],
+      "output": "DONE. Reviewer APPROVE 1/3, QA PASS ready_for_release YES — QA tự dựng ca drop thật qua babeldoc CLI thật (LLM server giả cục bộ), lần đầu quan sát trọn vẹn nhánh type=drop. 816 test pass. Chờ commit gộp cùng S2. ⚠️ Architecture.md 8111/8000 dòng — VƯỢT trần Protocol C.3, cần rotate.",
       "closed_commit": null
     }
   ],
@@ -149,7 +186,7 @@
     {
       "pair": "dev-reviewer",
       "item": "S2",
-      "count": 1,
+      "count": 2,
       "limit": 3,
       "escalated_at": null,
       "reset_reason": null

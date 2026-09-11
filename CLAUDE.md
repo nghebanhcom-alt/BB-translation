@@ -1,7 +1,35 @@
 # CLAUDE.md — BB-Translation (Project-specific conventions)
 
-Kế thừa toàn bộ quy ước tại `/Users/hieutt/Vibe Code/CLAUDE.md` (global). File này chỉ bổ
-sung quy tắc riêng cho project BB-Translation.
+Kế thừa toàn bộ quy ước tại `/Users/hieutt/Vibe Code/CLAUDE.md` (global). File này bổ sung
+quy tắc riêng cho BB-Translation: **Protocol 5, 6, 7, 8** (rút ra từ sự cố thật của chính project
+này) và **bộ Protocol A–F + mở rộng Protocol 2/3/4** (port từ AB-RnD, 2026-09-10 — xem mục cuối file).
+
+## Bản đồ tài liệu — đọc file nào cho việc gì
+
+| Cần biết | Đọc | Không đọc |
+|---|---|---|
+| Hệ thống **phải** như thế nào (hợp đồng hiện hành) | `docs/Architecture.md` §1–10, **đúng § được chỉ** | cả file (7.2k dòng) |
+| **Vì sao** tới được thiết kế đó (RCA, phản biện, Final Decision) | `docs/design-log.md` | — |
+| Yêu cầu nghiệp vụ, User Story, Acceptance Criteria | `docs/PRD.md` | — |
+| Trạng thái hiện tại: bước nào đang chạy, ai chặn ai | `project_state.json` (5KB, đọc hết được) | — |
+| Lịch sử quyết định trước 2026-09-10 | `docs/decisions-archive.md` | — |
+| Đợt review/test gần nhất | `docs/review-report.md`, `docs/test-report.md` | — |
+| Đợt review/test cũ | `docs/archive/` | — |
+| Vì sao pipeline dừng ở một hạng mục | `docs/escalation-log.md` | — |
+
+**Luật (Protocol C.4)**: brief giao việc phải trỏ tới **§ hoặc dải dòng cụ thể**, không được viết
+"đọc Architecture.md". Với tài liệu cỡ này, "đọc cả file" là chỉ thị bất khả thi mà agent sẽ âm thầm
+thực hiện dở dang — mỗi vai một mảnh khác nhau. Đó là cơ chế đã sinh ra Bug #5 và Bug #9.
+
+## Đội hình
+
+**Thường trực** (hub-and-spoke, PM là orchestrator): PM (sonnet) · BA (opus) · Tech Lead (opus) ·
+Dev (sonnet) · Reviewer (sonnet) · QA (sonnet) — file agent tại `.claude/agents/`.
+
+**Checkpoint expert one-off** (Protocol D, không thường trực, tối đa 2 lần/hạng mục):
+Domain Expert PDF/typography (opus) · Critic phản biện độc lập (fable).
+
+**Trước mỗi lần dispatch**, PM chạy: `python3 scripts/validate_state.py`
 
 ## Protocol 5 — External Dependency Verification
 
@@ -173,7 +201,10 @@ lệ DUY NHẤT: thay đổi chỉ gồm comment/docs không ảnh hưởng hàn
 
 **R7-02 (Gate kỹ thuật, không chỉ dựa trí nhớ)**: Repo này có 1 git pre-commit hook
 (`.git/hooks/pre-commit`, cài 2026-09-06) tự động chặn `git commit` nếu commit đó đổi file trong
-`src/`/`web/` mà `docs/review-report.md` không nằm trong cùng commit. Đây là backstop kỹ thuật
+`src/`/`web/` mà `docs/review-report.md` không nằm trong cùng commit. **Bổ sung 2026-09-10**: hook
+còn chạy `python3 scripts/validate_state.py` và chặn commit nếu `project_state.json` không hợp lệ
+(Protocol 4 mở rộng) — bắt được cả trường hợp `loops[]` vượt ngưỡng chưa escalate và
+`infra_pending[]` quá 24h chưa có commit (Protocol E). Đây là backstop kỹ thuật
 cho R7-01 — không phụ thuộc agent có "nhớ" quy tắc hay không. Giới hạn đã biết: hook chỉ kiểm tra
 file `review-report.md` có được touch hay không, KHÔNG kiểm tra được nội dung review có nghiêm
 túc hay không — R7-01 vẫn là quy tắc chính, R7-02 chỉ là lưới an toàn cho trường hợp quên hoàn
@@ -250,3 +281,217 @@ rác trong thân hàm.
 kỳ biến thể nào khác được route qua 1 hàm/pipeline dùng chung đã tồn tại từ trước trong
 `src/core/job_orchestrator.py` hoặc pipeline tương tự. Không áp dụng khi biến thể mới có pipeline
 xử lý hoàn toàn riêng, không đi qua code dùng chung nào.
+
+---
+
+# Protocols riêng project — bộ A–F (port từ AB-RnD, áp dụng 2026-09-10)
+
+> **Nguồn gốc**: dự án `Anela-bakeworks/RnD-app` (AB-RnD) đã làm một vòng phản biện độc lập về quy
+> trình (Domain Expert chạy model Fable), Hiếu duyệt 2026-09-10, kết quả nằm ở commit `510e511` của
+> repo đó. Bộ Protocol A–F + phần mở rộng Protocol 2/3/4 dưới đây được **port sang BB-Translation
+> có adapt**: BB là pipeline Python/FastAPI đã release v1.3.1 (không phải project mới bootstrap,
+> không có Supabase), nên Protocol E đổi đối tượng từ "migration Supabase" sang "môi trường chạy
+> thật + version tool bên thứ ba".
+>
+> **Đánh chữ cái A–F** (không đánh số) để không va chạm với Protocol 1–8 ở global CLAUDE.md và
+> Protocol 5–8 riêng của project này. Bộ A–F **bổ sung**, không thay thế gì cả.
+>
+> **Cuối mỗi phase, PM tổng kết** vào `docs/decisions-archive.md`: Protocol nào đáng đẩy lên global
+> `/Users/hieutt/Vibe Code/CLAUDE.md`, Protocol nào chỉ hợp với riêng BB-Translation.
+
+## Mở rộng Protocol 2 (Human Checkpoints) — checkpoint hết hạn ngầm
+
+Mỗi checkpoint đã duyệt (`checkpoints[]` trong `project_state.json`) gắn với một `approved_version`
++ `approved_commit` cụ thể, và **tự chuyển `status: stale`** khi xảy ra 1 trong 3 điều kiện:
+
+- (a) một mục có nhãn nguồn owner quyết trực tiếp (`[Hiếu ...]`) bị đổi nội dung kể từ bản duyệt;
+- (b) tài liệu tăng ≥3 phiên bản nhỏ kể từ bản duyệt;
+- (c) `git diff --stat <approved_commit> HEAD -- <file>` ≥20% tổng dòng của bản duyệt.
+
+PM kiểm 3 điều kiện này **trước mỗi lần dispatch** một bước phụ thuộc checkpoint đó. Stale → không
+dispatch, trình Hiếu **bản tóm tắt khác biệt** (không phải cả tài liệu). Xác nhận lại chỉ cần một
+câu "OK" nhưng phải tường minh — **im lặng không tính là đồng ý**.
+
+*Trạng thái khi port (2026-09-10)*: `C1` (PRD.md) và `C2` (Architecture.md) đều `stale` — cả hai
+header vẫn ghi `Version 1.0 | Phase: Planning` trong khi sản phẩm đã ở v1.3.1 và Architecture.md đã
+tăng từ bản duyệt gốc lên 12.818 dòng. Không truy vết được mốc duyệt nào. Cần Hiếu đặt lại baseline
+(duyệt bản hiện tại là 2.0) trước khi có checkpoint thật để so.
+
+## Mở rộng Protocol 3 (Circuit Breaker) — mọi cặp agent, không chỉ Dev↔Reviewer/QA
+
+Bất kỳ cặp agent nào trả việc qua lại trên cùng một item đều có bộ đếm riêng trong
+`project_state.json` → `loops[]`:
+
+| Loại cặp | Ví dụ | Ngưỡng |
+|---|---|---|
+| Thi công ↔ Review | Dev↔Reviewer, Tech Lead↔Reviewer | 3 |
+| Thi công ↔ Kiểm thử | Dev↔QA | 5 |
+| Viết-spec ↔ Hỏi-Hiếu (đợt CLARIFY, Protocol B) | BA↔Hiếu qua PM | 2 |
+| Tổng hợp ↔ Nguồn | PM↔agent bị yêu cầu làm lại | 2 |
+| Chưa phân loại | — | 3 |
+
+Vượt ngưỡng mà chưa escalate → PM dừng **đúng cặp đó** (không chặn cặp/item khác), ghi
+`docs/escalation-log.md`. Reject do vi phạm **Protocol 5** (`[UNVERIFIED]`, mock không có golden
+file) và vi phạm **Protocol 7** (thiếu Reviewer thật) **KHÔNG tính** vào bộ đếm này — vi phạm quy
+trình không được phép ăn mòn quota sửa lỗi kỹ thuật.
+
+## Mở rộng Protocol 4 (Shared Context) — state phải hợp lệ theo schema
+
+`project_state.json` phải hợp lệ theo `project_state.schema.json`, kiểm bằng:
+
+```bash
+python3 scripts/validate_state.py
+```
+
+PM chạy lệnh này **trước mỗi lần dispatch**. Fail → sửa state cho hợp lệ TRƯỚC khi làm bất cứ việc
+gì khác.
+
+Luật kèm theo:
+- **Không còn trường văn xuôi tự do.** Mô tả sự kiện/lý do thuộc `docs/CHANGELOG.md`,
+  `docs/design-log.md`, `docs/decisions-archive.md`, `docs/escalation-log.md`.
+- `blockers[]` **chỉ chứa id** trỏ tới `open_questions[]` / `infra_pending[]` / `checkpoints[]` —
+  không chứa câu văn.
+- `steps[].status = done` chỉ hợp lệ khi có `output`; nếu bước chạm môi trường thật thì phải có cả
+  `closed_commit`.
+- Finding non-blocking của Reviewer/QA vào `backlog[]` — **không được im lặng biến mất**, cũng không
+  được nhét vào `blockers[]` để rồi chặn nhầm release.
+
+*Vá lần đầu 2026-09-10*: state cũ là văn xuôi tự do 70.513 ký tự (~17.6k token **mỗi lần mỗi agent
+đọc**), gồm 19 `notes[]` + 12 `blockers[]` + 23 `iterations.by_increment[]` mà gần như toàn bộ là
+lịch sử increment đã đóng. Đã archive nguyên văn 100% vào `docs/decisions-archive.md` (kèm bảng ánh
+xạ từng mục) và dựng lại state có cấu trúc còn 5.409 ký tự — **giảm 13 lần**.
+
+## Protocol A — Ranh giới vai PM
+
+PM là orchestrator, **không phải worker dự phòng**. Chi tiết đầy đủ (được LÀM gì / KHÔNG được làm
+gì, vòng làm việc chuẩn 9 bước) nằm ở `.claude/agents/pm.md` — file đó **chính là phần thực thi**
+của Protocol này, đọc ở đó thay vì lặp lại ở đây. File `pm.md` là system prompt của PM **kể cả khi
+PM chạy trong session chính, không được spawn qua Agent tool**.
+
+Protocol A và **Protocol 7** (Mandatory Reviewer Gate) là hai mặt của cùng một vấn đề: Protocol 7
+cấm PM *tự review*; Protocol A cấm PM *tự thi công* ngay từ đầu. Sự cố 2026-09-06 (PM tự viết 2
+tính năng UI rồi tự review) vi phạm cả hai.
+
+## Protocol B — CLARIFY trước, WRITE sau
+
+Agent ghi quyết định của Hiếu vào tài liệu sống (PRD, Architecture, design-log) làm **2 pha tách
+bạch**:
+
+1. **CLARIFY** — liệt kê hết câu hỏi hệ quả dự đoán được, mỗi câu kèm: phát sinh từ đâu, chặn bước
+   nào nếu không trả lời, **đề xuất mặc định**. Ghi vào `open_questions[]`. PM gộp lại, hỏi Hiếu
+   **một lần** bằng một bảng đánh số (một lượt `AskUserQuestion` nhiều câu — không hỏi lẻ từng câu
+   rồi dispatch lại).
+2. **WRITE** — chỉ viết khi mọi câu ở CLARIFY đã `answered`/`deferred`, viết **một lần** toàn bộ
+   phần bị ảnh hưởng.
+
+Một item tối đa **2 đợt CLARIFY** (`open_questions[].clarify_rounds` ≤ 2 — validator chặn cứng).
+Phát hiện câu hỏi mới giữa lúc WRITE → **không hỏi ngay**: ghi `default`, viết tiếp theo mặc định,
+gộp vào đợt CLARIFY sau. Ngoại lệ hỏi lẻ: chỉ khi mọi mặc định khả dĩ đều buộc phải xoá/viết lại
+>30% phần đang viết, và phải nêu rõ lý do.
+
+**Vì sao**: hỏi lẻ từng câu là dạng lãng phí kín đáo nhất — mỗi lần hỏi là một lần Hiếu phải nạp lại
+ngữ cảnh, và mỗi lần dispatch lại là một lần agent phải đọc lại toàn bộ tài liệu.
+
+## Protocol C — Kỷ luật tài liệu đặc tả
+
+`docs/PRD.md` và `docs/Architecture.md` **chỉ chứa trạng thái hiện hành** — hợp đồng đang có hiệu
+lực. Nhật ký (RCA, phản biện, Final Decision, đo đạc) sống ở `docs/design-log.md`.
+
+1. **Tách lịch sử khỏi hợp đồng.** `docs/Architecture.md` = *hệ thống PHẢI như thế nào*;
+   `docs/design-log.md` = *vì sao tới được như thế* (chỉ append, theo thời gian). Một quyết định
+   trong design-log làm đổi hợp đồng → **bắt buộc** cập nhật §1–10 của Architecture.md; không để
+   hợp đồng chỉ tồn tại dưới dạng nhật ký.
+2. **Rotate report theo đợt.** `docs/review-report.md` và `docs/test-report.md` chỉ giữ các đợt gần
+   nhất; đợt cũ chuyển nguyên văn sang `docs/archive/<tên>-until-<ngày>.md` kèm mục lục, và file
+   sống giữ 1 khối `<details>` liệt kê đợt đã lưu trữ. **Chuyển chỗ, không xoá** — R7-03 vẫn nguyên
+   giá trị.
+3. **Ngân sách kích thước.** `scripts/validate_state.py` cảnh báo khi vượt: Architecture.md 8.000
+   dòng · design-log.md 8.000 · CHANGELOG.md 8.000 · review-report.md 4.000 · test-report.md 4.000
+   · PRD.md 2.000. Cảnh báo **không chặn**, nhưng PM phải xử lý (rotate/tách) chứ không được ngó lơ
+   qua nhiều lượt.
+4. **Brief phải trỏ tới đoạn, không trỏ tới file.** Khi giao việc, PM ghi rõ `docs/Architecture.md`
+   **§6.14.7** hoặc dải dòng cụ thể, kèm gợi ý `sed -n '<from>,<to>p'` — **không viết "đọc
+   Architecture.md"**. Đây là luật, không phải lời khuyên: với tài liệu cỡ này, "đọc cả file" là một
+   chỉ thị bất khả thi mà agent sẽ âm thầm thực hiện dở dang, mỗi agent một mảnh khác nhau.
+
+**Bối cảnh (vì sao Protocol này tồn tại)**: 2026-09-10, `Architecture.md` đạt **12.818 dòng
+(~238k token)** — lớn hơn context window của một agent, trong đó 44% là nhật ký chứ không phải kiến
+trúc. `review-report.md` đạt 9.576 dòng, tích luỹ liên tục từ Increment 1 không rotate. Nghĩa là mọi
+brief kiểu *"Dev đọc Architecture.md trước khi code"* đã **không thể thực thi được** từ lâu — và đây
+chính là cùng một cơ chế đã sinh ra Bug #5 (không ai nối OCR→dịch) và Bug #9 (không ai audit lại
+bước hậu kỳ cũ): **mỗi vai nhìn một mảnh khác nhau của cùng một tài liệu**.
+
+*Vá lần đầu 2026-09-10*: tách 12 khối nhật ký (5.650 dòng) từ Architecture.md sang `design-log.md`
+(Architecture.md còn 7.197 dòng, có bảng ánh xạ tiêu đề cũ → vị trí mới để `grep` cũ vẫn tra ra);
+rotate 20 đợt review cũ sang `docs/archive/review-report-until-2026-09-10.md` (review-report.md còn
+2.183 dòng).
+
+## Protocol D — Checkpoint expert one-off, giới hạn tần suất
+
+Hai vai **không thường trực**, không tham gia vòng lặp Dev↔Reviewer/QA. Chỉ được gọi tại đúng
+checkpoint, ra một bản phản biện, rồi kết thúc — không giữ context xuyên suốt pipeline.
+
+| Vai | Model | Agent file | Gọi khi nào |
+|---|---|---|---|
+| Domain Expert — PDF/typography/dịch thuật | Opus | `.claude/agents/domain-expert.md` | (1) Sau khi Tech Lead thiết kế xong một hạng mục chạm layout/typography/chất lượng dịch, **trước** khi Dev implement. (2) Khi một bug về chất lượng đầu ra tái diễn qua ≥2 vòng Dev↔QA |
+| Critic — phản biện độc lập | Fable | `.claude/agents/critic.md` | Sau khi Tech Lead ra thiết kế cho hạng mục phức tạp, **trước** Human Checkpoint 2. Phản biện độc lập, **không đồng thuận ngầm** với Tech Lead |
+
+Giới hạn: tối đa **2 lần cho mỗi (hạng mục, checkpoint)** — lần 1 phản biện, lần 2 xác nhận bản đã
+sửa. Lần 3+ chỉ khi PM ghi tường minh lý do vào `docs/expert-notes/`: (a) bản nhận xét trước **tự
+mâu thuẫn** (phải chỉ rõ 2 điểm mâu thuẫn), hoặc (b) **phạm vi hạng mục đã đổi thật** (trỏ dòng
+history). Không có lý do → không gọi.
+
+Cùng một expert bị gọi cho ≥4 hạng mục liên tiếp trong 1 phase → PM đề xuất Hiếu cân nhắc thêm vai
+thường trực tương ứng (dấu hiệu vai đó đã hết tính "one-off").
+
+Kết quả mỗi lần gọi ghi vào `docs/expert-notes/<role>-<YYYYMMDD>-<chủ đề>.md`. PM tổng hợp điểm cần
+sửa vào Architecture.md/design-log.md **trước khi** trình Hiếu.
+
+*Tiền lệ BB*: chính vai này (chạy model Fable) đã tìm ra **Bug #9** — `font_shrink_page()` phá
+output của babeldoc, kèm mất chữ thật ở trang 26. 3 file `docs/expert-review-*.md` hiện có là các
+lần gọi kiểu ad-hoc trước khi có Protocol D.
+
+## Protocol E — Đồng bộ môi trường thật ↔ git
+
+Thay đổi đã áp dụng lên **môi trường chạy thật** phải có commit tương ứng trong **24 giờ**. Với
+BB-Translation, "môi trường thật" gồm:
+
+- `.env` — API key, `pdf_translate_engine`, model/provider mặc định, ngưỡng cost gate
+- `data/bb_translation.db` — migration schema (kể cả migration idempotent chạy lúc startup)
+- **Version tool bên thứ ba** đã cài trong `.venv` — `pdf2zh`, `babeldoc`, `MinerU`,
+  `bilingual_book_maker`, SDK provider (đổi version → Protocol 5 R5-05: verify lại toàn bộ contract
+  liên quan, **không kế thừa nguồn xác thực cũ**)
+- `fonts/` — font đang được nhúng vào PDF đầu ra
+- `docker/` — cấu hình service đang chạy thật
+
+Áp dụng xong → ghi ngay `infra_pending[]` (`applied_at`, `target`, `description`, `commit: null`).
+Quá hạn 24h chưa có commit → `validate_state.py` **fail**, PM không dispatch bước nào chạm cùng
+`target`. Đóng bước (`steps[].status = done`) chỉ khi: Dev báo commit hash, PM xác minh bằng
+`git log`, và Reviewer/QA đã pass.
+
+**Luật bổ sung (bài học AB-RnD 2026-09-10)**: trước khi đóng một `infra_pending[]` (điền `commit`),
+phải chạy `grep -rn "chưa apply\|chua apply\|\[UNVERIFIED\]" docs/` và sửa hết chỗ liên quan tới
+đúng thay đổi đó — không chỉ điền `commit` rồi coi là xong. Nguyên nhân gốc của việc tài liệu nói
+sai trạng thái là **đóng infra_pending mà không cập nhật tài liệu mô tả bước đó**.
+
+## Protocol F — Ma trận tool ↔ trách nhiệm
+
+Mỗi agent được cấp **đúng và đủ** tool cho output mà nhiệm vụ của nó yêu cầu:
+
+| Vai | Tool | Ghi chú |
+|---|---|---|
+| PM | Read, Grep, Glob, Write, Edit, Bash*, Agent | `Bash` **chỉ read-only**: `git status/log/diff/show`, `python3 scripts/validate_state.py`. Không commit/push/test/deploy |
+| BA | Read, Grep, Glob, Write, Edit | Ghi PRD Business Rules |
+| Tech Lead | Read, Grep, Glob, Write, Edit, Bash, WebSearch, WebFetch | Cần web để verify contract tool bên thứ 3 (Protocol 5 R5-01) |
+| Dev | Read, Grep, Glob, Write, Edit, Bash | Chạy được test/ruff |
+| Reviewer | Read, Grep, Glob, Bash, **Write, Edit** | Vai chỉ-đọc **vẫn cần Write** vì output là `docs/review-report.md` |
+| QA | Read, Grep, Glob, Bash, **Write, Edit** | Cần Edit để **append** từng đợt vào `docs/test-report.md` |
+| Domain Expert / Critic | Read, Grep, Glob, Bash, Write | Ghi `docs/expert-notes/` |
+
+Giới hạn phạm vi ghi bằng **luật viết trong chính file agent** ("chỉ được ghi vào
+`docs/review-report.md`"), **không** bằng cách cắt tool — cắt `Write` của Reviewer chỉ khiến nó báo
+kết quả trong chat và vi phạm Protocol 1 (đúng lỗi AB-RnD đã gặp và phải vá).
+
+Mọi brief giao việc cho agent ghi vào file dùng chung (`review-report.md`, `test-report.md`,
+`CHANGELOG.md`, `design-log.md`, `project_state.json`) **bắt buộc** nhắc lại R7-03: *"đọc file hiện
+có trước, APPEND section mới vào cuối, KHÔNG xoá/ghi đè nội dung cũ"*.

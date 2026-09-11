@@ -86,6 +86,11 @@ class Pdf2zhRunner:
     #: `font_shrink_page()` của app (BR-FONT-02/US-05) là bắt buộc ở đây.
     needs_font_shrink: ClassVar[bool] = True
 
+    #: BL-04 (Architecture.md 6.22.7 R8-03). pdf2zh khong bo doan (no ve
+    #: TRAN — do la ly do needs_font_shrink ton tai o tren), va khong co
+    #: kenh bao cao tuong duong. Khong co gi de doc.
+    reports_own_paragraph_drops: ClassVar[bool] = False
+
     def __init__(self, executable: str = "pdf2zh") -> None:
         self._executable = executable
 

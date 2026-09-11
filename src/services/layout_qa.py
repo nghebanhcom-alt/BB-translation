@@ -73,6 +73,29 @@ ROTATED_OVERLAY_FLAG_CHECK = "rotated_text_overlay_flag"
 #: `angle_deg` trong `detail`).
 ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK = "rotated_text_scan_unsupported"
 
+#: BL-04 (Architecture.md 6.22.6) — babeldoc tu bo han 1 doan van vi khong
+#: vua khung sau khi da bop toi `min_scale=0.1` (kenh KHAC voi Bug #9/
+#: font_shrink — xem audit 6.22.7). Hau to `_unfit` BAT BUOC: co che nay CHI
+#: do kenh "khong vua khung", KHONG do 2 kenh mat noi dung khac cua babeldoc
+#: (loc theo goc xoay / thieu font id — xem 6.22.6.1, backlog BL-08).
+BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK = "babeldoc_paragraph_drop_unfit"
+
+#: BL-04 — khong co dong `header` hop le nao trong file sidecar (shim tat /
+#: version babeldoc khac 0.6.4 / patch that bai) -> KHONG do duoc, KHONG duoc
+#: quy ve "0 drop" (Architecture.md 6.22.6 "BON trang thai").
+BABELDOC_DROP_REPORT_UNAVAILABLE_CHECK = "babeldoc_drop_report_unavailable"
+
+#: BL-04 — do duoc NHUNG khong tron ven: thieu trang so voi
+#: `expected_pages`, HOAC checksum (`page.dropped_count` vs so dong `drop`
+#: thuc te) lech nhau (X5, 2026-09-11) — 2 dieu kien deu kich hoat CUNG 1
+#: check_type nay.
+BABELDOC_DROP_REPORT_INCOMPLETE_CHECK = "babeldoc_drop_report_incomplete"
+
+#: BL-04 — doi chieu 1 CHIEU (F5): so lan xuat hien sentinel tren stdout
+#: NHIEU HON so record `drop` co cau truc trong sidecar (nguoc lai la binh
+#: thuong — `EvictQueue` tu vut bot log khi day, khong phai loi).
+BABELDOC_DROP_REPORT_MISMATCH_CHECK = "babeldoc_drop_report_mismatch"
+
 _SEVERITY_BY_CHECK: dict[str, str] = {
     "overlap": "critical",
     "text_over_drawing": "critical",
@@ -81,6 +104,14 @@ _SEVERITY_BY_CHECK: dict[str, str] = {
     "entity_loss": "blocker",
     ROTATED_OVERLAY_FLAG_CHECK: "blocker",
     ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK: "blocker",
+    # BL-04 (Architecture.md 6.22.6 F6) — nguon su that DUY NHAT cho severity
+    # cua 4 check_type nay; `job_orchestrator` phai TRA DICT nay, khong tu
+    # dien chuoi severity (2 nguon su that cho cung 1 anh xa la cach chac
+    # chan de chung lech nhau).
+    BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK: "critical",
+    BABELDOC_DROP_REPORT_UNAVAILABLE_CHECK: "major",
+    BABELDOC_DROP_REPORT_INCOMPLETE_CHECK: "major",
+    BABELDOC_DROP_REPORT_MISMATCH_CHECK: "minor",
 }
 
 _SEVERITY_WEIGHT: dict[str, int] = {"blocker": 3, "critical": 2, "major": 1, "minor": 0}

@@ -53,6 +53,7 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+from src.core.chunking import surviving_page_range
 from src.models.chunk import Chunk
 
 logger = logging.getLogger(__name__)
@@ -82,13 +83,24 @@ async def merge_chunk_pdfs(chunks: Sequence[Chunk], output_path: str | Path) -> 
             if not chunk.output_path:
                 raise ChunkMergeError(f"Chunk {chunk.chunk_index} has no output_path set")
 
-            actual_start = chunk.page_start
-            if (
-                position > 0
-                and chunk.overlap_start is not None
-                and chunk.overlap_end is not None
-            ):
-                actual_start = chunk.overlap_end + 1
+            # BL-04 (Architecture.md 6.22.5.1): `position != chunk.chunk_index`
+            # would mean `surviving_page_range(..., is_first_in_merge=(position
+            # == 0))` disagrees with the SAME call
+            # `JobOrchestrator._process_chunk()` makes with `is_first_in_merge
+            # =(chunk.chunk_index == 0)` — a bug of a missing chunk, not
+            # something to silently tolerate. Same warning style as the
+            # "contributed 0 pages" case below.
+            if position != chunk.chunk_index:
+                logger.warning(
+                    "merge_chunk_pdfs: chunk order mismatch — position=%s nhung "
+                    "chunk_index=%s (Architecture.md 6.22.5.1 bat bien 'du chunk, "
+                    "khong thieu'). surviving_page_range() dung is_first_in_merge="
+                    "(position==0), co the SAI neu thieu chunk.",
+                    position,
+                    chunk.chunk_index,
+                )
+
+            actual_start, _ = surviving_page_range(chunk, is_first_in_merge=(position == 0))
 
             if actual_start > chunk.page_end:
                 continue

@@ -262,6 +262,16 @@ class Settings(BaseSettings):
     # nay — xem docs/CHANGELOG.md muc Bug #10 cho ket qua 5 gate.
     babeldoc_word_wrap_fix_enabled: bool = True
 
+    # BL-04 (Architecture.md 6.22.4): babeldoc tu bo han 1 doan van khong vua
+    # khung (Bug #9 da tat font_shrink cho engine nay, nen khong con hau ky
+    # nao phat hien duoc dieu do). Bat patch OBSERVER (CHI DOC, khong sua
+    # hanh vi typeset) ghi 1 file sidecar JSONL qua PYTHONPATH shim tren —
+    # cung mau rollback tuc thi voi 3 co babeldoc_* tren: tat duoc rieng
+    # patch nay ma khong dong `babeldoc_line_split_shim_enabled` (nhung PHAI
+    # co ca 2 cung bat thi patch moi thuc su chay, vi PYTHONPATH do shim tong
+    # set — xem BabeldocRunner.translate_pages()).
+    babeldoc_drop_report_enabled: bool = True
+
     # US-20 "Cac tu moi" (Architecture.md 6.18.2, bang cau hinh CAP NHAT boi
     # 6.18.8 T5 — 4 field, khong con 3 nhu ban goc). Rule-based, $0, chay SAU
     # khi job completed (BR-TERM-01) — khong lien quan translation pipeline.

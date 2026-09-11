@@ -75,6 +75,7 @@ def _fake_pdf2zh_runner_cancel_after_first_chunk(
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
+    runner.reports_own_paragraph_drops = False
     call_counter = {"n": 0}
 
     async def _translate_pages(

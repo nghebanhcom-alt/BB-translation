@@ -7781,3 +7781,212 @@ uv run pytest tests/ -q                           → 773 passed (baseline 767, 
 
 **Chưa có Reviewer thật review trong phiên này (R7-01)** — KHÔNG tự báo cáo "xong"/"sẵn sàng
 release". Chờ PM giao Reviewer.
+
+## Bước 2 (S2) — Fix 2 blocking issue từ Reviewer vòng 1/3, `scripts/validate_state.py` (Dev, 2026-09-11)
+
+Phạm vi theo brief PM, trỏ `docs/review-report.md:2188-2374` (mục "Review Report — Port Protocol
+A–F..."). Không đụng file nào khác ngoài `scripts/validate_state.py` (không sửa non-blocking #1/2/3
+của cùng review — để dành vòng sau).
+
+### Blocking #1 — `parse_day()` lỗ hổng im lặng
+
+`check_infra()` giờ gọi `fail()` (không phải chỉ `warn()`) khi `parse_day(item["applied_at"])` trả
+`None` — chọn nhánh mạnh hơn theo khuyến nghị của Reviewer, vì "ngày không parse được" tự nó đã là
+dữ liệu hỏng, không nên chỉ cảnh báo rồi cho qua. Áp dụng bất kể `commit` đã set hay chưa (kiểm tra
+`applied_at` chạy trước, `continue` sớm nếu không parse được — không để field `commit` che lấp lỗi
+dữ liệu này).
+
+### Blocking #2 — validator không thực thi phần lớn ràng buộc schema
+
+Chọn **hướng (a)** trong 2 hướng Reviewer đề xuất: viết `check_against_schema()` — 1 checker generic
+đệ quy thuần stdlib, đọc trực tiếp `project_state.schema.json` và tự áp `type` (kể cả union
+`["string","null"]`), `required`, `additionalProperties` (bool hoặc schema con), `properties`,
+`items`, `enum`, `pattern`, `maxLength`, `minimum`, `maximum`, `format=date`. Lý do chọn (a) thay vì
+(b): (a) đóng đúng khoảng trống thật (schema và validator không còn 2 nguồn duy trì tay tách rời có
+thể lệch nhau theo thời gian — chính cơ chế lỗi mà Protocol 5/6 của project này được viết ra để
+phòng, chỉ khác lần này nằm trong chính công cụ phòng thủ); khối lượng code không lớn vì
+`project_state.schema.json` không dùng `oneOf`/`$ref`/`allOf` phức tạp — xác nhận bằng cách đọc lại
+toàn bộ schema trước khi viết checker. `main()` gọi `check_against_schema(state, schema, "")` trước
+mọi luật nghiệp vụ khác; các hàm `check_*` còn lại (checkpoints/questions/backlog/steps/loops/infra/
+blockers) chỉ còn áp riêng quan hệ CHÉO giữa nhiều field mà JSON Schema draft-07 không diễn đạt được
+(vd `status=done` kéo theo phải có `output`) — không còn trùng lặp việc `check_against_schema()` đã
+làm.
+
+### Tự verify (không viết mock theo Architecture.md — đây là internal script, Protocol 5 N/A nhưng
+vẫn tự verify bằng cách tái tạo đúng phương pháp Reviewer đã dùng)
+
+Dựng 1 git repo cô lập tại scratchpad (`isolated_state_repo/`, không đụng `project_state.json` thật
+của repo này), copy `scripts/validate_state.py` + `project_state.schema.json` +
+`project_state.json` (làm baseline hợp lệ) vào đó, sinh 9 case bằng script Python (mutate baseline,
+không viết tay JSON theo trí nhớ):
+
+| Case | Kỳ vọng | Kết quả thật |
+|---|---|---|
+| `infra_pending[].applied_at` rác, `commit=null` | fail | ❌ bắt đúng (Blocking #1) |
+| `infra_pending[].applied_at` rác, `commit` ĐÃ set | fail (không để `commit` che lấp) | ❌ bắt đúng |
+| field lạ ở top-level (`totally_unexpected_top_field`) | fail | ❌ bắt đúng (Blocking #2) |
+| field lạ lồng trong `checkpoints[]` | fail | ❌ bắt đúng |
+| `open_questions[].id` sai pattern (không đúng tiền tố `HOI-`/`BUG-`) | fail | ❌ bắt đúng |
+| `backlog[].id` sai pattern (không đúng tiền tố `BL-`) | fail | ❌ bắt đúng |
+| `project_name` vượt `maxLength: 80` (200 ký tự) | fail | ❌ bắt đúng |
+| `steps[].id` vượt `maxLength: 12` (20 ký tự) | fail | ❌ bắt đúng |
+| baseline không mutate | pass | ✅ hợp lệ |
+
+9/9 case đúng kỳ vọng. Sau khi xong, `git diff --stat project_state.json` ở repo thật vẫn y hệt
+trước khi bắt đầu (diff tiền tồn tại từ trước phiên này, không phải do Dev gây ra trong lúc verify).
+
+### Kết quả chạy thật
+
+```
+uv run pytest tests/ -q                              → 773 passed (không regression)
+uv run ruff check src/ tests/ scripts/                → All checks passed!
+uv run ruff format --check scripts/validate_state.py  → 1 file already formatted
+```
+
+### Trạng thái
+
+Gửi lại Reviewer vòng 2/3 (`loops[]` pair `dev-reviewer` item `S2`, count hiện tại theo
+`project_state.json`). Chưa tự báo "xong" (R7-01) — chờ Reviewer thật duyệt lại trước khi PM cân
+nhắc commit.
+
+## BL-04 — babeldoc không ghi finding khi tự drop đoạn không fit khung (Architecture.md §6.22)
+
+Hoàn tất implementation (tiếp tục 1 phiên Dev trước bị lỗi hạ tầng giữa chừng — phần lớn code đã
+có sẵn và hợp lệ, session này fix 1 test fail + chạy gate đầy đủ + live E2E).
+
+### Nội dung đã implement (từ phiên trước, xác nhận lại)
+
+- `src/babeldoc_shim/drop_report.py` (mới): predicate `_has_rendered_chars`, dựng record
+  `header`/`page`/`drop`, ghi append JSONL — pattern giống `word_wrap.py`/`line_split.py`.
+- `src/babeldoc_shim/sitecustomize.py`: patch `_create_render_units_for_page` (3 patch hook trong
+  `_install_hook_if_version_matches()`).
+- `src/core/chunking.py` (mới): `surviving_page_range(chunk, *, is_first_in_merge)` + Protocol
+  `_ChunkLike` (structural typing, không import `src.models.chunk`).
+- `src/postprocess/chunk_merge.py`: dùng `surviving_page_range(...)` thay khối tính tay, giữ
+  nguyên guard `overlap_* is not None` và phần kẹp `end` theo `chunk_doc.page_count` (X3 — KHÔNG
+  chuyển vào hàm chung).
+- `src/services/babeldoc_runner.py`: `BabeldocDroppedParagraph`/`BabeldocDropReport`, set 2 env
+  var (`BABELDOC_SHIM_DROP_REPORT`/`_PATH`), `drop_report_path` trong `output_dir`, parse sau
+  `process.wait()`, đếm sentinel, `reports_own_paragraph_drops: ClassVar[bool] = True`.
+- `src/services/pdf2zh_runner.py`: `reports_own_paragraph_drops: ClassVar[bool] = False` (R8-03 —
+  capability khai báo trên object đại diện biến thể, không rẽ nhánh `if engine==` trong
+  orchestrator).
+- `src/services/layout_qa.py`: 3 `check_type` mới (`babeldoc_paragraph_drop_unfit`,
+  `babeldoc_drop_report_unavailable`, `babeldoc_drop_report_incomplete`,
+  `babeldoc_drop_report_mismatch`) + severity trong `_SEVERITY_BY_CHECK`.
+- `src/core/job_orchestrator.py`: property `_reports_own_paragraph_drops`; trong `_process_chunk()`
+  sau khối `OverflowReport`, lọc dải trang sống sót → đối chiếu `observed_pages` → map sang
+  `LayoutQaFindingData` → `persist_findings()` → log R-1 (best-effort, `try/except` không làm fail
+  chunk); log R-2 ở `run_job()` Bước 10 trước `job.status="completed"`, đếm bằng `SELECT COUNT`
+  trên DB (X7 — không đếm từ list in-memory, để đúng khi resume sau crash).
+- `src/core/config.py`: `babeldoc_drop_report_enabled: bool = True`.
+
+### Fix trong session này — 1 test fail duy nhất
+
+`tests/integration/test_job_orchestrator.py::test_pdf2zh_branch_untouched_by_babeldoc_drop_report`
+(gate test #7, regression check Bug #9) fail: `assert len(overflow_result.all()) > 0` = 0.
+
+**Root cause: (b) test tự nó sai, KHÔNG phải regression từ BL-04.** `_fake_pdf2zh_runner()`'s mono
+output chỉ vẽ text `"page N"` qua `page.insert_text()` (giống `_make_pdf`) — đúng như
+`font_shrink_page`'s docstring "Second implementation note" đã ghi rõ từ trước: `block["bbox"]` mà
+`page.get_text("dict")` trả về được TÍNH TỪ CHÍNH các glyph đang bị so sánh, nên
+`text_width <= bbox_width` LUÔN đúng với bất kỳ text nào PyMuPDF vừa tự vẽ ra — không có cách nào
+để 1 trang PyMuPDF mới dựng tự nó tràn khung được, bất kể font/độ dài. Xác nhận thực nghiệm: đã đối
+chiếu với `test_font_shrink_page_full_scan_no_overflow_for_normal_text` (test unit sẵn có, cùng kết
+luận `entries == []`) và không có test nào khác trong repo (trước session này) từng assert
+`OverflowReport` count `> 0` qua đường full-page scan thật.
+
+**Cách sửa** (không nới lỏng assertion): thêm helper `_make_pdf_with_forced_overflow()` +
+`_fake_pdf2zh_runner_with_forced_overflow()` dựng trang 0 của mono output bằng ký tự `"|"` (30 lần)
+ở fontsize 14, vẽ bằng font mặc định PyMuPDF "helv" (`insert_text()` không chỉ định `fontname`) —
+đo thật (`fitz.Font("helv").text_length()` vs `fitz.Font(fontfile=".../NotoSerif-Regular.ttf")`)
+cho tỉ lệ mismatch ~2.15x giữa 2 font cho ký tự này, vượt xa ngưỡng ~1.47x cần để sống sót cả 2
+bước giảm nhẹ (-20% font shrink, 85% condensed scale) và rơi đúng nhánh `still_overflow=True`.
+Đây CHÍNH LÀ cơ chế overflow thật của production (mismatch giữa font THỰC TẾ vẽ trang và font
+`font_shrink_page` dùng để ĐO lại, `Settings.noto_font_path`) — không phải một mẹo giả tạo tách
+biệt khỏi logic thật. Assertion sau khi sửa cụ thể hơn: không chỉ đếm `> 0`, còn assert
+`still_overflow=True`, `page_number == 0`, `font_size_original ≈ 14.0` (R6-02).
+
+### Kết quả gate
+
+```
+uv run pytest tests/ -q                    → 816 passed (0 fail), 1101 warnings (pre-existing,
+                                              không liên quan — RuntimeWarning aiosqlite thread
+                                              teardown + FutureWarning google.generativeai)
+uv run ruff check src/ tests/              → All checks passed!
+uv run ruff format --check <files BL-04>   → All formatted (2 file cần format lại:
+                                              tests/test_babeldoc_drop_report_shim.py,
+                                              tests/test_chunking.py — đã sửa)
+```
+
+Không đụng tới 8 file khác đang lệch `ruff format` (`src/api/routes/jobs.py`,
+`src/core/file_router.py`, `src/services/claude_provider.py`, `src/services/epub_document.py`,
+`src/services/ollama_provider.py`, `src/services/openai_provider.py`, `src/utils/excel_utils.py`,
+`src/utils/unit_conversion_table.py`) — không nằm trong phạm vi BL-04, không có trong git diff của
+session này (đã xác nhận `git status --porcelain` sạch cho các file đó), khả năng do version
+`ruff` bump (`uv.lock` cũng đang modified). Ghi nhận cho PM/Reviewer xử lý riêng, không tự ý sửa
+ngoài phạm vi giao việc.
+
+### Live E2E (R5-03 + R6-03) — 2 lần chạy thật
+
+**Lần 1 — `scripts/bl04_live_e2e_chunk5.py`**: gọi TRỰC TIẾP
+`JobOrchestrator._process_chunk()` (không qua `run_job()`, đúng harness X8) với `BabeldocRunner`
+thật, DB session thật, `Chunk(chunk_index=5, page_start=199, page_end=240, overlap_start=199,
+overlap_end=200)`, nguồn `data/uploads/f07b3194-…-Le-Cordon-Bleu-Patisserie-and-Baking-Foundations
+(1).pdf` (418 trang, đúng `--pages 199-240`, KHÔNG cắt nhỏ — tránh bẫy mode-scale), model
+`deepseek`. Kết quả:
+
+- Assertion 0 (tiền điều kiện): `job.chunk_size_used == 40`, `page_start/end == 199/240` — PASS.
+- Assertion 1: `drop_report.available=True`, `observed_pages == 42/42` — PASS.
+- Assertion 6: log R-1 xuất hiện đúng định dạng (`observed=42/42`, `unfit_drops=0`,
+  `suppressed_overlap=0`, `checksum_mismatch=0`, kèm câu PHẠM VI) — PASS.
+- Assertion 2/3 (record tại trang 230): **KHÔNG tái hiện** — `unfit_drops=0` toàn bộ 42 trang, 0
+  `LayoutQaFinding` được ghi. Theo đúng Architecture.md 6.22.9 "Nếu không tái hiện được... KHÔNG
+  kết luận thiết kế sai" (dịch máy không tất định).
+- Assertion 4 (R6-03 — mở PDF output bằng PyMuPDF, không chỉ tin số đếm): **đã tự mở**
+  `chunk.output_path` trang index 31 (= trang nguồn 230). Đoạn sidebar 614 ký tự tiếng Anh ("The
+  term feuilletage appeared in the 15th century… Carême who innovated the fifth turn") **THẬT SỰ
+  VẮNG MẶT** khỏi bản dịch (đã đối chiếu trực tiếp với text trang 230 của file nguồn — đoạn đó có
+  mặt nguyên vẹn ở nguồn, biến mất ở đích) — **cùng hiện tượng Domain Expert đã đo trên job
+  `1ee1fdee`**. Nhưng sidecar JSONL của babeldoc (`page_number_1based=230,
+  dropped_count=0`) xác nhận đây **KHÔNG phải kênh (1)** ("không vừa khung sau khi bóp tới
+  min_scale") mà BL-04 đo — khớp đúng với câu PHẠM VI trong log R-1 ("chữ bị lọc ở
+  `ActiveILCreater.project_native_char`… KHÔNG được đo bởi cơ chế này"). Đây là bằng chứng sống
+  THỨ HAI (sau Domain Expert) rằng kênh (2)/BL-08 là có thật và đáng ưu tiên — không phải lỗi của
+  BL-04, BL-04 báo cáo đúng những gì NÓ đo được.
+- Assertion 5 (không finding tại trang chồng lấn 199-200): PASS nhưng **yếu** — vì tổng 0 finding
+  nên đây là pass rỗng, không chứng minh được bộ lọc F1 thật sự loại trừ gì (cần 1 ca drop thật ở
+  vùng chồng lấn để test có ý nghĩa — chưa có).
+
+**Lần 2 (fallback (b) theo Architecture.md 6.22.9) — `scripts/bl04_live_e2e_synthetic_drop.py`**:
+dựng PDF 1 trang tái tạo ĐÚNG hình học đã đo (bbox `(61.5, 223.6, 332.3, 466.6)`, 271×243pt, đúng
+614 ký tự gốc), chạy `BabeldocRunner.translate_pages()` trực tiếp. Kết quả: babeldoc **không dịch**
+trang này (giữ nguyên tiếng Anh), `dropped_count=0`. Không kết luận thêm được gì — nhiều khả năng
+trang đơn lẻ thiếu ngữ cảnh layout xung quanh khiến bộ phân loại layout của babeldoc xử lý khác
+(không phải lỗi BL-04). Không thử thêm lần 3 (chi phí gọi API thật, đã có 2 lần chạy thật hợp lệ
+cho R5-03).
+
+**Golden fixture mới**: `tests/fixtures/babeldoc/drop_report_v2.jsonl` — copy nguyên văn sidecar
+JSONL thật từ lần chạy 1 (4 header, 42 page, `dropped_count=0` toàn bộ, không có dòng `drop` nào —
+xem `tests/fixtures/babeldoc/README.md` mục "drop_report_v2.jsonl" cho investigation đầy đủ). Test
+mới: `test_parse_drop_report_file_reads_real_live_e2e_golden_fixture`
+(`tests/test_babeldoc_runner.py`) — phủ nhánh `header`/`page`/`observed_pages` bằng byte thật;
+nhánh `type=drop` (field `text_excerpt` v.v.) vẫn dựa vào
+`test_parse_drop_report_file_reads_real_written_file` (dữ liệu mô phỏng đúng schema đã verify qua
+source, KHÔNG phải byte live-capture — 2 lần thử live đều không tạo ra dòng `drop` thật).
+
+### R5-03 kết luận
+
+Đã có ≥1 lần gọi thật (2 lần) tới `babeldoc` 0.6.4 CLI + DeepSeek API thật — điều kiện tối thiểu
+thoả. Chưa verify được (và có nêu rõ, không giấu): nhánh `type=drop` end-to-end (từ babeldoc dừng
+thật → shim ghi dòng `drop` thật → orchestrator map sang `LayoutQaFinding` thật) — 2 lần thử live
+đều không tạo ra ca drop kênh (1) thật để quan sát trọn vẹn nhánh này; nhánh này vẫn được phủ ở
+mức "schema verified qua source + mapping test dùng sidecar dựng tay đúng schema"
+(`test_babeldoc_drop_finding_page_number_traces_to_sidecar_file`,
+`tests/integration/test_job_orchestrator.py`), không phải live-capture. Đề xuất: PM/QA cân nhắc có
+đáng đầu tư thêm 1 lần chạy live (option (a) Architecture.md 6.22.9 — dịch nguyên cuốn 418 trang
+cùng model/prompt job `1ee1fdee`) trước khi release, hay chấp nhận mức verify hiện tại.
+
+### KHÔNG commit
+
+Theo brief — PM điều phối commit sau khi Reviewer + QA duyệt qua vòng thật.

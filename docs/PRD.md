@@ -7,6 +7,12 @@
 > sử, KHÔNG mô tả trạng thái hiện tại. Nội dung mới nhất (US-15 kích hoạt lại, US-17→US-22 ở
 > §3, business rules §4.10-4.12, backlog §9) là **bổ sung tính năng lên trên nền đã release**,
 > không phải build lại. Xem `docs/CHANGELOG.md` cho lịch sử đầy đủ giữa 2 mốc.
+>
+> **Baseline duyệt lại (Hiếu, 2026-09-11)**: checkpoint C1 (Protocol C / mở rộng Protocol 2) đã
+> `stale` từ trước (US-15/17→22 thêm vào mà không bump version) — Hiếu duyệt lại toàn bộ nội dung
+> hiện tại của file này làm **Version 2.0**. Xem `project_state.json` → `checkpoints[]` cho
+> `approved_commit`, và `docs/design-log.md` mục "Final Decision: Hiếu trả lời 3 open_questions...
+> (2026-09-11)" cho bối cảnh đầy đủ.
 
 ---
 

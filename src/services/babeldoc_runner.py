@@ -1,13 +1,22 @@
 import asyncio
+import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from src.core.concurrency_controller import RATE_LIMIT_LINE_RE
 from src.services.pdf2zh_runner import _drain
 from src.services.pdf2zh_service_map import Pdf2zhService, UnsupportedForPdfPipelineError
+
+#: BL-04 (Architecture.md 6.22.3(a), 6.22.6 "Doi chieu cheo"). Cau sentinel
+#: THAT do trong log babeldoc khi 1 doan khong con ky tu da render nhung van
+#: con `unicode`+`debug_id` (`pdf_creater.py:831-835` ban 0.6.4 da cai) —
+#: dung DE DOI CHIEU MOT CHIEU voi so record `drop` co cau truc trong sidecar
+#: JSONL, KHONG dung de trich payload (rich wrap co the cat giua tu, xem
+#: 6.22.3).
+_DROP_SENTINEL_TEXT = "Unable to export paragraphs that have not yet been formatted"
 
 #: Endpoint OpenAI-compat chinh thuc cua Gemini — VERIFIED (Architecture.md
 #: 6.14.1 B14, WebFetch https://ai.google.dev/gemini-api/docs/openai,
@@ -197,6 +206,122 @@ class BabeldocTimeoutError(RuntimeError):
         self.rate_limit_hits = rate_limit_hits
 
 
+@dataclass(frozen=True)
+class BabeldocDroppedParagraph:
+    """1 doan van bi babeldoc BO HAN vi khong vua khung sau khi da bop toi
+    `min_scale=0.1` (Architecture.md 6.22.2/6.22.4/6.22.5) — 1 dong `type=drop`
+    trong sidecar JSONL."""
+
+    page_number: int  # 1-based, tai lieu NGUON (khong phai chi so trong chunk)
+    debug_id: str
+    layout_label: str | None
+    box: tuple[float, float, float, float] | None
+    optimal_scale: float | None
+    scale: float | None
+    text_excerpt: str
+    text_len: int
+
+
+@dataclass(frozen=True)
+class BabeldocDropReport:
+    """Ket qua parse toan bo sidecar JSONL cua 1 lan goi `translate_pages()`
+    (Architecture.md 6.22.5) — CHUA loc chong lan (runner khong biet gi ve
+    chunk plan, viec loc thuoc `JobOrchestrator._process_chunk()`)."""
+
+    available: bool  # False = KHONG do duoc (khong co dong `header` hop le nao)
+    dropped: list[BabeldocDroppedParagraph]  # TOAN BO record cua lan chay, CHUA loc chong lan
+    observed_pages: frozenset[int]  # 1-based; tu record type="page" (F2)
+    page_dropped_counts: dict[int, int]  # page_number_1based -> dropped_count da khai bao
+    header_count: int  # >=1 la binh thuong (spawn nhieu process)
+    malformed_line_count: int
+    stdout_sentinel_count: int = 0  # doi chieu 1 chieu, xem 6.22.6
+
+
+def _empty_drop_report() -> BabeldocDropReport:
+    """Gia tri mac dinh cua `BabeldocResult.drop_report` cho cac call site
+    (test cu, mock) khong truyen field nay — tuong duong trang thai 4 "KHONG
+    do duoc" (Architecture.md 6.22.6), khong phai "0 drop that su"."""
+    return BabeldocDropReport(
+        available=False,
+        dropped=[],
+        observed_pages=frozenset(),
+        page_dropped_counts={},
+        header_count=0,
+        malformed_line_count=0,
+        stdout_sentinel_count=0,
+    )
+
+
+def _parse_drop_report_lines(lines: list[str]) -> BabeldocDropReport:
+    """Thuat toan thuan (khong doc file) — tach rieng de test khong can dung
+    tmp_path (Protocol 6 R6-02: golden fixture van la file that, nhung logic
+    parse tu no thi test truc tiep tren list dong).
+
+    Quy tac parse (Architecture.md 6.22.4 "Quy tac parse", bat buoc):
+    KHONG gia dinh dong dau tien la `header`, KHONG gia dinh chi co 1 dong
+    `header`; dong JSON hong (parse loi) -> bo qua + dem vao
+    `malformed_line_count`, KHONG lam hong ca report.
+    """
+    header_count = 0
+    malformed_line_count = 0
+    dropped: list[BabeldocDroppedParagraph] = []
+    observed_pages: set[int] = set()
+    page_dropped_counts: dict[int, int] = {}
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            record: dict[str, Any] = json.loads(line)
+        except json.JSONDecodeError:
+            malformed_line_count += 1
+            continue
+
+        record_type = record.get("type")
+        if record_type == "header":
+            header_count += 1
+        elif record_type == "page":
+            page_number = record["page_number_1based"]
+            observed_pages.add(page_number)
+            page_dropped_counts[page_number] = record["dropped_count"]
+        elif record_type == "drop":
+            box = record.get("box")
+            dropped.append(
+                BabeldocDroppedParagraph(
+                    page_number=record["page_number_1based"],
+                    debug_id=record.get("debug_id", ""),
+                    layout_label=record.get("layout_label"),
+                    box=tuple(box) if box is not None else None,
+                    optimal_scale=record.get("optimal_scale"),
+                    scale=record.get("scale"),
+                    text_excerpt=record.get("text_excerpt", ""),
+                    text_len=record.get("text_len", 0),
+                )
+            )
+        # else: schema tuong lai (v3+) co the co type khac — bo qua, KHONG
+        # dem vao malformed_line_count (day khong phai loi parse).
+
+    return BabeldocDropReport(
+        available=header_count >= 1,
+        dropped=dropped,
+        observed_pages=frozenset(observed_pages),
+        page_dropped_counts=page_dropped_counts,
+        header_count=header_count,
+        malformed_line_count=malformed_line_count,
+        stdout_sentinel_count=0,  # dien boi caller (translate_pages), tu stdout+stderr
+    )
+
+
+def _parse_drop_report_file(path: Path) -> BabeldocDropReport:
+    """Doc file sidecar JSONL (`BabeldocRunner` sau `process.wait()`,
+    Architecture.md 6.22.5 buoc 3) — file khong ton tai/rong deu la trang
+    thai 4 "KHONG do duoc", KHONG phai loi."""
+    if not path.exists():
+        return _empty_drop_report()
+    return _parse_drop_report_lines(path.read_text(encoding="utf-8").splitlines())
+
+
 @dataclass
 class BabeldocResult:
     success: bool
@@ -206,6 +331,10 @@ class BabeldocResult:
     duration_seconds: float
     stdout: str = ""
     rate_limit_hits: int = 0
+    #: BL-04 (Architecture.md 6.22.5). Mac dinh = trang thai 4 "KHONG do
+    #: duoc" (KHONG phai "0 drop that su") cho cac call site cu khong truyen
+    #: field nay (test hien co, mock).
+    drop_report: BabeldocDropReport = field(default_factory=_empty_drop_report)
 
 
 class BabeldocRunner:
@@ -227,6 +356,11 @@ class BabeldocRunner:
     #: gây Bug #8 (lệch toạ độ, đã fix) và XOÁ MẤT CHỮ THẬT (Bug #9).
     needs_font_shrink: ClassVar[bool] = False
 
+    #: BL-04 (Architecture.md 6.22.7 R8-03). babeldoc tu bo han doan khong
+    #: vua khung (6.22.2) — app khong do duoc bang hau ky, phai lay tin hieu
+    #: tu chinh no (shim + sidecar JSONL, 6.22.4).
+    reports_own_paragraph_drops: ClassVar[bool] = True
+
     def __init__(
         self,
         executable: str = "babeldoc",
@@ -235,6 +369,7 @@ class BabeldocRunner:
         numbered_list_split_enabled: bool = True,
         toc_split_enabled: bool = False,
         word_wrap_fix_enabled: bool = False,
+        drop_report_enabled: bool = True,
     ) -> None:
         self._executable = executable
         self._deepseek_base_url = deepseek_base_url
@@ -265,6 +400,12 @@ class BabeldocRunner:
         #: `Settings.babeldoc_word_wrap_fix_enabled` (mac dinh `True`, xem
         #: src/core/config.py), giong het pattern cua `toc_split_enabled`.
         self._word_wrap_fix_enabled = word_wrap_fix_enabled
+        #: BL-04 (Architecture.md 6.22.4). Doc lap voi 4 co tren, cung ly do:
+        #: chi co tac dung khi shim tong CUNG bat (PYTHONPATH phai duoc set),
+        #: truyen qua bien moi truong RIENG de tat duoc mot minh patch
+        #: observer nay ma khong dong 4 patch kia. Gia tri production THAT
+        #: nam o `Settings.babeldoc_drop_report_enabled` (mac dinh `True`).
+        self._drop_report_enabled = drop_report_enabled
 
     async def translate_pages(
         self,
@@ -325,6 +466,14 @@ class BabeldocRunner:
         base_url, api_key, model = _resolve_openai_compat(
             service, deepseek_base_url=self._deepseek_base_url
         )
+
+        # BL-04 (Architecture.md 6.22.4/6.22.5). BAT BUOC nam TRONG
+        # `output_dir` (== `chunk_output_dir` cua `_call_translator()`):
+        # `job_orchestrator.py` xoa sach thu muc nay o DAU MOI attempt (ke ca
+        # retry ngam + resume sau crash), nen record cua attempt hong khong
+        # bao gio bi cong don vao attempt thanh cong. Gan `page_range` vao
+        # ten file de 2 chunk chay song song khong ghi de nhau.
+        drop_report_path = output_dir / f"{input_path.stem}.{page_range}.drops.jsonl"
 
         args = [
             "--files",
@@ -387,6 +536,8 @@ class BabeldocRunner:
             )
             env["BABELDOC_SHIM_TOC_SPLIT"] = "1" if self._toc_split_enabled else "0"
             env["BABELDOC_SHIM_WORD_WRAP_FIX"] = "1" if self._word_wrap_fix_enabled else "0"
+            env["BABELDOC_SHIM_DROP_REPORT"] = "1" if self._drop_report_enabled else "0"
+            env["BABELDOC_SHIM_DROP_REPORT_PATH"] = str(drop_report_path)
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(
@@ -421,6 +572,9 @@ class BabeldocRunner:
         # (B10/B11): moi canh bao tenacity sinh dung 1 token "RateLimitError"
         # tren stdout, dong bi rich wrap nen chi neo token la dung.
         rate_limit_hits = len(RATE_LIMIT_LINE_RE.findall(stdout + "\n" + stderr))
+        # BL-04 (Architecture.md 6.22.6 "Doi chieu cheo") — dem CHINH sentinel
+        # nay tren stdout+stderr, dung CACH dem hien co (khong regex moi).
+        drop_sentinel_count = (stdout + "\n" + stderr).count(_DROP_SENTINEL_TEXT)
 
         if timed_out:
             raise BabeldocTimeoutError(
@@ -444,6 +598,14 @@ class BabeldocRunner:
         mono_path = output_dir / f"{stem}.no_watermark.{lang_out}.mono.pdf"
         dual_path = output_dir / f"{stem}.no_watermark.{lang_out}.dual.pdf"
 
+        # BL-04 (Architecture.md 6.22.5 buoc 3) — parse file sidecar SAU khi
+        # process.wait(), KHONG doc lai stdout cho payload. File khong ton tai
+        # (shim tat / drop_report_enabled=False / patch that bai) la trang
+        # thai 4 hop le, khong phai loi.
+        drop_report = replace(
+            _parse_drop_report_file(drop_report_path), stdout_sentinel_count=drop_sentinel_count
+        )
+
         return BabeldocResult(
             success=True,
             mono_path=mono_path,
@@ -452,4 +614,5 @@ class BabeldocRunner:
             stderr=stderr,
             duration_seconds=duration,
             rate_limit_hits=rate_limit_hits,
+            drop_report=drop_report,
         )

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -20,8 +21,18 @@ from src.models.overflow import OverflowReport
 from src.postprocess.font_shrink import font_shrink_page as _real_font_shrink_page
 from src.postprocess.image_compress import ImageCompressStats
 from src.postprocess.rotated_text_overlay import OverlayResult
-from src.services.babeldoc_runner import BabeldocResult, BabeldocRunner
-from src.services.layout_qa import ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK, LayoutQaFindingData
+from src.services.babeldoc_runner import (
+    BabeldocDroppedParagraph,
+    BabeldocDropReport,
+    BabeldocResult,
+    BabeldocRunner,
+    _parse_drop_report_file,
+)
+from src.services.layout_qa import (
+    BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK,
+    ROTATED_TEXT_SCAN_UNSUPPORTED_CHECK,
+    LayoutQaFindingData,
+)
 from src.services.mineru_det_probe import MineruDetProbeUnavailableError
 from src.services.mineru_runner import (
     MinerUCancelledError,
@@ -70,6 +81,43 @@ def _make_pdf(path: Path, n_pages: int) -> None:
     doc.close()
 
 
+def _make_pdf_with_forced_overflow(path: Path, n_pages: int) -> None:
+    """Same shape as `_make_pdf`, except page 0 is built so that
+    `font_shrink_page()` genuinely finds a `still_overflow=True` span when run
+    for real (not asserting on a count that can never be non-zero).
+
+    `font_shrink_page`'s own module docstring ("Second implementation note")
+    explains why plain `_make_pdf`-style text can NEVER organically overflow:
+    `page.get_text("dict")`'s block bbox is *computed from the same glyphs*
+    it gets compared against, so `text_width <= bbox_width` trivially holds
+    for anything freshly rendered by PyMuPDF, regardless of font or length.
+    Real overflow only happens because production compares a *different*
+    pair of numbers: the width PyMuPDF drew the glyphs at (here: fitz's
+    built-in "helv", via `insert_text()`'s default `fontname`) vs. the width
+    `font_shrink_page` re-measures the SAME extracted text at using the real
+    production `font_path` (`Settings.noto_font_path`, NotoSerif — passed by
+    `JobOrchestrator._process_chunk()` exactly as it does for a real chunk).
+    "|" is used because it happens to have the largest measured helv-vs-Noto
+    metric gap of any ASCII character tried (~2.15x, verified locally by
+    comparing `fitz.Font("helv").text_length()` vs
+    `fitz.Font(fontfile=".../NotoSerif-Regular.ttf").text_length()` for the
+    same string) -- comfortably past the ~1.47x needed to survive BOTH
+    mitigation steps (-20% font shrink, then 85% condensed scale) and still
+    land in the `still_overflow=True` branch, so this is not a hair's-width
+    coincidence that could flake.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    for i in range(n_pages):
+        page = doc.new_page()
+        if i == 0:
+            page.insert_text((50, 100), "|" * 30, fontsize=14)
+        else:
+            page.insert_text((50, 100), f"page {i + 1}", fontsize=10)
+    doc.save(path)
+    doc.close()
+
+
 def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
     """Real chunks worth of pages get created on disk so post-processing
     (font_shrink, chunk_merge) runs against real PyMuPDF files, not mocks.
@@ -88,6 +136,7 @@ def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
+    runner.reports_own_paragraph_drops = False
     call_counter = {"n": 0}
 
     async def _translate_pages(
@@ -102,6 +151,30 @@ def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
             total_pages = source_doc.page_count
         mono_path = output_dir / f"{input_path.stem}-mono.pdf"
         _make_pdf(mono_path, n_pages=total_pages)
+        return Pdf2zhResult(
+            success=True, mono_path=mono_path, dual_path=None, stderr="", duration_seconds=0.01
+        )
+
+    runner.translate_pages.side_effect = _translate_pages
+    return runner
+
+
+def _fake_pdf2zh_runner_with_forced_overflow() -> Pdf2zhRunner:
+    """Variant of `_fake_pdf2zh_runner()` whose mono output's page 0 is built
+    with `_make_pdf_with_forced_overflow` instead of `_make_pdf`, so a real
+    `font_shrink_page()` run genuinely produces a `still_overflow=True` entry
+    -- see `test_pdf2zh_branch_untouched_by_babeldoc_drop_report`."""
+    runner = AsyncMock(spec=Pdf2zhRunner)
+    runner.needs_font_shrink = True
+    runner.reports_own_paragraph_drops = False
+
+    async def _translate_pages(
+        input_path, output_dir, page_range, service, prompt_file=None, **kwargs
+    ):
+        with fitz.open(input_path) as source_doc:
+            total_pages = source_doc.page_count
+        mono_path = output_dir / f"{input_path.stem}-mono.pdf"
+        _make_pdf_with_forced_overflow(mono_path, n_pages=total_pages)
         return Pdf2zhResult(
             success=True, mono_path=mono_path, dual_path=None, stderr="", duration_seconds=0.01
         )
@@ -382,6 +455,7 @@ async def test_run_job_calls_mineru_before_pdf2zh_for_pdf_scan(
 
     tracked_pdf2zh = AsyncMock(spec=Pdf2zhRunner)
     tracked_pdf2zh.needs_font_shrink = True
+    tracked_pdf2zh.reports_own_paragraph_drops = False
     tracked_pdf2zh.translate_pages.side_effect = _tracked_translate_pages
     tracked_mineru = AsyncMock(spec=MinerURunner)
     tracked_mineru.parse_document.side_effect = _tracked_parse_document
@@ -445,6 +519,7 @@ def _fake_pdf2zh_runner_empty_output() -> Pdf2zhRunner:
     """
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
+    runner.reports_own_paragraph_drops = False
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -509,6 +584,7 @@ def _fake_babeldoc_runner() -> BabeldocRunner:
     with babeldoc's own filename pattern (Architecture.md 6.14.1 B7)."""
     runner = AsyncMock(spec=BabeldocRunner)
     runner.needs_font_shrink = False
+    runner.reports_own_paragraph_drops = True
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -1007,6 +1083,7 @@ async def test_empty_translation_fails_before_compress_runs(
 
     babeldoc_runner = AsyncMock(spec=BabeldocRunner)
     babeldoc_runner.needs_font_shrink = False
+    babeldoc_runner.reports_own_paragraph_drops = True
 
     async def _translate_pages_empty(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -2005,3 +2082,294 @@ async def test_needs_font_shrink_property_isinstance_guard_catches_unset_mock(
 
     with pytest.raises(TypeError, match="needs_font_shrink"):
         _ = orchestrator._needs_font_shrink
+
+
+# --- BL-04 (Architecture.md 6.22, gate 6.22.9) ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_babeldoc_drop_finding_page_number_traces_to_sidecar_file(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Gate test #6 (test_lineage, R6-01): `page_number` cua finding persist
+    vao DB PHAI bat nguon tu FILE sidecar ma `BabeldocRunner` da parse qua
+    duong dan truyen qua env (`_parse_drop_report_file`), KHONG phai mot gia
+    tri hang rieng trong test."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    dropped_page_number = 2
+    sidecar_dir = tmp_path / "sidecar_source"
+    sidecar_dir.mkdir()
+    sidecar_path = sidecar_dir / "real.drops.jsonl"
+    sidecar_path.write_text(
+        '{"type":"header","schema":"babeldoc_drop_report/v2","babeldoc_version":"0.6.4","pid":1}\n'
+        f'{{"type":"page","page_number_1based":{dropped_page_number},"paragraph_count":2,'
+        '"dropped_count":1}\n'
+        f'{{"type":"drop","page_number_1based":{dropped_page_number},"debug_id":"lineage1",'
+        '"layout_label":"plain text","box":[1.0,2.0,3.0,4.0],"optimal_scale":0.1,"scale":null,'
+        '"text_excerpt":"noi dung mat that","text_len":16}\n'
+        f'{{"type":"page","page_number_1based":1,"paragraph_count":1,"dropped_count":0}}\n'
+        f'{{"type":"page","page_number_1based":3,"paragraph_count":1,"dropped_count":0}}\n',
+        encoding="utf-8",
+    )
+    # Cung ham production dung boi BabeldocRunner.translate_pages() (khong
+    # tu viet lai logic parse trong test).
+    sidecar_drop_report = _parse_drop_report_file(sidecar_path)
+    assert sidecar_drop_report.available
+    assert sidecar_drop_report.observed_pages == frozenset({1, 2, 3})
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    original_side_effect = babeldoc_runner.translate_pages.side_effect
+
+    async def _translate_pages_with_sidecar(*args, **kwargs):
+        result = await original_side_effect(*args, **kwargs)
+        result.drop_report = sidecar_drop_report
+        return result
+
+    babeldoc_runner.translate_pages.side_effect = _translate_pages_with_sidecar
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=babeldoc_runner,
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+    assert result.status == "completed"
+
+    findings_result = await session.exec(
+        select(LayoutQaFinding).where(LayoutQaFinding.job_id == job.id)
+    )
+    findings = findings_result.all()
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.check_type == BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK
+    assert finding.page_number == dropped_page_number
+    detail = json.loads(finding.detail)
+    assert detail["debug_id"] == "lineage1"
+    assert detail["text_excerpt"] == "noi dung mat that"
+
+
+@pytest.mark.asyncio
+async def test_pdf2zh_branch_untouched_by_babeldoc_drop_report(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Gate test #7 (test_pdf2zh_branch_untouched) — regresion Bug #9:
+    `pdf_translate_engine="pdf2zh"` phai cho ra 0 finding `babeldoc_*`, va
+    `OverflowReport` VAN duoc ghi nhu cu (khong bi BL-04 lam thay doi).
+
+    Dung `_fake_pdf2zh_runner_with_forced_overflow()` (khong phai
+    `_fake_pdf2zh_runner()` thuong) vi mono output cua `_fake_pdf2zh_runner()`
+    chi ve text kieu "page N" qua `page.insert_text()` -- theo dung "Second
+    implementation note" trong docstring cua `font_shrink_page`, mot trang
+    PyMuPDF moi ve KHONG BAO GIO tu no tran khung duoc (block bbox tinh tu
+    chinh nhung glyph dang duoc so sanh), nen `len(overflow_result.all()) > 0`
+    voi mono output do la bat kha thi bat ke BL-04 co dung hay sai -- day la
+    ly do that su test nay fail, khong phai regression tu thay doi BL-04 (da
+    doi chieu: khoi ghi `OverflowReport` o `job_orchestrator.py` khong bi
+    BL-04 dung vao, xem `:2159-2172` van nguyen ven, chi co code moi cua
+    BL-04 duoc THEM VAO SAU no)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        pdf2zh_runner=_fake_pdf2zh_runner_with_forced_overflow(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with patch(
+        "src.core.job_orchestrator.font_shrink_page",
+        new=AsyncMock(wraps=_real_font_shrink_page),
+    ):
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    babeldoc_findings_result = await session.exec(
+        select(LayoutQaFinding).where(LayoutQaFinding.job_id == job.id)
+    )
+    assert babeldoc_findings_result.all() == []
+
+    overflow_result = await session.exec(
+        select(OverflowReport).where(OverflowReport.job_id == job.id)
+    )
+    overflow_rows = overflow_result.all()
+    assert len(overflow_rows) > 0  # font_shrink van chay cho pdf2zh
+    still_overflowing = [row for row in overflow_rows if row.still_overflow]
+    assert still_overflowing  # entry that == True went through the real still-overflow branch
+    assert still_overflowing[0].page_number == 0  # page 0 of the mono is the forced-overflow page
+    assert still_overflowing[0].font_size_original == pytest.approx(14.0)
+
+
+@pytest.mark.asyncio
+async def test_reports_own_paragraph_drops_property_isinstance_guard_catches_unset_mock(
+    tmp_path: Path,
+) -> None:
+    """Gate test #8 (test_capability_guard) — cung khuon voi
+    `test_needs_font_shrink_property_isinstance_guard_catches_unset_mock`:
+    `AsyncMock(spec=BabeldocRunner)` khong set `reports_own_paragraph_drops`
+    phai raise `TypeError` ro rang, khong am tham chay nhanh pdf2zh (0
+    finding) va van PASS."""
+    runner = AsyncMock(spec=BabeldocRunner)  # deliberately NOT setting reports_own_paragraph_drops
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with pytest.raises(TypeError, match="reports_own_paragraph_drops"):
+        _ = orchestrator._reports_own_paragraph_drops
+
+
+@pytest.mark.asyncio
+async def test_r2_log_counts_from_db_including_resumed_chunk_findings(
+    session: AsyncSession, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Gate test #11 (test_r2_counts_from_db_on_resume, X7): job co 2 chunk,
+    chunk 0 da `status="completed"` VOI 3 row `layout_qa_findings` `babeldoc_*`
+    SAN CO trong DB (mo phong lan chay truoc da crash SAU chunk 0 — cac
+    finding cua no da persist nhung Buoc 7 se BO QUA chunk nay o lan chay
+    nay, `if chunk.status != "completed":`), chunk 1 chay trong lan nay sinh
+    THEM 1 finding -> log R-2 phai bao 4, KHONG phai 1. Day la test chung
+    minh R-2 dem tu DB (1 cau SELECT COUNT) chu KHONG phai tu list
+    in-memory tich luy qua `_process_chunk()` (X7)."""
+    total_pages = 45
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, total_pages)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+    job.chunk_size_used = 40  # -> chunks [1-40], [39-45] (overlap 39-40)
+    session.add(job)
+    await session.commit()
+
+    # Chunk 0: da hoan tat tu "lan chay truoc" — output that (can cho
+    # merge_chunk_pdfs() sau nay), status="completed" nen Buoc 7 se BO QUA.
+    chunk0_output = tmp_path / "chunk0_mono.pdf"
+    _make_pdf(chunk0_output, n_pages=40)
+    chunk0 = Chunk(
+        job_id=job.id,
+        chunk_index=0,
+        page_start=1,
+        page_end=40,
+        overlap_start=None,
+        overlap_end=None,
+        status="completed",
+        output_path=str(chunk0_output),
+    )
+    chunk1 = Chunk(
+        job_id=job.id,
+        chunk_index=1,
+        page_start=39,
+        page_end=45,
+        overlap_start=39,
+        overlap_end=40,
+        status="pending",
+    )
+    session.add(chunk0)
+    session.add(chunk1)
+    await session.commit()
+
+    # 3 finding "da persist tu lan chay truoc" — vAN con trong DB, nhung
+    # KHONG di qua _process_chunk() cua lan chay NAY (chunk 0 bi skip).
+    for i in range(3):
+        session.add(
+            LayoutQaFinding(
+                job_id=job.id,
+                page_number=10 + i,
+                check_type=BABELDOC_PARAGRAPH_DROP_UNFIT_CHECK,
+                severity="critical",
+                detail="{}",
+            )
+        )
+    await session.commit()
+
+    dropped_page_number = 42  # trong dai song sot cua chunk 1 (41-45)
+
+    def _resume_babeldoc_runner() -> BabeldocRunner:
+        runner = AsyncMock(spec=BabeldocRunner)
+        runner.needs_font_shrink = False
+        runner.reports_own_paragraph_drops = True
+
+        async def _translate_pages(
+            input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
+        ):
+            with fitz.open(input_path) as source_doc:
+                total = source_doc.page_count
+            mono_path = output_dir / f"{input_path.stem}.no_watermark.{lang_out}.mono.pdf"
+            _make_pdf(mono_path, n_pages=total)
+
+            start, end = (int(x) for x in page_range.split("-"))
+            expected_pages = set(range(start, end + 1))
+            drop_report = BabeldocDropReport(
+                available=True,
+                dropped=[
+                    BabeldocDroppedParagraph(
+                        page_number=dropped_page_number,
+                        debug_id="resume1",
+                        layout_label="plain text",
+                        box=(1.0, 2.0, 3.0, 4.0),
+                        optimal_scale=0.1,
+                        scale=None,
+                        text_excerpt="mat sau khi resume",
+                        text_len=19,
+                    )
+                ],
+                observed_pages=frozenset(expected_pages),
+                page_dropped_counts={
+                    p: (1 if p == dropped_page_number else 0) for p in expected_pages
+                },
+                header_count=1,
+                malformed_line_count=0,
+                stdout_sentinel_count=0,
+            )
+            return BabeldocResult(
+                success=True,
+                mono_path=mono_path,
+                dual_path=None,
+                stderr="",
+                duration_seconds=0.01,
+                drop_report=drop_report,
+            )
+
+        runner.translate_pages.side_effect = _translate_pages
+        return runner
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=_resume_babeldoc_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.core.job_orchestrator"):
+        result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+
+    # Chunk 0 KHONG duoc goi lai (status da "completed" tu truoc).
+    resume_runner = orchestrator._babeldoc_runner
+    assert resume_runner.translate_pages.await_count == 1
+
+    all_findings_result = await session.exec(
+        select(LayoutQaFinding).where(LayoutQaFinding.job_id == job.id)
+    )
+    all_findings = all_findings_result.all()
+    assert len(all_findings) == 4  # 3 co san + 1 moi tu chunk 1
+
+    r2_messages = [
+        record.message
+        for record in caplog.records
+        if "R-2" in record.message and job.id in record.message
+    ]
+    assert len(r2_messages) == 1
+    assert "babeldoc_finding_count=4" in r2_messages[0]
