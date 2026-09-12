@@ -251,7 +251,7 @@
       "status": "done",
       "blocked_by": [],
       "output": "web/index.html + web/history.html — hint đã verify qua source Chromium/Firefox thật (Architecture.md §6.24). Reviewer APPROVE (review-report.md), QA PASS ready_for_release YES qua Playwright live (test-report.md), 827 test pass. CHANGELOG.md đã append.",
-      "closed_commit": null
+      "closed_commit": "f55d17f"
     }
   ],
   "loops": [
