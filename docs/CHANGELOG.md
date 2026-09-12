@@ -8096,3 +8096,27 @@ integration) + `ruff check`/`ruff format` sạch.
 ### KHÔNG commit
 
 Theo brief — PM điều phối commit sau khi Reviewer + QA duyệt qua vòng thật.
+
+## S5 — UI hint "chọn thư mục tải về" (không code logic, dựa hoàn toàn vào browser)
+
+Theo `docs/Architecture.md` §6.24 (đã Tech Lead verify qua source Chromium/Firefox thật, không
+suy đoán). Chỉ sửa HTML tĩnh, không thêm JS, không đụng `web/js/*.js` hay `src/`.
+
+`web/index.html`: thêm `<span class="text-xs text-gray-400 cursor-help" title="...">ⓘ Chọn nơi
+lưu</span>` ngay sau 2 link download trong `div.mt-2.flex.gap-2` (khu vực `x-show="f.job?.status
+=== 'completed'"`), tooltip hướng dẫn bật "Ask where to save each file before downloading"
+(Chrome) / "Ask where to save files before downloading" (Firefox) — nguyên văn theo §6.24, không
+sửa/rút gọn.
+
+`web/history.html`: bảng lịch sử lặp `<tr>` qua nhiều job (`x-for="job in jobs"`) nên KHÔNG nhân
+bản hint theo từng dòng — đặt 1 lần duy nhất ở `<th>` cuối cùng của header bảng (cột chứa 2 link
+Tải), cùng nội dung tooltip như trên.
+
+### Test
+
+Không sửa Python — chạy lại toàn bộ `pytest` để xác nhận không phá gì: 827 passed. Không cần
+ruff (không đổi file `.py`).
+
+### KHÔNG commit
+
+Theo brief — PM điều phối commit sau khi Reviewer duyệt qua vòng thật (Protocol 7, Protocol A).

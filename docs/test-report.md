@@ -2476,3 +2476,76 @@ ngỏ ở vòng trước:
   `status`): thoả qua `step1b_process_chunk.py` (đã mở `text_excerpt` thật ra xem).
 - Regression suite đầy đủ: 816/816 pass, ruff sạch. Nhánh pdf2zh không hồi quy (Bug #9). R-2 đếm đúng
   từ DB khi resume sau crash (X7).
+
+---
+
+## S5 — UI hint "chọn thư mục tải file" (2026-09-12)
+
+**Phạm vi**: `web/index.html` (~dòng 152) và `web/history.html` (~dòng 54-56) — span tooltip
+`ⓘ Chọn nơi lưu` cạnh khu vực download, đã qua Reviewer APPROVE
+("S5 — UI hint 'chọn thư mục tải file' (2026-09-12)"). Thuần UI tĩnh, không đụng backend/pipeline,
+nhưng vẫn verify sống theo Protocol A — không tự "đọc code thấy ổn" mà kết luận.
+
+### Cách đã test (không mock, không chỉ đọc source)
+
+1. **Server thật**: không cần tự khởi động — phát hiện `uvicorn` (`src.api.main:app`) đã chạy sẵn
+   thật trên port 8000 (`lsof -nP -iTCP:8000 -sTCP:LISTEN` → `python3.1 92662 ... LISTEN`), verify
+   bằng `curl http://localhost:8000/index.html` và `curl http://localhost:8000/api/jobs` trả JSON
+   thật từ `data/bb_translation.db` (17 job `translate` completed thật, có cả `bilingual_path`).
+   `curl` HTML trực tiếp từ server xác nhận nội dung đang serve khớp đúng file nguồn hiện tại (không
+   phải bản cache cũ) — dòng 152/55 khớp y hệt `web/index.html`/`web/history.html`.
+2. **Trình duyệt thật (Chromium qua Playwright 1.63.0, đã cài sẵn tại
+   `~/Library/Caches/ms-playwright/chromium-1243`, không phải giả lập DOM)**: viết script Node
+   (`pw_test.js`, tại scratchpad phiên này) mở `http://localhost:8000/history.html` và
+   `http://localhost:8000/index.html` bằng browser thật, `waitUntil: networkidle` để Alpine.js kịp
+   fetch data thật, gắn listener bắt `console.error`/`pageerror` thật của trang.
+3. Không viết fixture/mock nào cho HTML hay API — toàn bộ dữ liệu hiển thị (17 file ở index.html từ
+   localStorage của trình duyệt thật đang chạy sẵn, 18 job ở history.html từ DB thật) đều là dữ liệu
+   sản xuất thật đã tồn tại từ trước, không phải data QA tự tạo.
+
+### Kết quả cụ thể
+
+- **history.html**: `span[title]` trong `<th>` xuất hiện đúng **1 lần** (`historySpanCount=1`), dù
+  bảng có **18 dòng job thật** trong `<tbody>` — xác nhận hint nằm ở header, KHÔNG lặp theo từng
+  row (đúng yêu cầu mục 3 của brief). `title` attribute đọc trực tiếp từ DOM thật qua
+  `getAttribute('title')` giải mã đúng, không còn escape sống nào (`&mdash;` → `—` thật,
+  `&gt;`/`&quot;` → `>`/`"` thật) — text đầy đủ: *"Muốn tự chọn thư mục lưu: bật cài đặt trình duyệt
+  — Chrome: Settings > Downloads > "Ask where to save each file before downloading"; Firefox:
+  Settings > General > Downloads > "Ask where to save files before downloading". Khi đã bật, hộp
+  thoại lưu sẽ mở sẵn ở thư mục bạn chọn lần gần nhất (trừ chế độ ẩn danh/riêng tư)."*.
+  `boundingBox()` của span hợp lệ (`{x:1028.9, y:154, width:90.1, height:15}`) — phần tử hiển thị
+  thật, không bị `display:none`/kích thước 0/che khuất. Screenshot xác nhận layout không vỡ, cột
+  cuối bảng căn phải bình thường (`history_full.png`, `history_hover.png`).
+- **index.html**: span xuất hiện **17 lần**, đúng bằng số file `completed` thực sự đang có trong
+  localStorage của trình duyệt (17 file thật, không phải QA tạo) — mỗi card file completed có 1
+  hint riêng cạnh link tải (đây là thiết kế đúng cho index.html, khác history.html — index.html
+  không có yêu cầu "chỉ 1 lần" trong brief, vì mỗi file là 1 khối độc lập chứ không phải bảng dùng
+  chung header). Screenshot `index_full.png` xác nhận layout 17 card không bị vỡ, icon ⓘ + text
+  "Chọn nơi lưu" hiển thị gọn cạnh "Tải bản VI"/"Tải bản song ngữ", không tràn dòng, không chèn lên
+  nút Xoá.
+- **Console JS**: `consoleErrors = []` — không có lỗi `console.error`/`pageerror` nào phát sinh trên
+  cả 2 trang, kể cả lúc Alpine parse `x-show`/`x-text`/`x-for` với DOM mới thêm — xác nhận Alpine.js
+  không bị vỡ bởi thay đổi HTML.
+- Ký tự tiếng Việt (`Chọn`, `thư mục`, `ẩn danh`) hiển thị đúng trên cả 2 screenshot, không lỗi
+  font/mojibake.
+
+### Giới hạn đã biết
+
+- Không thể chụp được overlay tooltip native của OS/browser khi hover thật (Chromium headless
+  không render tooltip title như 1 lớp overlay chụp được trong screenshot) — bù lại bằng cách verify
+  trực tiếp `title` attribute qua DOM (nguồn dữ liệu tooltip thật sự dùng, không phải suy đoán) +
+  `boundingBox()` xác nhận phần tử hover được. Đây là giới hạn kỹ thuật của công cụ chụp ảnh, không
+  phải giới hạn của phép verify — nội dung/khả năng hiển thị tooltip đã được xác nhận bằng dữ liệu
+  DOM thật.
+- Đây là tính năng UI tĩnh, không phụ thuộc external tool/service (pdf2zh/MinerU/babeldoc/LLM
+  provider) → **Protocol 5 (R5-03) không áp dụng** cho mục này.
+
+### Kết luận
+
+**PASS** cho toàn bộ 5 mục trong brief (server thật, index.html layout+tooltip, history.html
+1-lần-duy-nhất+tooltip, console sạch, screenshot bằng chứng đã lưu tại
+`/private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/d4ac5514-44b6-41a5-b170-a95bbf39ab45/scratchpad/{index_full,history_full,history_hover}.png`).
+Không phát hiện bug.
+
+**`ready_for_release: YES`** — riêng cho S5 (UI hint chọn thư mục tải file). Không phải kết luận
+cho toàn bộ project.

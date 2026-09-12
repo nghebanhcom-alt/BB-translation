@@ -8356,6 +8356,36 @@ báo rate-limit ra stdout"*. Dev **phải** làm trước khi implement:
 
 ---
 
+### 6.24. S5 — UI hint "chọn thư mục tải về" (không code logic, dựa hoàn toàn vào browser)
+
+Quyết định: KHÔNG dùng File System Access API (`showSaveFilePicker`, chỉ Chromium desktop). Chỉ thêm
+1 hint tĩnh cạnh link download ở `web/index.html` và `web/history.html` — browser tự lo chọn + nhớ thư mục.
+
+Tên setting đã verify (nguồn thật, fetch 2026-09-12):
+- **Chrome**: Settings → Downloads → **"Ask where to save each file before downloading"** — nhãn UI trích
+  từ https://support.google.com/chrome/answer/95759 (fetch 2026-09-12).
+- **Firefox**: Settings → General → Downloads → **"Ask where to save files before downloading"** —
+  nhãn hiện hành (`download-always-ask-where2`) trong mozilla-central
+  `browser/locales/en-US/browser/preferences/preferences.ftl:617-618`. Nhãn cũ "Always ask you where to
+  save files" đã đổi; **không** dùng wording cũ trong hint.
+
+Hành vi "nhớ thư mục lần trước" — **ĐÚNG cho cả 2**, verify bằng source, không suy đoán:
+- Chrome/Chromium `chrome/browser/download/download_target_determiner.cc:333-336` — khi cần prompt, thư mục
+  khởi tạo lấy từ `download_prefs_->SaveFilePath()` kèm comment *"If the user is going to be prompted and the
+  user has been prompted before, then always prefer the last directory that the user selected"*; thư mục user
+  vừa chọn được ghi lại tại cùng file `:757` (`SetSaveFilePath(virtual_path_.DirName())`).
+- Firefox `toolkit/mozapps/downloads/HelperAppDlg.sys.mjs:356-365` — `picker.displayDirectory` mặc định là
+  thư mục tải mặc định, rồi **ghi đè bằng `lastDir`** nếu hợp lệ; thư mục vừa chọn lưu lại ở `:399`
+  (`gDownloadLastDir.setFile(...)`). Lưu ý: `browser.download.lastDir.savePerSite` mặc định `true`
+  (`toolkit/mozapps/downloads/DownloadLastDir.sys.mjs:86-91`) → Firefox nhớ **theo từng site**; với app này
+  (cùng 1 origin) hiệu quả vẫn là "nhớ thư mục lần trước".
+
+Kết luận wording: ĐƯỢC phép claim "browser sẽ mở lại thư mục bạn chọn lần trước", nhưng phải nói rõ điều kiện
+(phải bật setting) và không hứa cho mọi browser/mọi chế độ — private/incognito không lưu lại (Firefox
+`DownloadLastDir.sys.mjs:54-61` xoá pref; Chrome dùng prefs của profile thường). Không claim app tự nhớ.
+
+---
+
 ## 7. Docker Setup
 
 ### 7.1. docker-compose.yml

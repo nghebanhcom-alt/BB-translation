@@ -149,6 +149,7 @@
                x-text="f.job_type === 'parse_only' ? 'Tải Markdown (.zip)' : 'Tải bản VI'"></a>
             <a x-show="f.job_type !== 'parse_only' && f.job?.bilingual_path" :href="`/api/jobs/${f.job.id}/download?format=bilingual`"
                class="text-sm text-amber-700 underline">Tải bản song ngữ</a>
+            <span class="text-xs text-gray-400 cursor-help" title="Muốn tự chọn thư mục lưu: bật cài đặt trình duyệt &mdash; Chrome: Settings &gt; Downloads &gt; &quot;Ask where to save each file before downloading&quot;; Firefox: Settings &gt; General &gt; Downloads &gt; &quot;Ask where to save files before downloading&quot;. Khi đã bật, hộp thoại lưu sẽ mở sẵn ở thư mục bạn chọn lần gần nhất (trừ chế độ ẩn danh/riêng tư).">&#9432; Chọn nơi lưu</span>
           </div>
 
           <button x-show="['failed', 'cancelled', 'cost_capped'].includes(f.job?.status)" @click="retryJob(f)"

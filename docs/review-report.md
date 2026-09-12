@@ -2993,3 +2993,70 @@ pass toàn bộ (827), ruff sạch. Không có blocking issue nào ở code ho�
 **Không blocking, nhưng bắt buộc QA đọc trước khi release**: gate G-4 (§6.20.15) chưa đạt ở mức
 live E2E full pipeline do BL-12 (bug merge OCF độc lập, chưa sửa) — xem mục "Phát hiện quan trọng"
 ở trên.
+
+## S5 — UI hint "chọn thư mục tải file" (2026-09-12)
+
+**Phạm vi**: `web/index.html` (dòng ~152), `web/history.html` (dòng ~54-56), `docs/CHANGELOG.md`
+(append). Chỉ HTML tĩnh (`<span title="...">`), không có JS/logic mới, không đụng `web/js/*.js`
+hay `src/`. Xác nhận bằng `git diff --stat`: 6 file đổi (`docs/*`, `project_state.json`,
+`web/history.html` +3/-1, `web/index.html` +1) — không có file `.py`/`.js` nào trong diff.
+
+**1. Đối chiếu nội dung tooltip với nguồn xác thực §6.24**: **KHỚP**. Đã đọc
+`docs/Architecture.md` dòng 8359-8385 (Tech Lead verify qua source Chromium
+`download_target_determiner.cc:333-336/757` và Firefox `HelperAppDlg.sys.mjs:356-365/399` +
+`DownloadLastDir.sys.mjs`, không suy đoán). Đối chiếu từng điểm bắt buộc trong brief:
+- 2 chuỗi tiếng Anh giữ nguyên, đúng nguyên văn, đặt trong dấu ngoặc kép (`&quot;...&quot;`):
+  `"Ask where to save each file before downloading"` (Chrome) và `"Ask where to save files before
+  downloading"` (Firefox) — không dịch, không đổi 1 ký tự nào so với §6.24.
+- Có mệnh đề loại trừ `"(trừ chế độ ẩn danh/riêng tư)"` — khớp §6.24 ("private/incognito không lưu
+  lại").
+- Không nhắc Safari/Edge ở đâu trong tooltip — đúng, §6.24 chỉ verify Chrome/Firefox.
+- Chủ thể của hành vi "nhớ thư mục" là **"hộp thoại lưu"** ("hộp thoại lưu sẽ mở sẵn ở thư mục bạn
+  chọn lần gần nhất"), không phải "hệ thống"/"app" — đúng yêu cầu, khớp kết luận wording ở §6.24
+  ("KHÔNG claim app tự nhớ").
+- Không rút gọn làm mất ý: cả điều kiện tiên quyết ("bật cài đặt trình duyệt") và tên đường dẫn
+  setting cụ thể (Chrome: Settings > Downloads; Firefox: Settings > General > Downloads) đều được
+  giữ đủ.
+
+**2. HTML escape**: **ĐÚNG**. `title="..."` dùng `&quot;` cho dấu nháy kép nằm trong attribute
+(bắt buộc — nháy kép sống sẽ đóng attribute sớm, vỡ hoàn toàn phần còn lại của tag), `&gt;` cho
+`>` và `&mdash;` cho gạch ngang dài — cả 2 không bắt buộc phải escape trong attribute value nhưng
+vô hại, không gây lỗi render. Đã đọc raw source (không chỉ nhìn qua): không có dấu `"` sống nào lọt
+vào giữa chuỗi title ở cả 2 file — `grep -c` xác nhận đúng 1 span/file, không có tag nào bị cắt
+cụt do escape sai.
+
+**3. `web/history.html` — hint chỉ 1 lần ở header, không lặp theo row**: **ĐÚNG**, đã tự trace
+bằng tay: span mới nằm trong `<th>` (dòng 54-56, trong `<thead>`), còn `<tr>` lặp job
+(`x-for="job in jobs"`) nằm trong `<tbody>` (dòng 60-81) — 2 khối HTML tách biệt, `<th>` không nằm
+trong template lặp nên không nhân bản. `git diff` xác nhận đúng 1 chỗ thay đổi trong file
+(`<th class="p-2"></th>` cũ → `<th class="p-2 text-right"><span ...></th>`), không có thay đổi nào
+trong `<tbody>`/`<template x-for>`. `colspan="8"` ở dòng "Chưa có job nào" không đổi và vẫn đúng
+(đếm lại: 8 cột `<th>`, không tăng số cột — span nằm lồng trong `<th>` cuối, không thêm `<th>` mới).
+
+**4. Phạm vi đúng đã chốt với Hiếu**: không có JS mới, không dùng File System Access API
+(`showSaveFilePicker`) — đúng quyết định ở §6.24 ("KHÔNG dùng File System Access API"). Không đụng
+`src/`.
+
+**5. `docs/CHANGELOG.md` — R7-03 (append, không overwrite)**: đã tự kiểm bằng `git diff
+docs/CHANGELOG.md` — toàn bộ diff chỉ có dòng `+` (thêm mới), 0 dòng `-`, phần thêm nằm sau dòng
+cuối cùng của nội dung cũ (`Theo brief — PM điều phối commit sau khi Reviewer + QA duyệt qua vòng
+thật.`). Không có nội dung cũ nào bị xoá/ghi đè.
+
+**6. R5-04 (external contract verification checklist)**: **N/A**. Đây không phải service wrapper
+gọi external tool (`*_runner.py`/`*_provider.py`) — chỉ là UI tĩnh (HTML `title` attribute) không
+gọi API/CLI/SDK nào lúc runtime. Nội dung tooltip tham chiếu hành vi browser nhưng không gọi
+browser API nào (không dùng File System Access API) — bản thân browser-setting-name đã được Tech
+Lead verify qua source thật ở §6.24 (không phải claim chưa verify của Reviewer).
+
+**7. Test**: Dev không sửa file `.py` nên không cần `ruff`; đã tự xác nhận lại bằng
+`git diff --stat` rằng không có file `.py` nào trong diff của item này. Chấp nhận báo cáo "827
+passed" của Dev vì không có thay đổi logic Python nào có thể ảnh hưởng tới suite test — rủi ro hồi
+quy từ thay đổi HTML tĩnh gần như bằng 0.
+
+### Kết luận
+
+**APPROVE** (Vòng 1/3) cho S5 — UI hint chọn thư mục tải file (`web/index.html`,
+`web/history.html`, `docs/CHANGELOG.md`). Tooltip khớp 100% nội dung đã verify ở
+Architecture.md §6.24 (không dịch sai/rút gọn mất ý/thêm claim không nguồn), HTML escape đúng,
+hint chỉ xuất hiện 1 lần ở header `history.html` (không spam theo row), không có JS/logic mới,
+không đụng `src/`, CHANGELOG.md append đúng cách. Không có blocking issue.

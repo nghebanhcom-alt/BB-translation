@@ -6637,3 +6637,25 @@ là lần đầu tiên 1 job EPUB thật chạy hết toàn bộ 66 chunk tới 
 chặn giữa chừng. Không sửa ở đây (ngoài phạm vi brief S4) — báo lại PM/Tech Lead để quyết định có
 nên nới guard này (chấp nhận EPUB có `mimetype` compressed nhưng vẫn well-formed OCF về mặt khác)
 hay giữ nguyên strict và coi đây là giới hạn đã biết.
+
+---
+
+## S5 — Verify claim "browser tự nhớ thư mục tải lần trước" (Tech Lead, 2026-09-12)
+
+Hiếu chọn phương án "không code logic mới" cho yêu cầu chọn thư mục tải: chỉ thêm UI hint, để browser
+lo phần chọn + nhớ thư mục. PM đưa claim "bật tuỳ chọn hỏi-nơi-lưu thì browser sẽ nhớ thư mục lần
+trước" vào brief mà chưa verify → Protocol 5 R5-01 buộc Tech Lead verify trước khi nó lan xuống Dev.
+
+Kết quả: claim **ĐÚNG cho cả Chrome và Firefox**, verify bằng source thật (không phải kiến thức chung,
+cũng không phải forum — kết quả WebSearch ban đầu chỉ trả về forum/blog, không đủ theo R5-01):
+- Chromium `download_target_determiner.cc:333-336` (chọn thư mục khởi tạo = `SaveFilePath()`, kèm
+  comment "always prefer the last directory that the user selected") và `:757` (ghi lại thư mục vừa chọn).
+  Đáng chú ý: `DownloadFilePicker::FileSelected` KHÔNG ghi pref — việc ghi nằm ở target determiner, nên
+  tra nhầm file sẽ ra kết luận ngược ("Chrome không nhớ").
+- Firefox `HelperAppDlg.sys.mjs:356-365` + `:399`; `DownloadLastDir.sys.mjs:86-91` cho thấy
+  `browser.download.lastDir.savePerSite` mặc định `true` → nhớ **theo site**, không phải toàn cục.
+
+Điểm phải cẩn thận trong wording: (a) nhãn Firefox đã đổi thành "Ask where to save files before
+downloading" (`preferences.ftl:617-618`), wording cũ "Always ask you where to save files" là sai với bản
+hiện tại; (b) private/incognito không lưu lastDir (`DownloadLastDir.sys.mjs:54-61`) → hint không được
+hứa tuyệt đối. Hợp đồng ghi tại Architecture.md §6.24.

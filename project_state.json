@@ -241,7 +241,16 @@
       "owner_role": "qa",
       "status": "blocked",
       "blocked_by": [],
-      "output": "Reviewer APPROVE (docs/review-report.md) — verify sống R5-04/K-1 vị trí/R6-02/R8-02/K-4/K-3/R7-03, 827 test pass, ruff sạch. Live E2E job bfc0ac24 xác nhận Bug #EPUB-5 đã hết (0/784 reasoning_tokens leak, 0 abort). Chặn bởi backlog BL-12 (bug merge OCF khác, ngoài phạm vi S4) — gate G-4 (§6.20.15) chưa đạt, QA KHÔNG được đánh dấu ready_for_release tới khi BL-12 fixed. Chưa commit — 14 file working tree, chờ Hiếu duyệt commit (PM không tự commit).",
+      "output": "Reviewer APPROVE (docs/review-report.md) — verify sống R5-04/K-1 vị trí/R6-02/R8-02/K-4/K-3/R7-03, 827 test pass, ruff sạch. Live E2E job bfc0ac24 xác nhận Bug #EPUB-5 đã hết (0/784 reasoning_tokens leak, 0 abort). Đã commit theo Hiếu duyệt 2026-09-12. Chặn bởi backlog BL-12 (bug merge OCF khác, ngoài phạm vi S4) — gate G-4 (§6.20.15) chưa đạt, QA KHÔNG được đánh dấu ready_for_release tới khi BL-12 fixed. Chưa push lên remote.",
+      "closed_commit": "f1e05d72ea8e8ef9943ac8a299cfa8041f1a997b"
+    },
+    {
+      "id": "S5",
+      "title": "UI hint: hướng dẫn bật cài đặt browser để chọn/nhớ thư mục tải file",
+      "owner_role": "dev",
+      "status": "done",
+      "blocked_by": [],
+      "output": "web/index.html + web/history.html — hint đã verify qua source Chromium/Firefox thật (Architecture.md §6.24). Reviewer APPROVE (review-report.md), QA PASS ready_for_release YES qua Playwright live (test-report.md), 827 test pass. CHANGELOG.md đã append.",
       "closed_commit": null
     }
   ],
