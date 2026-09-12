@@ -39,6 +39,7 @@
 11. [Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng (`_get_width_before_next_break_point` đếm đôi bề rộng ký tự hiện tại) — thiết kế bản vá (Tech Lead, 2026-09-09)](#bug-10-babeldoc-cắt-ngang-từ-tiếng-việt-giữa-chừng-_get_width_before_next_break_point-đếm-đôi-bề-rộng-ký-tự-hiện-tại-thiết-kế-bản-vá-tech-lead-2026-09-09)
 12. [Bug #EPUB-3 — Quét job mồ côi (orphan) lúc server startup (Tech Lead, 2026-09-10)](#bug-epub-3-quét-job-mồ-côi-orphan-lúc-server-startup-tech-lead-2026-09-10)
 13. [BL-04 — Phát hiện babeldoc tự bỏ đoạn: verify lại R5-05 + Final Decision (Tech Lead, 2026-09-11)](#bl-04-phát-hiện-babeldoc-tự-bỏ-đoạn-verify-lại-r5-05-final-decision-tech-lead-2026-09-11)
+14. [Final Decision: Hiếu trả lời HOI-04/HOI-05 (Bug #EPUB-5) — 2026-09-11](#final-decision-hiếu-trả-lời-hoi-04hoi-05-bug-epub-5-2026-09-11)
 
 ---
 
@@ -6321,3 +6322,318 @@ một đường dẫn cụ thể tới việc Dev hoặc QA đốt công vô íc
   là cảnh báo **không chặn**, nhưng Protocol C.3 cấm ngó lơ qua nhiều lượt: PM cần lên lịch
   rotate/tách (ứng viên rõ nhất là tách phần nhật ký còn sót trong §6.22 — các khối "Đính chính
   (…)" — sang design-log, giữ §6.22 là hợp đồng thuần).
+
+---
+
+## BL-10 — Chi phí đo thật cho nhánh PDF/babeldoc (Tech Lead, 2026-09-11)
+
+**Hợp đồng tương ứng: `docs/Architecture.md` §6.23 (mới) + §4.2 bảng `chunks` + §6.6.6/§6.6.7 (cập
+nhật cross-ref).** Mục này là *vì sao*, không phải hợp đồng.
+
+### Vấn đề
+
+Từ Increment 1, mọi job PDF báo chi phí bằng `estimate_chunk_cost()` — số học trên độ dài text, sai
+số công bố ±30–50% — và `jobs.cost_source` **luôn** `'estimated'`. Sự cố $6.50 (§6.11) đã cho thấy
+cái giá của việc không có số thật: RC-4 chính là *"số ước lượng bị báo cáo nhầm là số đo thật"*.
+Metering proxy (§6.6.6 v1.1) được thiết kế từ lâu nhưng vẫn hoãn vì phải dựng thêm 1 HTTP server
+per-chunk.
+
+### Phát hiện làm đổi bài toán
+
+babeldoc 0.6.4 **đã tự đếm token thật** từ `response.usage` (kể cả `prompt_cache_hit_tokens`) và in
+ra stdout 4 dòng tổng kết cuối mỗi tiến trình (`main.py:772-784`). App **đã capture stdout** đó và
+đã parse nó 2 lần rồi (`RATE_LIMIT_LINE_RE`, `drop_sentinel_count`). Và vì `_process_chunk()` spawn
+**1 subprocess babeldoc cho mỗi chunk**, tổng token in ra ứng 1-1 với chunk — tức là đạt được đúng
+thứ metering proxy hứa, **không cần proxy**, chỉ cần 1 regex.
+
+### Những chỗ suýt sai (ghi lại để không ai "đơn giản hoá" lại về sau)
+
+1. **`re.IGNORECASE` là bẫy chết người ở đây.** babeldoc in cả `Prompt tokens:` lẫn `Cache hit
+   prompt tokens:`. Bật IGNORECASE thì pattern thứ nhất khớp bên trong dòng thứ hai ⇒ `prompt_tokens`
+   nhận nhầm số cache-hit, và sai này **im lặng** (vẫn ra một con số hợp lý). Hợp đồng cấm tường
+   minh.
+2. **`Term extraction tokens:` KHÔNG được cộng.** `main.py:524` cho `term_extraction_translator =
+   translator` khi app không truyền 3 flag `--openai-term-extraction-*` ⇒ token term-extraction đã
+   nằm trong `Total tokens`. Cộng thêm = đếm 2 lần. Đây là loại lỗi chỉ lộ ra khi đọc source, không
+   lộ ra khi nhìn log.
+3. **Brief đề xuất 1 field `real_tokens_used: int`** — tôi đổi thành dataclass 4 số vì giá input ≠
+   giá output. Chỉ có `total` thì buộc phải **đoán tỷ lệ split**, tức là nhét một ước lượng vào bên
+   trong thứ được dán nhãn `'metered'` — đúng bản chất RC-4 mà §6.11 tồn tại để chặn. Tốn thêm 3
+   dòng regex, đổi lại nhãn `metered` không nói dối.
+4. **`0` vs `None`.** Cache của babeldoc có thể làm `Total tokens: 0` — đó là **số đo thật** (0 lời
+   gọi API), khác hẳn "không parse được". Vì vậy sentinel phải là `None`, không được là `0`. Tiền lệ
+   đã có ở §6.20 (`actual_cost=0.0` + `metered`).
+5. **`chunks.cost_source` phải là cột thật, không suy từ engine của job.** Một job có thể có chunk
+   metered lẫn chunk fallback estimated (parse trượt giữa chừng). Nếu chỉ lưu ở cấp job thì con số
+   trộn lẫn sẽ được dán một nhãn duy nhất — lại đúng RC-4. Luật gộp chốt: **trộn ⇒ `'estimated'`**
+   (một tổng chứa số ước lượng thì bản thân nó là ước lượng). Không tạo giá trị thứ ba `'partial'`
+   vì phải đổi hợp đồng ở 3 tầng để mô tả một trạng thái hiếm.
+6. **Nhánh EPUB suýt bị hồi quy ngầm.** EPUB đã `job.cost_source='metered'` từ §6.20 nhưng
+   `chunks` chưa có cột này. Nếu chỉ thêm cột với default `'estimated'` mà không ghi cho EPUB, thì
+   những chunk **duy nhất trong dự án đã đo thật từ trước** lại mang nhãn ước lượng. Đã đưa 1 dòng
+   `chunk.cost_source = "metered"` cho `_process_epub_chunk()` vào spec.
+
+### Audit Protocol 8 (R8-01) — kết quả
+
+Liệt kê đủ 7 bước hiện có trong `_process_chunk()` (§6.23.6). Bước bị audit "bắt" chính là bước
+**CŨ**: `estimate_chunk_cost()` tồn tại vì *pdf2zh không xuất token* — lý do đó **không còn đúng với
+babeldoc**. Đây đúng khuôn Bug #9 (`font_shrink_page` tồn tại vì pdf2zh vẽ tràn, không đúng với
+babeldoc), chỉ khác là lần này bắt được **trước** khi có sự cố. Không bước nào rơi vào "chưa rõ" ⇒
+không SKIP thêm bước nào (R8-02). Hiện thực bằng capability `reports_token_usage` trên runner
+(R8-03), cùng khuôn `needs_font_shrink` / `reports_own_paragraph_drops`, **kèm guard
+`isinstance(bool)`** — không có guard thì `AsyncMock(spec=...)` cho truthy và test chạy nhầm nhánh
+mà vẫn PASS.
+
+### Ranh giới bằng chứng
+
+- **Verified trực tiếp phiên này** (đọc source bản đã cài + chạy thật): T1–T11 ở §6.23.1, gồm 1 lần
+  dựng lại đúng cấu hình logging của babeldoc (`main.py:918-920`) và capture `repr()` của output
+  non-tty để chốt định dạng dòng.
+- **⚠️ ASSUMED, đã gắn nhãn trong §6.23.1**: (a) dòng `Total tokens:` xuất hiện trong một lần chạy
+  **end-to-end thật qua pipeline app** — chưa chạy (tốn API key/thời gian ngoài phạm vi thiết kế),
+  R5-02 giao cho Dev làm spike trước khi viết regex; (b) `total == prompt + completion` với DeepSeek
+  — thiết kế **không phụ thuộc** vào đẳng thức này, chỉ log WARNING khi lệch.
+
+### Cố ý KHÔNG làm trong lượt này
+
+- **Không sửa bảng giá** `deepseek_provider.py:17-24` (quyết định của Hiếu). Hệ quả trung thực đã
+  ghi thành giới hạn đã biết: `'metered'` ở vòng này nghĩa là *"token là số đo thật"*, **không**
+  nghĩa *"số tiền chắc chắn đúng"*.
+- **Không chiết khấu cache-hit** (đã parse, chưa dùng) ⇒ tính cao hơn thực tế — chiều sai an toàn
+  theo §6.11.6.
+- **Không đếm token của attempt retry thất bại** ⇒ metered là under-count khi có retry. Ghi rõ thay
+  vì để QA tự phát hiện rồi báo là bug.
+- Không đưa token vào `BabeldocError`/`BabeldocTimeoutError`: chunk fail không có `api_cost` để ghi.
+
+### Trạng thái
+
+- §6.23 **chưa implement** — chờ Human Checkpoint 2. Không có thay đổi code nào trong lượt này ⇒
+  không kích hoạt Protocol 7.
+- ⚠️ **Ngân sách Protocol C.3 tiếp tục vượt**: `Architecture.md` 8.105 → **8.477 dòng** (trần
+  8.000). §6.23 được viết ở dạng hợp đồng thuần (phần "vì sao" nằm ở chính mục này của design-log),
+  nhưng tổng vẫn tăng. PM cần lên lịch rotate như BL4.15 đã nêu.
+
+---
+
+## Bug #EPUB-5 — koboSpan KHÔNG phải nguyên nhân runaway; nguyên nhân thật là phép đo (Tech Lead, 2026-09-11)
+
+**Hợp đồng tương ứng**: `docs/Architecture.md` §6.20.15 (K-1..K-5), cùng 2 sửa tại chỗ ở §6.20.6
+(hộp "⚠️ SỬA 2026-09-11") và §6.20.13.3b (hộp "⚠️ ĐÃ ĐO").
+
+### 1. Giả thuyết được giao — và kết quả: BỊ BÁC BỎ
+
+Brief của PM nêu giả thuyết (đã tự gắn nhãn `[CHƯA VERIFY]`, đúng Protocol 1 mở rộng): file EPUB
+export từ Kobo có markup `koboSpan` dày đặc; pipeline gửi nguyên inner-HTML cho LLM nên payload thật
+lớn hơn nhiều budget đo bằng `_plain_char_len()`, và đó là nguyên nhân runaway.
+
+**Hai nửa của giả thuyết có số phận khác nhau:**
+
+| Nửa | Kết luận |
+|---|---|
+| "Payload gửi đi chứa nguyên koboSpan, budget lại đo bằng text thuần" | **ĐÚNG, đã verify** (`job_orchestrator.py:2372` + `epub_document.py:786` + `chunking.py:268`) |
+| "…và đó là nguyên nhân runaway" | **SAI — bị bác bỏ bằng test đối chứng** |
+
+### 2. Test đối chứng đã bác bỏ giả thuyết
+
+3 job EPUB đều `failed` vì R-b, cùng provider `deepseek-v4-flash`:
+
+| Job | Sách | koboSpan | inner-HTML / text thuần | % request bị gắn runaway | max ratio |
+|---|---|---|---|---|---|
+| `781b59b0` | Sourdough Culture (Kobo) | **1.963/1.963 unit**, 7.616 thẻ | **2,29×** | **68,2%** (45/66) | 7,57× |
+| `88e897af` | Sourdough Discard Recipes | **0** | 1,14× | 63,2% (148/234) | 25,57× |
+| `f21c1555` | Sourdough by Science | **0** | 1,21× | 67,2% (334/497) | 32,21× |
+
+Hai cuốn **không có một thẻ koboSpan nào**, markup ratio sát đúng giả định `1.15`, vẫn runaway với
+tỉ lệ **không phân biệt được** với cuốn Kobo — và **đuôi phân bố còn tệ hơn nhiều** (p99 ~20× vs
+7,6×). Cuốn Kobo thực ra là cuốn *nhẹ* nhất, vì `payload_chars` phình lên nằm ở **mẫu số** của
+`runaway_ratio` nên markup rác lại **che bớt** triệu chứng.
+
+Nếu chỉ nhìn 1 job (đúng như brief ban đầu) thì tương quan trông hoàn hảo. Đây là ca sách giáo khoa
+"correlation ≠ causation" mà R5-01 tồn tại để chặn: **giả thuyết trông rất thuyết phục, nhưng nhóm
+đối chứng đã nằm sẵn trong `data/processing/` và chưa ai mở ra**.
+
+### 3. Nguyên nhân thật
+
+`epub_expected_output_tokens(payload_chars) = payload_chars × 1,16 / 2,0` mô hình hoá **số token của
+bản dịch tiếng Việt**. Còn `output_tokens` mà nó bị đem so sánh là
+`response.usage.completion_tokens` (`openai_provider.py:116`).
+
+`deepseek-v4-flash` **bật thinking mặc định, effort mặc định `high`** (doc chính thức đã fetch:
+<https://api-docs.deepseek.com/guides/thinking_mode/> — *"Thinking mode is enabled by default, with
+the default effort being `high`"*). App **không** truyền tham số tắt, và chỉ đọc
+`message.content` (bỏ `reasoning_content`). Nên `completion_tokens` ≈ *token thinking + token trả
+lời*, trong khi công thức chỉ mô hình hoá vế sau.
+
+**Bằng chứng định lượng độc lập** (không dựa vào doc): ghép `units.json` (bản dịch thật đã nhận) với
+`requests.jsonl` (token thật) trên 55 chunk / 3 sách cho **0,23–0,66 ký tự trả về / 1 output token**,
+median ~**0,32**. Tiếng Việt NFC tệ nhất cũng chỉ ~3 byte/ký tự, nên ngay cả tokenizer byte-fallback
+thuần cũng không thể xuống dưới ~0,33 — và con số 0,25 quan sát được nằm **dưới** giới hạn vật lý đó.
+Kết luận: phần lớn `completion_tokens` **không phải nội dung trả về**. Khớp chính xác với S6.
+
+Đối chiếu thêm: `max_tokens = 8192`, max quan sát = **8.099**, **0 request** chạm trần ⇒ không có
+truncation. Các response "runaway" không hề bị cắt cụt — chúng chỉ *được đo sai*.
+
+### 4. Vì sao lỗi này giết job (cơ chế, không phải triệu chứng)
+
+`job_orchestrator.py:2398` — `if runaway and missing_ids: raise EpubRequestRunawayError`. Nhánh này
+đứng **TRƯỚC** toàn bộ thang cứu hộ (C-1 retry từng-id `:2452`, retry nguyên request `:2470`, Lớp B
+salvage, Lớp C fallback).
+
+Với `runaway` gần như luôn `True` (65,4% request, và 100% các request lớn), R-b thoái hoá thành
+**"abort cả chunk khi thiếu BẤT KỲ id nào"**. Mọi lớp dung sai xây suốt §6.20.14 (Lớp A/B/C, 3 vòng
+Protocol 3, Bug #EPUB-B2-1…B2-5) trở thành **code chết cho provider này** — chúng chưa bao giờ có
+cơ hội chạy. Đó là lý do 4/7 chunk của job `781b` phải retry thủ công nhiều lần mới qua: mỗi lần là
+một lần R-b bắn nhầm, không phải một lần model hỏng thật.
+
+### 5. Điều §6.20.13.3b đã tự dự đoán — và không ai quay lại kiểm
+
+Chính §6.20.13.3b (viết 2026-09-09) đã ghi: *"Nếu max ratio thật của lần chạy lành mạnh > 1,5 →
+ngưỡng 3,0 quá sát, phải nâng và ghi lại. Đây chính là bước 'đo thêm trước khi tự tin vào con số'
+của R5-02."* Log `requests.jsonl` đã được implement đúng như yêu cầu và **đã chứa sẵn dữ liệu bác bỏ
+ngưỡng** từ lần chạy live đầu tiên. Bước "đọc lại log rồi cập nhật hằng số" thì không có ai sở hữu:
+nó không phải task của Dev (đã code xong), không phải của QA (job `failed`, không tới mục đo), không
+phải của Tech Lead (không được dispatch lại).
+
+**Bài học quy trình**: một chỉ thị dạng *"lần chạy live đầu tiên phải đo X rồi hiệu chỉnh"* đặt trong
+Architecture.md **không có chủ sở hữu** thì không bao giờ được thực thi. Nó cần là một mục
+`backlog[]`/`open_questions[]` trong `project_state.json` có người chịu trách nhiệm, hoặc một
+assertion trong code (như K-4 đã làm cho `EPUB_INLINE_MARKUP_FACTOR`). Đề xuất PM đưa vào backlog
+như một luật chung, không chỉ cho ca này.
+
+### 6. Vì sao K-1 (bóc koboSpan) vẫn đáng làm, dù không sửa được bug
+
+Không phải để sửa runaway — mà vì nó là **một lỗi thật khác, độc lập**:
+
+- `EPUB_INLINE_MARKUP_FACTOR = 1.15` (chốt tại §6.20.6 FD X5(b), đo trên **đúng 1 cuốn**) bị cuốn
+  Kobo làm sai **2×** ⇒ cost gate ước **thấp** ⇒ vi phạm §6.11.6 ("được ước cao, CẤM ước thấp") ở
+  đúng lớp bảo vệ tài chính. Đây là cùng khuôn lỗi mà FD X5(b) từng bắt Expert vì ước thấp 9% — lần
+  này là 100%.
+- **50,5% payload là rác**, trả tiền cả chiều vào lẫn chiều ra (model tái tạo y hệt koboSpan trong
+  bản dịch — xem `units.json` chunk_0).
+- Bóc xong đưa tỉ lệ về **1,13×**, tức **khôi phục tính đúng đắn của hằng số 1.15 hiện có** thay vì
+  phải nâng nó lên 2,3 cho mọi EPUB (nâng như thế sẽ ước cao vô lý cho 2 cuốn còn lại).
+
+### 7. Điểm suýt sai khi thiết kế K-1 (ghi lại để không tái diễn)
+
+Phản xạ đầu tiên là bóc markup ở **chỗ build payload** (`job_orchestrator.py:2372`) — nơi vấn đề lộ
+ra. Đó sẽ là một Bug #5 mới: `write_translated()` mở **lại zip gốc** và đếm "slot" text trên node
+**chưa bóc** (`_apply_translation_untrusted_structure` → `_text_runs_under`), còn bản dịch trả về đã
+sạch span ⇒ lệch số slot ⇒ rơi vào nhánh *"Known limitation"*, dồn hết bản dịch vào slot dài nhất và
+**giữ nguyên tiếng Anh** ở các slot còn lại. Đo thật: **85/1.963 unit** đi qua nhánh untrusted,
+**64** trong đó multi-slot ⇒ 64 unit dịch sót *âm thầm* (BR-EPUB-05 vẫn pass vì 64/1963 = 3,3% < khe
+hở 10%).
+
+Đặt phép bóc ở `_parse_xhtml()` — điểm vào **duy nhất** dùng chung bởi `load()`,
+`write_translated()`, `count_bb_vi_pairs()`, `to_markdown()` — làm cả 4 đường đọc cùng nhìn một cây.
+Số slot/unit giảm từ median 4,0 (max 16) xuống median 1,0 (max 12) ⇒ nhánh rủi ro *an toàn hơn*
+hiện trạng. Đây đúng tinh thần R6-01: chọn chỗ sửa theo **lineage**, không theo chỗ triệu chứng lộ ra.
+
+Đã kiểm 0/7.616 `id="kobo.*"` được `href`/`idref`/`src` nào tham chiếu ⇒ bóc an toàn, không phá
+`page-list`/nav. Giữ nguyên `<span epub:type="pagebreak">` (khác class, **id của nó CÓ được tham
+chiếu**).
+
+### 8. Cố ý KHÔNG làm trong lượt này
+
+- **Không sửa `CHARS_PER_TOKEN_VI` ngay**, dù đã biết nó sai ~6×: số đo hiện tại nhiễm token
+  thinking. Hiệu chỉnh bây giờ = khoá cứng cái sai vào hằng số. Xếp thành K-4, sau K-2/K-3 (R8-02
+  deny-by-default áp cho chính con số).
+- **Không nâng `EPUB_RUNAWAY_OUTPUT_FACTOR`** — nâng ngưỡng là chữa triệu chứng của một phép đo sai
+  đơn vị. Sửa tử số (`answer_tokens`) trước, đo lại, rồi mới bàn ngưỡng.
+- **Không tổng quát hoá K-1 thành "bóc mọi span rỗng nghĩa"** — chưa đo trên EPUB khác, R8-02.
+- **Không đổi signature `provider.translate()`** — ràng buộc kiến trúc từ X4 (§6.20.12), 5 provider
+  dùng chung. K-3 hiện thực bằng capability trên class (R8-03), không rẽ nhánh theo tên provider.
+- **Không tự chạy job lại để xác minh** — phạm vi lượt này là thiết kế; và spike K-2 phải do Dev làm
+  theo R5-02 (capture golden file), không phải Tech Lead làm hộ rồi mô tả lại.
+
+### 9. Trạng thái
+
+- §6.20.15 **chưa implement**. K-2/K-3 mang nhãn ⚠️ ASSUMED ⇒ **chặn Dev implement đúng 2 mục đó**
+  cho tới khi spike R5-02 xong; K-1 và K-5 **không** bị chặn.
+- Không có thay đổi code nào trong lượt này ⇒ không kích hoạt Protocol 7.
+- ⚠️ **Ngân sách Protocol C.3 tiếp tục vượt**: `Architecture.md` 8.477 → ~8.640 dòng (trần 8.000);
+  `design-log.md` 6.413 → ~6.520 (trần 8.000). Phần "vì sao" đã dồn hết sang design-log, nhưng
+  Architecture.md vẫn tăng. PM cần lên lịch rotate.
+
+---
+
+## Final Decision: Hiếu trả lời HOI-04/HOI-05 (Bug #EPUB-5) — 2026-09-11
+
+**Hợp đồng tương ứng**: `docs/Architecture.md` §6.20.15 (bảng "Trạng thái quyết định", K-1, K-3).
+RCA đầy đủ: mục *"Bug #EPUB-5 — koboSpan KHÔNG phải nguyên nhân runaway; nguyên nhân thật là phép
+đo (Tech Lead, 2026-09-11)"* ngay phía trên.
+
+Theo Protocol B (CLARIFY trước, WRITE sau) — 2 câu hỏi do Tech Lead nêu sau khi điều tra Bug
+#EPUB-5, PM gộp hỏi một lượt (`open_questions[]` HOI-04/HOI-05), Hiếu trả lời trực tiếp qua
+`AskUserQuestion` trong chat 2026-09-11. **Cả hai đều trùng với mặc định đề xuất.**
+
+### HOI-04 — Tắt thinking mode của DeepSeek cho nhánh EPUB (K-3)
+
+*Câu hỏi*: tắt thinking mode của `deepseek-v4-flash` cho nhánh EPUB
+(`Settings.epub_disable_thinking = True`, §6.20.15 K-3) để `output_tokens` không còn lẫn token suy
+luận gây runaway giả?
+
+*Trả lời*: **TẮT thinking cho nhánh EPUB** (= mặc định đề xuất). Hiếu chấp nhận đánh đổi đã nêu:
+chi phí output giảm mạnh, chất lượng dịch **câu khó** có thể giảm nhẹ. Cơ sở: dịch câu là tác vụ
+không cần CoT, còn effort `high` mặc định (S6, doc chính thức DeepSeek đã fetch) đang chiếm phần
+lớn chi phí output và là nguyên nhân trực tiếp làm R-b abort nhầm 65,4% request.
+
+### HOI-05 — Chấp nhận bóc `id="kobo.*"` khỏi output EPUB (K-1)
+
+*Câu hỏi*: chấp nhận việc unwrap `koboSpan` làm biến mất `id="kobo.*"` trong file EPUB đầu ra?
+Hệ quả đã đo: **0/7.616** id được `href`/`idref`/`src` nào tham chiếu (S8), chỉ ảnh hưởng tính năng
+phân trang lại của riêng máy đọc Kobo.
+
+*Trả lời*: **CHẤP NHẬN bóc** (= mặc định đề xuất). Không id nào bị tham chiếu ⇒ không phá
+`nav`/`ncx`/`page-list`, không vi phạm BR-EPUB-01; đổi lại bỏ được **50,5% payload rác** và khôi
+phục tính đúng đắn của `EPUB_INLINE_MARKUP_FACTOR = 1.15` thay vì phải nâng hằng số này lên 2,3 cho
+mọi EPUB (nâng như vậy sẽ ước cao vô lý cho 2 cuốn không-Kobo).
+
+### Ranh giới của 2 quyết định này — điểm QUAN TRỌNG nhất của mục này
+
+Quyết định của Hiếu là **"làm cái gì"** (chấp nhận đánh đổi nghiệp vụ), **KHÔNG PHẢI** "đã verify
+cơ chế kỹ thuật hoạt động đúng như mô tả". Cụ thể:
+
+| Mục | Được duyệt phần nào | Vẫn ⚠️ ASSUMED phần nào |
+|---|---|---|
+| K-1 | Toàn bộ (hướng + hệ quả mất id) | — (mọi claim có nguồn xác thực S1–S4, S8) |
+| K-2 | Không hỏi Hiếu (quyết định kỹ thuật thuần) | `usage.completion_tokens_details.reasoning_tokens` có mặt & khác 0 trên response sống |
+| K-3 | **Hướng**: tắt thinking, `epub_disable_thinking=True` mặc định | **Cơ chế**: `extra_body={"thinking": {"type": "disabled"}}` được endpoint DeepSeek chấp nhận (không 400) |
+
+⇒ **R5-02 vẫn chặn Dev implement K-2 và K-3** cho tới khi spike xong (gọi thật 1 request EPUB, in
+`response.usage.model_dump()`, lưu golden file `tests/fixtures/epub_llm/deepseek_v4flash_usage.json`
+theo R5-03). Không được gỡ nhãn ⚠️ ASSUMED chỉ vì hướng xử lý đã được duyệt — đây đúng là loại
+nhầm lẫn "đã quyết = đã verify" mà Protocol 5 tồn tại để chặn.
+
+### Hệ quả
+
+- §6.20.15 được cập nhật tại chỗ: thêm bảng "Trạng thái quyết định", đánh dấu K-1/K-3 **ĐÃ CHỐT**,
+  giữ nguyên toàn bộ nội dung kỹ thuật và **giữ nguyên** 2 hộp ⚠️ ASSUMED ở K-2/K-3.
+- Thứ tự implement (§6.20.15 *"Thứ tự implement bắt buộc"*) **không đổi**: spike → K-5 → K-2 → K-3
+  → chạy live 1 cuốn → K-1 (song song được) → K-4.
+- Không có thay đổi code nào trong lượt này ⇒ không kích hoạt Protocol 7.
+- HOI-06 (luật quy trình "chỉ thị ⚠️ ASSUMED phải có mục `backlog[]` kèm owner") cũng đã được Hiếu
+  chốt cùng lượt, nhưng PM ghi trực tiếp vào `CLAUDE.md` project (R5-06) — không thuộc phạm vi
+  thiết kế kỹ thuật của mục này.
+
+## Bug #EPUB-5 — K-1..K-5 implement + live E2E (2026-09-11, Dev) — phát hiện MỚI, chưa fix: guard OCF `mimetype ZIP_STORED` fail trên EPUB thật
+
+Sau khi implement K-5 → K-2 → K-3 (theo đúng thứ tự bắt buộc, spike R5-02 xanh cả 2 câu — xem
+`tests/fixtures/epub_llm/deepseek_v4flash_usage.json`), chạy live E2E job thật
+(`bfc0ac24-0664-4932-96da-1ac99c1abc10`) trên `Sourdough Culture...epub` (66 chunk, KHÔNG kèm K-1):
+**66/66 chunk `completed`, 784 request, 0 abort vì R-b, 0/784 request rò rỉ `reasoning_tokens`**
+(K-3 hoạt động đúng trên toàn bộ sách thật) — gate G-2 (Architecture.md §6.20.15) đạt cho chính
+phần dịch. Số đo đầy đủ (`chars_per_answer_token`, `runaway_ratio`) đã ghi vào §6.20.15 mục K-4.
+
+**Phát hiện MỚI, KHÔNG thuộc phạm vi Bug #EPUB-5, KHÔNG được fix trong lượt này**: job cuối cùng
+báo `status="failed"` ở bước MERGE (sau khi cả 66 chunk đã dịch xong), lỗi:
+`"'<path>...epub': entry 'mimetype' khong o dang ZIP_STORED"` — đây là 1 guard OCF-compliance CÓ
+SẴN TỪ TRƯỚC trong `EpubDocument.write_translated()` (`src/services/epub_document.py`), kiểm
+`infolist[0].compress_type == zipfile.ZIP_STORED`. Verify trực tiếp: file nguồn
+`data/uploads/4a752f64-...Sourdough Culture...epub` có entry `mimetype` với
+`compress_type=8` (`ZIP_DEFLATED`), KHÔNG phải `0` (`ZIP_STORED`) — vi phạm OCF spec (đa số trình
+đọc EPUB bỏ qua vi phạm này, nhưng app hiện từ chối ghi đè lên file không tuân thủ). Bug này tồn
+tại ĐỘC LẬP với K-1..K-5 (không do đợt sửa này gây ra — guard này có từ trước), chỉ mới LỘ RA vì đây
+là lần đầu tiên 1 job EPUB thật chạy hết toàn bộ 66 chunk tới bước merge mà không bị Bug #EPUB-5
+chặn giữa chừng. Không sửa ở đây (ngoài phạm vi brief S4) — báo lại PM/Tech Lead để quyết định có
+nên nới guard này (chấp nhận EPUB có `mimetype` compressed nhưng vẫn well-formed OCF về mặt khác)
+hay giữ nguyên strict và coi đây là giới hạn đã biết.

@@ -24,6 +24,7 @@ from src.services.epub_document import (
     EpubParseError,
     _parse_xhtml,
     _rewrite_image_srcs,
+    count_bb_vi_pairs,
     normalize_sup_sub,
 )
 
@@ -1166,8 +1167,7 @@ def test_normalize_sup_sub_pandoc_style_wraps_with_carets_and_tildes() -> None:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(
-        "<p>x<sup>2</sup>, H<sub>2</sub>O, "
-        "1<sup>1</sup>/<sub>3</sub> cups flour</p>",
+        "<p>x<sup>2</sup>, H<sub>2</sub>O, 1<sup>1</sup>/<sub>3</sub> cups flour</p>",
         "html.parser",
     )
     normalize_sup_sub(soup, style="pandoc")
@@ -1317,3 +1317,111 @@ def test_to_markdown_missing_image_entry_does_not_crash(tmp_path: Path) -> None:
     # Khong raise — src giu nguyen trang (khong rewrite thanh images/...).
     assert "images/missing.jpg" not in markdown_text
     assert list(images_out.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# K-1 (Architecture.md §6.20.15) — unwrap koboSpan tai `_parse_xhtml()`, diem
+# vao DUY NHAT ma load()/write_translated()/count_bb_vi_pairs()/to_markdown()
+# deu dung chung. R6-02: test o day BAT BUOC assert CA 3 duong doc dung CHUNG
+# 1 phep unwrap — khong chi assert rieng le tung ham.
+# ---------------------------------------------------------------------------
+
+_KOBO_SPAN_BODY = (
+    "<p>Preheat the oven "
+    '<span class="koboSpan" id="kobo.1.1">to 220C</span>'
+    ", then "
+    '<span class="koboSpan" id="kobo.1.2">add the flour</span>'
+    " and knead.</p>"
+    # Mo phong span pagebreak that (khong co class koboSpan) — id DUOC
+    # page-list tham chieu trong EPUB that, KHONG duoc dung toi boi K-1.
+    # Bo prefix `epub:` (khong khai bao namespace o helper `_build_minimal_epub`)
+    # de tranh loi parse XML khong lien quan toi noi dung dang test o day.
+    '<span class="pagebreak" id="page_1" title="1"/>'
+)
+
+
+def test_unwrap_kobo_spans_removes_only_kobospan_class_token(tmp_path: Path) -> None:
+    """Don vi truc tiep tren `_unwrap_kobo_spans()`: chi `<span>` co class
+    CHUA DUNG token `koboSpan` bi unwrap (giu nguyen con ben trong, mat the
+    `<span>` bao ngoai) — span pagebreak (khong co class koboSpan, mo phong
+    span `id="page_i"` DUOC page-list tham chieu trong EPUB that) PHAI con
+    nguyen ca the lan id."""
+    path = _build_minimal_epub(tmp_path / "kobo.epub", _KOBO_SPAN_BODY)
+    with zipfile.ZipFile(path) as zf:
+        raw = zf.read("OEBPS/xhtml/chap1.xhtml")
+
+    soup, _parser_used = _parse_xhtml(raw)
+
+    assert "koboSpan" not in str(soup)
+    assert "kobo.1.1" not in str(soup)
+    assert "kobo.1.2" not in str(soup)
+    # Text ben trong cac span da unwrap phai con nguyen, lien mach (dung
+    # `str(soup)` thay vi `get_text(" ")` — ham nay chen space GIUA MOI node
+    # con, se lam sai lech gia dinh "lien mach" o day khong lien quan toi
+    # unwrap).
+    assert "<p>Preheat the oven to 220C, then add the flour and knead.</p>" in str(soup)
+    # pagebreak span KHONG bi dung toi.
+    assert 'id="page_1"' in str(soup)
+    assert soup.find("span", attrs={"id": "page_1"}) is not None
+
+
+def test_load_write_translated_and_to_markdown_share_same_kobo_unwrap(
+    tmp_path: Path,
+) -> None:
+    """R6-02 — kiem CA 3 duong doc dung CHUNG 1 phep unwrap, tren CUNG 1 file
+    co koboSpan multi-slot (mo phong dung kich ban da do that o Architecture.md
+    §6.20.15: nhieu koboSpan/paragraph). Truoc K-1, `write_translated()` se
+    dem 2 "slot" (2 koboSpan) trong khi ban dich unit tra ve 1 chuoi -> lech
+    slot -> roi vao nhanh "Known limitation" (dich sot). Sau K-1: node goc
+    doc lai qua `_parse_xhtml()` (trong `write_translated()`) DA unwrap CUNG
+    kieu voi luc `load()` -> chi con 1 candidate node (`<p>`), khop 1-1 voi 1
+    unit -> khong bao gio roi vao nhanh slot-mismatch do."""
+    path = _build_minimal_epub(tmp_path / "kobo_lineage.epub", _KOBO_SPAN_BODY)
+
+    # (1) load() — unit text KHONG con koboSpan, va CHI 1 unit (khong bi
+    # koboSpan lam phinh so unit/slot).
+    doc = EpubDocument.load(path)
+    assert len(doc.units) == 1
+    assert "koboSpan" not in doc.units[0].text
+    assert "kobo." not in doc.units[0].text
+
+    # (2) write_translated() — ban dich 1-cau THAY THE TOAN BO noi dung unit
+    # duy nhat nay; PHAI ap dung DAY DU (khong bi cat/dich sot do lech slot),
+    # va output KHONG con koboSpan/id "kobo.*" nao.
+    vi_translation = "Làm nóng lò đến 220C, sau đó cho bột vào và nhào."
+    out = tmp_path / "kobo_lineage_out.epub"
+    doc.write_translated({doc.units[0].unit_id: vi_translation}, out, bilingual=False)
+
+    with zipfile.ZipFile(out) as zf:
+        raw_out = zf.read("OEBPS/xhtml/chap1.xhtml").decode("utf-8")
+    assert "koboSpan" not in raw_out
+    assert "kobo.1.1" not in raw_out
+    assert "kobo.1.2" not in raw_out
+    assert vi_translation in raw_out
+    # Mat mat chap nhan duoc (K-1, Hieu da duyet HOI-05): id kobo.* bien mat.
+    # pagebreak van con nguyen — KHONG bi dung toi boi K-1.
+    assert 'id="page_1"' in raw_out
+
+    from xml.etree import ElementTree as ET
+
+    ET.fromstring(raw_out.encode("utf-8"))  # van well-formed
+
+    # (3) to_markdown() — cung 1 phep unwrap, khong con koboSpan/id lo ra
+    # trong markdown, text lien mach (khong bi tach doi boi 2 the <span>
+    # rieng biet o giua).
+    doc2 = EpubDocument.load(path)
+    markdown_text = doc2.to_markdown(images_out_dir=tmp_path / "images")
+    assert "koboSpan" not in markdown_text
+    assert "kobo." not in markdown_text
+    assert "Preheat the oven to 220C, then add the flour and knead." in markdown_text
+
+    # (4) count_bb_vi_pairs() — mo LAI file output tu dia (khong tin bo nho),
+    # cung dung `_parse_xhtml()` -> van dem dung 1 cap bb-vi (bilingual=False
+    # o day khong tao node bb-vi nao, nhung ham phai chay khong loi tren file
+    # da qua unwrap).
+    out_bilingual = tmp_path / "kobo_lineage_out_bilingual.epub"
+    doc3 = EpubDocument.load(path)
+    doc3.write_translated({doc3.units[0].unit_id: vi_translation}, out_bilingual, bilingual=True)
+    total, differing = count_bb_vi_pairs(out_bilingual)
+    assert total == 1
+    assert differing == 1

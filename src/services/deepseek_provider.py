@@ -30,6 +30,17 @@ class DeepSeekProvider(OpenAIProvider):
 
     provider_name = "deepseek"
 
+    # K-3 (Architecture.md §6.20.15) — verified qua spike R5-02 (2026-09-11,
+    # tests/fixtures/epub_llm/deepseek_v4flash_usage.json): endpoint DeepSeek
+    # chap nhan `extra_body={"thinking": {"type": "disabled"}}` (khong 400),
+    # va `completion_tokens_details` bien mat (None) khi tat -> reasoning
+    # token ve 0. Nguon: https://api-docs.deepseek.com/guides/thinking_mode/
+    # (fetch 2026-09-11).
+    supports_thinking_toggle = True
+
+    def _extra_body(self) -> dict:
+        return {"thinking": {"type": "disabled"}}
+
     def __init__(
         self,
         api_key: str,

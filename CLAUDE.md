@@ -96,6 +96,17 @@ hoặc QA review 1 service wrapper gọi external tool (dạng `src/services/*_r
 source: YES (nguồn: ...) / NO — chỉ verify theo Architecture.md / N/A". Nếu câu trả lời là NO,
 đây tự động là 1 non-blocking suggestion ghi vào report, không được im lặng bỏ qua.
 
+**R5-06 (Chỉ thị "đo lại ở lần chạy live đầu" bắt buộc có owner trong backlog[])**: Bug #EPUB-5
+(2026-09-11): §6.20.13.3b đã tự ghi "nếu max ratio lành mạnh > 1,5 → ngưỡng quá sát, phải nâng"
+— log của chính lần chạy live đầu tiên đã có sẵn dữ liệu bác bỏ ngưỡng đó, nhưng không ai đọc
+lại vì chỉ thị chỉ nằm trong văn xuôi Architecture.md, không gắn với ai phải làm. Root cause là
+quy trình, không phải model nào quên: 1 chỉ thị "phải đo lại" không có chủ sở hữu sẽ không bao
+giờ được thực thi. Từ nay, mọi chỉ thị dạng `⚠️ ASSUMED — phải đo lại ở lần chạy live đầu tiên`
+(hoặc tương đương) viết trong Architecture.md **bắt buộc** đi kèm 1 mục tương ứng trong
+`backlog[]` (project_state.json) với `source` là agent/role chịu trách nhiệm đo lại — không được
+để chỉ thị đo-lại chỉ tồn tại dưới dạng văn bản không ai theo dõi. PM kiểm tra điều này khi dispatch
+Tech Lead ghi `⚠️ ASSUMED` mới vào Architecture.md.
+
 ### Phạm vi áp dụng
 
 Áp dụng cho mọi tool bên thứ ba app gọi qua subprocess/HTTP mà bản thân app không kiểm soát

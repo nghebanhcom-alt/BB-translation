@@ -2868,3 +2868,128 @@ repo (8 Dev đã báo + 10 chưa báo) thành 1 backlog dọn dẹp riêng; (b) 
 Live E2E (R5-03/R6-03): đã có 2 lần chạy thật hợp lệ, không tái hiện được ca drop kênh (1) — được
 Dev/README ghi nhận trung thực, không giấu, có escalate rõ cho PM/QA quyết định thêm 1 lần chạy live
 trước release hay không. Đây là quyết định của PM/QA, không phải lý do reject ở vòng Reviewer này.
+
+---
+
+## S4 — Bug #EPUB-5: DeepSeek thinking mode gây runaway giả cho EPUB (K-1..K-5) — Vòng 1/3
+
+**Ngày**: 2026-09-12. **Phạm vi diff review**: `src/core/job_orchestrator.py`,
+`src/services/translation.py`, `src/services/openai_provider.py`,
+`src/services/deepseek_provider.py`, `src/core/config.py`, `src/services/epub_document.py`,
+`tests/test_openai_provider_thinking.py` (mới), `tests/test_epub_document.py`,
+`tests/integration/test_epub_translate_guards.py`, `tests/fixtures/epub_llm/deepseek_v4flash_usage.json`
+(golden, mới), `docs/Architecture.md` §6.20.15, `docs/CHANGELOG.md`, `docs/design-log.md`,
+`project_state.json`, `CLAUDE.md`. Đã tự chạy `git diff --stat` xác nhận đúng danh sách file (khớp
+Dev báo cáo, không thiếu/thừa).
+
+Đọc trước khi review: `docs/Architecture.md` §6.20.15 (dòng 6672–6936).
+
+### Checklist bắt buộc (theo brief Protocol 5/6/7/8)
+
+**1. R5-04 — External contract verified against real source**: **YES** (nguồn:
+`tests/fixtures/epub_llm/deepseek_v4flash_usage.json`, golden file capture thật từ 1 lần gọi live
+`deepseek-v4-flash` — spike R5-02 2026-09-11 — có shape response y hệt `openai` SDK
+`model_dump()` thật, kèm cả field `null` không dùng đến (`accepted_prediction_tokens`,
+`audio_tokens`...), 2 case rõ ràng khác nhau `baseline_thinking_default` vs `thinking_disabled` với
+số token/nội dung tiếng Việt hợp lý — không có dấu hiệu viết tay theo giả định. Đối chiếu với doc
+chính thức DeepSeek (`https://api-docs.deepseek.com/guides/thinking_mode/`, fetch 2026-09-11, ghi
+rõ trong Architecture.md S6/S7). Áp dụng cho cả `src/services/openai_provider.py` (thêm cơ chế
+`_extra_body()`/`reasoning_tokens` extraction, dùng chung cho mọi provider con) và
+`src/services/deepseek_provider.py` (override cụ thể payload `{"thinking": {"type": "disabled"}}`).
+
+**2. Điểm suýt sai đã cảnh báo trước — vị trí bóc koboSpan (K-1)**: **ĐÚNG chỗ**. Đọc trực tiếp
+`src/services/epub_document.py`: `_unwrap_kobo_spans(soup)` được gọi bên trong `_parse_xhtml()`
+— cả 2 nhánh (`features="xml"` thành công VÀ fallback `html.parser`) đều gọi hàm này ngay sau khi
+parse xong soup, trước khi return. Đây là điểm vào DUY NHẤT mà `load()`, `write_translated()`,
+`count_bb_vi_pairs()`, `to_markdown()` đều đi qua (tất cả đều gọi lại `_parse_xhtml()` trên bytes
+đọc từ zip, không có đường tắt nào bỏ qua nó). KHÔNG có dòng nào trong `job_orchestrator.py` tự
+bóc/sửa `koboSpan` ở chỗ build payload — đúng như Architecture.md §6.20.15 K-1 yêu cầu. Không phát
+hiện lỗi mất chữ âm thầm ở điểm này.
+
+**3. R6-02 — test assert cả 3 đường đọc dùng CHUNG 1 hàm unwrap**: **ĐẠT, không chỉ test riêng
+lẻ**. `tests/test_epub_document.py::test_load_write_translated_and_to_markdown_share_same_kobo_unwrap`
+dựng 1 EPUB có koboSpan multi-slot + 1 span pagebreak giả (mô phỏng thật), rồi tự tay trace:
+(1) `EpubDocument.load()` → `doc.units[0].text` không còn `koboSpan`/`kobo.*`, đúng 1 unit (không bị
+phình do koboSpan làm lệch slot); (2) `write_translated()` → mở lại file output từ đĩa, xác nhận
+bản dịch tiếng Việt CÓ DẤU đã áp dụng ĐẦY ĐỦ (không bị cắt do lệch slot — đúng chính kịch bản Bug #5
+kiểu-mới mà K-1 phòng), output không còn `koboSpan`, pagebreak vẫn còn nguyên; (3) `to_markdown()` —
+cùng input, không còn koboSpan, text liền mạch; (4) `count_bb_vi_pairs()` — mở lại file output từ
+đĩa (bilingual=True), đếm đúng 1 cặp bb-vi khác nội dung. Cả 4 bước dùng lại đúng 1 input gốc
+(`_KOBO_SPAN_BODY`), không phải 4 test độc lập rời rạc với input khác nhau.
+
+**4. R8-02 — phạm vi bóc koboSpan hẹp đúng deny-by-default**: **ĐÚNG**. Đọc
+`_unwrap_kobo_spans()`: chỉ lặp `soup.find_all("span")`, kiểm `class` chứa đúng token `koboSpan`
+(xử lý cả 2 dạng string/list tuỳ parser, dùng `.split()` thay vì dựa vào hành vi multi-valued-attr
+của bs4 — đúng như comment cảnh báo "TUYỆT ĐỐI không dùng `class_="koboSpan"` của `find_all()`"),
+dùng `span.unwrap()` (giữ con) chứ không `decompose()`. Test
+`test_unwrap_kobo_spans_removes_only_kobospan_class_token` xác nhận tường minh span
+`epub:type="pagebreak" id="page_1"` (không có class `koboSpan`) còn nguyên cả thẻ lẫn `id` sau khi
+unwrap chạy.
+
+**5. K-4 — quyết định KHÔNG đổi hằng số**: lý do hợp lý, có số đo thật (không né việc). Dev đã chạy
+live E2E job thật (`bfc0ac24-...`, 66/66 chunk, 784 request) đo được `chars_per_answer_token` (min
+1.89 · median 2.386 · max 7.66) và `runaway_ratio` (mean 0.7048 · median 0.7234 · max 0.9119 — dưới
+tiêu chí ≤1.5× VÀ dưới `EPUB_RUNAWAY_OUTPUT_FACTOR=3.0`). Lý do không tách được 2 hằng số riêng từ
+1 tỉ số gộp mà không suy đoán là hợp lý — đúng tinh thần Protocol 5 (không đoán 1 trong 2 rồi suy
+ra cái kia). Đồng ý đây là lựa chọn AN TOÀN HƠN so với sửa dựa trên suy diễn, và Dev đã ghi backlog
+rõ cho lần đo tách sau này (không giấu việc chưa làm).
+
+**6. K-3 lệch nhỏ so với pseudocode gốc — đã cập nhật Architecture.md thật chưa**: **ĐÃ cập nhật
+khớp code**. Đọc §6.20.15 K-3 (dòng 6814–6825): mô tả đúng cơ chế thật trong code — thuộc tính
+INSTANCE `disable_thinking: bool = False` (không phải class-level cờ chung), `translate()` chỉ áp
+`_extra_body()` khi `supports_thinking_toggle and self.disable_thinking` đều đúng, và
+`run_epub_job()` tự bật cờ NGAY sau khi tạo provider — khớp 100% với
+`src/services/openai_provider.py` dòng 53–58/91–93 và `src/core/job_orchestrator.py` dòng
+1150–1159. Đã tự đối chiếu code thật với văn bản, không chỉ tin Dev báo.
+
+**7. R7-03 — append, không overwrite**: đã tự kiểm bằng `git diff`. `docs/CHANGELOG.md`:
+`grep -c "^-[^-]"` = 0 (không xoá dòng nào). `docs/design-log.md`: = 0. `docs/Architecture.md`: có
+2 dòng bị thay (không phải xoá lịch sử — mở rộng nội dung "Cost ở v1.0 là ước lượng..." để phân
+biệt rõ nhánh `pdf2zh` vs `babeldoc`, và Architecture.md vốn KHÔNG phải file append-only theo
+Protocol C — nó là hợp đồng hiện hành, được phép sửa tại chỗ). Không có dấu hiệu ghi đè lịch sử.
+
+**8. Test + lint**: tự chạy (không tin số Dev báo).
+- `uv run ruff check src/ tests/` → sạch.
+- `uv run ruff format --check` trên đúng 9 file trong phạm vi diff (kể cả file test mới) → đã
+  format sẵn, không cần reformat (17 file cần reformat toàn repo là drift CŨ, không liên quan diff
+  này — đã tự đối chiếu bằng `ruff format --diff` chỉ trên các file S4, không có output).
+- `uv run pytest tests/test_openai_provider_thinking.py tests/test_epub_document.py
+  tests/integration/test_epub_translate_guards.py` → 83 passed.
+- `uv run pytest` (toàn bộ suite) → 827 passed (1 warning `RuntimeError: Event loop is closed` là
+  artifact teardown `aiosqlite` không liên quan, không phải test fail).
+- `python3 scripts/validate_state.py` → hợp lệ, 2 cảnh báo Protocol C (Architecture.md/CHANGELOG.md
+  vượt ngân sách dòng) — không chặn, đã có trong backlog (BL-11) từ trước.
+
+### Phát hiện quan trọng — chưa đủ điều kiện release, không phải lỗi của K-1..K-5
+
+Đọc `docs/design-log.md` (dòng 6618–6639) và `project_state.json` (BL-12): live E2E job
+`bfc0ac24-...` dịch xong 66/66 chunk (xác nhận K-2/K-3/K-5 hoạt động đúng, gate G-2 §6.20.15 đạt),
+NHƯNG job cuối `status="failed"` ở bước MERGE vì 1 guard OCF có sẵn từ trước (`mimetype` không ở
+dạng `ZIP_STORED`) — bug ĐỘC LẬP, không do K-1..K-5 gây ra, chỉ mới lộ ra vì lần này là lần đầu 1
+job EPUB thật chạy hết 66 chunk tới bước merge. Dev đã báo cáo trung thực (không giấu), ghi backlog
+BL-12 "QUAN TRỌNG — đang CHẶN job thật của Hiếu", trạng thái `open`.
+
+**Hệ quả cho gate G-4 (§6.20.15, R6-03)**: *"mở EPUB output thật, xác nhận có chữ tiếng Việt CÓ
+DẤU, không chỉ tin status=completed"* — gate này **CHƯA đạt được** cho luồng end-to-end thật, vì
+chưa có file output cuối nào được tạo ra (merge fail trước khi ghi output). K-1's test riêng
+(`test_load_write_translated_and_to_markdown_share_same_kobo_unwrap`, mục 3 checklist trên) CÓ mở
+lại file output và xác nhận tiếng Việt có dấu — nhưng đó là unit test tự dựng EPUB tối giản, KHÔNG
+phải G-4 (live E2E, sách thật, xuyên suốt cả pipeline). Đây là **non-blocking cho việc APPROVE code
+S4** (đúng phạm vi brief, bug merge ngoài phạm vi K-1..K-5, đã disclosed đầy đủ), nhưng **BẮT BUỘC
+QA không được đánh dấu `ready_for_release` cho S4/US-22 tới khi G-4 thật sự đạt** — hoặc chạy lại
+live E2E sau khi BL-12 được sửa, hoặc dùng 1 EPUB nguồn khác không dính lỗi OCF mimetype để xác
+nhận riêng phần K-1..K-5 tới hết pipeline. Ghi lại ở đây để QA không bỏ sót.
+
+### Kết luận
+
+**APPROVE** (Vòng 1/3) cho phần code thuộc phạm vi S4 (K-1..K-5, `src/core/job_orchestrator.py`,
+`src/services/translation.py`, `src/services/openai_provider.py`,
+`src/services/deepseek_provider.py`, `src/core/config.py`, `src/services/epub_document.py`). Đã tự
+verify độc lập từng điểm PM/Tech Lead lo ngại (vị trí unwrap koboSpan đúng chỗ, data lineage 3
+đường đọc dùng chung, phạm vi bóc hẹp đúng deny-by-default, mock có golden file backing thật, K-4
+có số đo không phải né việc, Architecture.md khớp code thật, không có ghi đè lịch sử tài liệu). Test
+pass toàn bộ (827), ruff sạch. Không có blocking issue nào ở code hoặc test.
+
+**Không blocking, nhưng bắt buộc QA đọc trước khi release**: gate G-4 (§6.20.15) chưa đạt ở mức
+live E2E full pipeline do BL-12 (bug merge OCF độc lập, chưa sửa) — xem mục "Phát hiện quan trọng"
+ở trên.

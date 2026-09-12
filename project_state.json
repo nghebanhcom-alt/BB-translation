@@ -86,6 +86,39 @@
       "status": "answered",
       "answered_in": "docs/design-log.md — Final Decision 2026-09-11: Hiếu chọn Phương án 1 (= mặc định)",
       "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-04",
+      "text": "Bug #EPUB-5 (S4): tắt thinking mode của DeepSeek cho nhánh EPUB (epub_disable_thinking=True, K-3 Architecture.md §6.20.15) để output_tokens không còn lẫn token suy luận gây runaway giả?",
+      "asked_by": "tech-lead",
+      "origin": "docs/Architecture.md §6.20.15 K-3, docs/design-log.md RCA Bug #EPUB-5",
+      "blocks": ["S4"],
+      "default": "Bật tắt thinking cho nhánh EPUB — đổi chi phí output giảm mạnh, đánh đổi chất lượng dịch câu khó có thể giảm nhẹ",
+      "status": "answered",
+      "answered_in": "docs/design-log.md — Final Decision 2026-09-11: Hiếu chọn tắt thinking cho EPUB (= mặc định)",
+      "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-05",
+      "text": "Bug #EPUB-5 (S4): chấp nhận bóc id=\"kobo.*\" khỏi output EPUB (K-1) để tránh Bug #5-kiểu-mới ở write_translated() đếm lệch slot? Hệ quả đo được: 0/7.616 id được tham chiếu, chỉ ảnh hưởng phân trang lại trên máy đọc Kobo.",
+      "asked_by": "tech-lead",
+      "origin": "docs/Architecture.md §6.20.15 K-1, docs/design-log.md RCA Bug #EPUB-5",
+      "blocks": ["S4"],
+      "default": "Chấp nhận bóc — không id nào bị tham chiếu, chỉ mất phân trang lại của riêng máy Kobo",
+      "status": "answered",
+      "answered_in": "docs/design-log.md — Final Decision 2026-09-11: Hiếu chọn chấp nhận bóc koboSpan (= mặc định)",
+      "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-06",
+      "text": "Chốt luật: mọi chỉ thị '⚠️ ASSUMED — phải đo lại ở lần chạy live đầu' bắt buộc có mục backlog[] kèm owner, không chỉ nằm trong văn bản (root cause quy trình Bug #EPUB-5, xem design-log.md)?",
+      "asked_by": "tech-lead",
+      "origin": "docs/design-log.md RCA Bug #EPUB-5 — quan sát quy trình",
+      "blocks": [],
+      "default": "Chốt luật — thêm vào CLAUDE.md project dưới dạng mở rộng Protocol 5",
+      "status": "answered",
+      "answered_in": "CLAUDE.md project — R5-06 (PM ghi trực tiếp 2026-09-11, tài liệu governance)",
+      "clarify_rounds": 1
     }
   ],
   "backlog": [
@@ -151,6 +184,27 @@
       "source": "reviewer",
       "ref": "docs/review-report.md — Review Report Port Protocol A–F VÒNG 2/3 (2026-09-11), non-blocking",
       "status": "open"
+    },
+    {
+      "id": "BL-10",
+      "text": "DONE 2026-09-11: spike R5-02 xanh cả 2 câu (reasoning_tokens khác 0; tắt thinking qua extra_body được chấp nhận) — golden tests/fixtures/epub_llm/. K-2/K-3 hết ASSUMED",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.20.15 K-2/K-3, docs/design-log.md Final Decision HOI-04/05 2026-09-11",
+      "status": "done"
+    },
+    {
+      "id": "BL-11",
+      "text": "Protocol C.3: Architecture.md 8.711 dòng (vượt trần 8.000, +9%) và design-log.md 6.616 dòng — cần rotate/tách trước khi vượt xa hơn",
+      "source": "tech-lead",
+      "ref": "scripts/validate_state.py cảnh báo — không chặn, nhưng PM phải lên lịch xử lý theo nhiều lượt (Protocol C.3)",
+      "status": "open"
+    },
+    {
+      "id": "BL-12",
+      "text": "QUAN TRỌNG — đang CHẶN job thật của Hiếu (781b59b0): job bfc0ac24 dịch xong 66/66 chunk (xác nhận S4 hết bug) nhưng bước MERGE CUỐI lỗi — mimetype OCF của file gốc không ở dạng ZIP_STORED. KHÔNG sửa (ngoài phạm vi S4)",
+      "source": "dev",
+      "ref": "docs/design-log.md — ghi nhận trong mục live E2E Bug #EPUB-5, job bfc0ac24-0664-4932-96da-1ac99c1abc10, error_message qua GET /api/jobs/bfc0ac24",
+      "status": "open"
     }
   ],
   "steps": [
@@ -180,6 +234,15 @@
       "blocked_by": [],
       "output": "DONE. Reviewer APPROVE 1/3, QA PASS ready_for_release YES — QA tự dựng ca drop thật qua babeldoc CLI thật (LLM server giả cục bộ), lần đầu quan sát trọn vẹn nhánh type=drop. 816 test pass. ⚠️ Architecture.md 8111/8000 dòng — VƯỢT trần Protocol C.3, cần rotate.",
       "closed_commit": "d946e0cc1a370f67221e37d6ee016169ac96f445"
+    },
+    {
+      "id": "S4",
+      "title": "Bug #EPUB-5: DeepSeek thinking mode gây runaway giả (koboSpan bị bác bỏ, đọc design-log.md RCA)",
+      "owner_role": "qa",
+      "status": "blocked",
+      "blocked_by": [],
+      "output": "Reviewer APPROVE (docs/review-report.md) — verify sống R5-04/K-1 vị trí/R6-02/R8-02/K-4/K-3/R7-03, 827 test pass, ruff sạch. Live E2E job bfc0ac24 xác nhận Bug #EPUB-5 đã hết (0/784 reasoning_tokens leak, 0 abort). Chặn bởi backlog BL-12 (bug merge OCF khác, ngoài phạm vi S4) — gate G-4 (§6.20.15) chưa đạt, QA KHÔNG được đánh dấu ready_for_release tới khi BL-12 fixed. Chưa commit — 14 file working tree, chờ Hiếu duyệt commit (PM không tự commit).",
+      "closed_commit": null
     }
   ],
   "loops": [

@@ -7990,3 +7990,109 @@ cùng model/prompt job `1ee1fdee`) trước khi release, hay chấp nhận mức
 ### KHÔNG commit
 
 Theo brief — PM điều phối commit sau khi Reviewer + QA duyệt qua vòng thật.
+
+## S4 — Bug #EPUB-5: DeepSeek thinking mode gây runaway giả cho EPUB (K-1..K-5)
+
+Dev: implement theo đúng thứ tự bắt buộc của Architecture.md §6.20.15 (Tech Lead đã chỉ định thứ tự,
+không được đảo). RCA gốc: `deepseek-v4-flash` bật thinking mode mặc định, `usage.completion_tokens`
+lẫn cả token suy luận, khiến `is_runaway_output()` so sánh sai và kích hoạt abort R-b gần như luôn
+luôn cho job EPUB thật.
+
+### Bước 1 — Spike R5-02 (bắt buộc chạy TRƯỚC K-2/K-3)
+
+Gọi thật `deepseek-v4-flash` 2 lần (baseline thinking mặc định + `extra_body={"thinking":
+{"type":"disabled"}}`), lưu `response.usage.model_dump()` vào golden file
+`tests/fixtures/epub_llm/deepseek_v4flash_usage.json`. Cả 2 câu hỏi bắt buộc đều XANH:
+- (a) `completion_tokens_details.reasoning_tokens` tồn tại, khác 0: **833** trên **933**
+  `completion_tokens` tổng ở baseline → K-2 hợp lệ, không cần escalate.
+- (b) Endpoint chấp nhận `extra_body` (không HTTP 400); khi tắt thinking,
+  `completion_tokens_details` biến mất hoàn toàn (`None`, không phải object có `reasoning_tokens=0`)
+  → K-3 hợp lệ, và code phải xử lý đúng ca `None` này (không chỉ `reasoning_tokens=0`).
+
+### Bước 2 — K-5 (song song với spike, thuần logic)
+
+`src/core/job_orchestrator.py` (`_process_epub_chunk()`, quanh dòng 2397): điều kiện abort R-b đổi
+từ `if runaway and missing_ids:` (abort khi thiếu BẤT KỲ id nào) sang
+`if runaway and len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES:` — với ≤ 2 id thiếu, đi qua thang cứu
+hộ C-1 (retry từng-id, rẻ, tỉ lệ thành công cao) thay vì abort cả chunk (đúng cái bẫy đã làm 3 job
+EPUB thật chết ở §6.20.13.3b trước K-5).
+
+### Bước 3 — K-2 (sau spike xanh)
+
+`src/services/translation.py`: `TranslationResult` thêm field `reasoning_tokens: int = 0` +
+property `answer_tokens` (= `max(0, output_tokens - reasoning_tokens)`, CHỈ dùng cho phép đo
+runaway). `src/services/openai_provider.py`: `translate()` đọc
+`getattr(getattr(response.usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0` —
+xử lý đúng cả 3 ca: field tồn tại khác 0, `completion_tokens_details=None` (thinking đã tắt), và
+provider không có field này (OpenAI/Claude → mặc định 0). `output_tokens` GIỮ NGUYÊN =
+`completion_tokens` thật (tính tiền không đổi, không được ước thấp — §6.11.6).
+`job_orchestrator.py` đổi 2 dòng đo runaway sang dùng `result.answer_tokens` thay vì
+`result.output_tokens`; `requests.jsonl` ghi thêm 2 field `reasoning_tokens`/`answer_tokens` (giữ
+nguyên field cũ).
+
+### Bước 3b — K-3 (song song K-2, sau spike xanh)
+
+`src/services/openai_provider.py`: thêm `supports_thinking_toggle: bool = False` (class attribute,
+R8-03 — không rẽ nhánh `if provider_name == "deepseek"`) + instance attribute
+`disable_thinking: bool = False` + hook `_extra_body() -> dict` (mặc định `{}`).
+`src/services/deepseek_provider.py`: `DeepSeekProvider.supports_thinking_toggle = True`,
+`_extra_body()` trả `{"thinking": {"type": "disabled"}}`. `translate()` chỉ truyền `extra_body=`
+khi CẢ `supports_thinking_toggle` LẪN `disable_thinking` đều đúng trên instance đó.
+
+**Lệch có chủ đích so với pseudocode nháp của Architecture.md** (đã cập nhật lại §6.20.15 K-3 cho
+khớp): pseudocode gốc gợi ý "truyền `extra_body` khi `_extra_body()` khác rỗng" — hiểu thẳng sẽ tắt
+thinking cho MỌI lần gọi `DeepSeekProvider.translate()`, kể cả `glossary.py` (dịch glossary term) và
+`rotated_text_overlay.py` (PDF babeldoc), trong khi Hiếu chỉ duyệt HOI-04 cho **riêng nhánh EPUB**.
+Fix: `disable_thinking` là **instance attribute**, mặc định `False` (hành vi không đổi cho mọi
+provider/call site khác); `src/core/job_orchestrator.py` (`run_epub_job()`) tự bật
+`pricing_provider.disable_thinking = True` NGAY sau khi tạo provider, CHỈ trong nhánh EPUB, theo
+`Settings.epub_disable_thinking` (mới, `src/core/config.py`, mặc định `True`) VÀ
+`getattr(pricing_provider, "supports_thinking_toggle", False)` — vẫn đúng tinh thần R8-03 (hỏi
+capability trên object, không hardcode theo tên provider), chỉ thêm 1 lớp "ai được phép bật cờ" để
+không rò rỉ sang PDF/glossary ngoài phạm vi Hiếu đã duyệt.
+
+### Bước 4 — Live E2E 1 cuốn thật (gate G-2, Architecture.md §6.20.15)
+
+Job `bfc0ac24-0664-4932-96da-1ac99c1abc10`, `Sourdough Culture A History of Bread Making...epub`
+(66 chunk), qua ĐÚNG `JobOrchestrator.run_job()` thật (không mock), `deepseek-chat` (repoint server
+`deepseek-v4-flash`), `epub_disable_thinking=True` mặc định. Kết quả: **66/66 chunk `completed`**,
+**784 request**, **0 abort vì R-b**, **0/784 request có `reasoning_tokens` khác 0** (K-3 hoạt động
+đúng trên toàn bộ sách thật, không chỉ 1 request spike). `runaway_ratio` (đo bằng `answer_tokens`):
+mean 0,7048 · median 0,7234 · **max 0,9119** — xa dưới `EPUB_RUNAWAY_OUTPUT_FACTOR=3,0`. Chi phí
+thật: $0,588 / 2.043.387 token. Số đo đầy đủ đã ghi vào Architecture.md §6.20.15 mục K-4.
+
+**Phát hiện MỚI, KHÔNG sửa trong lượt này** (đã ghi `docs/design-log.md`): job cuối cùng vẫn
+`status="failed"` ở bước MERGE (sau khi cả 66 chunk đã dịch xong) — guard OCF-compliance có sẵn từ
+trước trong `EpubDocument.write_translated()` (`infolist[0].compress_type == zipfile.ZIP_STORED`)
+từ chối file nguồn vì entry `mimetype` của nó bị nén (`ZIP_DEFLATED`, vi phạm OCF spec). Không thuộc
+phạm vi Bug #EPUB-5 — báo lại PM/Tech Lead quyết định có nới guard hay không.
+
+### Bước 5 — K-1 (song song, độc lập — CẤM báo cáo là "fix Bug #EPUB-5")
+
+`src/services/epub_document.py`: thêm `_unwrap_kobo_spans(soup)`, gọi TRONG `_parse_xhtml()` (điểm
+vào DUY NHẤT mà `load()`/`write_translated()`/`count_bb_vi_pairs()`/`to_markdown()` đều dùng chung)
+— unwrap (giữ nguyên con, KHÔNG `decompose()`) mọi `<span>` có class chứa đúng token `koboSpan`,
+deny-by-default (Protocol 8 R8-02): KHÔNG đụng span khác (vd pagebreak). K-1 chỉ sửa lãng phí
+chi phí/độ ồn payload (markup Kobo chiếm ~50,5% payload đo trên `Sourdough Culture.epub`), KHÔNG
+làm job nào runaway ít hơn — bản vá thật cho Bug #EPUB-5 là K-2/K-3/K-5 ở trên.
+
+### Bước 6 — K-4: quyết định KHÔNG đổi hằng số (có số đo, không phải bỏ qua)
+
+Đo `chars_per_answer_token` trên toàn bộ 784 request live (bước 4): min 1,89 · median 2,386 · max
+7,66. Formula hiện tại (`CHARS_PER_TOKEN_VI=2.0`, `VI_CHAR_EXPANSION=1.16`) đã an toàn (max
+`runaway_ratio` đo được = 0,9119 << tiêu chí ≤1,5× của K-4 bước 3, và << ngưỡng abort 3,0) — quyết
+định KHÔNG đổi cả 3 hằng số, lý do đầy đủ (đặc biệt: `VI_CHAR_EXPANSION` dùng CHUNG với
+`estimate_job_cost_v2()` cho PDF, đo trên cơ sở ký tự khác với `payload_chars` ở đây — đổi sẽ làm
+sai lệch ước lượng chi phí PDF không liên quan) đã ghi vào Architecture.md §6.20.15 mục K-4.
+
+### Test
+
+`tests/test_openai_provider_thinking.py` (mới, 6 test — mock dựng TỪ golden file thật, R5-03),
+`tests/test_epub_document.py` (+2 test K-1, R6-02: xác nhận `load()`/`write_translated()`/
+`to_markdown()` dùng chung 1 phép unwrap), `tests/integration/test_epub_translate_guards.py` (+4
+test K-5/K-3, sửa 2 test cũ theo hợp đồng mới của R-b). Toàn bộ `tests/` (827 test, bao gồm
+integration) + `ruff check`/`ruff format` sạch.
+
+### KHÔNG commit
+
+Theo brief — PM điều phối commit sau khi Reviewer + QA duyệt qua vòng thật.

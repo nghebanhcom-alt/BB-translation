@@ -461,20 +461,33 @@ async def test_runaway_ra_kept_when_parse_succeeds(session: AsyncSession, tmp_pa
     assert logged["output_tokens"] == 50_000
 
 
-async def test_runaway_rb_aborted_when_missing_ids(session: AsyncSession, tmp_path: Path) -> None:
-    """R-b (Architecture.md 6.20.13.3b bang): runaway VA thieu id/hong ->
-    abort NGAY, KHONG chay vong goi lai (moi retry sau 1 runaway hong la con
-    duong khuech dai C-1)."""
-    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=_big_payload_paragraphs())
+async def test_runaway_rb_aborted_when_missing_ids_exceeds_retry_budget(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """K-5 (Architecture.md §6.20.15): R-b CHI abort khi runaway VA
+    len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES (=2) — o day thieu 3/6 id,
+    vuot han muc cuu ho C-1 -> abort NGAY, KHONG chay vong goi lai (moi retry
+    sau 1 runaway hong la con duong khuech dai C-1)."""
+    assert EPUB_MAX_SINGLE_ID_RETRIES == 2
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=6)
     job = await _create_epub_job(session, epub_path)
 
     def _runaway_and_broken(payload: list[dict]) -> tuple[dict, int]:
-        # Thieu id cuoi cung + output_tokens gia tao rat lon.
-        reply = {item["id"]: f"VI:{item['html']}" for item in payload[:-1]}
+        # Thieu 3/6 id (id "3","4","5") — > EPUB_MAX_SINGLE_ID_RETRIES (=2) —
+        # + output_tokens gia tao rat lon.
+        reply = {item["id"]: f"VI:{item['html']}" for item in payload[:3]}
         return reply, 50_000
 
     provider = _ControllableEpubProvider([_runaway_and_broken])
-    orchestrator = _make_orchestrator(tmp_path, provider)
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_request_max_units=100,  # giu dung 1 request cho toan bo 6 unit
+        ),
+    )
 
     result = await orchestrator.run_job(job.id, session)
 
@@ -483,6 +496,144 @@ async def test_runaway_rb_aborted_when_missing_ids(session: AsyncSession, tmp_pa
     assert "EpubRequestRunawayError" in job.error_message or "runaway" in job.error_message
     # KHONG chay vong goi lai nao ca -> dung 1 lan goi duy nhat.
     assert len(provider.calls) == 1
+
+
+async def test_runaway_rb_kept_and_retried_when_missing_ids_within_retry_budget(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """K-5 (Architecture.md §6.20.15) — diem MOI TRUNG TAM: truoc K-5, 1 id
+    thieu + runaway se abort ca chunk (chinh la bay lam 3 job EPUB that chet
+    o 6.20.13.3b). Sau K-5: chi 1/6 id thieu (<= EPUB_MAX_SINGLE_ID_RETRIES),
+    R-b KHONG duoc kich hoat — request van duoc GIU (R-a, ghi anomaly "kept"),
+    va id thieu di qua thang cuu ho C-1 (retry rieng le, RE) — job completed,
+    KHONG fallback tieng Anh vi retry thanh cong."""
+    assert EPUB_MAX_SINGLE_ID_RETRIES == 2
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=6)
+    job = await _create_epub_job(session, epub_path)
+
+    def _main_call_runaway_missing_one(payload: list[dict]) -> tuple[dict, int]:
+        # Thieu dung 1/6 id ("5") + output_tokens gia tao rat lon -> runaway
+        # NHUNG trong han muc cuu ho C-1.
+        reply = {item["id"]: f"VI:{item['html']}" for item in payload if item["id"] != "5"}
+        return reply, 50_000
+
+    def _single_id_retry_succeeds(payload: list[dict]) -> tuple[dict, None]:
+        # `_retry_single_unit` goi lai VOI DUNG 1 item — tra ve thanh cong.
+        return {item["id"]: f"VI:{item['html']}" for item in payload}, None
+
+    provider = _ControllableEpubProvider(
+        [_main_call_runaway_missing_one, _single_id_retry_succeeds]
+    )
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_request_max_units=100,  # giu dung 1 request cho toan bo 6 unit
+        ),
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    # Request chinh + 1 lan goi lai rieng le cho id "5" — KHONG abort.
+    assert len(provider.calls) == 2
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunk = chunks_result.one()
+    anomalies_path = Path(
+        tmp_path / "processing" / job.id / f"chunk_{chunk.chunk_index}" / "anomalies.json"
+    )
+    assert anomalies_path.exists()
+    anomalies = json.loads(anomalies_path.read_text(encoding="utf-8"))
+    assert len(anomalies["runaway_requests"]) == 1
+    assert anomalies["runaway_requests"][0]["action"] == "kept"
+    # Retry rieng le thanh cong -> KHONG unit nao roi vao fallback tieng Anh.
+    assert anomalies["fallback_units"] == []
+
+    untranslated_path = Path(tmp_path / "outputs" / job.id / "untranslated_units.json")
+    assert not untranslated_path.exists()
+
+
+class _ThinkingCapableEpubProvider(_ControllableEpubProvider):
+    """K-3 (Architecture.md §6.20.15) — provider gia lap co khai bao nang luc
+    `supports_thinking_toggle=True` (R8-03), de kiem `run_epub_job()` tu bat
+    `disable_thinking=True` tren INSTANCE khi `Settings.epub_disable_thinking`
+    bat, khong can biet ten provider that."""
+
+    supports_thinking_toggle = True
+
+    def __init__(self, script) -> None:
+        super().__init__(script)
+        self.disable_thinking = False
+        self.observed_disable_thinking_per_call: list[bool] = []
+
+    async def translate(
+        self, text: str, glossary_prompt: str, source_lang: str, target_lang: str
+    ) -> TranslationResult:
+        self.observed_disable_thinking_per_call.append(self.disable_thinking)
+        return await super().translate(text, glossary_prompt, source_lang, target_lang)
+
+
+async def test_epub_disable_thinking_setting_sets_flag_on_capable_provider(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """K-3 — `Settings.epub_disable_thinking=True` (mac dinh) phai bat
+    `provider.disable_thinking=True` TRUOC khi chunk dau tien chay, CHI khi
+    provider tu khai bao `supports_thinking_toggle=True` — khong `if
+    provider_name == "deepseek"` rai rac trong `job_orchestrator.py`."""
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=2)
+    job = await _create_epub_job(session, epub_path)
+
+    def _reply(payload: list[dict]) -> tuple[dict, None]:
+        return {item["id"]: f"VI:{item['html']}" for item in payload}, None
+
+    provider = _ThinkingCapableEpubProvider([_reply])
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_disable_thinking=True,
+        ),
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert provider.disable_thinking is True
+    assert provider.observed_disable_thinking_per_call == [True]
+
+
+async def test_epub_disable_thinking_setting_false_leaves_flag_untouched(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """K-3 — `Settings.epub_disable_thinking=False` phai KHONG bat co, du
+    provider co kha nang (mac dinh instance moi la `disable_thinking=False`,
+    hanh vi khong doi)."""
+    epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=2)
+    job = await _create_epub_job(session, epub_path)
+
+    def _reply(payload: list[dict]) -> tuple[dict, None]:
+        return {item["id"]: f"VI:{item['html']}" for item in payload}, None
+
+    provider = _ThinkingCapableEpubProvider([_reply])
+    orchestrator = _make_orchestrator(
+        tmp_path,
+        provider,
+        settings=Settings(
+            epub_chunk_char_budget=5_000,
+            epub_request_char_budget=5_000,
+            epub_disable_thinking=False,
+        ),
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+
+    assert result.status == "completed"
+    assert provider.disable_thinking is False
 
 
 # --- 6.20.13.5: guard mat dau tieng Viet 2 tang -----------------------------
@@ -771,8 +922,12 @@ async def test_epub_request_runaway_error_still_records_cost_of_prior_successful
     (R-b): request 1 (slice unit 0-2) succeeds normally; request 2 (slice
     unit 3-5) comes back BOTH runaway (huge output vs its own payload) AND
     missing ids -> aborts immediately via `EpubRequestRunawayError` with NO
-    retry (R-b, Architecture.md 6.20.13.3b). `chunk.api_cost` must still
-    reflect request 1's real cost after this exception is caught.
+    retry (R-b, Architecture.md 6.20.13.3b). K-5 (§6.20.15): R-b only fires
+    when `len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES` (=2) — this slice
+    has exactly 3 units, so ALL 3 must be missing (not just 1) to exceed the
+    retry budget and trigger abort instead of the cheap per-id retry path.
+    `chunk.api_cost` must still reflect request 1's real cost after this
+    exception is caught.
     """
     epub_path = _build_epub(tmp_path / "book.epub", n_paragraphs=6)
     job = await _create_epub_job(session, epub_path)
@@ -780,11 +935,11 @@ async def test_epub_request_runaway_error_still_records_cost_of_prior_successful
     def _slice_succeeds(payload: list[dict]) -> tuple[dict, None]:
         return {item["id"]: f"VI:{item['html']}" for item in payload}, None
 
-    def _slice_runaway_and_missing(payload: list[dict]) -> tuple[dict, None]:
-        # Missing id "0", and an artificially huge output_tokens override so
-        # `is_runaway_output()` trips (Architecture.md 6.20.13.3b).
-        reply = {item["id"]: f"VI:{item['html']}" for item in payload if item["id"] != "0"}
-        return reply, 100_000
+    def _slice_runaway_and_missing(payload: list[dict]) -> tuple[dict, int]:
+        # Missing ALL 3 id (> EPUB_MAX_SINGLE_ID_RETRIES=2, K-5), and an
+        # artificially huge output_tokens override so `is_runaway_output()`
+        # trips (Architecture.md 6.20.13.3b).
+        return {}, 100_000
 
     provider = _CostTrackingEpubProvider([_slice_succeeds, _slice_runaway_and_missing])
     orchestrator = _make_orchestrator(

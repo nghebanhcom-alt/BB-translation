@@ -188,9 +188,7 @@ _NUMERIC_PUNCT_RE = re.compile(r"^[0-9+\-=()]+$")
 _SINGLE_ALPHA_RE = re.compile(r"^[A-Za-z]$")
 
 #: Bang anh xa Unicode §6.21.2 (du cho hoa hoc pho thong + so mu so hoc).
-_SUP_UNICODE_MAP: dict[str, str] = dict(
-    zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ", strict=True)
-)
+_SUP_UNICODE_MAP: dict[str, str] = dict(zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ", strict=True))
 _SUB_UNICODE_MAP: dict[str, str] = dict(
     zip("0123456789+-=()aeoxhklmnpst", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ", strict=True)
 )
@@ -505,6 +503,44 @@ def _strip_nested_lists(node: Tag) -> Tag:
     return clone
 
 
+#: K-1 (Architecture.md §6.20.15) — CHI token class nay, KHONG tong quat hoa
+#: (Protocol 8 R8-02, deny-by-default).
+_KOBO_SPAN_CLASS = "koboSpan"
+
+
+def _unwrap_kobo_spans(soup: BeautifulSoup) -> None:
+    """K-1 (Architecture.md §6.20.15) — unwrap (KHONG decompose, giu nguyen
+    con ben trong) MOI `<span>` co `class` chua dung token `koboSpan`. Goi
+    NGAY sau khi parse xong soup, TRUOC moi buoc khac (`_parse_xhtml()`), la
+    diem vao DUY NHAT ma `load()`, `write_translated()`, `count_bb_vi_pairs()`,
+    `to_markdown()` deu dung chung -- BAT BUOC o day, KHONG o cho build
+    payload (`job_orchestrator.py`), vi `write_translated()` doc lai node GOC
+    tu zip qua CHINH `_parse_xhtml()` nay de dem "slot"
+    (`_text_runs_under()`); unwrap muon (chi o payload) se lam node goc con
+    nhieu koboSpan = nhieu slot trong khi ban dich tra ve gop thanh 1 run ->
+    lech slot -> roi vao nhanh "Known limitation" (dich sot cac slot con
+    lai). Xem Architecture.md §6.20.15 K-1/K-1b cho so do that + bang tac
+    dong len BR-EPUB-05.
+
+    `class` la string (khong phai list) duoi builder "xml" nhung LA list duoi
+    "html.parser" -- xu ly ca 2 dang bang `.split()` thay vi dua vao hanh vi
+    multi-valued-attribute cua bs4 (chi ap dung cho HTML, khong ap dung cho
+    XML). TUYET DOI khong dung `class_="koboSpan"` cua `find_all()` (phu
+    thuoc hanh vi parser-specific do).
+
+    KHONG dung toi `<span epub:type="pagebreak" id="page_i"/>` (khong co
+    class `koboSpan`) -- `id` cua no DUOC `page-list` tham chieu, xoa se lam
+    epubcheck fail.
+    """
+    for span in soup.find_all("span"):
+        class_attr = span.get("class")
+        if class_attr is None:
+            continue
+        classes = class_attr if isinstance(class_attr, list) else class_attr.split()
+        if _KOBO_SPAN_CLASS in classes:
+            span.unwrap()
+
+
 def _parse_xhtml(raw_bytes: bytes) -> tuple[BeautifulSoup, str]:
     """§6.20.12 Y1: dùng `features="xml"`; fallback `html.parser` CHỈ khi XML
     parse fail, và chỉ chấp nhận fallback nếu kết quả serialize lại vẫn qua
@@ -512,6 +548,7 @@ def _parse_xhtml(raw_bytes: bytes) -> tuple[BeautifulSoup, str]:
     mù — `html.parser` hạ `viewBox` thành `viewbox`, hỏng SVG)."""
     try:
         soup = BeautifulSoup(raw_bytes, "xml")
+        _unwrap_kobo_spans(soup)
         return soup, "xml"
     except Exception:  # noqa: BLE001, S110 — lxml raises assorted types on malformed XML; any of them means "fall back to html.parser"
         pass
@@ -522,6 +559,7 @@ def _parse_xhtml(raw_bytes: bytes) -> tuple[BeautifulSoup, str]:
         raise EpubParseError(
             "XHTML khong well-formed va fallback html.parser cung khong cuu duoc"
         ) from exc
+    _unwrap_kobo_spans(soup)
     return soup, "html.parser"
 
 
@@ -982,9 +1020,7 @@ def _find_bb_vi_nodes(root: Tag | BeautifulSoup) -> list[Tag]:
     `BeautifulSoup('<p class="noindent bb-vi">x</p>', "xml").find_all(class_="bb-vi")`
     tra ve RONG. Dung `_node_classes()` (da chuan hoa str/list) qua callable
     predicate de tranh phu thuoc hanh vi noi bo nay cua bs4."""
-    return [
-        node for node in root.find_all(True) if _BB_VI_CLASS in _node_classes(node)
-    ]
+    return [node for node in root.find_all(True) if _BB_VI_CLASS in _node_classes(node)]
 
 
 def count_bb_vi_pairs(path: Path) -> tuple[int, int]:

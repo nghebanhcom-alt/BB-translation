@@ -312,6 +312,15 @@ class Settings(BaseSettings):
     # truc tiep (nhan RateLimitError THAT qua with_retry()), khac PDF/pdf2zh
     # phai *doan* tin hieu rate-limit tu stdout subprocess.
     epub_translate_concurrency: int = 1
+    # K-3 (Architecture.md §6.20.15, HOI-04 — Hieu da chot huong 2026-09-11):
+    # dich cau la tac vu khong can CoT, con effort `high` mac dinh cua
+    # deepseek-v4-flash (S6) la nguyen nhan truc tiep lam R-b abort nham
+    # 65,4% request (token thinking lan vao `output_tokens` gay runaway gia,
+    # Bug #EPUB-5). Chi anh huong nhanh EPUB (`run_epub_job()` bat co nay
+    # tren instance provider qua `OpenAIProvider.disable_thinking`, KHONG
+    # hardcode trong DeepSeekProvider) — glossary.py/rotated_text_overlay.py
+    # (PDF) dung CUNG mot provider class van giu thinking BAT nhu cu.
+    epub_disable_thinking: bool = True
 
 
 @lru_cache

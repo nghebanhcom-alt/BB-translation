@@ -1,0 +1,48 @@
+{
+  "baseline_thinking_default": {
+    "label": "baseline_thinking_default",
+    "error": false,
+    "usage": {
+      "completion_tokens": 933,
+      "prompt_tokens": 105,
+      "total_tokens": 1038,
+      "completion_tokens_details": {
+        "accepted_prediction_tokens": null,
+        "audio_tokens": null,
+        "reasoning_tokens": 833,
+        "rejected_prediction_tokens": null,
+        "text_tokens": null
+      },
+      "prompt_tokens_details": {
+        "audio_tokens": null,
+        "cache_write_tokens": null,
+        "cached_tokens": 0,
+        "image_tokens": null,
+        "text_tokens": null
+      },
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 105
+    },
+    "text_preview": "Bánh mì sourdough đã được làm từ hàng ngàn năm nay bằng cách sử dụng nấm men hoang dã và vi khuẩn axit lactic. Men cái phải được cho ăn hàng ngày để duy trì hoạt động, và tỉ lệ bột so với nước ảnh hưở"
+  },
+  "thinking_disabled": {
+    "label": "thinking_disabled",
+    "error": false,
+    "usage": {
+      "completion_tokens": 97,
+      "prompt_tokens": 80,
+      "total_tokens": 177,
+      "completion_tokens_details": null,
+      "prompt_tokens_details": {
+        "audio_tokens": null,
+        "cache_write_tokens": null,
+        "cached_tokens": 0,
+        "image_tokens": null,
+        "text_tokens": null
+      },
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 80
+    },
+    "text_preview": "Bánh mì sourdough đã được làm từ hàng nghìn năm bằng cách sử dụng men hoang dã và vi khuẩn axit lactic. Men khởi động phải được cho ăn hàng ngày để duy trì hoạt động, và tỷ lệ bột mì với nước ảnh hưởn"
+  }
+}

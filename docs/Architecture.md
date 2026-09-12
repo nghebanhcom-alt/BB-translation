@@ -514,6 +514,10 @@ CREATE TABLE chunks (
     output_path     TEXT,              -- chunk output file path
     api_tokens_used INTEGER,
     api_cost        REAL,
+    cost_source     TEXT NOT NULL DEFAULT 'estimated',
+                    -- 'estimated' | 'metered' — nguon cua CHINH 2 cot ngay tren,
+                    -- ghi per-chunk (xem 6.23). `jobs.cost_source` la ket qua
+                    -- GOP tu cot nay, khong phai hang so dat cung.
     started_at      TEXT,
     completed_at    TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1187,6 +1191,10 @@ def estimate_chunk_cost(
 - `TranslationProvider` duoc dung o day **chi qua `estimate_cost()`** — thuan tinh toan, khong
   goi API. Dung R3.
 - Ket qua ghi vao `chunks.api_tokens_used` / `chunks.api_cost`; `jobs.actual_cost` = tong.
+- **Cap nhat (6.23, BL-10)**: duong uoc luong nay van la hop dong cho **pdf2zh**, nhung da tro
+  thanh **fallback** cho engine `babeldoc` — babeldoc tu dem token that va in ra stdout, nen chunk
+  dich bang babeldoc ghi `chunks.cost_source = 'metered'`. `jobs.cost_source` gio **suy ra tu
+  chunk** (§6.23.5), khong con dat cung `'estimated'` cho moi job PDF.
 - **Thay doi DB schema (section 4.2)**: them `jobs.cost_source TEXT NOT NULL DEFAULT 'estimated'`
   voi gia tri `'estimated' | 'metered'`. UI **phai** hien thi "~$X.XX (uoc tinh)" khi
   `cost_source = 'estimated'`, khong duoc trinh bay nhu so tien thuc.
@@ -1224,9 +1232,11 @@ def estimate_chunk_cost(
    lap moi segment), Claude se la provider **dat nhat** trong 6 provider. Khuyen nghi mac dinh
    cho PDF khoi luong lon: **DeepSeek** (re nhat, co context caching server-side tu dong) hoac
    **Gemini Flash**; Claude danh cho tai lieu ngan / can chat luong thuat ngu cao nhat.
-3. **Cost o v1.0 la uoc luong, khong phai so do dem** (6.6.6).
+3. **Cost o v1.0 la uoc luong, khong phai so do dem** (6.6.6) — **chi con dung cho engine
+   `pdf2zh`**; nhanh `babeldoc` da co token that tu 6.23.
 4. `chunks.api_tokens_used` / `api_cost` la uoc luong per-chunk, khong the doi soat voi hoa don
-   nha cung cap. Doi soat that chi kha thi tu v1.1.
+   nha cung cap. Doi soat that chi kha thi tu v1.1 — **tru nhanh `babeldoc`** (6.23: token that,
+   nhung gia tien van phu thuoc bang gia co the loi thoi, xem 6.23.8 muc 1).
 
 #### 6.6.8. Thay doi interface (spec cho Dev)
 
@@ -5301,6 +5311,13 @@ estimate    = estimate_job_cost_v2(source_text_chars, segment_count, prompt_over
 > **Bắt buộc dùng id ngắn `0..N` trong request**, map ngược sang `unit_id` ở phía app (giảm một nửa
 > envelope, và giảm rủi ro model gõ sai một id dài 30 ký tự). Xem X4 (§6.20.12) cho contract.
 >
+> **⚠️ SỬA 2026-09-11 (§6.20.15 K-1)**: `EPUB_INLINE_MARKUP_FACTOR = 1.15` **chỉ đúng cho EPUB có
+> markup inline thưa**. Đo thật trên 3 cuốn: 1,14× · 1,21× · **2,29×** — cuốn thứ ba (`Sourdough
+> Culture`, export từ Kobo) làm công thức trên ước **THẤP ~2×**, vi phạm §6.11.6 ("được ước cao, CẤM
+> ước thấp"). Hằng số **không đổi**; thay vào đó §6.20.15 K-1 thêm bước chuẩn hoá ở tầng parse để
+> đưa tỉ lệ thật của mọi EPUB về vùng 1,13–1,21×, và K-4 thêm assertion đo-thật chặn im lặng tái
+> diễn. Xem §6.20.15.
+>
 > **Không sửa `estimate_job_cost_v2()`.** Nó suy `output_tokens` từ chính `source_text_chars`
 > (`cost_estimator.py:167`), nên `source_text_chars` đã nở 1,37× kéo theo ước output nở 1,37× —
 > trong khi overhead output thật chỉ ~+7% (Expert đo). Tức là ước output **cao hơn thật**, hợp lệ
@@ -5944,6 +5961,20 @@ chính request đó**, không phải ước tính cả sách (đúng yêu cầu 
   `chunk_dir/requests.jsonl`, và QA ghi vào `test-report.md` giá trị **max ratio quan sát được**.
   Nếu max ratio thật của lần chạy lành mạnh > 1,5 → ngưỡng 3,0 quá sát, phải nâng và ghi lại.
   Đây chính là bước "đo thêm trước khi tự tin vào con số" của R5-02.
+
+> ### ⚠️ ĐÃ ĐO — 2026-09-11: điều kiện cảnh báo ở gạch đầu dòng trên ĐÃ XẢY RA. §6.20.13.3b **hết
+> hiệu lực nguyên trạng**, đọc **§6.20.15** cho hợp đồng hiện hành.
+>
+> 797 request thật / 3 cuốn sách / `deepseek-v4-flash`: `ratio` **median 4,4× · p90 11,2× · p99
+> 20,3×**; **65,4% số request** vượt ngưỡng 3,0×. Ngưỡng dự báo "response lành mạnh < 1,0×" sai
+> khoảng **4–6×**. Nguyên nhân **không phải** model runaway mà là `output_tokens` (=
+> `usage.completion_tokens`) của DeepSeek V4 Flash **bao gồm cả token thinking** (thinking bật mặc
+> định, effort `high`) trong khi `epub_expected_output_tokens()` chỉ mô hình hoá phần **bản dịch**.
+>
+> Hệ quả trực tiếp (đây là thứ đang giết job, không phải markup): vì `runaway` gần như **luôn**
+> `True`, nhánh **R-b** (`if runaway and missing_ids: raise`) biến thành *"abort ngay khi thiếu BẤT
+> KỲ id nào"* — toàn bộ thang cứu hộ C-1/Lớp B/Lớp C ở phía dưới trở thành **code chết** cho provider
+> này. Bản vá: §6.20.15 K-2/K-3.
 
 **Hành động khi phát hiện runaway — TRẢ LỜI CÂU HỎI 2 CỦA BRIEF: KHÔNG tự động retry.** Chia 2 ca,
 theo tiêu chí "kết quả có dùng được không", vì trade-off khác hẳn nhau:
@@ -6635,6 +6666,272 @@ Artifact mới: `_salvage_epub_id_pairs()`, `EpubParseOutcome`,
   phần còn lại của C-2.
 - **H-5**: diacritic ratio đo trên **384/384 unit** (mục tiêu 3 vòng QA trước chưa lần nào đạt vì job
   chưa từng chạy xong) — tiêu chí giữ nguyên: 0 unit thoả `letters ≥ 40 và ratio < 0,02`.
+
+---
+
+#### 6.20.15. Bug #EPUB-5 — chuẩn hoá markup rác (K-1) + sửa phép đo runaway đang abort nhầm (K-2..K-5)
+
+**Trạng thái**: hợp đồng. RCA, số liệu đầy đủ, giả thuyết đã bị bác bỏ → `docs/design-log.md`,
+mục *"Bug #EPUB-5 — koboSpan KHÔNG phải nguyên nhân runaway (2026-09-11)"*.
+
+**Tóm tắt 1 dòng**: hai lỗi ĐỘC LẬP bị gộp làm một. K-1 sửa lỗi **chi phí/độ ồn payload** (markup
+Kobo), K-2..K-5 sửa lỗi **abort nhầm** (phép đo runaway) — **chỉ K-2..K-5 mới làm job chạy được**.
+Làm riêng K-1 KHÔNG sửa được job nào.
+
+**Trạng thái quyết định (2026-09-11, Hiếu duyệt qua AskUserQuestion — HOI-04/HOI-05)**:
+
+| Mục | Hướng xử lý | Trạng thái quyết định | Trạng thái verify |
+|---|---|---|---|
+| K-1 (bóc `koboSpan`, chấp nhận mất `id="kobo.*"`) | **ĐÃ CHỐT LÀM** (HOI-05) | Hiếu đồng ý, không cần hỏi lại | ✅ có nguồn xác thực (S1–S4, S8); **✅ ĐÃ IMPLEMENT + test** (2026-09-11, Dev) |
+| K-2 (tách `reasoning_tokens` khỏi phép đo) | Chưa chốt riêng — hệ quả kỹ thuật của K-3 | — | ✅ **VERIFIED qua spike R5-02** (2026-09-11, golden file `tests/fixtures/epub_llm/deepseek_v4flash_usage.json`) — `reasoning_tokens` tồn tại, khác 0 (833/933). **✅ ĐÃ IMPLEMENT + live confirm** (0/784 request có reasoning_tokens khác 0 sau khi tắt thinking, job `bfc0ac24-...`) |
+| K-3 (tắt thinking cho nhánh EPUB, `epub_disable_thinking=True`) | **ĐÃ CHỐT LÀM** (HOI-04) | Hiếu đồng ý, chấp nhận đánh đổi chất lượng dịch câu khó | ✅ **VERIFIED qua spike R5-02** — endpoint chấp nhận `extra_body={"thinking":{"type":"disabled"}}` (không 400). **✅ ĐÃ IMPLEMENT + live confirm** trên 784 request thật |
+| K-5 | Quyết định kỹ thuật thuần, không cần Hiếu duyệt | — | ✅ **ĐÃ IMPLEMENT + test** (2026-09-11, Dev) — không chặn spike |
+| K-4 | Quyết định kỹ thuật thuần, không cần Hiếu duyệt | — | ✅ **Đã đo live sau K-2/K-3/K-5** (2026-09-11) — xem mục K-4 bên dưới cho số đo + quyết định KHÔNG đổi hằng số kèm lý do |
+
+> ⚠️ **Đọc kỹ ranh giới**: quyết định của Hiếu ở HOI-04/HOI-05 là **"làm cái gì"** (chấp nhận đánh
+> đổi nghiệp vụ), **KHÔNG PHẢI** "đã verify cơ chế hoạt động đúng như mô tả". Các nhãn
+> ⚠️ ASSUMED ở K-2 và K-3 **giữ nguyên hiệu lực** và vẫn chặn Dev implement đúng 2 mục đó cho tới
+> khi spike R5-02 xong (đo `response.usage.model_dump()` thật của `deepseek-v4-flash`). Không được
+> gỡ nhãn chỉ vì hướng xử lý đã được duyệt.
+>
+> Nhật ký quyết định: `docs/design-log.md` — *"Final Decision: Hiếu trả lời HOI-04/HOI-05
+> (Bug #EPUB-5) — 2026-09-11"*.
+
+##### Nguồn xác thực (R5-01)
+
+| # | Claim | Nguồn |
+|---|---|---|
+| S1 | Payload gửi LLM là `unit.text` = inner-HTML **nguyên trạng**, không có bước strip markup nào | `src/core/job_orchestrator.py:2372` (`payload = [{"id": str(i), "html": u.text} ...]`); `src/services/epub_document.py:786` (`text=_inner_html(own)` → `Tag.decode_contents()`) |
+| S2 | Contract X4 **yêu cầu model tái tạo** `span` đúng số lượng/vị trí | `src/core/prompt_builder.py:418-419` (điều 3, `span` nằm trong danh sách) |
+| S3 | Model **đã tái tạo đúng** koboSpan trong bản dịch | `data/processing/781b59b0-…/chunk_0/units.json` — mỗi giá trị dịch vẫn chứa `<span class="koboSpan" id="kobo.N.1" xmlns="…">` |
+| S4 | `EPUB_REQUEST_CHAR_BUDGET` đo bằng **text thuần** (strip tag), không đo payload thật | `src/core/chunking.py:268-275` (`_plain_char_len()` = `_TAG_RE.sub("", unit.text)`) |
+| S5 | `output_tokens` = `usage.completion_tokens` | `src/services/openai_provider.py:116` (DeepSeekProvider kế thừa, `deepseek_provider.py:29`) |
+| S6 | DeepSeek V4 Flash: **thinking BẬT mặc định, effort mặc định `high`**; tắt bằng `{"thinking": {"type": "disabled"}}` (OpenAI format) | doc chính thức đã fetch 2026-09-11: <https://api-docs.deepseek.com/guides/thinking_mode/> — *"Thinking mode is enabled by default, with the default effort being `high`"* |
+| S7 | Có `usage.completion_tokens_details.reasoning_tokens` để tách token thinking | doc chính thức DeepSeek (fetch 2026-09-11). **Chưa tự đọc field này trên response thật** → xem K-2 ⚠️ |
+| S8 | 0 tham chiếu `href`/`idref`/`src` nào trỏ tới `id="kobo.*"` trong toàn bộ zip | quét thật `Sourdough Culture.epub`: 0/7.616 |
+| S9 | Số đo phân bố `ratio` / `chars-per-output-token` | `data/processing/*/chunk_*/requests.jsonl` + `units.json` (797 request, 55 chunk, 3 sách) — số liệu ở design-log |
+
+##### K-1 — Chuẩn hoá markup rác ở TẦNG PARSE (`epub_document.py`) — ✅ ĐÃ CHỐT (HOI-05, 2026-09-11)
+
+**Hiếu đã duyệt** phương án này, gồm cả hệ quả "mất `id="kobo.*"` trong file output" (mục *Mất mát
+chấp nhận được* bên dưới). K-1 **không** mang nhãn ASSUMED — mọi claim của nó có nguồn xác thực
+(S1–S4, S8) ⇒ Dev được implement ngay, không chờ spike.
+
+**Vấn đề (đo thật)**: `Sourdough Culture.epub` (export Kobo) có **1.963/1.963 unit** chứa
+`koboSpan`, tổng **7.616** thẻ. inner-HTML = **1.245.072** ký tự vs text thuần **543.924** →
+**2,29×**; sau khi unwrap koboSpan còn **616.745** (**1,13×**). Tức **50,5% payload là rác** —
+phải trả tiền input, **và** buộc model sinh lại y hệt ở output (S2, S3) nên trả tiền cả chiều ra.
+
+**Quyết định**: unwrap tại **`_parse_xhtml()`** (`src/services/epub_document.py`), NGAY sau khi
+parse xong soup, TRƯỚC mọi thứ khác.
+
+*Vì sao ở `_parse_xhtml()` chứ không ở chỗ build payload* (đây là điểm dễ sai nhất, đã đo):
+`write_translated()` → `_apply_translation_untrusted_structure()` đếm "slot" bằng
+`_text_runs_under()` trên **node GỐC đọc lại từ zip**. Nếu chỉ bóc markup ở payload, node gốc vẫn
+còn 4 koboSpan ⇒ **4 slot**, còn bản dịch trả về chỉ **1 run** ⇒ lệch số lượng ⇒ rơi vào nhánh
+*"Known limitation"* (dồn hết bản dịch vào slot dài nhất, **các slot khác GIỮ NGUYÊN tiếng Anh**).
+Đo trên chính file này: **85/1.963 unit** đi qua nhánh untrusted, **64** trong số đó multi-slot ⇒
+64 unit sẽ dịch sót. Unwrap ở `_parse_xhtml()` làm `load()`, `write_translated()`,
+`count_bb_vi_pairs()`, `to_markdown()` **cùng nhìn một cây** — số slot/unit tụt từ median 4,0
+(max 16) xuống **median 1,0** (max 12), tức nhánh rủi ro này còn **an toàn hơn** hiện trạng.
+
+**Phạm vi bóc — deny-by-default, hẹp nhất có thể**: CHỈ `<span>` có `class` chứa token `koboSpan`,
+và **`unwrap()`** (giữ nguyên con), KHÔNG `decompose()`. Cụ thể **KHÔNG** đụng tới:
+- `<span epub:type="pagebreak" id="page_i"/>` — không có class `koboSpan`; `id` của nó ĐƯỢC
+  `page-list` tham chiếu, xoá là epubcheck fail.
+- mọi `<span>` khác (có thể mang hook CSS thật).
+- Không tổng quát hoá thành "bóc mọi span rỗng nghĩa" — chưa đo, R8-02.
+
+**Mất mát chấp nhận được**: `id="kobo.*"` biến mất khỏi file output ⇒ máy đọc Kobo sẽ tự phân trang
+lại. Không có tham chiếu nào tới các id này (S8), `nav`/`ncx`/CSS không dùng ⇒ không phá cấu trúc
+EPUB, không vi phạm BR-EPUB-01.
+
+**Đọc/ghi (R6-01, data lineage)**:
+
+| Bước | Đọc | Tạo ra | Bước sau đọc gì |
+|---|---|---|---|
+| `_parse_xhtml(raw_bytes)` | bytes entry zip | `soup` **đã unwrap koboSpan** | `_collect_candidate_nodes(soup)` |
+| `load()` | `soup` trên | `EpubUnit.text` = `_inner_html(_strip_nested_lists(node))` — **đã sạch koboSpan** | `plan_epub_chunks(units)`; `payload = [{"id", "html": u.text}]` (job_orchestrator.py:2372) — **không sửa dòng này** |
+| `write_translated()` | mở LẠI zip gốc, `_parse_xhtml()` → **cùng phép unwrap** | `output_path` | `_check_epub_output_guard(source_doc, merged_path)` |
+
+##### K-1b — Tác động lên BR-EPUB-05 (bắt buộc đọc trước khi code)
+
+Guard giữ **nguyên văn**, không nới một điều kiện nào. Kiểm từng điều kiện:
+
+| Điều kiện (`job_orchestrator.py:478-524`) | Ảnh hưởng của K-1 | Vì sao |
+|---|---|---|
+| `guard_doc.total_chars > 0` | không | unwrap không xoá text |
+| `len(guard_doc.units) == len(source_doc.units)` | **không** | `span` **không** thuộc `UNIT_TAG_NAMES`; unwrap không đổi tập `_collect_candidate_nodes()`. Và cả 2 phía đều qua `_parse_xhtml()` đã unwrap ⇒ đối xứng |
+| `bilingual=False`: ≥90% unit có `orig.text != new.text` | **không** (nới lỏng nhẹ về phía an toàn) | `source_doc` cũng đã unwrap ⇒ so sánh vẫn là "EN sạch vs VI sạch" |
+| `bilingual=True` (mặc định): `count_bb_vi_pairs()` ≥90% node `bb-vi` **và** ≥90% cặp khác nội dung | **không** | hàm này so bằng `get_text(" ", strip=True)` — **text thuần**, tag vô can |
+
+⚠️ **Bẫy đối xứng**: K-1 **bắt buộc** nằm trong `_parse_xhtml()` — nếu Dev đặt ở `load()` mà quên
+`write_translated()`/`count_bb_vi_pairs()`, `source_doc` sạch còn output còn koboSpan ⇒ điều kiện 3
+vẫn qua nhưng lineage đã lệch. Test bắt buộc theo R6-02 phải assert **cùng một hàm** được dùng cho
+cả 3 đường đọc.
+
+##### K-2 — Tách token thinking khỏi phép đo runaway (đây mới là bản vá làm job chạy được)
+
+`TranslationResult` (`src/services/translation.py`) thêm **1 field mới, mặc định `0`**:
+
+```python
+reasoning_tokens: int = 0   # phần token KHÔNG phải nội dung trả về (thinking/CoT)
+```
+
+`OpenAIProvider.translate()` (DeepSeek kế thừa) đọc:
+`getattr(getattr(response.usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0`.
+
+- `output_tokens` **giữ nguyên** = `completion_tokens` → **tính tiền không đổi** (nhà cung cấp tính
+  tiền trên completion_tokens; hạ số này xuống là tự ước thấp chi phí, vi phạm §6.11.6).
+- `answer_tokens = max(0, output_tokens - reasoning_tokens)` → **chỉ dùng cho phép đo runaway**.
+
+`job_orchestrator.py:2389-2391` đổi đối số (KHÔNG đổi công thức trong `cost_estimator.py`):
+```python
+runaway = is_runaway_output(len(payload_json), result.answer_tokens)
+runaway_ratio = result.answer_tokens / max(expected_output_tokens, 1)
+```
+`requests.jsonl` ghi thêm `reasoning_tokens` và `answer_tokens` (giữ nguyên các field cũ).
+
+> ✅ **VERIFIED (2026-09-11, Dev, spike R5-02)** — không còn ASSUMED. Gọi thật 1 request EPUB tới
+> `deepseek-v4-flash` (thinking mặc định): `response.usage.completion_tokens_details.reasoning_tokens
+> = 833` (trên `completion_tokens = 933` tổng) — field TỒN TẠI và KHÁC 0, đúng S7. Golden file:
+> `tests/fixtures/epub_llm/deepseek_v4flash_usage.json`. Đã implement (`TranslationResult.
+> reasoning_tokens`/`answer_tokens`, `src/services/translation.py` +
+> `src/services/openai_provider.py`) và xác nhận lại trên live E2E 784 request thật
+> (job `bfc0ac24-0664-4932-96da-1ac99c1abc10`, `Sourdough Culture...epub`) — 0/784 request có
+> `reasoning_tokens` khác 0 (nhất quán, vì K-3 đã tắt thinking cho toàn bộ nhánh EPUB, xem K-3 bên
+> dưới và K-4 cho số đo `answer_tokens` đầy đủ).
+
+##### K-3 — Tắt thinking cho nhánh dịch EPUB — ✅ ĐÃ CHỐT HƯỚNG (HOI-04, 2026-09-11), ✅ cơ chế ĐÃ VERIFIED + IMPLEMENT
+
+**Hiếu đã duyệt** hướng "tắt thinking cho nhánh EPUB", chấp nhận đánh đổi: chi phí output giảm
+mạnh, chất lượng dịch câu khó **có thể** giảm nhẹ. ⇒ `Settings.epub_disable_thinking` mặc định
+`True` là hợp đồng chính thức, không còn là đề xuất.
+
+**Cơ chế đã verify (2026-09-11, Dev, spike R5-02)**: `extra_body` truyền đúng key `thinking`, endpoint
+DeepSeek CHẤP NHẬN (không 400) — xem hộp verify cuối mục.
+
+**Lệch nhỏ so với pseudocode nháp bên dưới (có chủ đích, KHÔNG phải phỏng đoán)**: pseudocode gốc
+viết `translate()` truyền `extra_body=self._extra_body() khi khác rỗng` — nếu hiểu là BẤT CỨ khi
+nào `_extra_body()` khác rỗng thì áp dụng, sẽ tắt thinking cho MỌI lần gọi `DeepSeekProvider.
+translate()`, kể cả `glossary.py` (dịch glossary term) và `rotated_text_overlay.py` (PDF babeldoc) —
+2 nơi này CŨNG gọi `.translate()` (không chỉ nhánh EPUB) nhưng K-3 chỉ được Hiếu duyệt cho **riêng
+nhánh EPUB**. Implement thật thêm 1 thuộc tính INSTANCE `disable_thinking: bool = False` (mặc định
+`False`, hành vi không đổi) — `translate()` chỉ áp `_extra_body()` khi
+`supports_thinking_toggle and self.disable_thinking` đều đúng; `run_epub_job()`
+(`src/core/job_orchestrator.py`) tự bật `pricing_provider.disable_thinking = True` NGAY sau khi
+tạo provider, CHỈ trong nhánh EPUB, theo `Settings.epub_disable_thinking` — vẫn giữ đúng tinh thần
+R8-03 (hỏi capability `supports_thinking_toggle` trên object, không rẽ nhánh theo tên provider),
+chỉ thêm 1 lớp "ai được phép bật cờ" để không rò rỉ sang PDF/glossary ngoài ý Hiếu đã duyệt.
+
+Dịch câu là tác vụ **không cần CoT**; effort `high` mặc định (S6) là phần lớn chi phí output đang
+trả. Thêm **thuộc tính năng lực trên class provider** (R8-03 — KHÔNG rẽ nhánh `if provider ==` trong
+`job_orchestrator`):
+
+```python
+class OpenAIProvider:
+    supports_thinking_toggle: bool = False
+    def _extra_body(self) -> dict: return {}
+
+class DeepSeekProvider(OpenAIProvider):
+    supports_thinking_toggle = True
+    def _extra_body(self) -> dict:
+        return {"thinking": {"type": "disabled"}}   # doc: api-docs.deepseek.com/guides/thinking_mode/
+```
+`translate()` truyền `extra_body=self._extra_body()` khi khác rỗng. 4 provider còn lại trả `{}` ⇒
+hành vi **không đổi một byte**.
+
+Bật/tắt qua `Settings.epub_disable_thinking: bool = True` (`.env`, Protocol E → phải có commit trong
+24h khi đổi). Mặc định **True**: đây là quyết định kỹ thuật có nguồn xác thực, không phải chính sách
+tài chính của user.
+
+> ✅ **VERIFIED (2026-09-11, Dev, spike R5-02)** — không còn ASSUMED. `extra_body={"thinking":
+> {"type": "disabled"}}` gửi qua `openai` SDK tới endpoint DeepSeek: **KHÔNG** trả HTTP 400, và
+> `completion_tokens_details` biến mất khỏi response (`None`, không phải object với
+> `reasoning_tokens=0`) — `getattr(None, "reasoning_tokens", 0) or 0` trong `OpenAIProvider.
+> translate()` xử lý đúng trường hợp này. Golden file:
+> `tests/fixtures/epub_llm/deepseek_v4flash_usage.json`. Xác nhận lại trên live E2E 784 request thật
+> (0/784 request rò rỉ `reasoning_tokens`).
+
+K-2 và K-3 **độc lập, làm được cả hai**: K-3 làm giảm mạnh `output_tokens` (⇒ giảm tiền), K-2 làm
+phép đo đúng **kể cả khi** một provider khác bật thinking mà ta không tắt được.
+
+##### K-4 — Hiệu chỉnh lại hằng số, chỉ SAU khi có số đo hậu-K-2/K-3
+
+`CHARS_PER_TOKEN_VI = 2.0` hiện **sai nặng**: đo thật trên 55 chunk cho **0,23–0,66 ký tự/token**
+(median ~0,32) — và đây còn là **cận trên** (mẫu số bỏ qua token của retry). Nhưng **CẤM sửa hằng số
+này trong cùng lượt với K-2/K-3**: số đo hiện tại đã bị ô nhiễm bởi token thinking, hiệu chỉnh theo
+nó là khoá cứng cái sai vào hằng số. Thứ tự bắt buộc:
+
+1. Làm K-2 (+K-3), chạy live **1 cuốn**, thu `requests.jsonl` có `answer_tokens`.
+2. Tính `chars_per_answer_token` thật; cập nhật `CHARS_PER_TOKEN_VI` **và** `VI_CHAR_EXPANSION`,
+   ghi số đo + ngày vào §6.20.15 này (không để ⚠️ ASSUMED trần).
+3. Chỉ khi đó mới xét lại `EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0`. Tiêu chí giữ nguyên §6.20.13.3b:
+   **max ratio của lần chạy lành mạnh phải ≤ 1,5×**; nếu không, ngưỡng vẫn sai.
+
+Assertion chống tái diễn im lặng (K-1 phần đo): `run_epub_job()` log WARNING khi
+`sum(len(u.text)) / doc.total_chars > EPUB_INLINE_MARKUP_FACTOR` — tức khi công thức cost gate
+đang ước **thấp**. Chỉ log, **không chặn** job (§6.11.6 chỉ cấm ước thấp im lặng).
+
+**K-4 — số đo thật sau K-2/K-3/K-5 (2026-09-11, Dev, live E2E job `bfc0ac24-0664-4932-96da-1ac99c1abc10`,
+`Sourdough Culture...epub`, KHÔNG kèm K-1)**: 66/66 chunk `completed`, **784 request**, **0/784
+request có `reasoning_tokens` khác 0** (K-3 tắt thinking hoạt động đúng trên toàn bộ sách thật, không
+chỉ 1 request spike). `chars_per_answer_token` (`payload_chars / answer_tokens`, CÙNG định nghĩa
+`payload_chars` với `is_runaway_output()`) đo trên cả 784 request: min 1,89 · median **2,386** · max
+7,66. Suy ra `runaway_ratio = answer_tokens / epub_expected_output_tokens(payload_chars)`: mean
+**0,7048** · median **0,7234** · **max 0,9119** — xa dưới ngưỡng `EPUB_RUNAWAY_OUTPUT_FACTOR = 3,0`
+VÀ dưới tiêu chí ≤ 1,5× của bước 3 (K-4) với biên an toàn thoải mái. Tổng chi phí thật đo được:
+$0,588 / 2.043.387 token (input + output cộng dồn), well trong `max_cost_per_job_usd=2.00`.
+
+**Quyết định KHÔNG đổi `CHARS_PER_TOKEN_VI`/`VI_CHAR_EXPANSION`/`EPUB_RUNAWAY_OUTPUT_FACTOR` ở lượt
+này** (khác kỳ vọng ban đầu của mục K-4 khi viết — quyết định này CÓ SỐ ĐO, không phải bỏ qua bước):
+- Số đo live ở trên chỉ cho ra **1 tỉ số gộp** `chars_per_answer_token`
+  (= `CHARS_PER_TOKEN_VI / VI_CHAR_EXPANSION` theo đúng công thức `epub_expected_output_tokens()`),
+  KHÔNG tách được thành 2 hằng số độc lập — tách bằng cách "đoán" 1 trong 2 rồi suy hằng số kia là
+  đúng loại suy diễn Protocol 5 cấm.
+- `VI_CHAR_EXPANSION` là hằng số **DÙNG CHUNG** với `estimate_job_cost_v2()` (ước lượng chi phí
+  TỔNG QUÁT cho cả PDF, Architecture.md 6.11.4), đo gốc từ **ký tự văn bản thuần** (`total_chars`
+  tiếng Anh nguồn / tiếng Việt dịch, S1 6.11.2). `payload_chars` ở phép đo K-4 này là
+  `len(payload_json)` — ĐÃ GỒM markup HTML + overhead cấu trúc JSON (`{"id":...,"html":...}`), KHÔNG
+  phải ký tự văn bản thuần. Ghi đè `VI_CHAR_EXPANSION` bằng tỉ số đo trên cơ sở khác sẽ làm sai lệch
+  `estimate_job_cost_v2()` (rủi ro ước lượng SAI cho các job PDF không liên quan gì tới K-2/K-3/K-5)
+  — đúng loại lỗi tổng quát hoá nhầm ngữ cảnh mà Protocol 8 R8-02 cảnh báo.
+- Bản thân công thức HIỆN TẠI đã an toàn: `max_ratio=0,9119 < 1,5×` (tiêu chí bước 3) VÀ
+  `<< EPUB_RUNAWAY_OUTPUT_FACTOR=3,0` — không có bằng chứng false-positive nào cần sửa gấp. Vì phép
+  đo gộp không tách được 2 hằng số mà không suy đoán, giữ nguyên cả 3 hằng số là lựa chọn AN TOÀN
+  HƠN (tránh làm hỏng `VI_CHAR_EXPANSION` dùng chung) so với sửa dựa trên suy diễn.
+- Backlog cho lần đo sau (nếu muốn tách chính xác 2 hằng số): cần đo riêng
+  `len(translated_plain_text) / len(source_plain_text)` (cho `VI_CHAR_EXPANSION`, từ `units.json` +
+  `doc.units[i].text` đã strip tag, KHÔNG dùng `payload_json`) và
+  `len(translated_plain_text) / answer_tokens` (cho `CHARS_PER_TOKEN_VI`) riêng biệt — chưa làm ở
+  lượt này vì không nằm trong phạm vi brief S4 (chỉ có `requests.jsonl`, không map ngược được sang
+  `units.json` theo từng request slice mà không đọc lại toàn bộ `EpubDocument`).
+
+##### K-5 — R-b không được là "abort khi thiếu bất kỳ id nào"
+
+Ngay cả sau K-2, giữ **deny-by-default** cho chính cơ chế abort: R-b chỉ được raise khi **cả hai**
+đúng — `runaway` (đo bằng `answer_tokens`) **và** `len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES`.
+Với ≤ 2 id thiếu, thang cứu hộ C-1 (retry từng-id) rẻ và có tỉ lệ thành công cao; abort cả chunk ở
+đó là đánh đổi sai chiều — và đó đúng là cái bẫy đã làm 3 job chết ở §6.20.13.3b.
+
+##### Thứ tự implement bắt buộc
+
+1. **Spike R5-02** (K-2/K-3): 1 request thật, capture `usage` → golden file. **Chặn** K-2, K-3.
+2. K-5 (thuần logic, không phụ thuộc spike) → K-2 → K-3.
+3. Chạy live 1 cuốn, thu số đo.
+4. K-1 (độc lập hoàn toàn, có thể song song, nhưng **không** được báo là "fix Bug #EPUB-5").
+5. K-4 cuối cùng, dựa trên số đo bước 3.
+
+##### Gate release (cộng vào §6.20.10/§6.20.13.10/§6.20.14.9, không thay thế)
+
+- **G-1**: golden file `usage` thật tồn tại, có `reasoning_tokens` (R5-03).
+- **G-2**: sau K-2/K-3/K-5, chạy hết **1 cuốn** (`Sourdough Culture`, 66 chunk) không abort vì R-b;
+  ghi `max(runaway_ratio)` vào `test-report.md`.
+- **G-3** (R6-02): test assert `write_translated()` và `load()` dùng **cùng** hàm unwrap — cụ thể
+  mở file output và assert `koboSpan` không còn xuất hiện, **và** `len(guard_doc.units) ==
+  len(source_doc.units)`.
+- **G-4** (R6-03): mở EPUB output thật, xác nhận có chữ tiếng Việt CÓ DẤU, không chỉ tin
+  `status = completed`.
 
 ---
 
@@ -7700,6 +7997,362 @@ end-to-end lần nào — mọi kết luận ở 6.22.1–6.22.4 là từ đọc
 trước, **sự tồn tại của một ca drop thật thì KHÔNG còn là giả thuyết** (trang 230 đã đo trên output
 có sẵn). Điều chưa verify còn lại, hẹp hơn nhiều: chạy **lại** babeldoc trên `--pages 199-240` có
 drop **đúng đoạn đó** không — dịch máy không tất định.
+
+---
+
+### 6.23. BL-10 — Chi phí ĐO THẬT cho nhánh PDF/babeldoc (`cost_source = 'metered'`)
+
+> **Mục đích**: `chunks.api_tokens_used` / `chunks.api_cost` của job PDF hiện là **ước lượng**
+> (`estimate_chunk_cost()`, §6.6.6) với sai số công bố ±30–50%, và `jobs.cost_source` **luôn**
+> `'estimated'` — chưa từng có job PDF nào `'metered'`. babeldoc 0.6.4 **tự đếm token thật từ
+> `response.usage`** và in ra stdout cuối mỗi lần chạy CLI; app **đã capture sẵn** stdout đó và đã
+> có tiền lệ parse nó (`RATE_LIMIT_LINE_RE`, `drop_sentinel_count`). Section này biến số thật đó
+> thành `cost_source='metered'` cho **đúng chunk dịch bằng babeldoc**, giữ nguyên `'estimated'`
+> cho pdf2zh.
+>
+> **Phạm vi**: KHÔNG sửa bảng giá `deepseek_provider.py` (xem "Giới hạn đã biết" 6.23.8 — quyết
+> định của Hiếu: bảng giá xử lý ở task riêng). KHÔNG động tới `estimate_chunk_cost()`,
+> `estimate_job_cost_v2()`, pre-flight gate (Lớp 2), hay nhánh EPUB (đã `'metered'` từ §6.20).
+
+#### 6.23.1. Nguồn xác thực (Protocol 5 R5-01 + R5-05)
+
+Package đã cài: `~/.local/share/uv/tools/babeldoc/lib/python3.12/site-packages/babeldoc/`
+(gọi tắt `$BD`), **`babeldoc --version` → `babeldoc 0.6.4`** (chạy thật 2026-09-11, cùng version
+đã verify ở §6.14.1/§6.22.1 — không kế thừa mù, đã chạy lại lệnh `--version`).
+
+| # | Nguồn | Xác nhận điều gì |
+|---|---|---|
+| T1 | `$BD/translator/translator.py:260-263` — `self.token_count = AtomicInteger()`, `prompt_token_count`, `completion_token_count`, `cache_hit_prompt_token_count` | babeldoc có 4 bộ đếm token **cấp translator**, cộng dồn toàn tiến trình |
+| T2 | `$BD/translator/translator.py:345-364` — `def update_token_count(self, response)`: `self.token_count.inc(response.usage.total_tokens)`, `.prompt_tokens`, `.completion_tokens`, và `hit_count` lấy từ `response.usage.prompt_cache_hit_tokens` (DeepSeek) **hoặc** `response.prompt_tokens_details.cached_tokens` | Số đếm là **token THẬT do API trả về**, không phải ước lượng theo độ dài. Toàn khối bọc `try/except` → lỗi đếm không làm hỏng dịch |
+| T3 | `$BD/translator/translator.py:275-282` — trong `do_translate()`: `response = self.client.chat.completions.create(...)` rồi `self.update_token_count(response)` (tương tự trong `do_llm_translate()`) | Mọi lời gọi LLM dịch đều đi qua bộ đếm, không có đường vòng |
+| T4 | `$BD/main.py:772-784` — sau vòng `for file in pending_files:` (`main.py:683`): `logger.info(f"Total tokens: {translator.token_count.value}")`, `Prompt tokens:`, `Completion tokens:`, `Cache hit prompt tokens:`, và `"Term extraction tokens: total=%s prompt=%s completion=%s cache_hit_prompt=%s"` | 5 dòng tổng kết in **một lần cho mỗi tiến trình** (ngoài vòng lặp file), **không** in mỗi file |
+| T5 | `$BD/main.py:524` — `term_extraction_translator = translator`, chỉ tách thành object riêng khi có `--openai-term-extraction-model/-base-url/-api-key` (`main.py:525-545`); `main.py:785` — dòng log thứ 6 chỉ in `if term_extraction_translator is not translator` | App **không** truyền 3 flag đó ⇒ term-extraction dùng CHÍNH translator ⇒ token term-extraction (nếu có) **đã nằm trong** `Total tokens`. **Không được cộng thêm** dòng `Term extraction tokens:` vào tổng — sẽ đếm 2 lần |
+| T6 | `$BD/main.py:918-920` — `from rich.logging import RichHandler` + `logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])`, **không truyền `format=`** ⇒ dùng `logging.BASIC_FORMAT` = `"%(levelname)s:%(name)s:%(message)s"` | Giải thích vì sao message thật có tiền tố `INFO:babeldoc.main:` **bên trong** cột message của rich (level hiển thị 2 lần) |
+| T7 | **Chạy thật, non-tty** (Tech Lead, 2026-09-11): `COLUMNS=200 ~/.local/share/uv/tools/babeldoc/bin/python -c "<dựng lại đúng 2 dòng main.py:918-920, logger 'babeldoc.main'>" > f 2>/dev/null`, in `repr()` của file → `'[09/11/26 16:01:42] INFO     INFO:babeldoc.main:Total tokens: 123456' + <padding khoảng trắng> + '<string>:6\n'` | **Định dạng dòng thật khi redirect non-tty đã verify sống**: có timestamp + `INFO` + `INFO:babeldoc.main:` + message + cột nguồn bên phải; số nguyên **không có dấu phân cách nghìn** (f-string trên `int`) |
+| T8 | `src/services/babeldoc_runner.py:523` — `env = {**os.environ, **service.envs, "COLUMNS": "200"}`; `:568-570` — `stdout = bytes(stdout_buf).decode(...)`; `:574` `rate_limit_hits = len(RATE_LIMIT_LINE_RE.findall(stdout + "\n" + stderr))`; `:577` `drop_sentinel_count = (stdout + "\n" + stderr).count(_DROP_SENTINEL_TEXT)` | stdout **đã được capture nguyên vẹn** và **đã có 2 tiền lệ parse** trên chính chuỗi đó; `COLUMNS=200` đã được set sẵn (tiền đề chống rich wrap — xem 6.23.2) |
+| T9 | `src/core/job_orchestrator.py:2055-2077` — `await self._translator_runner.translate_pages(...)` nằm trong `_call_translator()` của `_process_chunk()`, gọi **1 lần cho mỗi chunk**; mỗi lần là **1 subprocess babeldoc riêng** | Tổng token in ra cuối mỗi tiến trình ứng **1-1 với đúng chunk đó**. Đây là điều khiến cách này đúng mà không cần metering proxy (§6.6.6 v1.1) |
+| T10 | `$BD/main.py:620,683` — `for file in args.files:` (lọc) rồi `for file in pending_files:` (chạy); app truyền **đúng 1** `--files` (`babeldoc_runner.py`, §6.14.2) | Trong pipeline của app, `Total tokens` = token của riêng 1 file = riêng 1 chunk. Vẫn lấy **match CUỐI CÙNG** để phòng thủ (6.23.2) |
+| T11 | §6.6.6 (hợp đồng hiện hành, từ Increment 1): *"pdf2zh khong xuat token usage ra stdout/stderr"*; `Pdf2zhResult` không có field token nào | pdf2zh **không** có gì để parse ⇒ `reports_token_usage = False`, giữ nguyên `'estimated'` — đây cũng là mặc định deny-by-default của R8-02, không cần verify thêm để được phép SKIP |
+
+**⚠️ ASSUMED — chưa verify với nguồn thật** (chặn Dev ở đúng phần này, xem R5-02 ở 6.23.7):
+- ⚠️ **ASSUMED**: dòng `Total tokens:` **thật sự xuất hiện** trong stdout của một lần chạy babeldoc
+  **qua pipeline của app** (subprocess, có `--no-auto-extract-glossary`, có `--pages`). Đã verify:
+  code in ra nó vô điều kiện (T4) và định dạng dòng khi non-tty (T7, dựng lại đúng cấu hình
+  logging của babeldoc). **Chưa verify**: một lần chạy babeldoc end-to-end thật với API key thật
+  rồi grep stdout — Tech Lead không chạy để tránh tốn tiền/thời gian ngoài phạm vi thiết kế.
+  R5-02 giao đúng việc này cho Dev **trước khi** viết regex chính thức.
+- ⚠️ **ASSUMED**: với DeepSeek, `total_tokens == prompt_tokens + completion_tokens`. T2 chỉ chứng
+  minh 3 con số đến từ 3 field khác nhau của `response.usage`, **không** chứng minh quan hệ cộng.
+  Thiết kế **không phụ thuộc** vào đẳng thức này (6.23.4 chỉ log WARNING khi lệch, không đổi hành
+  vi) — ghi ở đây để không ai âm thầm dựa vào nó sau này.
+
+#### 6.23.2. Hợp đồng parse — `parse_babeldoc_token_usage(stdout)` (spec cho Dev)
+
+Module: **`src/services/babeldoc_runner.py`** (cùng chỗ với 2 tiền lệ parse hiện có, không tạo
+module mới).
+
+```python
+#: 6.23.1 T4/T6/T7 — VERIFIED. Tiền tố `INFO:babeldoc.main:` là phần message
+#: THẬT (logging.BASIC_FORMAT của basicConfig, main.py:918-920), không phải
+#: cột hiển thị của rich → neo vào nó là neo vào thứ ổn định nhất có được.
+_TOKEN_LINE_RES: dict[str, re.Pattern[str]] = {
+    "total_tokens": re.compile(r"INFO:babeldoc\.main:Total tokens:\s*(\d+)"),
+    "prompt_tokens": re.compile(r"INFO:babeldoc\.main:Prompt tokens:\s*(\d+)"),
+    "completion_tokens": re.compile(r"INFO:babeldoc\.main:Completion tokens:\s*(\d+)"),
+    "cache_hit_prompt_tokens": re.compile(
+        r"INFO:babeldoc\.main:Cache hit prompt tokens:\s*(\d+)"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class BabeldocTokenUsage:
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+    cache_hit_prompt_tokens: int
+
+
+def parse_babeldoc_token_usage(stdout: str) -> BabeldocTokenUsage | None:
+    """Trả `None` khi KHÔNG parse đủ — không raise, không đoán (6.23.3)."""
+```
+
+Ràng buộc bắt buộc, mỗi cái có lý do cụ thể — Dev **không được** đơn giản hoá:
+
+1. **Case-sensitive tuyệt đối, CẤM `re.IGNORECASE`.** babeldoc in cả `Prompt tokens:` và
+   `Cache hit prompt tokens:` (T4). Với `IGNORECASE`, pattern `Prompt tokens:` khớp **bên trong**
+   dòng cache-hit ⇒ `prompt_tokens` nhận nhầm giá trị cache-hit. Đây là bẫy duy nhất của tập 4
+   dòng này.
+2. **Chỉ đọc `stdout`, KHÔNG nối `stderr`.** Khác `rate_limit_hits`/`drop_sentinel_count` (cố ý
+   quét cả hai vì chỉ đếm sự kiện, thừa còn hơn thiếu). Ở đây con số đi thẳng vào tiền: gộp 2 kênh
+   là mở đường cho cùng một dòng bị đếm 2 lần nếu babeldoc đổi handler sang stderr ở bản sau.
+   Nguồn: T4 + §6.12.2 D1 (log babeldoc/pdf2zh ra **stdout**) + T8.
+3. **Lấy match CUỐI CÙNG** (`matches = RE.findall(stdout)`; dùng `matches[-1]`), không phải match
+   đầu. T4/T10 chứng minh chỉ in 1 lần/tiến trình, nhưng nếu bản sau in thêm dòng tổng kết giữa
+   chừng thì con số **cuối** mới là tổng — phòng thủ này miễn phí.
+4. **Thiếu bất kỳ dòng nào trong 3 dòng `total`/`prompt`/`completion` ⇒ trả `None`** (không dựng
+   usage một phần). `cache_hit_prompt_tokens` thiếu ⇒ điền `0` (chỉ dùng để quan sát, không dùng
+   để tính tiền ở vòng này). Lý do deny-by-default: một usage thiếu prompt/completion không tính
+   được giá (2 rate khác nhau), mà đoán split là quay lại đúng bản chất "ước lượng" nhưng **đội
+   lốt** `'metered'` — chính là loại nhầm lẫn RC-4 (§6.11.3).
+5. **`\d+` thuần, không chấp nhận dấu phẩy/dấu chấm phân cách.** T7: f-string trên `int` không
+   sinh dấu phân cách. Nếu bản sau đổi sang `{value:,}` thì regex **không khớp** → rơi về
+   `estimated` (an toàn), thay vì khớp nửa vời `123` từ `123,456` (sai 1000 lần, im lặng).
+6. **Tiền đề `COLUMNS=200`** (T8, đã có sẵn trong runner) là **một phần của hợp đồng này**: rich
+   wrap theo chiều rộng terminal, và toàn bộ chuỗi `INFO:babeldoc.main:Total tokens: <số>` chỉ
+   ~45 ký tự nên không bị cắt ở 200 cột. Ai bỏ `COLUMNS=200` là phá đồng thời parse này **và**
+   `RATE_LIMIT_LINE_RE` (§6.14.3 B11).
+7. **Không parse dòng `Term extraction tokens:`** (T5) — nó đã nằm trong `Total tokens` vì app
+   dùng chung translator. Parse rồi cộng = đếm 2 lần.
+
+#### 6.23.3. Mở rộng `BabeldocResult` + capability (R8-03)
+
+```python
+@dataclass
+class BabeldocResult:
+    ...                                   # giữ nguyên toàn bộ field hiện có
+    rate_limit_hits: int = 0
+    drop_report: BabeldocDropReport = field(default_factory=_empty_drop_report)
+    #: 6.23 — token THẬT babeldoc tự đếm từ `response.usage` (6.23.1 T2/T4),
+    #: parse từ `stdout` của CHÍNH lần chạy này. `None` = không parse được
+    #: (bản babeldoc khác / log level khác / call site cũ, mock) ⇒ orchestrator
+    #: rơi về `estimate_chunk_cost()`, KHÔNG crash.
+    real_token_usage: BabeldocTokenUsage | None = None
+```
+
+`real_tokens_used` (1 field int) mà brief đề xuất **được thay bằng dataclass 4 số** vì giá input và
+giá output khác nhau (`DeepSeekProvider.estimate_cost(input_tokens, output_tokens)`,
+`deepseek_provider.py:49-51`): chỉ có `total` thì buộc phải **đoán tỷ lệ split** — xem lý do ở
+6.23.2 mục 4. `.total_tokens` chính là con số ghi vào `chunk.api_tokens_used`, nên không mất gì.
+
+Gán trong `translate_pages()`, **ngay cạnh 2 tiền lệ hiện có** (`babeldoc_runner.py:574-577`):
+
+```python
+rate_limit_hits = len(RATE_LIMIT_LINE_RE.findall(stdout + "\n" + stderr))
+drop_sentinel_count = (stdout + "\n" + stderr).count(_DROP_SENTINEL_TEXT)
+real_token_usage = parse_babeldoc_token_usage(stdout)   # 6.23 — CHỈ stdout
+```
+
+**Không** đưa `real_token_usage` vào `BabeldocError`/`BabeldocTimeoutError`: chunk fail thì không
+có `api_cost` để ghi, và chi phí đã tiêu của lần fail đó không đo được đầy đủ (bị kill giữa chừng)
+— ghi nửa vời vào cột tiền là tệ hơn không ghi. Ghi nhận vào backlog nếu sau này cần.
+
+**Capability (R8-03 — hỏi năng lực của object, không hỏi TÊN engine):**
+
+```python
+# src/services/babeldoc_runner.py, class BabeldocRunner
+    #: 6.23 (BL-10). babeldoc tự đếm token thật từ `response.usage` và in ra
+    #: stdout cuối mỗi lần chạy (6.23.1 T2/T4) → chunk dịch bằng engine này
+    #: có thể đạt `cost_source='metered'`.
+    reports_token_usage: ClassVar[bool] = True
+
+# src/services/pdf2zh_runner.py, class Pdf2zhRunner
+    #: 6.23 (BL-10). pdf2zh vứt bỏ `response.usage`, không in token ra đâu cả
+    #: (§6.6.6, T11) — không có gì để parse. Giữ `estimated`.
+    reports_token_usage: ClassVar[bool] = False
+```
+
+`JobOrchestrator` đọc qua property `_reports_token_usage`, **đúng khuôn** `_needs_font_shrink`
+(`job_orchestrator.py:608-631`) và `_reports_own_paragraph_drops` (`:633-650`), **bao gồm cả guard
+`isinstance(value, bool)`** kèm thông điệp lỗi cùng dạng. Guard là bắt buộc: `AsyncMock(spec=...)`
+chỉ copy TÊN thuộc tính chứ không copy GIÁ TRỊ, nên thiếu guard thì test pdf2zh quên set thuộc
+tính sẽ chạy nhầm nhánh metered và vẫn PASS (B9.4).
+
+**R8-02 (deny-by-default)**: engine thứ ba trong tương lai mặc định `reports_token_usage = False`.
+
+#### 6.23.4. Sửa `_process_chunk()` — data lineage (R6-01), thay `job_orchestrator.py:2202-2214`
+
+Khối hiện tại (nguyên văn hành vi: luôn ước lượng) đổi thành **2 nhánh, chọn theo capability +
+kết quả parse**:
+
+```python
+# 6.23 — capability của engine ĐÃ CHỌN (R8-03), không hỏi tên engine.
+usage = pdf2zh_result.real_token_usage if self._reports_token_usage else None
+if self._reports_token_usage and usage is None:
+    logger.warning(
+        "6.23: engine bao co token usage nhung KHONG parse duoc dong "
+        "'Total tokens:' tren stdout cho chunk %s cua job %s — roi ve "
+        "estimate_chunk_cost() (cost_source='estimated'). Kiem tra version "
+        "babeldoc/log level, xem Architecture.md 6.23.2.",
+        chunk.chunk_index, job.id,
+    )
+
+if usage is not None:
+    tokens_used = usage.total_tokens
+    cost_usd = pricing_provider.estimate_cost(usage.prompt_tokens, usage.completion_tokens)
+    cost_source = "metered"
+    if usage.prompt_tokens + usage.completion_tokens != usage.total_tokens:
+        logger.warning(...)          # 6.23.1 ASSUMED #2 — CHỈ log, không đổi hành vi
+else:
+    source_text = _extract_chunk_text(source_path, chunk)
+    segment_count = _count_text_segments(source_path, chunk.page_start, chunk.page_end)
+    input_tokens, output_tokens, cost_usd = estimate_chunk_cost(...)   # nguyên xi như hiện tại
+    tokens_used = input_tokens + output_tokens
+    cost_source = "estimated"
+
+chunk.api_tokens_used = tokens_used
+chunk.api_cost = cost_usd
+chunk.cost_source = cost_source
+```
+
+**Lineage tường minh (R6-01) — artifact nào, ai đọc field nào:**
+
+| Bước | Artifact tạo ra | Bước sau đọc gì |
+|---|---|---|
+| 1. subprocess babeldoc (`babeldoc_runner.translate_pages`) | chuỗi `stdout` của **chính lần chạy này** (biến cục bộ `stdout`, `babeldoc_runner.py:568`) | `parse_babeldoc_token_usage(stdout)` — **không** đọc file log, **không** đọc `stderr`, **không** đọc stdout của lần chạy khác |
+| 2. parse | `BabeldocResult.real_token_usage` (`BabeldocTokenUsage \| None`) | `_process_chunk()` đọc `pdf2zh_result.real_token_usage` — **cùng object** trả về từ `_call_translator()` cho **chunk đang xử lý**, không lấy lại từ biến nào khác |
+| 3. tính tiền | `tokens_used`, `cost_usd`, `cost_source` | ghi vào **3 cột của chính row `chunk` đó**: `api_tokens_used`, `api_cost`, `cost_source` |
+| 4. gộp job | `chunks[*].cost_source` trong DB | `run_job()` Bước 10 (`:1022`) + nhánh cost-cap (`:848`) tính `job.cost_source` — **suy ra từ chunk**, không đặt cứng (xem 6.23.5) |
+
+**Điểm Bug #5 tương ứng của section này**: `usage` phải đến từ `pdf2zh_result` (return value của
+lời gọi translate của **chunk này**), tuyệt đối không từ `self`, không từ biến tích luỹ cấp job,
+không parse lại `stdout` ở tầng orchestrator. Hai chunk chạy song song sẽ có 2 tiến trình babeldoc
+riêng, mỗi tiến trình có tổng token riêng — trộn là sai tiền cho cả hai.
+
+**Ghi chú cho Dev**: nhánh metered **cố ý bỏ qua** `_extract_chunk_text()` /
+`_count_text_segments()` (2 lần mở file PyMuPDF không còn dùng để làm gì). Dev **phải grep xác
+nhận** `source_text`/`segment_count`/`input_tokens`/`output_tokens` không được dùng ở đoạn sau
+trong cùng hàm trước khi chuyển chúng vào nhánh `else` — nếu có, giữ nguyên vị trí tính toán.
+
+#### 6.23.5. `jobs.cost_source` — suy ra từ chunk, không đặt cứng
+
+Luật gộp (áp dụng cho **nhánh PDF**):
+
+```python
+def rollup_cost_source(chunks: Sequence[Chunk]) -> str:
+    """'metered' CHỈ khi mọi chunk có đóng góp chi phí đều là số đo thật."""
+    sources = {c.cost_source for c in chunks if c.api_cost is not None}
+    return "metered" if sources == {"metered"} else "estimated"
+```
+
+- Trộn lẫn (vài chunk metered, vài chunk fallback estimated) ⇒ **`'estimated'`**. Không tạo giá
+  trị thứ ba `'partial'`: cột đang là 2 giá trị trong hợp đồng §4.2 và UI đã rẽ theo đúng 2 giá
+  trị đó; thêm giá trị mới là đổi hợp đồng ở 3 tầng để mô tả một trạng thái hiếm. Nguyên tắc:
+  **một tổng chứa số ước lượng thì bản thân nó là số ước lượng.**
+- Không chunk nào có `api_cost` (job fail sớm) ⇒ `'estimated'` (mặc định an toàn).
+- 2 điểm gán **phải sửa**: `job_orchestrator.py:1022` (Bước 10, dùng toàn bộ `chunks`) và `:848`
+  (nhánh `cost_capped`, dùng **`chunks[:position]`** — đúng tập đã cộng vào `completed_cost` ngay
+  trên đó). Câu `error_message` ở nhánh cost-cap nói "chi phí **ước tính** tích luỹ" — khi
+  rollup trả `'metered'` thì đổi thành "chi phí **thật** tích luỹ", đúng khuôn nhánh EPUB đã làm
+  (`:1256-1259`).
+- **Nhánh EPUB không đổi luật**: `job.cost_source = "metered"` vẫn đặt trực tiếp tại `:1197`,
+  `:1256`, `:1293`, `:1417`, `:1679` (số thật từ `TranslationResult`, §6.20.8). Nhưng
+  `_process_epub_chunk()` **phải ghi thêm `chunk.cost_source = "metered"`** tại đúng chỗ nó ghi
+  `api_tokens_used`/`api_cost` — nếu không, cột mới sẽ nói dối (`'estimated'`) cho những chunk
+  duy nhất trong dự án đã đo thật từ trước. Đây là yêu cầu lineage (R6-01), không phải tuỳ chọn.
+- **Job PDF bằng pdf2zh**: `reports_token_usage = False` ⇒ mọi chunk `'estimated'` ⇒ job
+  `'estimated'` — **hành vi hiện tại giữ nguyên 100%**.
+
+**Tương tác với cost gate (§6.11.4 Lớp 3)**: `completed_cost = sum(c.api_cost)` không đổi công
+thức; chỉ có chất lượng con số tốt lên (số thật thay vì ước lượng ±30–50%). Hệ quả cần biết
+trước: với babeldoc, chi phí tích luỹ **có thể thấp hơn hẳn** ước lượng cũ ⇒ job từng bị
+`cost_capped` oan nay chạy tiếp. Đó là cải thiện, không phải hồi quy — nhưng QA phải biết để
+không báo là bug.
+
+#### 6.23.6. Audit Protocol 8 (R8-01) — từng bước hiện có trong `_process_chunk()`
+
+Thêm một nhánh xử lý mới vào đường ống dùng chung 2 engine ⇒ phải trả lời cho **từng** bước đang
+có, kể cả bước cũ (bài học Bug #9: bước CŨ mới là chỗ dễ sót).
+
+| Bước hiện có | Tồn tại để giải quyết vấn đề gì | Nhánh metered mới có liên quan không |
+|---|---|---|
+| `shutil.rmtree(chunk_output_dir)` đầu mỗi attempt (`:2053-2054`) | pdf2zh/babeldoc ghi đè file cũ của attempt trước → trang dịch lặp 2 lần | **Có liên quan, theo hướng tốt**: mỗi attempt là **1 subprocess mới** ⇒ `stdout` (và do đó token) thuộc **đúng attempt cuối cùng thành công**. Token của attempt fail trước đó **không** bị cộng vào — vì `with_retry` trả về `BabeldocResult` của attempt thành công. ⚠️ **Giới hạn đã biết**: tiền đã tiêu cho attempt fail **không được tính** vào `api_cost` ⇒ metered là **under-count** khi có retry. Ghi rõ ở 6.23.8 |
+| `chunk.rate_limit_hits = pdf2zh_result.rate_limit_hits` (`:2117`) | lineage AIMD (§6.12.2 D1) | Không liên quan; cùng nguồn `stdout` nhưng khác regex, khác cột. **Không gộp 2 regex**, không đổi `RATE_LIMIT_LINE_RE` |
+| `classify_chunk_outcome` + `_observe_chunk_outcome` (`:2119-2140`) | AIMD | Không liên quan. Token không phải tín hiệu concurrency |
+| `font_shrink_page()` + vòng `OverflowReport` (`:2145-2172`) | pdf2zh vẽ tràn khung (Bug #9) | **Không đụng vào.** Gate `self._needs_font_shrink` giữ nguyên. Nhánh mới không đọc/ghi gì ở đây |
+| Khối BL-04 drop report (`:2181-2199`) | babeldoc tự bỏ đoạn không vừa khung | Không liên quan về dữ liệu, nhưng **cùng họ thiết kế**: cũng là "đọc tín hiệu do chính babeldoc phát ra". Đặt nhánh mới **sau** khối này, giữ nguyên thứ tự hiện có |
+| `estimate_chunk_cost()` + `_extract_chunk_text` + `_count_text_segments` (`:2202-2214`) | pdf2zh không xuất token ⇒ buộc phải ước lượng (§6.6.6) | **Đây chính là bước bị audit.** Câu hỏi R8-01: *"lý do bước này tồn tại có còn đúng với babeldoc không?"* → **KHÔNG**: babeldoc có token thật (T2/T4). Bước này trở thành **fallback**, không phải đường chính, cho engine có `reports_token_usage = True` |
+| `merge_chunk_pdfs` / guard BR-OCR-03 / `create_bilingual_pdf` (cấp job, §6.14.4) | nối chunk, chống bản dịch rỗng | Không liên quan — nhánh mới không tạo/sửa file PDF nào |
+
+**Kết luận R8-02**: không có bước nào rơi vào trạng thái "chưa rõ" ⇒ không bước nào bị SKIP thêm.
+Bước duy nhất đổi trạng thái là `estimate_chunk_cost()` (đường chính → fallback), và nó **vẫn
+chạy nguyên xi** khi parse trượt.
+
+#### 6.23.7. Gate kiểm thử
+
+**R5-02 — spike BẮT BUỘC trước khi viết regex chính thức.** Đây là increment ĐẦU TIÊN app dựa vào
+contract *"babeldoc in token ra stdout"*; trước đây app chỉ dựa vào contract *"babeldoc in cảnh
+báo rate-limit ra stdout"*. Dev **phải** làm trước khi implement:
+1. Chạy babeldoc thật qua đúng đường app gọi (1 file PDF ngắn, `--pages` 1 trang, API key thật,
+   **có** `--no-auto-extract-glossary`), redirect stdout ra file (non-tty), rồi
+   `grep -n "Total tokens" <file>`.
+2. So đúng 4 dòng thu được với 6.23.1 T4/T7. **Lệch bất kỳ điểm nào** (mất tiền tố
+   `INFO:babeldoc.main:`, đổi nhãn, có dấu phân cách nghìn, in nhiều lần) ⇒ **escalate Tech Lead**,
+   không tự sửa regex theo phỏng đoán (R5-02).
+3. Lưu stdout thu được thành **golden file** `tests/fixtures/babeldoc/token_usage_stdout.txt`
+   (đã khử API key nếu có). Mọi test dưới đây đọc từ golden file này — **cấm viết tay** chuỗi
+   stdout theo mô tả trong Architecture.md (Protocol 5 mục 3: mock viết tay = test tự xác nhận
+   giả định).
+
+**Unit / integration (R6-02 — assert GIÁ TRỊ, không assert "đã gọi"):**
+1. `test_parse_token_usage_golden`: từ golden file → `total_tokens`/`prompt_tokens`/
+   `completion_tokens`/`cache_hit_prompt_tokens` **bằng đúng** các số trong file.
+2. `test_parse_token_usage_no_cache_hit_confusion`: stdout chứa `Prompt tokens: 111` **và**
+   `Cache hit prompt tokens: 999` → `prompt_tokens == 111` (chống bẫy 6.23.2 mục 1).
+3. `test_parse_token_usage_missing_lines`: stdout không có dòng nào (hoặc chỉ có `Total tokens:`)
+   → trả `None`, **không raise**.
+4. `test_metered_chunk_lineage` (**test trung tâm, R6-02**): mock `BabeldocRunner` trả
+   `BabeldocResult(..., real_token_usage=BabeldocTokenUsage(total=30925, prompt=20000,
+   completion=10925, cache_hit_prompt=0))` → sau `_process_chunk()`:
+   `chunk.api_tokens_used == 30925` **VÀ** `chunk.cost_source == "metered"` **VÀ**
+   `chunk.api_cost == pytest.approx(provider.estimate_cost(20000, 10925))` (tính lại bằng chính
+   provider, **không** hard-code số tiền — bảng giá sẽ đổi ở task khác, 6.23.8).
+5. `test_estimated_fallback_when_no_token_line`: cùng mock nhưng `real_token_usage=None` →
+   `chunk.cost_source == "estimated"` và `chunk.api_tokens_used` **bằng đúng** kết quả
+   `estimate_chunk_cost()` như trước ⇒ chứng minh **không silent-break** test hiện có.
+6. `test_pdf2zh_never_metered`: runner có `reports_token_usage = False` →
+   `chunk.cost_source == "estimated"`, và `parse_babeldoc_token_usage` **không** được gọi.
+7. `test_reports_token_usage_guard`: `AsyncMock(spec=BabeldocRunner)` không set thuộc tính →
+   property raise `TypeError` (cùng khuôn test đã có cho `needs_font_shrink`).
+8. `test_rollup_cost_source`: 3 chunk metered → job `'metered'`; 2 metered + 1 estimated →
+   job **`'estimated'`**; 0 chunk có `api_cost` → `'estimated'`.
+
+**Live E2E (R5-03 + R6-03 — bắt buộc trước release):** chạy **1 job PDF thật** (≥2 chunk) với
+`pdf_translate_engine=babeldoc`, rồi mở DB kiểm **nội dung**, không chỉ `status`:
+- mọi `chunks.cost_source == 'metered'`, `api_tokens_used > 0` (trừ trường hợp cache-hit toàn
+  phần của babeldoc → `0`, hợp lệ, xem 6.23.8);
+- `jobs.cost_source == 'metered'` và `actual_cost == sum(chunks.api_cost)`;
+- đối chiếu `sum(chunks.api_tokens_used)` với **tổng 4 dòng token in trong log của từng chunk**
+  (đọc log app) — 2 con số phải **khớp tuyệt đối**, đây là phép kiểm lineage cuối cùng;
+- chạy lại **1 job PDF bằng pdf2zh** xác nhận vẫn `'estimated'` (chống hồi quy).
+
+#### 6.23.8. Giới hạn đã biết (phải đưa vào PRD / tooltip UI)
+
+1. **Bảng giá DeepSeek có thể đã lỗi thời** — `deepseek_provider.py:17-24` (tên model + giá
+   output). Theo quyết định của Hiếu, **task này KHÔNG sửa bảng giá**: chỉ đổi *nguồn số token*
+   từ ước lượng sang đo thật; phép nhân token × giá vẫn dùng nguyên `provider.estimate_cost()`
+   hiện có. Hệ quả trung thực: `cost_source='metered'` ở vòng này có nghĩa **"token là số đo
+   thật"**, **không** có nghĩa "số tiền chắc chắn đúng". Sẽ xử lý ở task riêng (cập nhật bảng
+   giá) — cho tới lúc đó **tooltip UI không được hứa độ chính xác của số tiền**.
+2. **Không chiết khấu cache-hit.** DeepSeek tính giá input cache-hit rẻ hơn nhiều;
+   `cache_hit_prompt_tokens` đã parse nhưng **chưa dùng** để tính tiền ⇒ chi phí bị tính **cao
+   hơn thực tế**. Đây là chiều sai an toàn theo đúng nguyên tắc §6.11.6 (thà ước cao còn hơn ước
+   thấp), và là lý do field vẫn được lưu trong `BabeldocTokenUsage` để dùng sau.
+3. **Under-count khi có retry**: token của attempt thất bại (timeout/lỗi, bị `with_retry` chạy
+   lại) không được cộng (6.23.6, hàng `shutil.rmtree`). Số metered là chi phí của **attempt thành
+   công**, không phải toàn bộ tiền đã tiêu cho chunk đó.
+4. **Cache của chính babeldoc**: khi `pdf2zh_ignore_cache = False` và nội dung đã dịch trước đó,
+   babeldoc không gọi API ⇒ `Total tokens: 0` ⇒ `api_cost = 0.0` với `cost_source='metered'`.
+   **`0` là số đo thật**, không phải lỗi parse — cùng tiền lệ đã chốt ở §6.20 (`actual_cost=0.0`
+   + `metered`). Phân biệt với "không parse được" chính là lý do `real_token_usage` dùng
+   `None` chứ không dùng `0` làm sentinel.
+5. **Chỉ áp dụng cho engine babeldoc.** Job PDF bằng pdf2zh vĩnh viễn `'estimated'` cho tới khi
+   có metering proxy (§6.6.6 v1.1, vẫn hoãn).
+
+#### 6.23.9. Vị trí sửa (spec cho Dev — CHƯA implement)
+
+| File | Việc |
+|---|---|
+| `src/services/babeldoc_runner.py` | `BabeldocTokenUsage` (dataclass frozen), `_TOKEN_LINE_RES`, `parse_babeldoc_token_usage()`; gọi parse ngay sau `drop_sentinel_count` (`:577`); thêm `real_token_usage` vào `BabeldocResult`; `reports_token_usage: ClassVar[bool] = True` |
+| `src/services/pdf2zh_runner.py` | `reports_token_usage: ClassVar[bool] = False` (chỉ 1 dòng + docstring) |
+| `src/core/job_orchestrator.py` | property `_reports_token_usage` (đặt ngay sau `_reports_own_paragraph_drops`, **có** guard `isinstance`); thay khối `:2202-2214` bằng 2 nhánh ở 6.23.4; `rollup_cost_source()` + áp tại `:848` và `:1022`; sửa câu `error_message` nhánh cost-cap theo 6.23.5; `_process_epub_chunk()` ghi thêm `chunk.cost_source = "metered"` |
+| `src/models/chunk.py` | `cost_source: str = Field(default="estimated")` kèm docstring trỏ 6.23 |
+| `src/models/database.py` | thêm `("chunks", "cost_source", "TEXT NOT NULL DEFAULT 'estimated'")` vào `_NEW_NULLABLE_COLUMNS` (`:61-77`) — SQLite cho phép `ADD COLUMN NOT NULL` khi có DEFAULT hằng; sửa comment của list cho khớp ("cột mới: nullable **hoặc** có DEFAULT hằng") |
+| `tests/fixtures/babeldoc/token_usage_stdout.txt` | golden file sinh từ spike R5-02, **không viết tay** |
+
+**KHÔNG sửa**: `src/services/deepseek_provider.py` (bảng giá — task riêng),
+`estimate_chunk_cost()`/`estimate_job_cost_v2()`, pre-flight gate Lớp 2, `RATE_LIMIT_LINE_RE`,
+`font_shrink_page()`, và mọi đường ghi của nhánh EPUB ngoài 1 dòng `chunk.cost_source` nêu trên.
 
 ---
 

@@ -30,6 +30,21 @@ class TranslationResult:
     output_tokens: int
     estimated_cost_usd: float
     provider_name: str
+    #: K-2 (Architecture.md §6.20.15): phan token thuoc thinking/CoT, KHONG
+    #: phai noi dung tra ve. Mac dinh 0 cho moi provider khong bao gio bao
+    #: reasoning token rieng (ca `openai.APIResponse.usage.completion_tokens_
+    #: details.reasoning_tokens` khong ton tai/None). `output_tokens` GIU
+    #: NGUYEN = completion_tokens that (tinh tien dung theo nha cung cap) —
+    #: field nay CHI dung cho `answer_tokens` ben duoi, KHONG duoc tru vao
+    #: `output_tokens`/`estimated_cost_usd`.
+    reasoning_tokens: int = 0
+
+    @property
+    def answer_tokens(self) -> int:
+        """K-2: phan output THAT SU la noi dung dich, da tru thinking token —
+        CHI dung cho phep do runaway (`is_runaway_output()`), khong dung cho
+        tinh tien."""
+        return max(0, self.output_tokens - self.reasoning_tokens)
 
 
 class TranslationProvider(Protocol):

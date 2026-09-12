@@ -50,6 +50,12 @@ class OpenAIProvider:
     #: Overridden by DeepSeekProvider to swap the base_url/pricing.
     provider_name = "openai"
 
+    #: K-3 (Architecture.md §6.20.15) — nang luc khai bao tren CLASS (R8-03,
+    #: khong re nhanh `if provider_name == "deepseek"` trong caller). Provider
+    #: nao khong ho tro tat thinking mode giu nguyen `False`/`{}` -> hanh vi
+    #: khong doi 1 byte.
+    supports_thinking_toggle: bool = False
+
     def __init__(
         self,
         api_key: str,
@@ -62,6 +68,18 @@ class OpenAIProvider:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        #: K-3 — chi co y nghia khi `supports_thinking_toggle=True`. Mac dinh
+        #: `False` (khong doi hanh vi); nguoi goi (vd `run_epub_job()`, Architecture.md
+        #: §6.20.15 K-3) tu bat co nay CHO RIENG nhanh EPUB qua
+        #: `Settings.epub_disable_thinking`, KHONG hardcode trong provider —
+        #: cung 1 provider instance van dung binh thuong (thinking BAT) cho
+        #: glossary.py/rotated_text_overlay.py neu khong ai bat co nay.
+        self.disable_thinking: bool = False
+
+    def _extra_body(self) -> dict:
+        """K-3 — override o subclass ho tro tat thinking. Body them vao request
+        `extra_body=` khi `disable_thinking=True`."""
+        return {}
 
     async def translate(
         self,
@@ -70,6 +88,9 @@ class OpenAIProvider:
         source_lang: str,
         target_lang: str,
     ) -> TranslationResult:
+        extra_body = (
+            self._extra_body() if (self.supports_thinking_toggle and self.disable_thinking) else {}
+        )
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,
@@ -82,11 +103,10 @@ class OpenAIProvider:
                         "content": f"Translate from {source_lang} to {target_lang}:\n\n{text}",
                     },
                 ],
+                **({"extra_body": extra_body} if extra_body else {}),
             )
         except openai.AuthenticationError as exc:
-            raise AuthenticationError(
-                f"{self.provider_name} authentication failed: {exc}"
-            ) from exc
+            raise AuthenticationError(f"{self.provider_name} authentication failed: {exc}") from exc
         except openai.RateLimitError as exc:
             raise RateLimitError(f"{self.provider_name} rate limit exceeded: {exc}") from exc
         except openai.APITimeoutError as exc:
@@ -105,15 +125,25 @@ class OpenAIProvider:
             # rieng (_make_status_error, tu doc source `openai/_exceptions.py`
             # verify 2026-09-09) — day la "loi ha tang binh thuong" Y6 noi
             # toi, khong phai loi vinh vien.
-            raise ConnectionError(
-                f"{self.provider_name} server error (5xx): {exc}"
-            ) from exc
+            raise ConnectionError(f"{self.provider_name} server error (5xx): {exc}") from exc
         except openai.APIError as exc:
             raise TranslationProviderError(f"{self.provider_name} API error: {exc}") from exc
 
         translated_text = response.choices[0].message.content or ""
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
+        # K-2 (Architecture.md §6.20.15) — verified tren response THAT cua
+        # deepseek-v4-flash qua spike R5-02 (2026-09-11,
+        # tests/fixtures/epub_llm/deepseek_v4flash_usage.json):
+        # `completion_tokens_details.reasoning_tokens` ton tai va != 0 khi
+        # thinking BAT (833 tren 1 cau ngan), va `completion_tokens_details`
+        # tra ve `None` (khong phai object voi field = 0) khi thinking bi tat
+        # qua `extra_body`. `getattr(None, ..., 0)` xu ly dung ca 2 truong hop
+        # nay lan provider khong co field nay (vd OpenAI/Claude) ve cung 0.
+        completion_details = (
+            getattr(response.usage, "completion_tokens_details", None) if response.usage else None
+        )
+        reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0) or 0
 
         return TranslationResult(
             text=translated_text,
@@ -121,6 +151,7 @@ class OpenAIProvider:
             output_tokens=output_tokens,
             estimated_cost_usd=self.estimate_cost(input_tokens, output_tokens),
             provider_name=self.provider_name,
+            reasoning_tokens=reasoning_tokens,
         )
 
     def _cost_per_mtok(self) -> tuple[float, float]:

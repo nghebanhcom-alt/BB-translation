@@ -1150,6 +1150,16 @@ class JobOrchestrator:
         pricing_provider = self._provider or self._provider_factory.create(
             job.model, self._settings
         )
+        # K-3 (Architecture.md §6.20.15): bat co tat thinking mode CHI cho
+        # nhanh EPUB nay, qua thuoc tinh nang luc tren chinh provider instance
+        # (R8-03 — KHONG `if job.model == "deepseek-..."` rai rac o day). Cung
+        # provider class dung o glossary.py/rotated_text_overlay.py (PDF)
+        # khong bi anh huong vi khong ai bat `disable_thinking` tren instance
+        # cua ho.
+        if self._settings.epub_disable_thinking and getattr(
+            pricing_provider, "supports_thinking_toggle", False
+        ):
+            pricing_provider.disable_thinking = True
 
         progress_tracker = ProgressTracker(broadcaster=self._progress_broadcaster)
         total_chunks = len(chunks)
@@ -2385,20 +2395,30 @@ class JobOrchestrator:
             )
 
             # Fix C-3 (Architecture.md 6.20.13.3b, Bug #EPUB-B2-1): phat hien
-            # runaway output SO VOI CHINH payload cua request nay.
-            runaway = is_runaway_output(len(payload_json), result.output_tokens)
+            # runaway output SO VOI CHINH payload cua request nay. K-2 (Architecture.md
+            # §6.20.15): dung `answer_tokens` (da tru token thinking/CoT) thay vi
+            # `output_tokens` tho — `output_tokens` van GIU NGUYEN cho tinh tien
+            # (_accumulate_and_check_budget o tren dung result.output_tokens, khong doi).
+            runaway = is_runaway_output(len(payload_json), result.answer_tokens)
             expected_output_tokens = epub_expected_output_tokens(len(payload_json))
-            runaway_ratio = result.output_tokens / max(expected_output_tokens, 1)
+            runaway_ratio = result.answer_tokens / max(expected_output_tokens, 1)
 
             parse_outcome = parse_epub_batch_response_detailed(result.text, expected_ids)
             self._log_epub_parse_salvage(job.id, chunk.chunk_index, parse_outcome)
             parsed = dict(parse_outcome.translations)
             missing_ids = expected_ids - parsed.keys()
 
-            if runaway and missing_ids:
-                # R-b (Architecture.md 6.20.13.3b): runaway VA hong/thieu ->
-                # abort NGAY, KHONG chay vong goi lai tung-id/nguyen request —
-                # do dung con duong C-1 dan den khuech dai chi phi.
+            if runaway and len(missing_ids) > EPUB_MAX_SINGLE_ID_RETRIES:
+                # K-5 (Architecture.md §6.20.15): R-b KHONG duoc la "abort khi
+                # thieu BAT KY id nao" — voi <= EPUB_MAX_SINGLE_ID_RETRIES id
+                # thieu, thang cuu ho C-1 (retry tung-id, nhanh ben duoi) re
+                # va co ti le thanh cong cao; abort ca chunk o do la danh doi
+                # sai chieu (day chinh la bay da lam 3 job chet o 6.20.13.3b
+                # truoc K-5).
+                # R-b (Architecture.md 6.20.13.3b): runaway VA hong/thieu VUOT
+                # nguong cuu ho -> abort NGAY, KHONG chay vong goi lai
+                # tung-id/nguyen request — do dung con duong C-1 dan den
+                # khuech dai chi phi.
                 logger.warning(
                     "EPUB runaway output (aborted): job=%s chunk=%s slice=(%s,%s) "
                     "ratio=%.2f missing=%d",
@@ -2440,6 +2460,8 @@ class JobOrchestrator:
                         "slice": [start, end],
                         "payload_chars": len(payload_json),
                         "output_tokens": result.output_tokens,
+                        "reasoning_tokens": result.reasoning_tokens,
+                        "answer_tokens": result.answer_tokens,
                         "ratio": round(runaway_ratio, 4),
                         "action": "kept",
                     }
@@ -2620,6 +2642,11 @@ class JobOrchestrator:
                     "payload_chars": len(payload_json),
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
+                    # K-2 (Architecture.md §6.20.15, gate G-2): field moi de
+                    # doi chieu phan bo `answer_tokens` sau khi tat thinking
+                    # (K-3) — dung cho K-4 (hieu chinh CHARS_PER_TOKEN_VI).
+                    "reasoning_tokens": result.reasoning_tokens,
+                    "answer_tokens": result.answer_tokens,
                     "ratio": round(runaway_ratio, 4),
                     "diacritic_ratio": round(final_diacritic_ratio, 4),
                 }
