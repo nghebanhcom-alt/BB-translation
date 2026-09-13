@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -322,6 +323,67 @@ def _parse_drop_report_file(path: Path) -> BabeldocDropReport:
     return _parse_drop_report_lines(path.read_text(encoding="utf-8").splitlines())
 
 
+#: BL-10 (Architecture.md 6.23.1 T4/T6/T7 — VERIFIED, ke ca chay end-to-end
+#: that voi DeepSeek 2026-09-13, golden file
+#: `tests/fixtures/babeldoc/token_usage_stdout.txt`). Tien to
+#: `INFO:babeldoc.main:` la phan message THAT (logging.BASIC_FORMAT cua
+#: `logging.basicConfig`, main.py:918-920), khong phai cot hien thi cua rich
+#: -> neo vao no la neo vao thu on dinh nhat co duoc.
+_TOKEN_LINE_RES: dict[str, re.Pattern[str]] = {
+    "total_tokens": re.compile(r"INFO:babeldoc\.main:Total tokens:\s*(\d+)"),
+    "prompt_tokens": re.compile(r"INFO:babeldoc\.main:Prompt tokens:\s*(\d+)"),
+    "completion_tokens": re.compile(r"INFO:babeldoc\.main:Completion tokens:\s*(\d+)"),
+    "cache_hit_prompt_tokens": re.compile(r"INFO:babeldoc\.main:Cache hit prompt tokens:\s*(\d+)"),
+}
+
+
+@dataclass(frozen=True)
+class BabeldocTokenUsage:
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+    cache_hit_prompt_tokens: int
+
+
+def parse_babeldoc_token_usage(stdout: str) -> BabeldocTokenUsage | None:
+    """Parse tong ket token THAT ma babeldoc tu in ra cuoi moi lan chay CLI
+    (Architecture.md 6.23.2, golden file
+    `tests/fixtures/babeldoc/token_usage_stdout.txt`).
+
+    Tra `None` khi KHONG parse du 3 dong bat buoc — khong raise, khong doan
+    (deny-by-default, 6.23.2 muc 4): mot usage thieu prompt/completion khong
+    tinh duoc gia (2 rate khac nhau), doan split la quay lai "uoc luong" nhung
+    doi lot "metered".
+
+    CHI doc `stdout`, KHONG noi `stderr` (khac `RATE_LIMIT_LINE_RE`/
+    `_DROP_SENTINEL_TEXT` cu tinh co quet ca hai vi chi dem su kien) — o day
+    con so di thang vao tien, gop 2 kenh la mo duong dem 2 lan neu babeldoc
+    doi handler sang stderr o ban sau.
+
+    Lay match CUOI CUNG cua moi pattern (phong thu re, T4/T10: hien tai chi in
+    1 lan/tien trinh). Case-sensitive tuyet doi (KHONG duoc them
+    `re.IGNORECASE`): "Prompt tokens:" la substring cua "Cache hit prompt
+    tokens:", IGNORECASE khong doi gi o day nhung giu nguyen quy tac de khong
+    ai vo tinh them sau.
+    """
+    matches: dict[str, list[str]] = {
+        key: pattern.findall(stdout) for key, pattern in _TOKEN_LINE_RES.items()
+    }
+    if (
+        not matches["total_tokens"]
+        or not matches["prompt_tokens"]
+        or not matches["completion_tokens"]
+    ):
+        return None
+    cache_hit_matches = matches["cache_hit_prompt_tokens"]
+    return BabeldocTokenUsage(
+        total_tokens=int(matches["total_tokens"][-1]),
+        prompt_tokens=int(matches["prompt_tokens"][-1]),
+        completion_tokens=int(matches["completion_tokens"][-1]),
+        cache_hit_prompt_tokens=int(cache_hit_matches[-1]) if cache_hit_matches else 0,
+    )
+
+
 @dataclass
 class BabeldocResult:
     success: bool
@@ -335,6 +397,11 @@ class BabeldocResult:
     #: duoc" (KHONG phai "0 drop that su") cho cac call site cu khong truyen
     #: field nay (test hien co, mock).
     drop_report: BabeldocDropReport = field(default_factory=_empty_drop_report)
+    #: BL-10 (Architecture.md 6.23.3). Token THAT babeldoc tu dem tu
+    #: `response.usage`, parse tu `stdout` cua CHINH lan chay nay. `None` =
+    #: khong parse duoc (ban babeldoc khac / log level khac / call site cu,
+    #: mock) -> orchestrator roi ve `estimate_chunk_cost()`, KHONG crash.
+    real_token_usage: BabeldocTokenUsage | None = None
 
 
 class BabeldocRunner:
@@ -360,6 +427,11 @@ class BabeldocRunner:
     #: vua khung (6.22.2) — app khong do duoc bang hau ky, phai lay tin hieu
     #: tu chinh no (shim + sidecar JSONL, 6.22.4).
     reports_own_paragraph_drops: ClassVar[bool] = True
+
+    #: BL-10 (Architecture.md 6.23.3 R8-03). babeldoc tu dem token that tu
+    #: `response.usage` va in ra stdout cuoi moi lan chay (6.23.1 T2/T4) ->
+    #: chunk dich bang engine nay co the dat `cost_source='metered'`.
+    reports_token_usage: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -575,6 +647,8 @@ class BabeldocRunner:
         # BL-04 (Architecture.md 6.22.6 "Doi chieu cheo") — dem CHINH sentinel
         # nay tren stdout+stderr, dung CACH dem hien co (khong regex moi).
         drop_sentinel_count = (stdout + "\n" + stderr).count(_DROP_SENTINEL_TEXT)
+        # BL-10 (Architecture.md 6.23.2) — CHI stdout, khong noi stderr.
+        real_token_usage = parse_babeldoc_token_usage(stdout)
 
         if timed_out:
             raise BabeldocTimeoutError(
@@ -615,4 +689,5 @@ class BabeldocRunner:
             duration_seconds=duration,
             rate_limit_hits=rate_limit_hits,
             drop_report=drop_report,
+            real_token_usage=real_token_usage,
         )

@@ -52,8 +52,9 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-# Architecture.md 6.12.8: new nullable columns on tables that already exist in
-# a dev DB. SQLite has no "ADD COLUMN IF NOT EXISTS", and
+# Architecture.md 6.12.8: new columns (nullable OR with a constant DEFAULT,
+# BL-10 6.23.9) on tables that already exist in a dev DB. SQLite has no
+# "ADD COLUMN IF NOT EXISTS", and
 # `SQLModel.metadata.create_all()` never alters an existing table (same
 # limitation noted in `src/models/job.py` for `ocr_confidence`/`ocr_bridge_path`
 # — those increments told the dev to just delete the dev DB). 6.12.8 asks for
@@ -74,6 +75,9 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     # page_start/page_end doi NOT NULL -> nullable, SQLite khong ALTER duoc
     # constraint nay bang ADD COLUMN don thuan).
     ("jobs", "total_units", "INTEGER"),
+    # BL-10 (Architecture.md 6.23.9). SQLite cho phep `ADD COLUMN NOT NULL`
+    # khi co DEFAULT hang — cot moi o list nay: nullable HOAC co DEFAULT hang.
+    ("chunks", "cost_source", "TEXT NOT NULL DEFAULT 'estimated'"),
 ]
 
 

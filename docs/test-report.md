@@ -2549,3 +2549,211 @@ Không phát hiện bug.
 
 **`ready_for_release: YES`** — riêng cho S5 (UI hint chọn thư mục tải file). Không phải kết luận
 cho toàn bộ project.
+
+---
+
+## BL-10 — QA live E2E cho `cost_source='metered'` nhánh PDF/babeldoc (2026-09-13)
+
+**Phạm vi**: `docs/Architecture.md` §6.23 (dòng 8003-8358), code đã qua Reviewer APPROVE Vòng 1/3
+(`docs/review-report.md`, mục "BL-10 — Chi phí ĐO THẬT cho nhánh PDF/babeldoc"). Mục tiêu: verify
+sống theo Protocol 5 R5-03 + Protocol 6 R6-03 — nhiều chunk, dữ liệu thật, không chỉ tin
+`status: completed`.
+
+### PHÁT HIỆN QUAN TRỌNG (process bug, không phải bug trong code BL-10) — server thật chạy CODE CŨ
+
+Lần chạy live đầu tiên (job `1f95ef19-284a-4f12-b152-351e4b0e1b0d`, file `001-030.pdf` 30 trang,
+babeldoc, DeepSeek) cho kết quả **`chunks.cost_source = 'estimated'`** dù chạy qua engine babeldoc
+thật — **không có** dòng WARNING "6.23: engine bao co token usage nhung KHONG parse duoc..." nào
+trong log ứng dụng (`grep -n "WARNING" /private/tmp/bb-app.log` chỉ có 2 dòng, không liên quan
+BL-10). Theo đúng logic đã đọc ở `job_orchestrator.py:2255-2264`, thiếu dòng WARNING trong khi
+`usage is None` chỉ có thể xảy ra khi `self._reports_token_usage` tự nó là `False` — mâu thuẫn với
+việc dòng log "babeldoc drop report" (chỉ bắn khi `self._reports_own_paragraph_drops` — CÙNG object
+`self._translator_runner`) đã xuất hiện, tức đang chạy engine babeldoc thật.
+
+Điều tra: `ps -o pid,lstart` cho thấy process `uvicorn` (PID 6919) **start lúc 2026-09-12
+18:53:29**, còn `git status` cho thấy toàn bộ code BL-10
+(`src/core/job_orchestrator.py`, `src/services/babeldoc_runner.py`, `src/services/pdf2zh_runner.py`,
+`src/models/chunk.py`, `src/models/database.py`) là **thay đổi chưa commit**, mtime file
+**2026-09-13 09:46** — SAU khi server đã khởi động. Python/uvicorn không hot-reload
+(không chạy `--reload`) → server thật đang phục vụ request bằng **code CŨ, trước BL-10**, mặc dù
+code trên đĩa (đã qua Reviewer APPROVE) đã đúng. Đây chính xác là loại lỗi Protocol E cảnh báo
+("thay đổi áp dụng lên môi trường thật phải đồng bộ với git") nhưng theo chiều ngược: **code đã
+review đúng nhưng môi trường chạy thật lại chưa được đồng bộ** — nếu QA không tự đối chiếu
+`ps -o lstart` với `git status`/mtime, kết quả `cost_source='estimated'` này sẽ bị hiểu nhầm thành
+"BL-10 không hoạt động" (false negative) hoặc tệ hơn, bị bỏ qua vì "status vẫn completed" — đúng
+tinh thần bug Bug #5 mà R6-03 yêu cầu phòng.
+
+**Đã xử lý**: `kill` process cũ, khởi động lại `uv run uvicorn src.api.main:app --host 0.0.0.0
+--port 8000` (log mới: `/private/tmp/bb-app-qa-bl10.log`), verify lại từ đầu bằng job mới. **Khuyến
+nghị PM/Dev**: trước khi coi BL-10 là "đã deploy", phải restart server thật (hoặc dùng `--reload`
+trong môi trường dev) — không đủ nếu chỉ commit code.
+
+### Live E2E thật (sau khi server đã chạy đúng code BL-10)
+
+**Job 1**: `2751c13c-993c-4648-ac75-e6e0c1a8ddaf`, file `qa_aimd_65pages.pdf` (65 trang, nội dung
+thật — trích "How Baking Works", Paula Figoni, đã tự đọc text trang 1 và trang 41 xác nhận không
+rỗng/không gibberish), provider `deepseek`, engine `babeldoc` (mặc định `.env`, không set
+`PDF_TRANSLATE_ENGINE`), tạo qua API thật `POST /api/jobs` (không gọi thẳng
+`JobOrchestrator._process_chunk()`/mock) → `chunk_size_used=40` (warm) → **2 chunk thật**: chunk 0
+(trang 1-40), chunk 1 (trang 39-65, có overlap). Job hoàn tất `status=completed` sau ~4 phút.
+
+Query trực tiếp `data/bb_translation.db`:
+
+```
+chunk_index  status     page_start  page_end  api_tokens_used  api_cost    cost_source
+0            completed  1           40        684840           0.1802306   metered
+1            completed  39          65        487996           0.12943304  metered
+
+jobs: chunk_size_used=40  actual_cost=0.30966364  cost_source=metered
+SUM(chunks.api_cost) = 0.30966364
+```
+
+**Kiểm tra cụ thể theo brief**:
+1. **Mỗi chunk babeldoc có `cost_source='metered'` và `api_tokens_used` dương, hợp lý, KHÔNG
+   giống số ước lượng cũ**: ĐẠT. 2 chunk có 2 giá trị token **khác nhau** (684840 vs 487996, tỉ lệ
+   gần đúng theo số trang 40 vs 27), không phải hằng số/không phải copy chéo giữa 2 chunk — đúng
+   lineage per-chunk (chống đúng kiểu lỗi Bug #5: "trộn 2 tiến trình song song").
+2. **`jobs.cost_source` đúng rollup**: ĐẠT — cả 2 chunk đều `metered` ⇒ job `metered`, đúng luật
+   `rollup_cost_source()` (all-metered ⇒ metered).
+3. **`SUM(chunks.api_cost) == jobs.actual_cost`**: ĐẠT tuyệt đối — `0.30966364 == 0.30966364`.
+4. **Đối chiếu log babeldoc thật**: **giới hạn đã biết** — app KHÔNG lưu lại stdout thô của babeldoc
+   ở đâu cả (đúng thiết kế §6.23.2: parse xong rồi bỏ, không có `infra_pending`/file log riêng),
+   `data/processing/<job_id>/` không chứa artifact stdout. Không tái tạo được lệnh babeldoc chạy
+   tay song song với ĐÚNG state prompt/glossary/overlap mà app dùng nội bộ (rebuild lại sẽ tốn thêm
+   phí thật và có nguy cơ không khớp 100% điều kiện). Bù lại bằng 2 bằng chứng gián tiếp nhưng có
+   giá trị: (a) đã tự đọc code `job_orchestrator.py:2255-2297` xác nhận `usage` chỉ có thể đến từ
+   `pdf2zh_result.real_token_usage` — **return value của chính lần dịch chunk đó** (đọc bằng mắt,
+   không chỉ tin docstring, giống cách Reviewer đã làm) — không có đường nào khác gán vào biến này;
+   (b) `retry_count=0` cho cả 2 chunk (không có lần chạy lại nào, loại trừ khả năng under-count do
+   retry theo giới hạn đã biết ở §6.23.8 mục 3) — số đo lần này là **sạch, không có ambiguity**.
+5. **So sánh metered mới vs estimated cũ**: `POST /api/estimate` cho ĐÚNG file này (65 trang, trước
+   khi tạo job) trả `estimated_cost_usd=0.25850638` (low) — `0.51701276` (high). Metered thật
+   `0.30966364` nằm **trong khoảng** nhưng **cao hơn cận thấp ~20%** — đúng hướng "metered cao hơn
+   estimated" đã ghi nhận trước đây (dashboard DeepSeek thật cao hơn ước lượng), không lệch ngược
+   chiều (không thấp hơn cận thấp) — không phải dấu hiệu sai ở đâu đó.
+
+**Output cuối cùng — mở file thật ra xem (R6-03, không chỉ tin `status`)**: đã mở
+`data/outputs/2751c13c-993c-4648-ac75-e6e0c1a8ddaf/translated_vi.pdf` bằng `pymupdf`, xác nhận
+`page_count=65` và text trang 1/trang 40 là **tiếng Việt thật, có nghĩa** (vd: "Khám phá những
+nguyên lý cơ bản của khoa học làm bánh", "Làm nóng lò nướng theo công thức...") — **không phải**
+`text_len=0` kiểu Bug #5.
+
+**Job 2 (chạy trước khi phát hiện server chạy code cũ — giữ lại làm bằng chứng của chính phát hiện
+process bug ở trên, KHÔNG dùng để kết luận về code BL-10)**: `1f95ef19-284a-4f12-b152-351e4b0e1b0d`,
+file `001-030.pdf` 30 trang → do `chunk_size_used=40` (warm) nên chỉ ra **1 chunk** (không đạt yêu
+cầu ≥2 chunk của brief) — lý do chọn file 65 trang cho Job 1 thay vì tăng số trang file 30-trang.
+
+### Việc KHÔNG làm được — cần ghi rõ theo R5-03
+
+**Chưa chạy lại 1 job PDF bằng pdf2zh để xác nhận vẫn `'estimated'`** (yêu cầu bullet 4 của Live E2E
+gate §6.23.7) — `pdf_translate_engine` là setting **`.env`-only** (không có trong
+`SETTINGS_DB_OVERRIDABLE_FIELDS`, không truyền được qua `POST /api/jobs`), muốn đổi phải sửa `.env`
++ restart server. Thao tác sửa `.env` bị **chặn bởi permission classifier** của công cụ (file chứa
+`DEEPSEEK_API_KEY`) trong phiên QA này. Đây là **gap thật, không phải đã verify** — unit test
+`test_pdf2zh_never_metered` (đã Reviewer xác nhận PASS) chỉ chứng minh code KHÔNG gọi
+`parse_babeldoc_token_usage` khi `reports_token_usage=False`, không thay thế được 1 lần chạy
+pdf2zh thật qua đúng đường API. Đề nghị Dev/PM (có quyền sửa `.env`) tự chạy bổ sung: set
+`PDF_TRANSLATE_ENGINE=pdf2zh` → restart → `POST /api/jobs` 1 file nhỏ → xác nhận
+`chunks.cost_source='estimated'` → revert `.env` → restart lại.
+
+### Chi phí thực tế đã dùng cho đợt QA này
+
+- Job `1f95ef19...` (30 trang, chạy nhầm trên code cũ): `actual_cost = 0.10280468` USD (đã tiêu
+  thật qua DeepSeek dù không dùng được để kết luận về BL-10).
+- Job `2751c13c...` (65 trang, kết quả chính thức của đợt QA): `actual_cost = 0.30966364` USD.
+- **Tổng chi phí live test đợt này: ~0.41 USD** — đúng như ước tính trước khi chạy (đã gọi
+  `POST /api/estimate` trước cả 2 lần, không có runaway).
+
+### Kết luận
+
+Code BL-10 (sau khi server chạy ĐÚNG version) hoạt động đúng theo Architecture.md §6.23 khi kiểm
+tra sống với dữ liệu thật, ≥2 chunk: lineage per-chunk đúng, rollup job đúng, `SUM(api_cost) ==
+actual_cost` khớp tuyệt đối, output PDF có nội dung tiếng Việt thật (không phải Bug #5 tái diễn).
+Phát hiện thêm 1 vấn đề quy trình quan trọng (server thật chạy code cũ so với code đã review) —
+không phải bug của BL-10 nhưng **phải xử lý trước khi coi BL-10 là "đã release"**: cần restart/
+deploy lại service thật sau khi merge.
+
+Còn 1 gap chưa verify được trong phiên này: hồi quy pdf2zh (`cost_source` phải vẫn `'estimated'`)
+— bị chặn bởi permission sửa `.env`, không phải do code lỗi.
+
+**`ready_for_release: NO — release blocked pending live verification: pdf2zh regression check
+(§6.23.7 Live E2E bullet 4) chưa chạy được (permission bị chặn khi sửa .env để đổi
+PDF_TRANSLATE_ENGINE); đồng thời PM/Dev cần restart server thật đang chạy production trước khi coi
+BL-10 là live (server hiện tại — sau khi QA đã restart thủ công để test — ĐANG chạy đúng code BL-10,
+nhưng cần xác nhận đây là quy trình deploy chính thức, không phải fix tạm của QA)`**. Nhánh babeldoc
+metered chính nó ĐÃ đạt live verification đầy đủ (R5-03 + R6-03) — chỉ chặn release vì thiếu bước
+hồi quy pdf2zh và cần PM xác nhận quy trình deploy.
+
+## S6 — pdf2zh regression check (bổ sung, đóng gap còn thiếu của đợt QA trước) — 2026-09-13
+
+**Bối cảnh**: đợt QA S6 trước (mục ngay phía trên) đã PASS live E2E cho nhánh babeldoc
+(`cost_source='metered'`) nhưng KHÔNG chạy được bullet 4 (hồi quy pdf2zh) do bị permission
+classifier chặn khi sửa `.env`. Hiếu đã xác nhận đồng ý cho làm tiếp phần còn thiếu này trong
+phiên hiện tại (session có quyền sửa `.env` + restart server).
+
+### Quy trình đã chạy
+
+1. **Xác định biến điều khiển**: `pdf_translate_engine: Literal["pdf2zh", "babeldoc"] = "babeldoc"`
+   (`src/core/config.py:150`), map từ env var `PDF_TRANSLATE_ENGINE` (pydantic-settings, case
+   insensitive theo tên field, `env_file=".env"`). `.env` gốc **không có dòng
+   `PDF_TRANSLATE_ENGINE`** — nghĩa là giá trị hiệu lực đang chạy là **default `"babeldoc"`** của
+   config.py, không phải override tường minh. Đã `git diff .env` xác nhận sạch trước khi sửa
+   (không có thay đổi chưa commit nào khác lẫn vào).
+2. **Sửa tạm**: thêm dòng `PDF_TRANSLATE_ENGINE=pdf2zh` vào `.env` (sau dòng
+   `PDF2ZH_TIMEOUT_SECONDS=7200`).
+3. **Restart server**: `kill` 2 tiến trình `uvicorn`/`uv run uvicorn` cũ (PID 27089/27091, đã chạy
+   từ 10:19AM — TRƯỚC lần sửa `.env` này, nên chắc chắn cần restart để nạp giá trị mới), khởi động
+   lại `nohup uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000` (log
+   `/private/tmp/bb-app-qa-s6.log`). Xác nhận `GET /api/settings` trả 200 sau restart.
+4. **Job dịch pdf2zh thật, tối thiểu chi phí**: dùng file có sẵn trong `tests/fixtures/`
+   (`tests/fixtures/babeldoc/toc_sources/figoni_p25_recipe.pdf`, 1 trang, nội dung thật — công thức
+   "Drop Sugar Cookie Dough" trích từ sách Paula Figoni, đã tự đọc `get_text()` xác nhận không phải
+   file rỗng/placeholder). `POST /api/upload` → `file_id=18ad1ae3-7b41-426c-9f48-55690a64e261`,
+   `file_type=pdf_digital`, `page_count=1`. `POST /api/estimate` (provider `deepseek`, mặc định
+   `default_provider`) trả **`estimated_cost_usd=0.0019899`** (`cost_source=estimated` — đúng ngay
+   từ bước ước tính) — nằm sâu trong ngân sách $0.05–0.1 đã duyệt, không có dấu hiệu runaway. Tạo
+   job thật qua `POST /api/jobs` (`confirm_cost:true`) → `job_id=3a260d20-1d71-422a-97fa-07f3f1785a20`,
+   `status=queued` → poll `GET /api/jobs/{id}` tới `status=completed` (~vài giây, đúng vì file 1
+   trang, không cần retry).
+5. **Query DB thật** (`data/bb_translation.db`):
+   ```
+   jobs:   id=3a260d20...  status=completed  actual_cost=0.00188232  cost_source=estimated  chunk_size_used=40
+   chunks: chunk_index=0   status=completed  page_start=1  page_end=1  api_tokens_used=6834  api_cost=0.00188232  cost_source=estimated
+   ```
+   **Cả `chunks.cost_source` và `jobs.cost_source` đều là `'estimated'`** — đúng hành vi của
+   `Pdf2zhRunner.reports_token_usage = False`, KHÔNG bị metered hoá bởi thay đổi S6. Không có
+   regression.
+6. **R6-03 — mở output thật ra xem, không chỉ tin `status`**: đã mở
+   `data/outputs/3a260d20-1d71-422a-97fa-07f3f1785a20/translated_vi.pdf` bằng `pymupdf`, `page_count=1`,
+   `get_text()` trang 1 có **"Bột bánh quy đường drop"** (bản dịch tiếng Việt thật của tiêu đề công
+   thức gốc "Drop Sugar Cookie Dough") — không phải `text_len=0` kiểu Bug #5, không phải gibberish.
+7. **Restore `.env`**: xoá dòng `PDF_TRANSLATE_ENGINE=pdf2zh` vừa thêm, `git diff .env` sau khi xoá
+   → **rỗng** (byte-identical với bản gốc, không có dòng thừa/khác biệt nào sót lại).
+8. **Restart lại server về trạng thái cũ**: `kill` 2 tiến trình PID 29711/29713, khởi động lại
+   `uv run uvicorn` (log `/private/tmp/bb-app-qa-s6-restore.log`). Log khởi động sạch: `Started
+   server process` → `Application startup complete` → `Uvicorn running`, `job_recovery` báo
+   **"đã đánh dấu 0 job mồ côi thành failed"** (đúng — job test đã `completed` trước khi kill, không
+   có job nào đang `processing` bị gián đoạn giữa chừng). `GET /api/settings` trả 200 ngay sau
+   restart — server chạy lại bình thường, không lỗi khởi động.
+
+### Chi phí thực tế đã dùng cho đợt QA bổ sung này
+
+`actual_cost = 0.00188232` USD (job pdf2zh 1 trang, provider deepseek) — thấp hơn nhiều ước tính
+$0.05–0.1 đã duyệt trước, không có runaway.
+
+### Kết luận S6 (tổng hợp cả 2 đợt QA)
+
+Gap cuối cùng còn thiếu của S6 ("hồi quy pdf2zh phải vẫn `estimated`", §6.23.7 Live E2E bullet 4)
+đã được verify sống, KHÔNG mock: `cost_source='estimated'` cho cả `chunks` và `jobs` khi chạy
+pdf2zh thật qua đúng đường API (`POST /api/upload` → `POST /api/estimate` → `POST /api/jobs`),
+đúng như `Pdf2zhRunner.reports_token_usage = False` yêu cầu — không bị ảnh hưởng bởi bất kỳ thay
+đổi nào của S6 (nhánh pdf2zh trong `job_orchestrator.py`/`pdf2zh_runner.py` không bị đụng tới theo
+đúng thiết kế). Kết hợp với đợt QA babeldoc `metered` đã PASS trước đó (R5-03 + R6-03 đầy đủ cho cả
+2 nhánh engine), S6 nay đã đủ điều kiện đóng.
+
+`.env` và server đã được **restore về đúng trạng thái ban đầu** (mặc định `babeldoc`, `git diff .env`
+rỗng), server khởi động lại sạch, không lỗi.
+
+**`ready_for_release: YES`** — cả 2 nhánh engine (`babeldoc` metered, `pdf2zh` estimated) đã có live
+verification thật (R5-03), pipeline nhiều bước đã kiểm nội dung output cuối cùng thay vì chỉ tin
+`status` (R6-03), không còn gap nào bị chặn.

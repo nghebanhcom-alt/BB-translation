@@ -21,7 +21,7 @@ import math
 import os
 import shutil
 import zipfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -271,6 +271,19 @@ def _count_text_segments(file_path: Path, page_start: int, page_end: int) -> int
             blocks = doc[page_num].get_text("blocks")
             count += sum(1 for block in blocks if block[4].strip())
     return max(count, 1)
+
+
+def rollup_cost_source(chunks: Sequence[Chunk]) -> str:
+    """BL-10 (Architecture.md 6.23.5) — 'metered' CHI khi MOI chunk co dong
+    gop chi phi (`api_cost is not None`) deu la so do that. Tron lan (vai
+    chunk metered, vai chunk fallback estimated) -> 'estimated': mot tong
+    chua so uoc luong thi ban than no la so uoc luong. Khong tao gia tri thu
+    ba 'partial' — cot dang la 2 gia tri trong hop dong §4.2 va UI da re theo
+    dung 2 gia tri do. Khong chunk nao co api_cost (job fail som) -> mac
+    dinh an toan 'estimated'.
+    """
+    sources = {c.cost_source for c in chunks if c.api_cost is not None}
+    return "metered" if sources == {"metered"} else "estimated"
 
 
 #: BL-04 (Architecture.md 6.22.6.1 "Rang buoc hinh thuc chong mo mo") — moi
@@ -649,6 +662,26 @@ class JobOrchestrator:
             )
         return value
 
+    @property
+    def _reports_token_usage(self) -> bool:
+        """BL-10 (Architecture.md 6.23.3 R8-03) — hoi NANG LUC cua engine da
+        chon, khong hoi TEN engine. Cung khuon voi `_needs_font_shrink` va
+        `_reports_own_paragraph_drops` o tren: `isinstance` guard la CO CHU
+        DICH — `AsyncMock(spec=...)` chi copy TEN thuoc tinh, khong copy GIA
+        TRI class attribute, nen mot test babeldoc quen set thuoc tinh se am
+        tham chay nhanh pdf2zh (cost_source='estimated') va van PASS neu
+        khong co guard nay.
+        """
+        value = self._translator_runner.reports_token_usage
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self._translator_runner).__name__}.reports_token_usage phai la bool, "
+                f"nhan duoc {value!r}. Neu day la test dung AsyncMock(spec=...), phai set "
+                "tuong minh `runner.reports_token_usage = True/False` cho dung nhanh dang test "
+                "(Architecture.md BL-10 6.23.3 R8-03)."
+            )
+        return value
+
     async def run_job(self, job_id: str, db_session: AsyncSession) -> JobResult:
         job = await db_session.get(Job, job_id)
         if job is None:
@@ -845,10 +878,14 @@ class JobOrchestrator:
             )
             if self._settings.cost_cap_enabled and completed_cost > effective_cap:
                 job.actual_cost = completed_cost
-                job.cost_source = "estimated"
+                # BL-10 (Architecture.md 6.23.5) — suy ra tu DUNG tap chunk da
+                # cong vao completed_cost o tren (chunks[:position]), khong
+                # dat cung "estimated".
+                job.cost_source = rollup_cost_source(chunks[:position])
+                cost_kind = "THAT" if job.cost_source == "metered" else "uoc tinh"
                 job.status = "cost_capped"
                 job.error_message = (
-                    f"Job dung o chunk {chunk.chunk_index}: chi phi uoc tinh tich luy "
+                    f"Job dung o chunk {chunk.chunk_index}: chi phi {cost_kind} tich luy "
                     f"${completed_cost:.2f} da vuot tran ${effective_cap:.2f}. Cac chunk da "
                     "dich duoc giu nguyen — tang tran trong Settings roi bam Retry de chay tiep."
                 )
@@ -1017,9 +1054,11 @@ class JobOrchestrator:
             await create_bilingual_pdf(merged_path, file_path, bilingual_path)
             job.bilingual_path = str(bilingual_path)
 
-        # Step 10: finalize cost (UOC LUONG — pdf2zh khong xuat token that, 6.6.6).
+        # Step 10: finalize cost. BL-10 (Architecture.md 6.23.5) — suy ra tu
+        # cost_source cua tung chunk, khong dat cung "estimated" nua (pdf2zh
+        # van luon 'estimated' vi khong chunk nao cua no dat duoc 'metered').
         job.actual_cost = sum(chunk.api_cost or 0.0 for chunk in chunks)
-        job.cost_source = "estimated"
+        job.cost_source = rollup_cost_source(chunks)
 
         # BL-04 R-2 (Architecture.md 6.22.6.2) — mat hien thi DUY NHAT cua
         # BL-04 (chua co UI/API — BL-09). BAT BUOC dem bang 1 cau SELECT COUNT
@@ -2209,19 +2248,53 @@ class JobOrchestrator:
                     exc_info=True,
                 )
 
-        source_text = _extract_chunk_text(source_path, chunk)
-        segment_count = _count_text_segments(source_path, chunk.page_start, chunk.page_end)
-        input_tokens, output_tokens, cost_usd = estimate_chunk_cost(
-            source_text=source_text,
-            segment_count=segment_count,
-            prompt_overhead_chars=prompt_overhead_chars,
-            provider=pricing_provider,
-            vi_expansion=self._settings.vi_expansion_factor,
-            vi_token_factor=self._settings.vi_token_factor,
-        )
+        # BL-10 (Architecture.md 6.23.4) — capability cua engine DA CHON
+        # (R8-03), khong hoi ten engine. `usage` phai den tu `pdf2zh_result`
+        # (return value cua lan dich CHUNK NAY), tuyet doi khong tu `self`,
+        # khong tu bien tich luy cap job (R6-01/Bug #5).
+        usage = pdf2zh_result.real_token_usage if self._reports_token_usage else None
+        if self._reports_token_usage and usage is None:
+            logger.warning(
+                "6.23: engine bao co token usage nhung KHONG parse duoc dong "
+                "'Total tokens:' tren stdout cho chunk %s cua job %s — roi ve "
+                "estimate_chunk_cost() (cost_source='estimated'). Kiem tra version "
+                "babeldoc/log level, xem Architecture.md 6.23.2.",
+                chunk.chunk_index,
+                job.id,
+            )
 
-        chunk.api_tokens_used = input_tokens + output_tokens
+        if usage is not None:
+            tokens_used = usage.total_tokens
+            cost_usd = pricing_provider.estimate_cost(usage.prompt_tokens, usage.completion_tokens)
+            cost_source = "metered"
+            if usage.prompt_tokens + usage.completion_tokens != usage.total_tokens:
+                logger.warning(
+                    "6.23: babeldoc bao total_tokens=%d nhung prompt_tokens+completion_tokens=%d "
+                    "cho chunk %s cua job %s (lech %d) — chi log, khong doi hanh vi tinh tien "
+                    "(Architecture.md 6.23.1 ASSUMED #2).",
+                    usage.total_tokens,
+                    usage.prompt_tokens + usage.completion_tokens,
+                    chunk.chunk_index,
+                    job.id,
+                    usage.total_tokens - (usage.prompt_tokens + usage.completion_tokens),
+                )
+        else:
+            source_text = _extract_chunk_text(source_path, chunk)
+            segment_count = _count_text_segments(source_path, chunk.page_start, chunk.page_end)
+            input_tokens, output_tokens, cost_usd = estimate_chunk_cost(
+                source_text=source_text,
+                segment_count=segment_count,
+                prompt_overhead_chars=prompt_overhead_chars,
+                provider=pricing_provider,
+                vi_expansion=self._settings.vi_expansion_factor,
+                vi_token_factor=self._settings.vi_token_factor,
+            )
+            tokens_used = input_tokens + output_tokens
+            cost_source = "estimated"
+
+        chunk.api_tokens_used = tokens_used
         chunk.api_cost = cost_usd
+        chunk.cost_source = cost_source
         chunk.status = "completed"
         chunk.completed_at = datetime.now(UTC)
         db_session.add(chunk)
@@ -2367,6 +2440,7 @@ class JobOrchestrator:
                 # chi doc chunk `completed` + co `output_path`).
                 chunk.api_tokens_used = total_input_tokens + total_output_tokens
                 chunk.api_cost = total_cost
+                chunk.cost_source = "metered"  # BL-10 (6.23.5) — so THAT tu TranslationResult
                 chunk.status = "failed"
                 chunk.output_path = None
                 db_session.add(chunk)
@@ -2437,6 +2511,7 @@ class JobOrchestrator:
                 # dung, KHONG danh dau "completed" (chi ghi cost/token).
                 chunk.api_tokens_used = total_input_tokens + total_output_tokens
                 chunk.api_cost = total_cost
+                chunk.cost_source = "metered"  # BL-10 (6.23.5) — so THAT tu TranslationResult
                 db_session.add(chunk)
                 await db_session.commit()
                 raise EpubRequestRunawayError(
@@ -2673,6 +2748,7 @@ class JobOrchestrator:
             # chunk TRUOC khi raise, dung pattern EpubChunkCostCapExceeded.
             chunk.api_tokens_used = total_input_tokens + total_output_tokens
             chunk.api_cost = total_cost
+            chunk.cost_source = "metered"  # BL-10 (6.23.5) — so THAT tu TranslationResult
             db_session.add(chunk)
             await db_session.commit()
             raise EpubBatchTranslationError(
@@ -2732,6 +2808,7 @@ class JobOrchestrator:
         # — day chinh la diem `cost_source='metered'` bat nguon tu (6.20.8).
         chunk.api_tokens_used = total_input_tokens + total_output_tokens
         chunk.api_cost = total_cost
+        chunk.cost_source = "metered"  # BL-10 (6.23.5) — so THAT tu TranslationResult
         chunk.status = "completed"
         chunk.completed_at = datetime.now(UTC)
         db_session.add(chunk)

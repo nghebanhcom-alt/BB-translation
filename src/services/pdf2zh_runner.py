@@ -91,6 +91,11 @@ class Pdf2zhRunner:
     #: kenh bao cao tuong duong. Khong co gi de doc.
     reports_own_paragraph_drops: ClassVar[bool] = False
 
+    #: BL-10 (Architecture.md 6.23.1 T11, 6.23.3 R8-03). pdf2zh vut bo
+    #: `response.usage`, khong in token ra dau ca (§6.6.6) — khong co gi de
+    #: parse. Giu `cost_source='estimated'`.
+    reports_token_usage: ClassVar[bool] = False
+
     def __init__(self, executable: str = "pdf2zh") -> None:
         self._executable = executable
 

@@ -3060,3 +3060,147 @@ quy từ thay đổi HTML tĩnh gần như bằng 0.
 Architecture.md §6.24 (không dịch sai/rút gọn mất ý/thêm claim không nguồn), HTML escape đúng,
 hint chỉ xuất hiện 1 lần ở header `history.html` (không spam theo row), không có JS/logic mới,
 không đụng `src/`, CHANGELOG.md append đúng cách. Không có blocking issue.
+
+## BL-10 — Chi phí ĐO THẬT cho nhánh PDF/babeldoc (`cost_source='metered'`) (2026-09-13)
+
+**Phạm vi review**: `src/services/babeldoc_runner.py`, `src/services/pdf2zh_runner.py`,
+`src/core/job_orchestrator.py`, `src/models/chunk.py`, `src/models/database.py`,
+`tests/test_babeldoc_runner.py`, `tests/integration/test_job_orchestrator.py`,
+`tests/integration/test_job_cancel.py`, `tests/integration/test_job_orchestrator_concurrency.py`,
+`tests/fixtures/babeldoc/token_usage_stdout.txt` (golden file mới), `docs/CHANGELOG.md`. Đối chiếu
+với đặc tả `docs/Architecture.md` §6.23 (dòng 8003–8358).
+
+**1. Correctness thường lệ**: Đọc toàn bộ diff `job_orchestrator.py`/`babeldoc_runner.py`. Logic
+2 nhánh (`usage is not None` / fallback) đúng như pseudocode §6.23.4, không leak exception nào
+mới (đường parse bọc trong hàm thuần `parse_babeldoc_token_usage`, trả `None` thay vì raise khi
+thiếu dòng — đã tự đọc code, không chỉ tin docstring). Type hints đầy đủ (`BabeldocTokenUsage`
+frozen dataclass, `parse_babeldoc_token_usage(stdout: str) -> BabeldocTokenUsage | None`,
+`rollup_cost_source(chunks: Sequence[Chunk]) -> str`).
+
+**2. R6-02 — test lineage giá trị cụ thể, không chỉ "đã gọi"**: **ĐẠT**, đã đọc từng test mới
+trong `test_job_orchestrator.py`:
+- `test_metered_chunk_lineage`: bơm `real_token_usage=BabeldocTokenUsage(total=30925, prompt=20000,
+  completion=10925, ...)` qua đúng `pdf2zh_result` return value của lần dịch chunk đó (không qua
+  biến cấp job/self) → assert `chunk.api_tokens_used == 30925` **VÀ** `chunk.cost_source ==
+  "metered"` **VÀ** `chunk.api_cost == pytest.approx(provider.estimate_cost(20000, 10925))` (tính
+  lại bằng chính provider, không hard-code số tiền) **VÀ** `job.cost_source == "metered"` (rollup
+  cấp job) — vượt cả yêu cầu tối thiểu của gate test #4 vì còn verify luôn rollup job.
+- `test_estimated_fallback_when_no_token_line`: `real_token_usage=None` (mặc định của
+  `_fake_babeldoc_runner()`) → `chunk.cost_source == "estimated"` và `api_tokens_used > 0` (không
+  silent-break đường ước lượng cũ) + `job.cost_source == "estimated"`.
+- `test_pdf2zh_never_metered`: engine pdf2zh (`reports_token_usage=False`) → `chunk.cost_source ==
+  "estimated"`, `job.cost_source == "estimated"`.
+- `test_rollup_cost_source` (unit thuần, không qua DB): 3 case đúng theo §6.23.5 — toàn bộ metered
+  ⇒ `"metered"`; trộn 2 metered + 1 estimated ⇒ `"estimated"` (không phải lấy chunk cuối, không có
+  giá trị thứ 3); không chunk nào có `api_cost` ⇒ `"estimated"`.
+
+Không có test nào trong bộ mới chỉ dừng ở `assert_called()`/`assert_awaited()` — mọi test đều
+assert giá trị cụ thể đi qua chuỗi `stdout` (golden) → `BabeldocResult.real_token_usage` →
+`chunk.{api_tokens_used,cost_source,api_cost}` → `job.cost_source`.
+
+**3. R8-03 — capability, không rẽ nhánh cứng theo tên/class engine**: **ĐÚNG khuôn**. Đã đọc kỹ
+property `_reports_token_usage` (`job_orchestrator.py:665-681`): hỏi
+`self._translator_runner.reports_token_usage` (thuộc tính trên chính object runner đang được chọn
+qua property `_translator_runner`, KHÔNG có `isinstance(self._translator_runner, BabeldocRunner)`
+hay `if engine == "babeldoc"` nào trong thân hàm). Guard `isinstance(value, bool)` mà Dev nói tới
+KHÔNG phải guard theo class name — đây là guard theo KIỂU DỮ LIỆU trả về (đề phòng
+`AsyncMock(spec=...)` không set thuộc tính trả về 1 `Mock` object thay vì `bool`), đúng y hệt
+khuôn `_needs_font_shrink`/`_reports_own_paragraph_drops` đã có sẵn trước đó (`job_orchestrator.py`
+đọc dòng 636-681, 3 property liền kề cùng pattern). Không phải "rẽ nhánh cứng trá hình" — đã tự
+đối chiếu, không chỉ tin lời Dev.
+
+**4. §6.23.5 rollup `jobs.cost_source`**: **ĐÚNG** — `rollup_cost_source()` (`job_orchestrator.py`)
+trả `"metered"` chỉ khi `{c.cost_source for c in chunks if c.api_cost is not None} == {"metered"}`,
+tức **có ≥1 chunk estimated (trong tập có `api_cost`) ⇒ job estimated**, không phải lấy chunk cuối
+cùng hay ngược lại. Áp dụng đúng 2 điểm bắt buộc: Bước 10 (`job_orchestrator.py:1062`, dùng toàn
+bộ `chunks`) và nhánh `cost_capped` (dùng `chunks[:position]` — đúng tập đã cộng vào
+`completed_cost`, khớp yêu cầu §6.23.5). Nhánh EPUB: đã grep toàn file xác nhận cả 4 vị trí
+`chunk.api_tokens_used = total_input_tokens + total_output_tokens` (dòng 2441, 2512, 2749, 2809)
+đều được thêm đúng `chunk.cost_source = "metered"` ngay cạnh — không sót vị trí nào; 5 vị trí
+`job.cost_source = "metered"` cấp job (dòng 1246, 1305, 1342, 1466, 1728) giữ nguyên không đổi
+đúng như "Nhánh EPUB không đổi luật".
+
+**5. Migration an toàn (`server_default`)**: đã tự verify bằng cách chạy thật (không chỉ tin Dev):
+- `uv run python3` dựng 1 bảng SQLAlchemy tối giản với `server_default="estimated"` (giống cách
+  `sa_column_kwargs` truyền vào `Field`) → `CreateTable` sinh đúng `DEFAULT 'estimated'` (có quote,
+  SQLAlchemy tự escape literal string) — không phải `DEFAULT estimated` (invalid SQL) như lo ngại
+  ban đầu khi đọc code.
+- Chạy thật `tests/test_database_chunks_unit_columns_migration.py` (test **có sẵn từ trước**, mô
+  phỏng bảng `chunks` legacy KHÔNG có cột `cost_source`) — pass, xác nhận đường
+  `_migrate_chunks_unit_columns()` (rebuild bảng qua `create_all()` + `INSERT...SELECT` với
+  `col_list` đọc từ `PRAGMA table_info` của bảng cũ, không liệt kê `cost_source`) không vỡ NOT NULL
+  constraint nhờ `server_default` áp dụng tại thời điểm `create_all()`.
+- Đường nâng cấp phổ biến hơn (DB đã có `page_start` nullable từ trước, chỉ thiếu `cost_source`)
+  đi qua `_add_missing_columns()` → `ALTER TABLE chunks ADD COLUMN cost_source TEXT NOT NULL
+  DEFAULT 'estimated'` — SQLite cho phép cú pháp này (đã biết từ trước, không cần verify lại).
+
+**6. R5-04 (Protocol 5, checklist bắt buộc cho service wrapper)**: **External contract verified
+against real source: YES (nguồn: golden file `tests/fixtures/babeldoc/token_usage_stdout.txt` —
+đã tự đọc nguyên văn nội dung file, xác nhận đây là output thật của 1 lần chạy babeldoc 0.6.4 thật
+qua DeepSeek API, KHÔNG phải bịa tay: có timestamp thật khớp ngày review [09/13/26], có đường dẫn
+output tuyệt đối trỏ vào chính thư mục scratchpad của session Dev
+`/private/tmp/claude-501/.../scratchpad/bl10_spike_out/...` — dấu hiệu không thể giả lập bằng cách
+gõ tay theo mô tả Architecture.md, có cảnh báo pymupdf `fitz` deprecated thật, có progress bar
+rich thật, và 4 dòng `Total tokens:`/`Prompt tokens:`/`Completion tokens:`/`Cache hit prompt
+tokens:` khớp 100% định dạng đã verify ở §6.23.1 T4/T7 — tiền tố `INFO:babeldoc.main:`, không dấu
+phân cách nghìn, đúng nhãn, đúng thứ tự)**. Không phải mock viết tay theo giả định — đạt yêu cầu
+Protocol 5 mục 3.
+
+**7. Đối chiếu 8 test §6.23.7**: cả 8 đều có mặt, với tên khớp hoặc gần khớp có ghi chú "Gate test
+#N" ngay trong docstring (thuận tiện trace ngược về Architecture.md):
+1. `test_parse_token_usage_golden` ✓ (`tests/test_babeldoc_runner.py`)
+2. `test_parse_token_usage_no_cache_hit_confusion` ✓ (chống đúng bẫy case-sensitive/substring)
+3. `test_parse_token_usage_missing_lines_returns_none_no_raise` ✓ (gộp luôn case "chỉ có Total
+   tokens" — đúng yêu cầu "thiếu bất kỳ dòng nào trong 3 dòng bắt buộc ⇒ `None`")
+4. `test_metered_chunk_lineage` ✓ (`tests/integration/test_job_orchestrator.py`)
+5. `test_estimated_fallback_when_no_token_line` ✓
+6. `test_pdf2zh_never_metered` ✓
+7. `test_reports_token_usage_property_isinstance_guard_catches_unset_mock` ✓ (đúng khuôn 2 guard
+   test có sẵn cho `needs_font_shrink`/`reports_own_paragraph_drops`)
+8. `test_rollup_cost_source` ✓
+
+Thêm 2 test không bắt buộc nhưng hợp lý: `test_parse_token_usage_ignores_stderr_only_lines` (củng
+cố ràng buộc "chỉ đọc stdout") và
+`test_translate_pages_parses_real_token_usage_from_golden_stdout` (test tích hợp cấp
+`BabeldocRunner.translate_pages()`, xác nhận golden stdout thật sự chảy được tới
+`BabeldocResult.real_token_usage` qua đúng subprocess mock — không chỉ test hàm parse thuần tuý)
+và `test_babeldoc_runner_reports_token_usage_capability_is_true`.
+
+**8. Phạm vi thay đổi**: đã tự chạy `git diff --stat` toàn bộ — xác nhận **KHÔNG** đụng
+`docs/Architecture.md`, `docs/design-log.md`, `src/services/deepseek_provider.py`. Grep xác nhận
+`estimate_chunk_cost()` không bị sửa nội dung — 2 dòng gọi hàm này trong `_process_chunk()` chỉ bị
+**di chuyển** vào nhánh `else` (nguyên văn, không đổi tham số/logic bên trong hàm), không phải bị
+xoá — đã đối chiếu diff đầy đủ để phân biệt "move" với "delete". `docs/CHANGELOG.md`: `git diff |
+grep -c "^-[^-]"` = 0, chỉ có dòng thêm mới, append đúng cuối file — đạt R7-03.
+
+**9. Test + lint (tự chạy, không tin báo cáo Dev)**:
+- `uv run ruff check src/ tests/` → sạch.
+- `uv run ruff format --check` trên đúng 9 file thuộc phạm vi diff → đã format sẵn, không cần
+  reformat.
+- `uv run pytest tests/test_babeldoc_runner.py tests/integration/test_job_orchestrator.py -q` →
+  94 passed.
+- `uv run pytest` (toàn bộ suite) → **838 passed**, không có regression.
+- `uv run pytest tests/test_database_chunks_unit_columns_migration.py
+  tests/test_database_finished_at_migration.py -q` (chạy riêng để tự verify mục 5 ở trên, không
+  nằm trong yêu cầu brief nhưng cần thiết để xác nhận migration an toàn bằng thực nghiệm chứ không
+  chỉ đọc code) → 5 passed.
+
+### Kết luận
+
+**APPROVE** (Vòng 1/3) cho BL-10 — chi phí đo thật `cost_source='metered'` cho nhánh
+PDF/babeldoc. Code khớp sát đặc tả §6.23, data lineage đúng (R6-01/R6-02, không lặp lại kiểu lỗi
+Bug #5), capability đúng tinh thần R8-03 (không rẽ nhánh cứng theo tên engine), rollup job đúng
+"có 1 chunk estimated ⇒ job estimated", migration `server_default` đã tự verify chạy thật (không
+chỉ tin lời Dev), golden file là output thật (không phải mock viết tay), đủ cả 8 test bắt buộc
+theo §6.23.7 (cộng thêm vài test có giá trị). Test toàn repo pass (838), ruff sạch. Không có
+blocking issue.
+
+**Không blocking, ghi nhận để theo dõi** (đã có sẵn trong Architecture.md §6.23.8, không phải phát
+hiện mới của Reviewer, nhắc lại ở đây để không ai bỏ sót khi release): (a) bảng giá DeepSeek có thể
+lỗi thời — `cost_source='metered'` chỉ đảm bảo *số token* là thật, không đảm bảo *số tiền* đúng;
+(b) under-count khi có retry (token của attempt fail không được cộng); (c) chưa chiết khấu
+cache-hit token (thiên về ước cao, an toàn). QA cần đọc §6.23.8 trước khi release, và theo R5-03 +
+R6-03, phải có ít nhất 1 lần chạy job PDF thật bằng babeldoc, mở DB đối chiếu
+`sum(chunks.api_tokens_used)` với tổng token in trong log thật của từng chunk trước khi đánh dấu
+`ready_for_release` — golden file ở review này là spike đơn-chunk (1 trang), chưa phải live E2E
+nhiều-chunk theo đúng yêu cầu §6.23.7 "Live E2E".

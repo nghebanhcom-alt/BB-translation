@@ -27,9 +27,11 @@ from src.services.babeldoc_runner import (
     BabeldocResult,
     BabeldocRunner,
     BabeldocTimeoutError,
+    BabeldocTokenUsage,
     _parse_drop_report_file,
     _parse_drop_report_lines,
     _resolve_openai_compat,
+    parse_babeldoc_token_usage,
 )
 from src.services.pdf2zh_service_map import Pdf2zhService, UnsupportedForPdfPipelineError
 
@@ -942,3 +944,83 @@ def test_babeldoc_drop_report_dataclass_default_is_unavailable_not_zero_drops() 
         duration_seconds=0.1,
     )
     assert result.drop_report.available is False
+
+
+# --- BL-10 (Architecture.md 6.23) — parse_babeldoc_token_usage() ------------
+#
+# Golden file `tests/fixtures/babeldoc/token_usage_stdout.txt` la stdout THAT
+# tu 1 lan chay babeldoc 0.6.4 end-to-end (Dev, 2026-09-13, R5-02 spike bat
+# buoc) qua DUNG duong app goi (subprocess CLI, --no-auto-extract-glossary,
+# --skip-scanned-detection, --pages 1) voi API key DeepSeek that tren
+# `tests/fixtures/babeldoc/page14_numbered_list_source.pdf`. Dinh dang khop
+# 100% voi Architecture.md 6.23.1 T4/T7 (khong lech, khong can escalate):
+# tien to `INFO:babeldoc.main:`, khong co dau phan cach nghin, 4 dong xuat
+# hien tren stdout (khong phai stderr).
+
+
+def test_parse_token_usage_golden() -> None:
+    stdout = _read_fixture("token_usage_stdout.txt").decode("utf-8")
+    usage = parse_babeldoc_token_usage(stdout)
+    assert usage == BabeldocTokenUsage(
+        total_tokens=2063,
+        prompt_tokens=1151,
+        completion_tokens=912,
+        cache_hit_prompt_tokens=0,
+    )
+
+
+def test_parse_token_usage_no_cache_hit_confusion() -> None:
+    """Chong bay 6.23.2 muc 1: `Prompt tokens: 111` la substring cua
+    `Cache hit prompt tokens: 999` — thieu case-sensitive/anchor dung se lam
+    `prompt_tokens` nhan nham gia tri cache-hit."""
+    stdout = (
+        "INFO:babeldoc.main:Total tokens: 1110\n"
+        "INFO:babeldoc.main:Prompt tokens: 111\n"
+        "INFO:babeldoc.main:Completion tokens: 999\n"
+        "INFO:babeldoc.main:Cache hit prompt tokens: 999\n"
+    )
+    usage = parse_babeldoc_token_usage(stdout)
+    assert usage is not None
+    assert usage.prompt_tokens == 111
+    assert usage.cache_hit_prompt_tokens == 999
+
+
+def test_parse_token_usage_missing_lines_returns_none_no_raise() -> None:
+    assert parse_babeldoc_token_usage("") is None
+    assert parse_babeldoc_token_usage("INFO:babeldoc.main:Total tokens: 100\n") is None
+
+
+def test_parse_token_usage_ignores_stderr_only_lines() -> None:
+    """6.23.2 muc 2: chi doc stdout — mo phong bang cach KHONG dua cac dong
+    token vao chuoi truyen vao ham (ham khong biet stdout/stderr, nhung
+    call site translate_pages() phai CHI truyen `stdout`, khong noi
+    `stderr`); o day xac nhan thieu du 3 dong bat buoc -> None, khong doan."""
+    only_total = "INFO:babeldoc.main:Total tokens: 500\n"
+    assert parse_babeldoc_token_usage(only_total) is None
+
+
+@pytest.mark.asyncio
+async def test_translate_pages_parses_real_token_usage_from_golden_stdout(
+    tmp_path: Path, mocker
+) -> None:
+    """R6-02: gia tri cu the truyen tu stdout THAT sang
+    `BabeldocResult.real_token_usage`, khong chi 'da goi'."""
+    stdout_payload = _read_fixture("token_usage_stdout.txt")
+    fake_process = _FakeProcess(returncode=0, stdout=stdout_payload, stderr=b"")
+    mocker.patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_process))
+
+    runner = BabeldocRunner()
+    result = await runner.translate_pages(
+        input_path=tmp_path / "input.pdf",
+        output_dir=tmp_path / "out",
+        page_range="1-1",
+        service=_DEEPSEEK_SERVICE,
+    )
+
+    assert result.real_token_usage == BabeldocTokenUsage(
+        total_tokens=2063, prompt_tokens=1151, completion_tokens=912, cache_hit_prompt_tokens=0
+    )
+
+
+def test_babeldoc_runner_reports_token_usage_capability_is_true() -> None:
+    assert BabeldocRunner.reports_token_usage is True

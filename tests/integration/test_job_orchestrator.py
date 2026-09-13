@@ -13,7 +13,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from src.core.config import Settings
-from src.core.job_orchestrator import JobOrchestrator
+from src.core.job_orchestrator import JobOrchestrator, rollup_cost_source
 from src.models.chunk import Chunk
 from src.models.job import Job
 from src.models.layout_qa import LayoutQaFinding
@@ -26,6 +26,7 @@ from src.services.babeldoc_runner import (
     BabeldocDropReport,
     BabeldocResult,
     BabeldocRunner,
+    BabeldocTokenUsage,
     _parse_drop_report_file,
 )
 from src.services.layout_qa import (
@@ -137,6 +138,7 @@ def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
+    runner.reports_token_usage = False  # BL-10 (6.23.3)
     call_counter = {"n": 0}
 
     async def _translate_pages(
@@ -167,6 +169,7 @@ def _fake_pdf2zh_runner_with_forced_overflow() -> Pdf2zhRunner:
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
+    runner.reports_token_usage = False  # BL-10 (6.23.3)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -456,6 +459,7 @@ async def test_run_job_calls_mineru_before_pdf2zh_for_pdf_scan(
     tracked_pdf2zh = AsyncMock(spec=Pdf2zhRunner)
     tracked_pdf2zh.needs_font_shrink = True
     tracked_pdf2zh.reports_own_paragraph_drops = False
+    tracked_pdf2zh.reports_token_usage = False  # BL-10 (6.23.3)
     tracked_pdf2zh.translate_pages.side_effect = _tracked_translate_pages
     tracked_mineru = AsyncMock(spec=MinerURunner)
     tracked_mineru.parse_document.side_effect = _tracked_parse_document
@@ -520,6 +524,7 @@ def _fake_pdf2zh_runner_empty_output() -> Pdf2zhRunner:
     runner = AsyncMock(spec=Pdf2zhRunner)
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
+    runner.reports_token_usage = False  # BL-10 (6.23.3)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -585,6 +590,11 @@ def _fake_babeldoc_runner() -> BabeldocRunner:
     runner = AsyncMock(spec=BabeldocRunner)
     runner.needs_font_shrink = False
     runner.reports_own_paragraph_drops = True
+    # BL-10 (Architecture.md 6.23.3). Matches real BabeldocRunner default;
+    # BabeldocResult.real_token_usage defaults to None below -> falls back to
+    # estimate_chunk_cost() (cost_source stays "estimated") unless a test
+    # overrides real_token_usage explicitly.
+    runner.reports_token_usage = True
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -1084,6 +1094,7 @@ async def test_empty_translation_fails_before_compress_runs(
     babeldoc_runner = AsyncMock(spec=BabeldocRunner)
     babeldoc_runner.needs_font_shrink = False
     babeldoc_runner.reports_own_paragraph_drops = True
+    babeldoc_runner.reports_token_usage = True  # BL-10 (6.23.3) — matches real default
 
     async def _translate_pages_empty(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -2298,6 +2309,7 @@ async def test_r2_log_counts_from_db_including_resumed_chunk_findings(
         runner = AsyncMock(spec=BabeldocRunner)
         runner.needs_font_shrink = False
         runner.reports_own_paragraph_drops = True
+        runner.reports_token_usage = True  # BL-10 (6.23.3) — matches real default
 
         async def _translate_pages(
             input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -2373,3 +2385,165 @@ async def test_r2_log_counts_from_db_including_resumed_chunk_findings(
     ]
     assert len(r2_messages) == 1
     assert "babeldoc_finding_count=4" in r2_messages[0]
+
+
+# --- BL-10 (Architecture.md 6.23) — cost_source='metered' cho nhanh babeldoc
+
+
+@pytest.mark.asyncio
+async def test_metered_chunk_lineage(session: AsyncSession, tmp_path: Path) -> None:
+    """Gate test #4 (test_metered_chunk_lineage, R6-02 — test trung tam):
+    `real_token_usage` tra ve tu CHINH lan dich chunk nay phai chay het qua
+    `_process_chunk()` toi dung 3 cot `api_tokens_used`/`cost_source`/
+    `api_cost`, va `api_cost` phai tinh LAI bang chinh provider (khong
+    hard-code so tien)."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    babeldoc_runner = _fake_babeldoc_runner()
+    original_side_effect = babeldoc_runner.translate_pages.side_effect
+
+    async def _with_real_usage(*args, **kwargs):
+        result = await original_side_effect(*args, **kwargs)
+        result.real_token_usage = BabeldocTokenUsage(
+            total_tokens=30925,
+            prompt_tokens=20000,
+            completion_tokens=10925,
+            cache_hit_prompt_tokens=0,
+        )
+        return result
+
+    babeldoc_runner.translate_pages.side_effect = _with_real_usage
+    provider = _FakePricingProvider()
+
+    orchestrator = JobOrchestrator(
+        # cost_cap_enabled=False: 30925 tokens * 0.0001 FakePricingProvider rate
+        # = ~$3.09, over Settings.max_cost_per_job_usd's $2.00 default -- this
+        # test is about lineage/rollup, not the cost cap gate (already covered
+        # by other tests).
+        settings=Settings(pdf_translate_engine="babeldoc", cost_cap_enabled=False),
+        babeldoc_runner=babeldoc_runner,
+        provider=provider,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+    assert result.status == "completed"
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunks = chunks_result.all()
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.api_tokens_used == 30925
+    assert chunk.cost_source == "metered"
+    assert chunk.api_cost == pytest.approx(provider.estimate_cost(20000, 10925))
+
+    await session.refresh(job)
+    assert job.cost_source == "metered"
+
+
+@pytest.mark.asyncio
+async def test_estimated_fallback_when_no_token_line(session: AsyncSession, tmp_path: Path) -> None:
+    """Gate test #5 (test_estimated_fallback_when_no_token_line): engine bao
+    co token usage (`reports_token_usage=True`) nhung lan chay nay khong
+    parse duoc (`real_token_usage=None`, mac dinh cua `_fake_babeldoc_runner`)
+    -> roi ve DUNG `estimate_chunk_cost()` nhu truoc BL-10, khong silent-break
+    test hien co."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=_fake_babeldoc_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+    assert result.status == "completed"
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunk = chunks_result.one()
+    assert chunk.cost_source == "estimated"
+    assert chunk.api_tokens_used is not None and chunk.api_tokens_used > 0
+
+    await session.refresh(job)
+    assert job.cost_source == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_pdf2zh_never_metered(session: AsyncSession, tmp_path: Path) -> None:
+    """Gate test #6 (test_pdf2zh_never_metered): `Pdf2zhRunner` co
+    `reports_token_usage=False` (khong co field `real_token_usage` nao tren
+    `Pdf2zhResult` de doc) -> `_process_chunk()` khong bao gio vao nhanh
+    metered cho pdf2zh."""
+    source_pdf = tmp_path / "source.pdf"
+    _make_pdf(source_pdf, 3)
+    job = await _create_job(session, source_pdf, file_type="pdf_digital")
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="pdf2zh"),
+        pdf2zh_runner=_fake_pdf2zh_runner(),
+        provider=_FakePricingProvider(),
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    result = await orchestrator.run_job(job.id, session)
+    assert result.status == "completed"
+
+    chunks_result = await session.exec(select(Chunk).where(Chunk.job_id == job.id))
+    chunk = chunks_result.one()
+    assert chunk.cost_source == "estimated"
+
+    await session.refresh(job)
+    assert job.cost_source == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_reports_token_usage_property_isinstance_guard_catches_unset_mock(
+    tmp_path: Path,
+) -> None:
+    """Gate test #7 (test_reports_token_usage_guard) — cung khuon voi
+    `test_needs_font_shrink_property_isinstance_guard_catches_unset_mock` va
+    `test_reports_own_paragraph_drops_property_isinstance_guard_catches_unset_mock`:
+    `AsyncMock(spec=BabeldocRunner)` khong set `reports_token_usage` phai
+    raise `TypeError` ro rang."""
+    runner = AsyncMock(spec=BabeldocRunner)  # deliberately NOT setting reports_token_usage
+    runner.needs_font_shrink = False
+    runner.reports_own_paragraph_drops = True
+
+    orchestrator = JobOrchestrator(
+        settings=Settings(pdf_translate_engine="babeldoc"),
+        babeldoc_runner=runner,
+        output_dir=tmp_path / "outputs",
+        processing_dir=tmp_path / "processing",
+    )
+
+    with pytest.raises(TypeError, match="reports_token_usage"):
+        _ = orchestrator._reports_token_usage
+
+
+def test_rollup_cost_source() -> None:
+    """Gate test #8 (test_rollup_cost_source, Architecture.md 6.23.5)."""
+
+    def _chunk(cost_source: str, api_cost: float | None) -> Chunk:
+        return Chunk(
+            job_id="job-1",
+            chunk_index=0,
+            cost_source=cost_source,
+            api_cost=api_cost,
+        )
+
+    all_metered = [_chunk("metered", 0.01), _chunk("metered", 0.02), _chunk("metered", 0.03)]
+    assert rollup_cost_source(all_metered) == "metered"
+
+    mixed = [_chunk("metered", 0.01), _chunk("metered", 0.02), _chunk("estimated", 0.03)]
+    assert rollup_cost_source(mixed) == "estimated"
+
+    none_priced = [_chunk("metered", None), _chunk("estimated", None)]
+    assert rollup_cost_source(none_priced) == "estimated"

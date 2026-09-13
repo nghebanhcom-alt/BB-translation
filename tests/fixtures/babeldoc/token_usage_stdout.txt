@@ -1,0 +1,50 @@
+[09/13/26 09:41:36] INFO     INFO:babeldoc.docvision.base_doclayout:Loading ONNX model...                                                                                           base_doclayout.py:43
+                    INFO     INFO:babeldoc.docvision.doclayout:Using CoreMLExecutionProvider with static input [1, 3, 1024, 1024]                                                        doclayout.py:64
+[09/13/26 09:41:42] INFO     INFO:babeldoc.format.pdf.high_level:start to translate: tests/fixtures/babeldoc/page14_numbered_list_source.pdf                                           high_level.py:533
+warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+[09/13/26 09:41:46] INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Found title paragraph: EQUIPMENT AND SMALLWARES                            il_translator_llm_only.py:171
+                    INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Found first title paragraph: EQUIPMENT AND SMALLWARES                      il_translator_llm_only.py:192
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Translation result is too long or too short. Input: 3, Output: 9        il_translator_llm_only.py:787
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Fallback to simple translation. paragraph id: wCpy3                     il_translator_llm_only.py:828
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Translation result is the same as input, fallback.                      il_translator_llm_only.py:778
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Fallback to simple translation. paragraph id: W76ah                     il_translator_llm_only.py:828
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Translation result is the same as input, fallback.                      il_translator_llm_only.py:778
+                    WARNING  WARNING:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Fallback to simple translation. paragraph id: RXVCN                     il_translator_llm_only.py:828
+[09/13/26 09:41:51] INFO     INFO:babeldoc.format.pdf.document_il.midend.il_translator_llm_only:Translation completed. Total: 12, Successful: 9, Fallback: 3               il_translator_llm_only.py:255
+[09/13/26 09:41:55] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:Font subsetting completed successfully                                                         pdf_creater.py:1285
+nothing to delete
+[09/13/26 09:41:57] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:PDF save with clean=True completed successfully                                                pdf_creater.py:1400
+[09/13/26 09:41:59] INFO     INFO:babeldoc.format.pdf.document_il.backend.pdf_creater:PDF save with clean=True completed successfully                                                pdf_creater.py:1400
+                    INFO     INFO:babeldoc.format.pdf.high_level:Peak memory usage: 2225.52 MB                                                                                         high_level.py:411
+                    INFO     INFO:babeldoc.format.pdf.high_level:finish translate: tests/fixtures/babeldoc/page14_numbered_list_source.pdf, cost: 16.8205988407135 s                   high_level.py:688
+                    INFO     INFO:babeldoc.format.pdf.high_level:No TOC found in the original PDF, skipping migration.                                                                 high_level.py:754
+translate                                              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100/100 0:00:16 0:00:00
+Parse PDF and Create Intermediate Representation (1/1) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Parse Page Layout (1/1)                                ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:00 0:00:00
+Parse Paragraphs (1/1)                                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Parse Formulas and Styles (1/1)                        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Translate Paragraphs (1/1)                             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14/14   0:00:04 0:00:00
+Typesetting (1/1)                                      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:00 0:00:00
+Add Fonts (1/1)                                        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 43/43   0:00:00 0:00:00
+Generate drawing instructions (1/1)                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:00 0:00:00
+Subset font (1/1)                                      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1     0:00:02 0:00:00
+Save PDF (1/1)                                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2/2     0:00:04 0:00:00
+                    INFO     INFO:babeldoc.main:Translation results:                                                                                                                         main.py:763
+                                     Original PDF: tests/fixtures/babeldoc/page14_numbered_list_source.pdf                                                                                              
+                                     Total time: 16.82 seconds                                                                                                                                          
+                                     Monolingual PDF:                                                                                                                                                   
+                             /private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/dde98a2e-6f68-490a-98df-2ea503d5fd40/scratchpad/bl10_spike_out/page14_numbered_list            
+                             _source.no_watermark.vi.mono.pdf                                                                                                                                           
+                                     Dual-language PDF:                                                                                                                                                 
+                             /private/tmp/claude-501/-Users-hieutt-Vibe-Code-Baking-tools-BB-Translation/dde98a2e-6f68-490a-98df-2ea503d5fd40/scratchpad/bl10_spike_out/page14_numbered_list            
+                             _source.no_watermark.vi.dual.pdf                                                                                                                                           
+                                     Peak memory usage: 2225.515625 MB                                                                                                                                  
+                                     Total valid character count: 2873                                                                                                                                  
+                                     Total valid text token count (gpt-4o): 791                                                                                                                         
+                    INFO     INFO:babeldoc.main:Total tokens: 2063                                                                                                                           main.py:772
+                    INFO     INFO:babeldoc.main:Prompt tokens: 1151                                                                                                                          main.py:773
+                    INFO     INFO:babeldoc.main:Completion tokens: 912                                                                                                                       main.py:774
+                    INFO     INFO:babeldoc.main:Cache hit prompt tokens: 0                                                                                                                   main.py:775
+                    INFO     INFO:babeldoc.main:Term extraction tokens: total=0 prompt=0 completion=0 cache_hit_prompt=0                                                                     main.py:778
+                    INFO     INFO:babeldoc.format.pdf.high_level:Waiting for translation to finish...                                                                                  high_level.py:375
+                    INFO     INFO:babeldoc.format.pdf.translation_config:cleanup temp files: /var/folders/pz/847t8wr57bqc2h625lj9j_8w0000gn/T/tmper5q6mvy                      translation_config.py:472

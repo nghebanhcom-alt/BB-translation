@@ -43,6 +43,16 @@ class Chunk(SQLModel, table=True):
     # Copied from Pdf2zhResult/Pdf2zhTimeoutError/Pdf2zhError.rate_limit_hits
     # AFTER the call (Architecture.md 6.12.8) — the same count the AIMD
     # controller used to update ConcurrencyState for this chunk.
+    # BL-10 (Architecture.md 6.23.5). 'estimated' | 'metered' — 'metered' CHI
+    # khi con so o api_tokens_used/api_cost la do that (babeldoc stdout parse
+    # hoac TranslationResult EPUB), khong phai uoc luong tu do dai van ban.
+    # `server_default` (khac vai tro voi `default` cua Field) BAT BUOC o day:
+    # `_migrate_chunks_unit_columns()` (src/models/database.py) rebuild bang
+    # `chunks` bang `create_all()` roi INSERT SELECT DUNG danh sach cot CU
+    # (khong co `cost_source`, cot moi hoan toan) — thieu server_default,
+    # SQLite se raise NOT NULL constraint failed vi INSERT khong dien gia tri
+    # cho cot nay va khong co DEFAULT o muc SQL de tu dien.
+    cost_source: str = Field(default="estimated", sa_column_kwargs={"server_default": "estimated"})
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)

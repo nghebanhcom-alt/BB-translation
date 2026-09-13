@@ -4,7 +4,7 @@
   "phase": "build",
   "version": "1.3.2",
   "released_at": "2026-09-10",
-  "updated_at": "2026-09-11",
+  "updated_at": "2026-09-13",
   "team": {
     "persistent": [
       "pm",
@@ -252,6 +252,15 @@
       "blocked_by": [],
       "output": "web/index.html + web/history.html — hint đã verify qua source Chromium/Firefox thật (Architecture.md §6.24). Reviewer APPROVE (review-report.md), QA PASS ready_for_release YES qua Playwright live (test-report.md), 827 test pass. CHANGELOG.md đã append.",
       "closed_commit": "f55d17f"
+    },
+    {
+      "id": "S6",
+      "title": "Cost metered cho chunk PDF babeldoc — xem decisions-archive.md 'S6 id note'",
+      "owner_role": "qa",
+      "status": "review",
+      "blocked_by": [],
+      "output": "Tech Lead design (Architecture.md §6.23 dòng 8003-8358) → Dev implement (838 test pass, spike R5-02 khớp spec, golden file tests/fixtures/babeldoc/token_usage_stdout.txt) → Reviewer APPROVE vòng 1/3 (review-report.md) → QA live E2E job 2751c13c: cost_source='metered' đúng lineage per-chunk, SUM(chunks.api_cost)==jobs.actual_cost khớp tuyệt đối, output PDF có tiếng Việt thật. ready_for_release: NO — thiếu (1) pdf2zh regression check (2) PM/Hiếu xác nhận restart server production là bước deploy hợp lệ. Chưa commit. Docs gọi item này là 'BL-10' — id trùng backlog BL-10 cũ (done 2026-09-11, việc khác) do PM gán nhầm, xem decisions-archive.md.",
+      "closed_commit": null
     }
   ],
   "loops": [
@@ -264,6 +273,14 @@
       "reset_reason": null
     }
   ],
-  "infra_pending": [],
+  "infra_pending": [
+    {
+      "id": "IP-01",
+      "applied_at": "2026-09-13",
+      "target": "running server (uvicorn production process)",
+      "description": "QA restart server chạy code S6 chưa commit cho live E2E — Hiếu đã xác nhận 2026-09-13 đây là deploy hợp lệ, chờ Dev commit",
+      "commit": null
+    }
+  ],
   "blockers": []
 }
