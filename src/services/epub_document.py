@@ -765,6 +765,7 @@ class EpubDocument:
         with zf:
             names = set(zf.namelist())
             _check_drm(zf, names)
+            _check_mimetype_entry(zf, names, path)
 
             try:
                 container = zf.read("META-INF/container.xml").decode("utf-8")
@@ -982,27 +983,37 @@ class EpubDocument:
                 modified_entries[doc_href] = output_bytes
 
             infolist = src_zf.infolist()
-            if not infolist or infolist[0].filename != "mimetype":
-                raise EpubParseError(
-                    f"'{self.path}': entry dau tien khong phai 'mimetype' — "
-                    "vi pham OCF spec, tu choi ghi de tai cho"
-                )
-            if infolist[0].compress_type != zipfile.ZIP_STORED:
-                raise EpubParseError(f"'{self.path}': entry 'mimetype' khong o dang ZIP_STORED")
+            mimetype_infos = [info for info in infolist if info.filename == "mimetype"]
+            if not mimetype_infos:
+                # load() da kiem entry nay ton tai (L1) — chi con la defensive
+                # guard neu ai goi write_translated() ma khong qua load().
+                raise EpubParseError(f"'{self.path}': khong tim thay entry 'mimetype' de chuan hoa")
+            mimetype_info = mimetype_infos[0]
+            rest_infos = [info for info in infolist if info.filename != "mimetype"]
+            # §6.25.2 L2: 'mimetype' luon la entry DAU TIEN cua output, du vi
+            # tri/compress_type cua no o input the nao — chuan hoa khi GHI,
+            # khong tu choi vi input vi pham (sua duoc, khac voi L1 o load()).
+            ordered_infos = [mimetype_info, *rest_infos]
 
             tmp_path = output_path.with_name(output_path.name + ".tmp")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(tmp_path, "w", allowZip64=True) as out_zf:
-                for info in infolist:
+                for info in ordered_infos:
                     data = modified_entries.get(info.filename)
                     if data is None:
                         data = src_zf.read(info.filename)
                     new_info = zipfile.ZipInfo(filename=info.filename, date_time=info.date_time)
-                    new_info.compress_type = info.compress_type
                     new_info.external_attr = info.external_attr
                     new_info.create_system = info.create_system
                     new_info.internal_attr = info.internal_attr
-                    new_info.flag_bits = info.flag_bits
+                    if info.filename == "mimetype":
+                        # §6.25.1 (EPUB 3.3 §4.3): STORED + khong extra field,
+                        # bat ke input nen kieu gi — writestr() von khong bao
+                        # gio sinh extra field (R5-01 §6.25.4), nen chi can ep
+                        # compress_type.
+                        new_info.compress_type = zipfile.ZIP_STORED
+                    else:
+                        new_info.compress_type = info.compress_type
                     out_zf.writestr(new_info, data)
 
         tmp_path.replace(output_path)
@@ -1073,6 +1084,27 @@ def count_bb_vi_pairs(path: Path) -> tuple[int, int]:
                 if original_text.strip() != translated_text.strip():
                     differing += 1
     return total, differing
+
+
+#: §6.25.1 (EPUB 3.3 §4.3, W3C) — noi dung bat buoc cua entry `mimetype`.
+_EPUB_MIMETYPE = b"application/epub+zip"
+
+
+def _check_mimetype_entry(zf: zipfile.ZipFile, names: set[str], path: Path) -> None:
+    """§6.25.2 L1 (BL-12) — reject SOM (truoc cost gate) khi EPUB thieu han
+    entry `mimetype` hoac noi dung sai. KHONG kiem thu tu/compress_type o
+    day (do la vi pham SUA DUOC, chuan hoa o `write_translated()` L2) —
+    deny-by-default (R8-02) CHI ap dung cho thu KHONG sua duoc: thieu han
+    entry, hoac noi dung khac `application/epub+zip` (app khong tu che entry
+    thay user)."""
+    if "mimetype" not in names:
+        raise EpubParseError(f"EPUB '{path}' thieu entry 'mimetype' — vi pham OCF, tu choi som")
+    content = zf.read("mimetype")
+    if content != _EPUB_MIMETYPE:
+        raise EpubParseError(
+            f"EPUB '{path}': entry 'mimetype' co noi dung '{content!r}', "
+            f"khac '{_EPUB_MIMETYPE!r}' — tu choi som"
+        )
 
 
 def _check_drm(zf: zipfile.ZipFile, names: set[str]) -> None:

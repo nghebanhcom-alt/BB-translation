@@ -6659,3 +6659,140 @@ cũng không phải forum — kết quả WebSearch ban đầu chỉ trả về 
 downloading" (`preferences.ftl:617-618`), wording cũ "Always ask you where to save files" là sai với bản
 hiện tại; (b) private/incognito không lưu lastDir (`DownloadLastDir.sys.mjs:54-61`) → hint không được
 hứa tuyệt đối. Hợp đồng ghi tại Architecture.md §6.24.
+
+---
+
+## BL-12 — RCA: job EPUB thật fail ở bước MERGE CUỐI vì guard OCF `mimetype ZIP_STORED` (Tech Lead, 2026-09-16)
+
+Hợp đồng kết quả: **Architecture.md §6.25** (đọc ở đó nếu chỉ cần biết hệ thống PHẢI làm gì).
+Mục này là nhật ký: bằng chứng, phản biện, quyết định.
+
+### 1. Hiện tượng
+
+Job `bfc0ac24-0664-4932-96da-1ac99c1abc10` (`Sourdough Culture …epub`, 66 chunk, 784 request,
+$0,588) dịch **thành công 66/66 chunk** — gate G-2 §6.20.15 đạt, xác nhận Bug #EPUB-5 đã hết — rồi
+`status="failed"` ở bước cuối với `error_message`:
+
+```
+'<path>…Sourdough Culture….epub': entry 'mimetype' khong o dang ZIP_STORED
+```
+
+Tiền đã trả, không có file output. Job `781b59b0` của Hiếu bị chặn theo.
+
+### 2. Truy vết — "bước MERGE CUỐI" nằm ở đâu
+
+- `src/core/job_orchestrator.py:1412-1424` — `merged_path = self._output_dir / job.id / "translated_vi.epub"`,
+  rồi `doc.write_translated(translations, merged_path, …)`, bọc trong `try/except Exception` →
+  `job.status = "failed"; job.error_message = str(exc)` (`:1425-1431`). Đây là nơi lỗi trồi lên.
+- Chỗ raise thật: `src/services/epub_document.py:984-991`, **bên trong** `write_translated()`:
+
+```python
+infolist = src_zf.infolist()
+if not infolist or infolist[0].filename != "mimetype":
+    raise EpubParseError(...)                       # :985-989
+if infolist[0].compress_type != zipfile.ZIP_STORED:
+    raise EpubParseError(f"'{self.path}': entry 'mimetype' khong o dang ZIP_STORED")  # :990-991
+```
+
+Nguồn gốc guard: commit `b5dad5e` *"US-22 EPUB — Bước 1/3: EpubDocument parser"*
+(`git log -S "khong o dang ZIP_STORED"`) — tức guard **có từ trước** Bug #EPUB-5, không do đợt
+K-1..K-5 sinh ra. Nó chỉ chưa bao giờ chạy tới vì trước đó chưa job EPUB thật nào đi hết 66 chunk.
+
+### 3. Root cause — HAI lỗi chồng lên nhau, phải tách bạch
+
+**(a) Lỗi ở dữ liệu vào (có thật, đã verify trực tiếp)**: file nguồn
+`data/uploads/4a752f64-…_Sourdough Culture … (z-library.sk, 1lib.sk, z-lib.sk).epub` có entry
+`mimetype` **là entry đầu tiên, nội dung đúng `b"application/epub+zip"`, nhưng bị nén DEFLATED**.
+Đọc thẳng byte local header: `PK\x03\x04`, `method = 8`, `extra len = 0`, `name = b"mimetype"`;
+`infolist()[0].compress_type = 8`, `file_size = 20`, `compress_size = 22` — *nén xong to hơn bản gốc
+2 byte*, minh hoạ đúng vì sao OCF bắt STORED. Toàn bộ 63/63 entry đều DEFLATED ⇒ file đã bị re-zip
+lại bằng công cụ không biết luật OCF. Vi phạm đúng 1 trong 3 câu MUST của EPUB 3.3 §4.3
+(fetch thật, trích nguyên văn ở Architecture.md §6.25.1).
+
+**(b) Lỗi ở thiết kế của chính app (đây mới là root cause thực sự của BL-12)**: app đặt một kiểm
+tra thuộc về **chất lượng file OUTPUT** vào đúng bước cuối cùng, dưới dạng **reject** thay vì
+**repair**, và **sau** toàn bộ chi phí LLM. Ba sai lầm ghép lại:
+
+1. **Sai chỗ**: `load()` (chạy ở pre-flight cost estimate, `job_orchestrator.py:1143` và
+   `cost_gate.py:167`) KHÔNG kiểm gì về `mimetype`; chỉ `write_translated()` kiểm. Tức điều kiện
+   tiên quyết để job có thể hoàn tất lại được kiểm ở *bước cuối cùng*. Không có lý do kỹ thuật nào
+   — thông tin cần kiểm (`infolist()[0]`) đã sẵn sàng ngay giây đầu tiên mở file.
+2. **Sai hành động**: app tự ghi zip output bằng `zipfile`, tức **tự quyết định** thứ tự entry và
+   `compress_type` của output. Nó hoàn toàn có thể ép `mimetype` lên đầu + STORED và tạo ra file
+   output *tuân thủ hơn cả input*. Từ chối làm việc chỉ vì input không tuân thủ là nhầm lẫn giữa
+   "hợp đồng của file tôi ghi ra" và "điều kiện nhập học của file tôi đọc vào".
+3. **Sai mức nghiêm khắc**: chính `ebooklib 0.20.0` mà app đang dùng để ĐỌC file đó **đọc được bình
+   thường** (`epub.read_epub(<file vi phạm>)` → `spine = 22`). App nghiêm khắc hơn thư viện đọc của
+   chính nó, trong khi phần nghiêm khắc đó không mua lại được lợi ích nào cho output.
+
+### 4. Phản biện các phương án (và vì sao loại)
+
+| Phương án | Loại/chọn | Lý do |
+|---|---|---|
+| **A. Nới guard**: bỏ hẳn 2 nhánh kiểm, ghi output với `compress_type` copy y nguyên input | **LOẠI** | Input DEFLATED ⇒ output cũng DEFLATED (dòng `new_info.compress_type = info.compress_type`, `:1001`) ⇒ app **sinh ra** file vi phạm OCF. Đổi 1 lỗi ồn ào lấy 1 lỗi im lặng |
+| **B. Giữ strict, coi là giới hạn đã biết**, báo lỗi rõ hơn | **LOẠI** | Vẫn fail sau khi đã tiêu $0,588. Và "giới hạn đã biết" ở đây nghĩa là từ chối cả một lớp nguồn file phổ biến (z-library/Kobo) vì 20 byte metadata |
+| **C. Chuẩn hoá (re-zip) file gốc tại chỗ trong `data/uploads/` trước khi dịch** | **LOẠI** | Sửa file gốc của user = mất bản gốc, khó rollback, và đụng file đang được job/batch khác tham chiếu. Không cần: app đã ghi file mới ở bước merge rồi |
+| **D. Normalize khi GHI output + chỉ reject sớm thứ không sửa được** | **CHỌN** | Xem §6.25.2. Output luôn hợp lệ OCF; input vi phạm kiểu sửa được thì sửa; input hỏng kiểu không sửa được (thiếu `mimetype`/sai nội dung) reject ở `load()` ⇒ HTTP 400 **trước** cost gate (`api/routes/jobs.py:376-380` đã map sẵn) |
+
+Ranh giới "sửa được / không sửa được" theo **deny-by-default (R8-02)**: app ĐƯỢC sửa thứ nó tự
+quyết định được (thứ tự entry, `compress_type`, extra field); KHÔNG được **chế ra** entry `mimetype`
+khi file thiếu hẳn — đó là đoán media-type thay user, và một file zip không có `mimetype` rất có
+thể không phải EPUB.
+
+### 5. Spike verify (không suy đoán — R5-01/R5-02)
+
+Chạy thật trên CPython 3.14.7 của `.venv`:
+
+1. Re-zip file vi phạm, ép `mimetype` → `ZIP_STORED`, giữ nguyên thứ tự + `compress_type` 62 entry
+   còn lại ⇒ `zipfile.testzip() is None`; `unzip -lv` báo `20 Stored 20 0% … mimetype`; local header
+   `method = 0`, `extra len = 0`; `ebooklib.epub.read_epub()` đọc lại đúng `spine = 22`.
+2. Đọc source `zipfile` bản đã cài: `_open_to_write()` gán **đè** `zinfo.flag_bits = _MASK_UTF_FILENAME`
+   vô điều kiện (`zipfile/__init__.py:1824`), và `writestr()` luôn đi qua `open(zinfo, "w")`
+   (`:2037-2038`) ⇒ dòng `new_info.flag_bits = info.flag_bits` (`epub_document.py:1005`) là **dead
+   code**. Phát hiện phụ, nhưng đáng xoá: nó tạo ảo giác đang bảo toàn cờ zip của input, trong khi
+   nếu Python *có* tôn trọng nó thì việc copy bit 3 (data descriptor) từ 1 input lạ sẽ sinh zip lệch.
+
+### 6. Phạm vi — chung, không cá biệt
+
+8 EPUB thật trong `data/uploads/`: **1 vi phạm (12,5%)**, đúng file của job `bfc0ac24` (bảng đo ở
+§6.25.5). File vi phạm mang dấu vết Kobo (`META-INF/com.kobobooks.display-options.xml`, markup
+`koboSpan` — cùng file đã dẫn tới K-1 ở §6.20). Nguồn sách qua đường z-library/Kobo bị re-zip toàn
+bộ là chuyện thường ⇒ **chắc chắn tái diễn**. Đây không phải sự cố 1 lần.
+
+### 7. Thiệt hại không thu hồi được
+
+Job `bfc0ac24` và `781b59b0` **đã bị xoá khỏi DB** (`select count(*) from jobs/chunks where id like
+'bfc0ac24%'` → `0`/`0`; không còn `data/processing/bfc0ac24*`). Cơ chế resume BR-CHUNK-05
+(`job_orchestrator.py:1383-1391`, chỉ tái dùng chunk `status="completed"` **còn `output_path`**)
+KHÔNG cứu được nữa ⇒ chạy lại sẽ **trả tiền lần hai** (~$0,6/cuốn). Đây là lý do BL-12 phải sửa
+theo hướng *fail sớm*, không chỉ *fail rõ ràng hơn*.
+
+### 8. Việc chưa làm / còn treo
+
+- ⚠️ **[UNVERIFIED]** hành vi reading system thật (Apple Books, Calibre, Kobo, Kindle Previewer)
+  với `mimetype` bị nén — chưa đo. Không chặn thiết kế (§6.25.2 làm output luôn tuân thủ), nhưng
+  chặn mọi claim kiểu "reader nào cũng bỏ qua vi phạm này". Chưa cài `epubcheck` (`which epubcheck`
+  → không có) ⇒ chưa có kiểm định OCF độc lập cho output của app. Đề xuất thành backlog riêng.
+- Chưa implement — cần Hiếu chốt 2 câu CLARIFY dưới đây trước (Protocol B).
+
+### 9. CLARIFY cho Hiếu (Protocol B — hỏi 1 lượt, đã có mặc định đề xuất)
+
+- **BL-12-Q1** — chọn phương án D (normalize khi ghi + reject sớm) hay giữ strict (B)?
+  *Phát sinh từ*: §4 bảng phương án. *Chặn*: toàn bộ implement BL-12 ⇒ chặn `ready_for_release`
+  của S4. **Mặc định đề xuất: D.**
+- **BL-12-Q2** — với EPUB **thiếu hẳn** `mimetype` hoặc nội dung khác `application/epub+zip`: reject
+  sớm (HTTP 400) hay tự chế entry `mimetype` chuẩn rồi dịch tiếp? *Phát sinh từ*: ranh giới
+  sửa-được/không-sửa-được ở §4. *Chặn*: nhánh L1 của §6.25.2. **Mặc định đề xuất: reject sớm**
+  (deny-by-default R8-02).
+
+### 10. Final Decision (Hiếu, 2026-09-16, qua PM/AskUserQuestion)
+
+- **BL-12-Q1: chọn Phương án D** (= mặc định) — normalize `mimetype` → `ZIP_STORED` khi GHI output;
+  chỉ reject sớm ở `load()` thứ không sửa được.
+- **BL-12-Q2: reject sớm** (= mặc định) khi EPUB thiếu hẳn `mimetype`/sai content-type — không tự
+  chế entry.
+
+Cả 2 câu chọn đúng mặc định Tech Lead đề xuất ⇒ không cần viết lại §6.25 của Architecture.md. Dev
+implement thẳng theo §6.25 + Final Decision này. Backlog mới cần thêm (theo mục 8 ở trên, R5-06):
+đo hành vi reading system thật (Apple Books/Calibre/Kobo/Kindle Previewer) với `mimetype` bị nén +
+cài `epubcheck` để kiểm định output — chưa có owner, PM thêm vào `backlog[]`.

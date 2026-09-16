@@ -1425,3 +1425,157 @@ def test_load_write_translated_and_to_markdown_share_same_kobo_unwrap(
     total, differing = count_bb_vi_pairs(out_bilingual)
     assert total == 1
     assert differing == 1
+
+
+# ---------------------------------------------------------------------------
+# BL-12 (Architecture.md §6.25) — 'mimetype' bi nen / sai vi tri: chuan hoa
+# khi GHI (L2), reject SOM khi thieu han/sai noi dung (L1, o load()).
+# ---------------------------------------------------------------------------
+
+#: File that duoc dung lam bang chung goc cho BL-12 (§6.25.5): entry dau
+#: tien la 'mimetype', noi dung dung, nhung bi nen DEFLATED (vi pham OCF).
+#: Protocol 5 muc 3 — KHONG viet mock tay, dung dung file da gay bug that.
+BL12_VIOLATING_PATH = Path(
+    "data/uploads/4a752f64-48bf-49f8-a6e4-0fdb64d4fa16_Sourdough Culture A History of "
+    "Bread Making from Ancient to Modern Bakers (Eric Pallant) "
+    "(z-library.sk, 1lib.sk, z-lib.sk).epub"
+)
+
+
+def test_bl12_violating_file_has_mimetype_deflated() -> None:
+    """Xac nhan lai tien de (khong suy doan) — neu file nay doi, cac test
+    round-trip ben duoi se mat y nghia bang chung goc."""
+    if not BL12_VIOLATING_PATH.exists():
+        pytest.skip("File bang chung BL-12 khong con trong data/uploads/")
+    zf = zipfile.ZipFile(BL12_VIOLATING_PATH)
+    info = zf.infolist()[0]
+    assert info.filename == "mimetype"
+    assert info.compress_type == zipfile.ZIP_DEFLATED
+    assert zf.read("mimetype") == b"application/epub+zip"
+
+
+def test_write_translated_normalizes_deflated_mimetype_from_real_violating_file(
+    tmp_path: Path,
+) -> None:
+    """§6.25.2 L2 — file THAT bi Kobo/z-library re-zip toan bo (63/63 entry
+    DEFLATED, ke ca 'mimetype') phai duoc load + dich + ghi THANH CONG, va
+    output phai tuan thu OCF du input khong tuan thu."""
+    if not BL12_VIOLATING_PATH.exists():
+        pytest.skip("File bang chung BL-12 khong con trong data/uploads/")
+    out = tmp_path / "out.epub"
+    doc = EpubDocument.load(BL12_VIOLATING_PATH)
+    translations = {doc.units[0].unit_id: "[VI] " + doc.units[0].text}
+    doc.write_translated(translations, out, bilingual=False)
+
+    zout = zipfile.ZipFile(out)
+    assert zout.testzip() is None
+    first = zout.infolist()[0]
+    assert first.filename == "mimetype"
+    assert first.compress_type == zipfile.ZIP_STORED
+    assert first.extra == b""
+    assert zout.read("mimetype") == b"application/epub+zip"
+
+    from ebooklib import epub as _epub
+
+    book = _epub.read_epub(str(out))
+    assert len(book.spine) > 0
+
+
+def test_write_translated_normalizes_synthetic_deflated_mimetype(tmp_path: Path) -> None:
+    """Fixture toi thieu tu dung (Protocol 5 muc 3 — day KHONG phai mock cho
+    ham dang test, ma la 1 EPUB hop le sinh bang zipfile) voi 'mimetype' nen
+    DEFLATED, la entry dau tien."""
+    src = tmp_path / "deflated_mimetype.epub"
+    _build_minimal_epub(src, "<p>hi</p>")
+    # Ghi de entry 'mimetype' thanh DEFLATED de mo phong dung kieu vi pham
+    # (§6.25.5): entry dau tien dung, noi dung dung, nhung nen.
+    with zipfile.ZipFile(src) as zf:
+        entries = {name: zf.read(name) for name in zf.namelist()}
+    with zipfile.ZipFile(src, "w") as zf:
+        deflated_mimetype = zipfile.ZipInfo("mimetype")
+        deflated_mimetype.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(deflated_mimetype, entries.pop("mimetype"))
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+    assert zipfile.ZipFile(src).infolist()[0].compress_type == zipfile.ZIP_DEFLATED
+
+    out = tmp_path / "out.epub"
+    doc = EpubDocument.load(src)
+    doc.write_translated({doc.units[0].unit_id: "[VI] hi"}, out, bilingual=False)
+
+    zout = zipfile.ZipFile(out)
+    assert zout.testzip() is None
+    first = zout.infolist()[0]
+    assert first.filename == "mimetype"
+    assert first.compress_type == zipfile.ZIP_STORED
+    assert first.extra == b""
+
+
+def test_write_translated_moves_mimetype_to_front_when_not_first_entry(tmp_path: Path) -> None:
+    """§6.25.6 — fixture voi 'mimetype' KHONG phai entry dau tien: output
+    van phai dua 'mimetype' len dau, STORED."""
+    src = tmp_path / "reordered.epub"
+    _build_minimal_epub(src, "<p>hi</p>")
+    with zipfile.ZipFile(src) as zf:
+        entries = [(info.filename, zf.read(info.filename)) for info in zf.infolist()]
+    assert entries[0][0] == "mimetype"
+    reordered = [entries[1], entries[0], *entries[2:]]  # dua mimetype xuong vi tri thu 2
+    with zipfile.ZipFile(src, "w") as zf:
+        for name, data in reordered:
+            info = zipfile.ZipInfo(name)
+            if name == "mimetype":
+                info.compress_type = zipfile.ZIP_STORED
+            zf.writestr(info, data)
+
+    assert zipfile.ZipFile(src).infolist()[0].filename != "mimetype"
+
+    out = tmp_path / "out.epub"
+    doc = EpubDocument.load(src)
+    doc.write_translated({doc.units[0].unit_id: "[VI] hi"}, out, bilingual=False)
+
+    zout = zipfile.ZipFile(out)
+    assert zout.infolist()[0].filename == "mimetype"
+    assert zout.infolist()[0].compress_type == zipfile.ZIP_STORED
+    # Cac entry con lai giu nguyen THU TU TUONG DOI voi nhau (chi 'mimetype'
+    # duoc keo len dau, khong xao tron phan con lai).
+    rest_out = [i.filename for i in zout.infolist()[1:]]
+    rest_expected = [name for name, _ in reordered if name != "mimetype"]
+    assert rest_out == rest_expected
+
+
+def test_load_raises_parse_error_when_mimetype_entry_missing(tmp_path: Path) -> None:
+    """§6.25.2 L1 (BL-12-Q2, Final Decision) — thieu han entry 'mimetype':
+    reject SOM o load(), KHONG tu che entry thay user."""
+    src = tmp_path / "no_mimetype.epub"
+    _build_minimal_epub(src, "<p>hi</p>")
+    with zipfile.ZipFile(src) as zf:
+        entries = [(info.filename, zf.read(info.filename)) for info in zf.infolist()]
+    with zipfile.ZipFile(src, "w") as zf:
+        for name, data in entries:
+            if name == "mimetype":
+                continue
+            zf.writestr(name, data)
+
+    with pytest.raises(EpubParseError, match="mimetype"):
+        EpubDocument.load(src)
+
+
+def test_load_raises_parse_error_when_mimetype_content_wrong(tmp_path: Path) -> None:
+    """§6.25.2 L1 (BL-12-Q2) — noi dung entry 'mimetype' khac
+    'application/epub+zip': reject SOM, khong doan media-type thay user."""
+    src = tmp_path / "wrong_mimetype.epub"
+    _build_minimal_epub(src, "<p>hi</p>")
+    with zipfile.ZipFile(src) as zf:
+        entries = [(info.filename, zf.read(info.filename)) for info in zf.infolist()]
+    with zipfile.ZipFile(src, "w") as zf:
+        for name, data in entries:
+            if name == "mimetype":
+                info = zipfile.ZipInfo("mimetype")
+                info.compress_type = zipfile.ZIP_STORED
+                zf.writestr(info, "text/plain")
+                continue
+            zf.writestr(name, data)
+
+    with pytest.raises(EpubParseError, match="mimetype"):
+        EpubDocument.load(src)

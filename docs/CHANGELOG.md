@@ -8200,3 +8200,74 @@ là `'metered'`, không phải lỗi parse.
 ### KHÔNG commit
 
 Theo brief — PM điều phối commit sau khi Reviewer duyệt qua vòng thật (Protocol 7, Protocol A).
+
+## BL-12 — EPUB nguồn không tuân thủ OCF (`mimetype` bị nén): chuẩn hoá khi ghi, reject sớm khi thiếu hẳn
+
+Implement theo `docs/Architecture.md` §6.25 (Final Decision Hiếu 2026-09-16, xem `docs/design-log.md`
+mục BL-12: BL-12-Q1 = Phương án D, BL-12-Q2 = reject sớm).
+
+### Sửa
+
+`src/services/epub_document.py`:
+
+- **L1 (pre-flight, tại `EpubDocument.load()`)**: thêm `_check_mimetype_entry()`, gọi ngay sau
+  `_check_drm()` — trước khi parse `container.xml`. Reject sớm (`EpubParseError`, map sẵn sang HTTP
+  400 qua `api/routes/jobs.py:376-380`, chạy TRƯỚC cost gate vì `cost_gate.py:167` gọi
+  `EpubDocument.load()`) khi entry `mimetype` **thiếu hẳn** hoặc nội dung khác
+  `b"application/epub+zip"` — KHÔNG tự chế entry thay user (deny-by-default, R8-02). KHÔNG kiểm
+  thứ tự/`compress_type` ở bước này — đó là vi phạm *sửa được*, xử lý ở L2.
+- **L2 (normalize khi ghi, tại `write_translated()`)**: xoá 2 guard reject cũ
+  (`infolist[0].filename != "mimetype"` và `compress_type != ZIP_STORED`, dòng 984-991 cũ). Thay
+  bằng: tìm entry `mimetype` trong `infolist` bất kể vị trí gốc, luôn ghi nó **ĐẦU TIÊN** trong zip
+  output với `compress_type = ZIP_STORED`; các entry còn lại giữ nguyên **thứ tự tương đối** và
+  `compress_type` gốc. `extra` field của `mimetype` output luôn rỗng — không cần set tường minh vì
+  `zipfile.ZipInfo(filename=...)` mới luôn có `extra = b""` và `writestr()` không có chỗ nào gán
+  thêm (tự verify lại bằng đọc source `zipfile` đã cài trong `.venv`, KHÔNG kế thừa lại nguồn xác
+  thực cũ của Tech Lead trong design-log — Protocol 5 áp dụng cho `zipfile`).
+- **Xoá dead code**: dòng `new_info.flag_bits = info.flag_bits`. Tự verify độc lập (không chỉ tin
+  lại design-log): đọc `zipfile.ZipFile._open_to_write()` trong bản Python đã cài
+  (`.venv`, CPython 3.14.7) — `zinfo.flag_bits = _MASK_UTF_FILENAME` bị gán **đè vô điều kiện**,
+  xác nhận dòng copy `flag_bits` từ input không có tác dụng gì.
+
+Data lineage (R6-01) không đổi so với §6.20: `write_translated()` vẫn đọc lại `self.path` (file gốc
+`data/uploads/...`) làm khuôn, ghi ra `merged_path`; chuẩn hoá `mimetype` xảy ra trong lúc ghi
+`merged_path`, KHÔNG sửa tại chỗ file gốc.
+
+### Test
+
+`tests/test_epub_document.py` (+8 test mới, Protocol 5 mục 3 — không mock tay theo giả định):
+
+- `test_bl12_violating_file_has_mimetype_deflated` — xác nhận lại tiền đề trên chính file THẬT đã
+  gây bug (`data/uploads/4a752f64-..._Sourdough Culture...epub`, entry đầu `mimetype`, nội dung
+  đúng, nhưng `compress_type == ZIP_DEFLATED`).
+- `test_write_translated_normalizes_deflated_mimetype_from_real_violating_file` — round-trip trên
+  CHÍNH file vi phạm thật: `load()` + dịch 1 unit + `write_translated()` phải THÀNH CÔNG (trước đây
+  sẽ raise `EpubParseError` ở bước ghi); output `infolist()[0]` là `mimetype`, `ZIP_STORED`,
+  `extra == b""`; `zipfile.testzip() is None`; `ebooklib.epub.read_epub()` đọc lại được.
+- `test_write_translated_normalizes_synthetic_deflated_mimetype` — fixture tối thiểu tự dựng bằng
+  `zipfile` (EPUB hợp lệ OCF, không phải mock cho hàm đang test) với `mimetype` DEFLATED ở đúng vị
+  trí đầu — cùng assertion chuẩn hoá.
+- `test_write_translated_moves_mimetype_to_front_when_not_first_entry` — fixture có `mimetype`
+  KHÔNG phải entry đầu (STORED nhưng sai vị trí) — output vẫn phải đưa `mimetype` lên đầu, các entry
+  còn lại giữ nguyên thứ tự tương đối với nhau (assert danh sách tên entry còn lại khớp chính xác,
+  không chỉ "có mặt").
+- `test_load_raises_parse_error_when_mimetype_entry_missing` — thiếu hẳn entry `mimetype` → `load()`
+  raise `EpubParseError` (L1, BL-12-Q2).
+- `test_load_raises_parse_error_when_mimetype_content_wrong` — entry `mimetype` tồn tại nhưng nội
+  dung `text/plain` (khác `application/epub+zip`) → `load()` raise `EpubParseError` (L1, BL-12-Q2).
+
+Test cũ `test_load_raises_parse_error_when_container_xml_missing` và mọi test dùng
+`_build_minimal_epub()` không đổi hành vi (fixture sẵn có `mimetype` STORED đúng nội dung, qua L1
+không raise).
+
+Toàn bộ `tests/` (844 test) + `ruff check`/`ruff format --check` sạch cho `src/services/epub_document.py`
+và `tests/test_epub_document.py`.
+
+### Chưa làm (theo mục 8 design-log, cần backlog riêng — không thuộc phạm vi BL-12 này)
+
+Đo hành vi reading system thật (Apple Books/Calibre/Kobo/Kindle Previewer) với `mimetype` bị nén +
+cài `epubcheck` để kiểm định output độc lập — PM cần thêm vào `backlog[]` với owner rõ ràng (R5-06).
+
+### KHÔNG commit
+
+Theo brief — PM điều phối commit sau khi Reviewer duyệt qua vòng thật (Protocol 7, Protocol A).

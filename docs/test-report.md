@@ -2757,3 +2757,164 @@ rỗng), server khởi động lại sạch, không lỗi.
 **`ready_for_release: YES`** — cả 2 nhánh engine (`babeldoc` metered, `pdf2zh` estimated) đã có live
 verification thật (R5-03), pipeline nhiều bước đã kiểm nội dung output cuối cùng thay vì chỉ tin
 `status` (R6-03), không còn gap nào bị chặn.
+
+---
+
+## BL-12 — Live E2E gate cho fix mimetype OCF EPUB (2026-09-16)
+
+**Phạm vi**: verify sống `_check_mimetype_entry()` (L1, `load()`) + normalize khi ghi (L2,
+`write_translated()`) trong `src/services/epub_document.py`, theo Final Decision Phương án D
+(`docs/design-log.md` mục BL-12 §9/§10) và review APPROVE mới nhất (`docs/review-report.md`,
+mục "## BL-12 — EPUB `mimetype` bị nén/sai vị trí OCF..."). Đây là gate G-4 (§6.20.15) mà Reviewer
+đã đánh dấu "chưa đạt ở mức live E2E full pipeline" và yêu cầu QA phải tự chạy trước khi release.
+
+### 0. PHÁT HIỆN QUAN TRỌNG TRƯỚC KHI TEST ĐƯỢC GÌ — server production đang chạy CODE CŨ (không có BL-12)
+
+Trước khi test, `lsof -i :8000` cho thấy server `uvicorn` đang chạy (PID 29713, khởi động
+`Sun Sep 13 11:54:45 2026`). `git log -1 -- src/services/epub_document.py` → commit gần nhất
+2026-09-12 09:33:23 +0700, và `git status` xác nhận `src/services/epub_document.py` **đang bị sửa
+uncommitted** (fix BL-12 chỉ nằm trên working tree, Dev/Reviewer chưa commit). Test đầu tiên (job
+EPUB thiếu hẳn `mimetype`) trả về lỗi **`"entry dau tien khong phai 'mimetype' — vi pham OCF spec,
+tu choi ghi de tai cho"`** — chuỗi này **không tồn tại trong source hiện tại** (`grep -rn` ra rỗng)
+⇒ xác nhận server đang chạy **module Python đã nạp vào RAM từ trước khi fix BL-12 được ghi ra đĩa**,
+không phải code hiện tại. `uvicorn` khởi động không có `--reload`, nên sửa file trên đĩa không tự
+nạp lại.
+
+**Hệ quả cho vận hành thật**: mọi job EPUB thật đi qua server này từ 2026-09-13 11:54 tới lúc QA
+phát hiện (2026-09-16, ~07:30 UTC) đều chạy **guard OCF strict cũ** (reject cả 2 nhánh vị trí +
+compress_type tại bước ghi, đúng hành vi gây ra bug gốc `bfc0ac24`), KHÔNG có fix BL-12 — bất kể
+code trên đĩa đã sửa xong và Reviewer đã APPROVE. Đây là gap giữa "code đã duyệt" và "code đang
+chạy thật" — đúng phạm vi Protocol E (Đồng bộ môi trường thật ↔ git) của CLAUDE.md, chiều ngược lại
+thường gặp (thường là "đã đổi env thật nhưng chưa commit"; ở đây là "đã sửa code nhưng server chưa
+restart để nạp code mới", cùng một loại rủi ro lệch môi trường-thật-vs-git).
+
+**Hành động QA đã làm**: xác nhận không có job nào đang `processing` (`GET /api/jobs` — toàn bộ
+`completed`/`failed`), `kill` PID 29713, khởi động lại `uvicorn` (không `--reload`, giữ đúng cách
+chạy production hiện có), xác nhận `GET /api/docs` → 200 trước khi test tiếp. Test dưới đây chạy
+trên server ĐÃ RESTART, tức đang chạy đúng code có fix BL-12.
+
+**Ghi nhận cho PM/Dev (không phải bug của BL-12, nhưng phải escalate)**: fix BL-12 đã APPROVE nhưng
+CHƯA COMMIT (`git status` vẫn `M src/services/epub_document.py`) và CHƯA từng được deploy (server
+chỉ nạp code mới vì QA restart thủ công trong lúc test). Nếu QA không tình cờ đọc git log/grep để
+đối chiếu message lỗi, đợt test này đã âm thầm PASS trên code cũ và không phát hiện gì. Đề xuất PM:
+(a) commit fix BL-12 ngay, (b) thêm vào quy trình release một bước "restart server + xác nhận log
+khởi động nạp đúng commit hash hiện tại" trước khi QA chạy live E2E — không giả định server tự nạp
+lại code đã sửa.
+
+### 1. Test A — Reject sớm khi thiếu hẳn `mimetype` (L1, BL-12-Q2)
+
+File tự dựng: `qa_bl12_missing_mimetype.epub` (EPUB hợp lệ 1 chương, xoá hẳn entry `mimetype`).
+`POST /api/upload` → 200 (upload không kiểm OCF, đúng thiết kế — `resolve_upload()` không gọi
+`EpubDocument.load()`). `POST /api/jobs` (`provider=deepseek`) →
+
+```
+HTTP 400
+{"detail":"File EPUB khong doc duoc: EPUB '...': thieu entry 'mimetype' — vi pham OCF, tu choi som"}
+```
+
+Không có `job_id` nào được tạo, không có chunk nào chạy — verify bằng cách không thấy job mới nào
+xuất hiện ở `GET /api/jobs` ứng với file này. **Chi phí LLM: $0** (reject trước cost gate/LLM call,
+đúng route `_estimate_translation_cost_or_400()` → `EpubParseError` → HTTP 400,
+`api/routes/jobs.py:377-381`). **PASS.**
+
+### 2. Test B — Reject sớm khi nội dung `mimetype` sai (L1, nhánh còn lại chưa có test riêng ở live E2E trước đó)
+
+File tự dựng: `qa_bl12_wrong_content.epub` (giữ entry `mimetype` đúng vị trí đầu, nội dung đổi thành
+`b"text/plain"`). `POST /api/jobs` →
+
+```
+HTTP 400
+{"detail":"...: entry 'mimetype' co noi dung 'b'text/plain'', khac 'b'application/epub+zip'' — tu choi som"}
+```
+
+**Chi phí LLM: $0.** **PASS.**
+
+### 3. Test C — Live E2E xuyên suốt: EPUB có `mimetype` DEFLATE (đúng loại vi phạm gây bug gốc) → dịch thật → mở output
+
+File tự dựng `qa_bl12_violating.epub` (2,2KB, 1 chương, 3 unit dịch được — `<h1>` + 2 `<p>`),
+**mô phỏng đúng kiểu vi phạm của file gốc gây bug** (`mimetype` là entry ĐẦU TIÊN, nội dung đúng,
+nhưng `compress_type=ZIP_DEFLATED` thay vì `ZIP_STORED` — xác nhận bằng đọc lại `infolist()[0]`
+trước khi upload). Không dùng lại file gốc `4a752f64-...Sourdough Culture...epub` (66 chunk,
+~$0,6) theo đúng chỉ dẫn tiết kiệm chi phí của PM — file tự dựng tối thiểu hoá cả rủi ro (không tốn
+tiền dịch 250+ trang không liên quan) lẫn thời gian, trong khi vẫn tái tạo đúng cấu trúc lỗi
+byte-for-byte (`compress_type` sai trên entry `mimetype` ở đúng vị trí đầu).
+
+- `POST /api/upload` → 200, `file_id=a972105d-...`.
+- `POST /api/jobs` (`provider=deepseek`, `confirm_cost=true`) → **202, `job_id=7c041f14-...`,
+  `status=queued`** — không bị reject (đúng: L1 chỉ kiểm thiếu/sai nội dung, không kiểm
+  `compress_type`).
+- Poll `GET /api/jobs/{id}`: sau ~1,3s → `status=completed`, `total_chunks=1`, `total_units=3`,
+  `cost_source=metered`, `estimated_cost=0.00031482`, **`actual_cost=0.0003509`** (job dịch thật
+  qua deepseek, không phải mock — số tiền đo được khác số ước tính, đúng dấu hiệu "đã gọi API
+  thật" chứ không phải giá trị hardcode), `output_path=data/outputs/7c041f14-.../translated_vi.epub`.
+
+**Verify nội dung output thật (R6-03 — không chỉ tin `status=completed`)**:
+
+```
+zipfile.testzip()                         → None (zip toàn vẹn)
+infolist()[0].filename                    → "mimetype"
+infolist()[0].compress_type               → 0 (ZIP_STORED)
+infolist()[0].extra                       → b"" (không extra field)
+zf.read("mimetype")                       → b"application/epub+zip"
+tất cả 5 entry (mimetype, container.xml, content.opf, toc.ncx, chap1.xhtml) → compress_type 0
+`unzip -lv` xác nhận độc lập: "20  Stored  20  0%  ...  mimetype" (dòng đầu tiên trong listing)
+ebooklib.epub.read_epub(output) → đọc được, spine length = 1 (thư viện độc lập với code app)
+```
+
+**Mở `OEBPS/chap1.xhtml` trong output ra đọc trực tiếp** (không chỉ đếm ký tự — đúng bài học Bug
+#5 "text_len=0 nhưng status=completed"):
+
+```html
+<h1>Kiến thức cơ bản về men sourdough</h1>
+<p>Men sourdough là một nền nuôi cấy sống gồm nấm men hoang dã và vi khuẩn axit lactic.</p>
+<p>Cho ăn hàng ngày với lượng bột mì và nước bằng nhau để giữ men luôn hoạt động và khỏe mạnh.</p>
+```
+
+Bản dịch tiếng Việt CÓ DẤU, đúng ngữ nghĩa với input gốc tiếng Anh ("A sourdough starter is a living
+culture of wild yeast and lactic acid bacteria." / "Feed it daily with equal parts flour and water
+to keep it active and healthy."), không phải gibberish, không phải giữ nguyên tiếng Anh, không phải
+rỗng. **PASS — đạt đúng chuẩn R6-03 + gate G-4 §6.20.15 cho luồng EPUB có mimetype vi phạm OCF.**
+
+### 4. Chi phí thực tế đã dùng cho đợt QA này
+
+- Test A, B: $0 (reject trước LLM call).
+- Test C: **`actual_cost = $0.0003509`** (đo thật từ DB `jobs.actual_cost`, đối chiếu qua
+  `sqlite3 data/bb_translation.db` — khớp với giá trị API trả về, không lệch).
+- **Tổng chi phí đợt QA BL-12: $0.0003509** — không dùng lại job/file gốc `bfc0ac24` (đã bị xoá,
+  không resume được), không tốn thêm ~$0,6 để dịch lại "Sourdough Culture" như RCA cảnh báo.
+
+### 5. Regression nhanh
+
+`.venv/bin/python3 -m pytest tests/test_epub_document.py -q` (sau khi restart server, chạy lại độc
+lập với suite Reviewer đã chạy) → **66 passed**. Không phát hiện regression mới.
+
+### 6. Đối chiếu R5-03 / R6-03 / R5-04 (checklist bắt buộc)
+
+- **R5-03**: có ≥1 lần gọi thật, không mock, tới external dependency liên quan (provider `deepseek`
+  qua API thật — `actual_cost` đo được khác `estimated_cost`, xác nhận không phải giá trị giả lập)
+  cho toàn bộ chuỗi upload → cost-gate → dịch → merge EPUB. **Đạt.**
+- **R6-03**: pipeline nhiều bước (parse EPUB → dịch từng unit → ghi lại EPUB output) đã chạy xuyên
+  suốt với dữ liệu thật, và đã **mở file output cuối cùng ra xem nội dung thật** (không chỉ tin
+  `status`/`output_path` tồn tại) — thấy chữ tiếng Việt có dấu thật trong `chap1.xhtml`, đúng cách
+  Bug #5 từng bị phát hiện. **Đạt.**
+- **R5-04** (N/A cho `epub_document.py`, đã ghi trong review-report.md mục BL-12 §8 — QA không lặp
+  lại, chỉ xác nhận Reviewer đã trả lời đúng câu hỏi này).
+
+### Kết luận BL-12
+
+**`ready_for_release: YES`** cho BL-12 (mimetype OCF EPUB fix). Cả 3 nhánh hành vi theo Final
+Decision (Phương án D) đã verify sống: (1) reject sớm khi thiếu hẳn `mimetype` — HTTP 400, $0 chi
+phí; (2) reject sớm khi nội dung `mimetype` sai — HTTP 400, $0 chi phí; (3) normalize khi ghi cho
+input có `mimetype` DEFLATE (đúng loại lỗi gây bug gốc) — job dịch thật thành công, output EPUB hợp
+lệ OCF (`mimetype` STORED, entry đầu, không extra field, `testzip()` sạch, `ebooklib` đọc lại được),
+và **có nội dung dịch tiếng Việt thật** trong file, không rỗng. Gate G-4 (§6.20.15) mà Reviewer để
+lại cho QA nay đã đạt.
+
+**Không blocking cho BL-12, nhưng bắt buộc PM xử lý ngay** (mục 0 ở trên): (a) commit fix BL-12
+(`src/services/epub_document.py`, `tests/test_epub_document.py`, và các file docs liên quan đang
+`M` trong `git status`) — hiện đang APPROVE nhưng chưa commit; (b) server production đã được QA
+restart thủ công trong lúc test để nạp code mới — **PM cần biết server đang chạy code có BL-12 kể
+từ giờ**, và cần xác nhận lại việc restart này không làm gián đoạn job nào (đã tự kiểm tra trước
+khi kill: không có job `processing` nào tại thời điểm đó); (c) cân nhắc thêm bước "restart +
+xác nhận" vào quy trình release để không lặp lại kiểu lệch code-đã-duyệt-vs-code-đang-chạy này —
+đúng tinh thần Protocol E dù đối tượng ở đây là code thay vì `.env`/DB migration.

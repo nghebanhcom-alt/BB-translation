@@ -8386,6 +8386,104 @@ Kết luận wording: ĐƯỢC phép claim "browser sẽ mở lại thư mục b
 
 ---
 
+### 6.25. BL-12 — EPUB nguồn không tuân thủ OCF (`mimetype` bị nén): SỬA ở bước ghi, KHÔNG từ chối ở bước cuối
+
+**Trạng thái**: thiết kế đã chốt về mặt kỹ thuật, **chưa implement** (chờ Hiếu duyệt CLARIFY
+BL-12-Q1/Q2, xem `docs/design-log.md` mục BL-12). RCA đầy đủ nằm ở design-log — mục này chỉ ghi
+hợp đồng phải đạt sau khi implement (Protocol C.1).
+
+#### 6.25.1. Chuẩn OCF về entry `mimetype` (nguồn xác thực — R5-01)
+
+EPUB 3.3 §4.3 *OCF ZIP container* (W3C, fetch thật qua WebFetch 2026-09-16,
+<https://www.w3.org/TR/epub-33/#sec-container-zip>), nguyên văn:
+
+> "The `mimetype` file _MUST_ be the first file in the OCF ZIP container, _MUST_ be stored
+> uncompressed, and _MUST NOT_ have an extra field."
+
+3 ràng buộc — **thứ tự đầu tiên**, **STORED**, **không extra field** — đều là ràng buộc lên *bên
+tạo file*, KHÔNG phải ràng buộc "reading system phải từ chối file vi phạm" (spec không có câu MUST
+nào bắt reading system reject — đã kiểm cùng lần fetch).
+
+#### 6.25.2. Hợp đồng MỚI (thay thế 2 nhánh reject tại `epub_document.py:985-991`)
+
+| Lớp | Nơi | Kiểm gì | Hành vi |
+|---|---|---|---|
+| **L1 — pre-flight** | `EpubDocument.load()` (`src/services/epub_document.py:758`) | Có entry tên `mimetype` **và** nội dung byte đúng `b"application/epub+zip"` | Sai → `EpubParseError` ngay ở bước ước tính chi phí. `src/api/routes/jobs.py:376-380` đã map sẵn `EpubParseError` → **HTTP 400**, nên user biết TRƯỚC khi tốn tiền dịch |
+| **L2 — normalize khi ghi** | `EpubDocument.write_translated()` (`:899`) | Không kiểm nữa — **sửa** | Luôn ghi `mimetype` là entry **ĐẦU TIÊN**, `compress_type = ZIP_STORED`, `extra = b""`; các entry còn lại giữ nguyên **thứ tự tương đối** và `compress_type` gốc |
+
+Nguyên tắc: **tính tuân thủ OCF là thuộc tính của file app GHI RA, không phải điều kiện nhập học
+của file app ĐỌC VÀO.** App tự kiểm soát được cả 3 ràng buộc ở §6.25.1 tại bước ghi, nên vi phạm ở
+input là *sửa được*, không phải *lý do từ chối*. Chỉ thứ không sửa được mới được phép reject — và
+phải reject ở L1 (trước cost gate), không phải ở bước merge cuối (sau khi đã trả tiền LLM).
+
+**Deny-by-default (Protocol 8 R8-02) vẫn giữ**: trường hợp `mimetype` **thiếu hẳn** hoặc nội dung
+KHÁC `application/epub+zip` → app **KHÔNG tự chế ra** entry mimetype (đó là đoán media-type thay
+user, có thể file không phải EPUB thật) → reject ở L1.
+
+#### 6.25.3. Data lineage (R6-01) — không đổi so với §6.20
+
+- `run_epub_job()` (`job_orchestrator.py:1143`): `doc = EpubDocument.load(file_path)` với
+  `file_path = job.file_path` (**file gốc user upload**, `data/uploads/<uuid>_<tên>.epub`).
+- Bước merge cuối (`job_orchestrator.py:1412-1424`): `doc.write_translated(translations, merged_path, ...)`
+  — đọc lại zip tại `self.path` (**chính file gốc đó**, không phải bản trung gian nào) làm khuôn,
+  ghi ra `merged_path = <output_dir>/<job.id>/translated_vi.epub`. Chuẩn hoá `mimetype` xảy ra
+  **trong lúc ghi ra `merged_path`** — **KHÔNG sửa tại chỗ file gốc trong `data/uploads/`**.
+- `_check_epub_output_guard(doc, merged_path, ...)` (`:1424` → `:470`) sau đó `EpubDocument.load(merged_path)`
+  lại từ đầu; sau khi có L2, `merged_path` luôn hợp lệ OCF kể cả khi input vi phạm.
+
+#### 6.25.4. Hành vi thư viện đã verify (R5-01)
+
+Đo trực tiếp trên CPython **3.14.7** của `.venv` (`zipfile/__init__.py`, đường dẫn
+`~/.local/share/uv/python/cpython-3.14.7-macos-aarch64-none/lib/python3.14/zipfile/__init__.py`):
+
+1. **`writestr(ZipInfo, data)` không bao giờ sinh extra field.** `ZipInfo` tạo mới có `extra = b""`
+   và không chỗ nào gán thêm. Đo thật trên file đã ghi: local header `extra len = 0`, `infolist()[0].extra == b""`.
+2. **`flag_bits` copy từ input là DEAD CODE.** `zipfile.py:1824` trong `_open_to_write()` gán đè
+   `zinfo.flag_bits = _MASK_UTF_FILENAME` **vô điều kiện**, và `writestr()` (`:2037-2038`) luôn đi
+   qua `self.open(zinfo, mode='w')`. ⇒ dòng `new_info.flag_bits = info.flag_bits`
+   (`epub_document.py:1005`) không có tác dụng gì. **Được phép xoá** khi implement BL-12 — đồng thời
+   loại luôn rủi ro tiềm ẩn copy nhầm bit 3 (data descriptor) từ 1 input lạ.
+3. **`ebooklib` KHÔNG hề từ chối `mimetype` bị nén.** `ebooklib 0.20.0`, `epub.read_epub()` đọc
+   thành công CHÍNH file vi phạm của Hiếu (`spine = 22`). Nghĩa là guard cũ nghiêm khắc hơn cả
+   thư viện đọc mà app đang dùng.
+4. **Chuẩn hoá hoạt động thật** (spike đã chạy, không phải suy đoán): re-zip file vi phạm với
+   `mimetype` ép `ZIP_STORED`, giữ nguyên thứ tự + `compress_type` 62 entry còn lại →
+   `zipfile.testzip() == None`, `unzip -lv` báo `mimetype … Stored … 0%`, `ebooklib` đọc lại đúng
+   `spine = 22`.
+
+⚠️ **[UNVERIFIED]** — hành vi của **reading system thực tế** (Apple Books, Calibre viewer, Kobo,
+KindlePreviewer) trước 1 EPUB có `mimetype` bị nén: CHƯA đo. Không cần đo để chốt thiết kế này, vì
+hợp đồng §6.25.2 làm cho **output luôn tuân thủ** — không phụ thuộc mức độ khoan dung của reader.
+Cũng chưa chạy `epubcheck` (chưa cài trong repo; `which epubcheck` → không có).
+
+#### 6.25.5. Phạm vi — lỗi CHUNG, không phải cá biệt 1 job
+
+Đo thật toàn bộ EPUB trong `data/uploads/` (8 file, 2026-09-16), cột `compress_type` của
+`infolist()[0]`:
+
+| File | entry đầu | `compress_type` | Kết luận |
+|---|---|---|---|
+| `4a752f64-…_Sourdough Culture … (z-library.sk …).epub` | `mimetype` | **8 (DEFLATED)** | **VI PHẠM** — đúng file của job `bfc0ac24` |
+| 7 file còn lại (kể cả `sample2_Bread-A-Global-History.epub`, `fake_drm.epub`) | `mimetype` | 0 (STORED) | hợp lệ |
+
+⇒ **1/8 = 12,5%** file thật đã vi phạm. File vi phạm còn chứa `META-INF/com.kobobooks.display-options.xml`
+và markup `koboSpan` (cùng file đã gây phần lãng phí payload ở §6.20 K-1) — dấu vết đã bị công cụ
+Kobo/z-library **re-zip lại toàn bộ** (cả 63/63 entry đều DEFLATED, kể cả `mimetype`). Đây là một
+lớp nguồn file phổ biến, **chắc chắn tái diễn**, không phải sự cố một lần.
+
+#### 6.25.6. Test bắt buộc khi implement
+
+- Fixture EPUB tối thiểu **có `mimetype` nén DEFLATED** (sinh bằng `zipfile`, không viết tay) —
+  assert `write_translated()` **thành công** và output có `infolist()[0].filename == "mimetype"`,
+  `compress_type == ZIP_STORED`, `extra == b""`.
+- Fixture EPUB có `mimetype` **KHÔNG phải entry đầu** → output vẫn phải đưa `mimetype` lên đầu.
+- Fixture thiếu `mimetype` / sai nội dung → `EpubDocument.load()` raise `EpubParseError`
+  (L1), và `POST` route tương ứng trả **400**, chứ không phải fail ở merge.
+- R6-02: assert output của merge nằm ở `merged_path` được sinh từ `doc` đã `load(job.file_path)`
+  — giữ nguyên các assert lineage sẵn có của §6.20.
+
+---
+
 ## 7. Docker Setup
 
 ### 7.1. docker-compose.yml

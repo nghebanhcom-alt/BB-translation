@@ -3204,3 +3204,160 @@ R6-03, phải có ít nhất 1 lần chạy job PDF thật bằng babeldoc, mở
 `sum(chunks.api_tokens_used)` với tổng token in trong log thật của từng chunk trước khi đánh dấu
 `ready_for_release` — golden file ở review này là spike đơn-chunk (1 trang), chưa phải live E2E
 nhiều-chunk theo đúng yêu cầu §6.23.7 "Live E2E".
+
+---
+
+## BL-12 — EPUB `mimetype` bị nén/sai vị trí OCF: normalize khi ghi, reject sớm khi thiếu hẳn (2026-09-16)
+
+**Phạm vi**: `src/services/epub_document.py` (hàm mới `_check_mimetype_entry()`, sửa
+`write_translated()`), `tests/test_epub_document.py` (+8 test), `docs/CHANGELOG.md` (đoạn BL-12).
+Đối chiếu với `docs/Architecture.md` §6.25 và Final Decision ở `docs/design-log.md` mục BL-12
+(§9/§10: Phương án D — chuẩn hoá `mimetype` khi ghi output; reject sớm khi thiếu hẳn/sai nội dung).
+
+### 1. Đối chiếu Final Decision (§6.25.2)
+
+- **L1 (`load()`, `_check_mimetype_entry()`, gọi ngay sau `_check_drm()` — đúng vị trí brief yêu
+  cầu, `epub_document.py:767-768`)**: chỉ reject khi thiếu hẳn entry `mimetype` hoặc nội dung khác
+  `b"application/epub+zip"` — KHÔNG kiểm thứ tự/`compress_type` ở đây. Đúng đặc tả. Route map sang
+  HTTP 400 đã verify tại `src/api/routes/jobs.py:377-381` (`except EpubParseError`), và `load()`
+  được gọi ở `cost_gate.py:167` → reject xảy ra **trước** cost gate, đúng ý "user biết trước khi
+  tốn tiền". Đọc code xác nhận trực tiếp, không suy đoán.
+- **L2 (`write_translated()`, `:985-1017`)**: 2 nhánh reject cũ đã bị xoá đúng như Final Decision
+  yêu cầu ("thay thế 2 nhánh reject tại `epub_document.py:985-991`"). Thay bằng: tìm `mimetype` bất
+  kể vị trí trong `infolist`, đặt lên đầu `ordered_infos`, ép `compress_type = ZIP_STORED` chỉ cho
+  entry này, các entry còn lại giữ nguyên `compress_type` gốc. Khớp đúng bảng L1/L2 ở §6.25.2.
+
+Kết luận mục này: **đúng theo Final Decision**, không có sai lệch.
+
+### 2. Correctness — thứ tự entry + nội dung/thứ tự phần còn lại
+
+- Đọc trực tiếp `write_translated()` (`:985-1017`): `ordered_infos = [mimetype_info, *rest_infos]`
+  với `rest_infos` giữ nguyên thứ tự xuất hiện trong `infolist` gốc (chỉ lọc bỏ `mimetype`, không
+  sort lại) → **đảm bảo mimetype luôn là entry ĐẦU TIÊN được ghi ra** (không chỉ đúng
+  `compress_type`, mà đúng cả vị trí ghi trong file zip output — `out_zf.writestr()` được gọi tuần
+  tự theo `ordered_infos`, zip ghi tuần tự nên thứ tự file header = thứ tự gọi `writestr`).
+  Test `test_write_translated_moves_mimetype_to_front_when_not_first_entry` chứng minh đúng bằng
+  dữ liệu (không chỉ đọc code): tạo fixture có `mimetype` ở vị trí thứ 2, output đưa nó lên đầu,
+  và assert `rest_out == rest_expected` (danh sách tên các entry còn lại, đúng thứ tự) — bắt được
+  cả trường hợp lỗi tiềm ẩn "sort nhầm/đảo lộn phần còn lại", không chỉ "có mặt".
+- Nội dung entry không bị `mimetype`-normalize đụng tới: `data = modified_entries.get(info.filename)
+  or src_zf.read(info.filename)` — chỉ entry đã dịch mới lấy từ `modified_entries`, còn lại đọc
+  nguyên byte từ src. Test cũ `test_write_translated_monolingual_preserves_untouched_entries` (đã
+  có từ trước BL-12, không bị sửa) vẫn assert `zin.namelist() == zout.namelist()` và nội dung byte
+  từng entry chưa đụng — chạy lại xanh (xem mục 6) xác nhận BL-12 không phá vỡ bất biến này (vì
+  `SOURDOUGH_PATH` vốn đã có `mimetype` STORED-đầu-tiên, theo bảng đo §6.25.5, nên thứ tự không đổi
+  cho đúng file này).
+
+Kết luận mục này: **đúng**, có bằng chứng test, không chỉ đọc code suy luận.
+
+### 3. Verify độc lập claim "flag_bits là dead code" (không chỉ tin lời Dev, không chỉ tin lại design-log)
+
+Tự đọc trực tiếp source `zipfile` đã cài ở `.venv` (`CPython 3.14.7`, đường dẫn
+`~/.local/share/uv/python/cpython-3.14.7-macos-aarch64-none/lib/python3.14/zipfile/__init__.py`,
+xác nhận đúng interpreter mà `.venv/bin/python3` trỏ tới):
+- `writestr()` (dòng 2008-2038) luôn gọi `self.open(zinfo, mode='w')` → `_open_to_write()`.
+- `_open_to_write()` dòng 1819: `zinfo.flag_bits = _MASK_UTF_FILENAME` — **gán đè vô điều kiện**,
+  không có `if`/điều kiện giữ giá trị cũ nào trước đó.
+
+⇒ Dòng `new_info.flag_bits = info.flag_bits` (bản cũ) không có tác dụng gì — claim của Dev **đúng**,
+và đã verify bằng nguồn thật (đọc trực tiếp source, không dựa trí nhớ) — không chỉ kế thừa lại kết
+quả spike của Tech Lead trong design-log (Dev tự verify độc lập, đúng tinh thần "version tool đổi
+phải verify lại" áp dụng chặt cho cả trường hợp không đổi version — cẩn trọng hợp lý). Grep xác
+nhận dòng này đã bị xoá khỏi `epub_document.py` (không còn `flag_bits` nào trong file).
+
+### 4. Test có chứng minh round-trip thật, không tự nhất quán với giả định sai
+
+- `test_write_translated_normalizes_deflated_mimetype_from_real_violating_file` dùng **file EPUB
+  thật** đã gây bug gốc (`data/uploads/4a752f64-..._Sourdough Culture...epub`, xác nhận file này
+  tồn tại thật trên đĩa, 4MB, đúng đường dẫn nêu trong design-log §BL-12 mục 2/3). Assertion không
+  chỉ "không raise": kiểm `zipfile.testzip() is None` (toàn vẹn zip), `infolist()[0].filename ==
+  "mimetype"`, `compress_type == ZIP_STORED`, `extra == b""`, nội dung đúng, và **đọc lại bằng
+  `ebooklib.epub.read_epub()`** (thư viện độc lập, không phải chính code app) xác nhận `spine`
+  không rỗng — đây chính là kiểu kiểm tra "mở file ra xem có đọc lại được không" mà Protocol 6
+  R6-03 yêu cầu, tránh lặp lại kiểu lỗi Bug #5 (tin field trạng thái thay vì tin nội dung thật).
+- `test_bl12_violating_file_has_mimetype_deflated` giữ vai trò "guard tiền đề" — nếu file bằng
+  chứng gốc đổi, test này fail trước, không để 2 test round-trip phía dưới mất ý nghĩa mà không ai
+  biết. Thiết kế test tốt.
+- Test L1 (`test_load_raises_parse_error_when_mimetype_entry_missing`,
+  `..._mimetype_content_wrong`) dùng `pytest.raises(EpubParseError, match="mimetype")` — chặt hơn
+  "raises Exception" trơn, xác nhận đúng loại lỗi + có nhắc tới `mimetype` trong message.
+- Không phát hiện mock nào viết tay theo giả định thay cho gọi hàm thật — mọi test gọi thẳng
+  `EpubDocument.load()`/`write_translated()` thật, hoặc dùng `_build_minimal_epub()` (fixture EPUB
+  hợp lệ tự dựng bằng `zipfile`, đã có từ trước BL-12, không phải mock cho chính hàm đang test).
+
+Kết luận mục này: **đạt Protocol 5 mục 3** — có golden file/file thật backing, không tự xác nhận
+giả định của chính nó.
+
+### 5. Security / Performance
+
+- Không phát hiện path traversal mới: entry name dùng để đọc/ghi (`info.filename`) bắt nguồn từ
+  chính `infolist()` của file zip đã `load()` qua `zipfile.ZipFile` (thư viện chuẩn tự chuẩn hoá
+  tên entry khi liệt kê), không ghép chuỗi path từ input ngoài, không đổi so với hành vi gốc trước
+  BL-12 — BL-12 chỉ thêm bước sắp xếp lại thứ tự ghi, không đổi cách lấy tên entry.
+- `_check_mimetype_entry()` đọc `zf.read("mimetype")` — file rất nhỏ (đặc tả 20-22 byte theo RCA),
+  không có rủi ro memory.
+- `write_translated()` vẫn giữ nguyên chiến lược cũ: chỉ giữ nội dung các entry ĐÃ dịch trong
+  `modified_entries` (dict nhỏ, chỉ các doc XHTML có thay đổi), các entry khác đọc-rồi-ghi ngay
+  (streaming qua từng `info` trong vòng lặp, không tải hết zip vào RAM cùng lúc) — không có
+  regression về memory so với code cũ, việc thêm bước tìm/sắp xếp `mimetype` chỉ là 1 lần lọc
+  O(n) trên danh sách entry (thường vài chục tới vài trăm), không đáng kể.
+- Ghi qua file tạm `+ .tmp` rồi `replace()` (atomic trên cùng filesystem) — không đổi so với hành
+  vi cũ, giữ nguyên tính an toàn khi ghi đè.
+
+Kết luận mục này: không có vấn đề mới.
+
+### 6. Regression — chạy thật, không chỉ tin báo cáo Dev
+
+- `.venv/bin/python3 -m pytest tests/test_epub_document.py -q` → **66 passed** (tự chạy).
+- `.venv/bin/python3 -m pytest tests/ -q` (toàn bộ suite) → **844 passed**, không regression ở
+  chỗ khác trong repo.
+- `.venv/bin/python3 -m ruff check src/services/epub_document.py tests/test_epub_document.py` →
+  sạch. `ruff format --check` → đã format sẵn.
+- Test cũ liên quan tới cấu trúc entry (`test_write_translated_monolingual_preserves_untouched_entries`,
+  `test_write_translated_writes_via_tmp_then_replaces`, `test_load_raises_parse_error_when_container_xml_missing`
+  — test này dùng `_build_minimal_epub` không có `mimetype` qua nhánh cũ khác, đã tự đọc lại xác
+  nhận không đổi hành vi) đều xanh, không cần sửa để thích nghi với BL-12 — dấu hiệu tốt cho thấy
+  thay đổi không phá vỡ bất biến sẵn có.
+
+### 7. R7-03 — CHANGELOG.md có đúng append không
+
+Đọc `docs/CHANGELOG.md`: đoạn BL-12 (`## BL-12 — ...`) nằm **sau** đoạn BL-10 gần nhất (dòng
+~8204, sau `### KHÔNG commit` của mục BL-10), không có dấu hiệu nội dung cũ bị xoá/ghi đè — xác
+nhận bằng `wc -l` (8273 dòng, tăng so với trước) và đọc phần cuối file. **Đạt R7-03.**
+
+### 8. Checklist bắt buộc theo brief Reviewer (CLAUDE.md)
+
+- **R5-04**: `epub_document.py` không phải `*_runner.py`/`*_provider.py` gọi external service qua
+  subprocess/HTTP — đây là code xử lý zip/XML nội bộ bằng `zipfile`/`ebooklib` (thư viện Python
+  import trực tiếp). Theo "Phạm vi áp dụng" của Protocol 5 (CLAUDE.md), `pymupdf`/thư viện Python
+  thuần dùng API core không thuộc phạm vi R5-04. → **N/A** cho phần lõi `epub_document.py`. Tuy
+  nhiên `write_translated()`/`_check_mimetype_entry()` DÙNG claim cụ thể về hành vi `zipfile`
+  (`writestr()` không sinh extra field, `flag_bits` bị gán đè) — phần này ĐÃ được verify against
+  real source (mục 3 ở trên): **External contract verified against real source: YES** (nguồn: đọc
+  trực tiếp `zipfile/__init__.py` của `.venv`, CPython 3.14.7, dòng 1819/2008-2038 — không chỉ kế
+  thừa lại spike cũ của Tech Lead trong design-log).
+- **R6-04**: `epub_document.py` không phải `*_orchestrator.py` gọi tuần tự nhiều service — đây là
+  1 class xử lý 1 file EPUB, không có chuỗi bước external-tool nối tiếp nhau kiểu OCR→dịch. → **N/A**.
+  (Data lineage của `write_translated()` đọc `self.path` không đổi so với §6.20, đã tự đối chiếu ở
+  mục 2 — không phát hiện đứt gãy lineage kiểu Bug #5.)
+- **R8-01**: BL-12 không thêm engine/backend/biến thể mới đi qua pipeline dùng chung — đây là bug
+  fix cho 1 lớp input (EPUB vi phạm OCF) của cùng 1 luồng xử lý EPUB, không phải thêm variant mới.
+  → **N/A**.
+- **Protocol 5 R5-03**: 6/8 test BL-12 dùng file EPUB thật (`4a752f64-..._Sourdough Culture...epub`)
+  hoặc fixture tự dựng hợp lệ bằng `zipfile` (không phải mock cho chính hàm đang test) — đã tự đọc
+  từng test để xác nhận (mục 4). **Có golden file/dữ liệu thật backing, không viết tay theo giả
+  định.**
+
+### Kết luận
+
+**APPROVE** cho BL-12. Code khớp đúng Final Decision (Phương án D) và §6.25.2, thứ tự + nội dung
+entry output đã verify bằng test có assertion cụ thể (không chỉ "không raise"), claim về hành vi
+`zipfile` (`flag_bits` dead code) đã tự verify độc lập bằng đọc source thật — không chỉ tin lời Dev
+hay kế thừa lại nguồn xác thực cũ. Toàn bộ 844 test + ruff sạch. CHANGELOG.md tuân thủ R7-03 (append
+đúng cách). Không có blocking issue.
+
+**Không blocking, đưa vào `backlog[]`** (đã ghi nhận sẵn ở CHANGELOG/design-log, nhắc lại để PM
+không bỏ sót owner theo R5-06): đo hành vi reading system thật (Apple Books, Calibre, Kobo, Kindle
+Previewer) với `mimetype` bị nén trước khi chuẩn hoá + cài `epubcheck` để có kiểm định OCF độc lập
+cho output — hiện `⚠️ ASSUMED`/`[UNVERIFIED]` ở Architecture.md §6.25.4 chưa có owner cụ thể trong
+`backlog[]`.

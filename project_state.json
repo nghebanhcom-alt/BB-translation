@@ -119,6 +119,50 @@
       "status": "answered",
       "answered_in": "CLAUDE.md project — R5-06 (PM ghi trực tiếp 2026-09-11, tài liệu governance)",
       "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-07",
+      "text": "BL-12: chọn Phương án D (normalize mimetype khi ghi output + reject sớm thứ không sửa được) hay giữ strict?",
+      "asked_by": "tech-lead",
+      "origin": "docs/design-log.md §4 bảng phương án — điều tra BL-12",
+      "blocks": ["S4"],
+      "default": "Phương án D",
+      "status": "answered",
+      "answered_in": "design-log.md — Final Decision 2026-09-16: chọn Phương án D",
+      "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-08",
+      "text": "BL-12: EPUB thiếu hẳn mimetype/sai content-type — reject sớm hay tự chế entry mimetype chuẩn?",
+      "asked_by": "tech-lead",
+      "origin": "docs/design-log.md §4 — ranh giới sửa-được/không-sửa-được",
+      "blocks": ["S4"],
+      "default": "Reject sớm",
+      "status": "answered",
+      "answered_in": "design-log.md — Final Decision 2026-09-16: chọn reject sớm (R8-02)",
+      "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-09",
+      "text": "Tính năng mới FR→VI: phạm vi định dạng, glossary, UI chọn source language, ưu tiên so với BL-12?",
+      "asked_by": "pm",
+      "origin": "Yêu cầu Hiếu trong chat 2026-09-16",
+      "blocks": [],
+      "default": "PDF+EPUB, dùng chung glossary EN hiện có, auto-detect ngôn ngữ nguồn, làm sau khi BL-12/S4 xong",
+      "status": "answered",
+      "answered_in": "Chat 2026-09-16: PDF+EPUB, glossary EN dùng chung, auto-detect source lang, sau BL-12",
+      "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-10",
+      "text": "Tính năng mới: loại bỏ trang claim bản quyền trước khi xuất file dịch — cách nhận diện, phạm vi, xử lý sai sót?",
+      "asked_by": "pm",
+      "origin": "Yêu cầu Hiếu trong chat 2026-09-16",
+      "blocks": [],
+      "default": "Auto-detect bằng heuristic, áp dụng PDF+EPUB, chấp nhận rủi ro v1 và ghi backlog cải thiện sau",
+      "status": "answered",
+      "answered_in": "Chat 2026-09-16: auto-detect heuristic, PDF+EPUB, chấp nhận rủi ro v1",
+      "clarify_rounds": 1
     }
   ],
   "backlog": [
@@ -201,9 +245,16 @@
     },
     {
       "id": "BL-12",
-      "text": "QUAN TRỌNG — đang CHẶN job thật của Hiếu (781b59b0): job bfc0ac24 dịch xong 66/66 chunk (xác nhận S4 hết bug) nhưng bước MERGE CUỐI lỗi — mimetype OCF của file gốc không ở dạng ZIP_STORED. KHÔNG sửa (ngoài phạm vi S4)",
+      "text": "MERGE CUỐI lỗi vì mimetype OCF không ở dạng ZIP_STORED. Dev implement Phương án D, Reviewer APPROVE, QA live E2E PASS (R6-03, nội dung dịch thật xác nhận) — CHƯA commit, CHƯA restart production",
       "source": "dev",
-      "ref": "docs/design-log.md — ghi nhận trong mục live E2E Bug #EPUB-5, job bfc0ac24-0664-4932-96da-1ac99c1abc10, error_message qua GET /api/jobs/bfc0ac24",
+      "ref": "docs/test-report.md 'BL-12 — Live E2E gate' (2026-09-16), docs/review-report.md",
+      "status": "open"
+    },
+    {
+      "id": "BL-13",
+      "text": "⚠️ ASSUMED — hành vi reading system thật (Apple Books, Calibre, Kobo, Kindle Previewer) với mimetype bị nén chưa đo; chưa cài epubcheck để kiểm định OCF output của app",
+      "source": "tech-lead",
+      "ref": "docs/design-log.md §8 (mục 'Việc chưa làm / còn treo') — điều tra BL-12",
       "status": "open"
     }
   ],
@@ -257,10 +308,26 @@
       "id": "S6",
       "title": "Cost metered cho chunk PDF babeldoc — xem decisions-archive.md 'S6 id note'",
       "owner_role": "qa",
-      "status": "review",
+      "status": "done",
       "blocked_by": [],
-      "output": "Tech Lead design (Architecture.md §6.23 dòng 8003-8358) → Dev implement (838 test pass, spike R5-02 khớp spec, golden file tests/fixtures/babeldoc/token_usage_stdout.txt) → Reviewer APPROVE vòng 1/3 (review-report.md) → QA live E2E job 2751c13c: cost_source='metered' đúng lineage per-chunk, SUM(chunks.api_cost)==jobs.actual_cost khớp tuyệt đối, output PDF có tiếng Việt thật. ready_for_release: NO — thiếu (1) pdf2zh regression check (2) PM/Hiếu xác nhận restart server production là bước deploy hợp lệ. Chưa commit. Docs gọi item này là 'BL-10' — id trùng backlog BL-10 cũ (done 2026-09-11, việc khác) do PM gán nhầm, xem decisions-archive.md.",
-      "closed_commit": null
+      "output": "Tech Lead design (Architecture.md §6.23 dòng 8003-8358) → Dev implement (838 test pass, spike R5-02 khớp spec, golden file tests/fixtures/babeldoc/token_usage_stdout.txt) → Reviewer APPROVE vòng 1/3 (review-report.md) → QA live E2E job 2751c13c (babeldoc metered, lineage đúng, SUM khớp jobs.actual_cost) + job 3a260d20 (pdf2zh regression PASS, vẫn 'estimated'). ready_for_release: YES. Docs gọi item này là 'BL-10' — id trùng backlog BL-10 cũ (done 2026-09-11, việc khác) do PM gán nhầm, xem decisions-archive.md.",
+      "closed_commit": "33d21a7310c7efe9140f71a8a7b385fff977bb0d"
+    },
+    {
+      "id": "S7",
+      "title": "Tính năng mới: hỗ trợ dịch FR→VI (PDF+EPUB, dùng chung glossary EN, auto-detect source language)",
+      "owner_role": "tech-lead",
+      "status": "blocked",
+      "blocked_by": ["S4"],
+      "output": null
+    },
+    {
+      "id": "S8",
+      "title": "Tính năng mới: loại bỏ trang claim bản quyền trước khi xuất file (heuristic, PDF+EPUB)",
+      "owner_role": "tech-lead",
+      "status": "blocked",
+      "blocked_by": ["S4"],
+      "output": null
     }
   ],
   "loops": [
@@ -273,14 +340,6 @@
       "reset_reason": null
     }
   ],
-  "infra_pending": [
-    {
-      "id": "IP-01",
-      "applied_at": "2026-09-13",
-      "target": "running server (uvicorn production process)",
-      "description": "QA restart server chạy code S6 chưa commit cho live E2E — Hiếu đã xác nhận 2026-09-13 đây là deploy hợp lệ, chờ Dev commit",
-      "commit": null
-    }
-  ],
+  "infra_pending": [],
   "blockers": []
 }
