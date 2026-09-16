@@ -54,6 +54,7 @@ from src.core.cost_estimator import (
 )
 from src.core.file_router import FileType
 from src.core.glossary_manager import GlossaryManager
+from src.core.language_detector import detect_source_lang
 from src.core.ocr_warning import build_ocr_warning
 from src.core.progress_tracker import BroadcastFn, ProgressTracker
 from src.core.prompt_builder import (
@@ -725,6 +726,18 @@ class JobOrchestrator:
         # file_path goc — file goc khong co text layer de doc.
         full_text = _extract_full_text(translation_source_path)
 
+        # Architecture.md §6.26.4 point 2 (S7 — dich FR->VI): fallback detect
+        # KHI `job.source_lang` con NULL luc nay — ca pdf_scan (cost_gate
+        # khong detect duoc tren file chua OCR, §6.26.4 point 1) VA job tao
+        # ngoai API/test (khong qua create_job()). Ghi 1 LAN roi giu nguyen
+        # qua moi lan resume (cung khuon voi chunk_size_used) — khong detect
+        # lai neu da co gia tri.
+        if job.source_lang is None:
+            detection = detect_source_lang(full_text)
+            job.source_lang = detection.lang or "en"
+            db_session.add(job)
+            await db_session.commit()
+
         # Step 4: map provider -> pdf2zh service. DeepL (va bat ky provider
         # khong ho tro) fail NGAY o day, truoc khi cham toi subprocess.
         try:
@@ -765,6 +778,7 @@ class JobOrchestrator:
                 project_id=job.batch_id,
                 only_terms_present_in=full_text,
                 max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
+                source_lang=job.source_lang or "en",
             )
             prompt_overhead_chars = len(prompt_path.read_text(encoding="utf-8"))
         else:
@@ -986,7 +1000,9 @@ class JobOrchestrator:
                         output_pdf_path=merged_path,
                         provider=pricing_provider,
                         glossary_prompt=await build_system_prompt(
-                            glossary_manager, project_id=job.batch_id
+                            glossary_manager,
+                            project_id=job.batch_id,
+                            source_lang=job.source_lang or "en",
                         ),
                         font_path=overlay_font_path,
                     )
@@ -1146,6 +1162,16 @@ class JobOrchestrator:
             db_session.add(job)
             await db_session.commit()
 
+        # Architecture.md §6.26.4 point 2 (S7 — dich FR->VI): cung khuon voi
+        # `run_job()` Step 3 — fallback detect khi con NULL (job tao ngoai
+        # API/test; nhanh EPUB luon co full_text() ngay tu dau nen cost_gate
+        # thuong da detect duoc, dieu kien nay chu yeu la an toan/idempotent).
+        if job.source_lang is None:
+            detection = detect_source_lang(doc.full_text())
+            job.source_lang = detection.lang or "en"
+            db_session.add(job)
+            await db_session.commit()
+
         # E2/E3 (Architecture.md 6.20.9 bang dong 3/4, §6.11.6): glossary
         # PHAI duoc loc theo `full_text` truoc khi build system prompt, cung
         # 1 co che loc voi `cost_gate.py::_estimate_epub_translation_cost()`
@@ -1165,6 +1191,7 @@ class JobOrchestrator:
             project_id=job.batch_id,
             only_terms_present_in=doc.full_text(),
             max_glossary_entries=self._settings.max_glossary_entries_in_prompt,
+            source_lang=job.source_lang or "en",
         )
         system_prompt = build_epub_batch_prompt(base_system_prompt)
 
@@ -2107,6 +2134,10 @@ class JobOrchestrator:
                 page_range=f"{chunk.page_start}-{chunk.page_end}",
                 service=service,
                 prompt_file=prompt_file,
+                # Architecture.md §6.26.4 point step 7 (S7 — dich FR->VI):
+                # `job.source_lang or "en"` — TUYET DOI KHONG lien quan gi
+                # toi `lang` cua MinerU (§6.26.5 buoc #1, luon "en" o do).
+                lang_in=job.source_lang or "en",
                 ignore_cache=self._settings.pdf2zh_ignore_cache,
                 timeout_seconds=self._settings.pdf2zh_timeout_seconds,
                 thread=thread,
@@ -2288,6 +2319,10 @@ class JobOrchestrator:
                 provider=pricing_provider,
                 vi_expansion=self._settings.vi_expansion_factor,
                 vi_token_factor=self._settings.vi_token_factor,
+                # Architecture.md §6.26.5 audit buoc #6 (S7 — dich FR->VI):
+                # dung DUNG source_lang da chot cua job nay — chars/token FR
+                # thap hon EN (uoc DU co chu dich, xem cost_estimator.py).
+                source_lang=job.source_lang or "en",
             )
             tokens_used = input_tokens + output_tokens
             cost_source = "estimated"
@@ -2332,16 +2367,20 @@ class JobOrchestrator:
         *,
         job_id: str,
         chunk_index: int,
+        source_lang: str = "en",
     ) -> tuple[str | None, int, int, float]:
         """Helper CHIA SE giua 2 co che retry-rieng-le KHAC nghia
         (Architecture.md 6.20.13.5's "CHOT: TACH, nhung dung CHUNG 1
         helper"): id thieu (X4/6.20.13.3a) VA unit mat dau tang 2
         (6.20.13.5). Tra `(ban_dich_hoac_None, input_tokens, output_tokens,
         cost_usd)` — caller tu cong don token/chi phi va tu kiem tran Lop 4.
+
+        `source_lang` (S7, Architecture.md §6.26.4): `job.source_lang or
+        "en"` — mac dinh "en" giu nguyen hanh vi cu cho caller chua cap nhat.
         """
         single_payload = json.dumps([{"id": local_id, "html": unit.text}], ensure_ascii=False)
         retry_result = await with_retry(
-            lambda p=single_payload: pricing_provider.translate(p, system_prompt, "en", "vi")
+            lambda p=single_payload: pricing_provider.translate(p, system_prompt, source_lang, "vi")
         )
         outcome = parse_epub_batch_response_detailed(retry_result.text, {local_id})
         self._log_epub_parse_salvage(job_id, chunk_index, outcome)
@@ -2361,14 +2400,18 @@ class JobOrchestrator:
         *,
         job_id: str,
         chunk_index: int,
+        source_lang: str = "en",
     ) -> tuple[dict[str, str], int, int, float]:
         """Goi lai NGUYEN 1 request (payload/expected_ids y het) dung 1 lan —
         dung chung cho ca nhanh C-1 (qua nua batch thieu id, Architecture.md
         6.20.13.3a) va tang 1 cua guard mat dau (6.20.13.5). Tra
         `(parsed, input_tokens, output_tokens, cost_usd)`.
+
+        `source_lang` (S7, Architecture.md §6.26.4): `job.source_lang or
+        "en"` — mac dinh "en" giu nguyen hanh vi cu cho caller chua cap nhat.
         """
         retry_result = await with_retry(
-            lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
+            lambda p=payload_json: pricing_provider.translate(p, system_prompt, source_lang, "vi")
         )
         outcome = parse_epub_batch_response_detailed(retry_result.text, expected_ids)
         self._log_epub_parse_salvage(job_id, chunk_index, outcome)
@@ -2408,6 +2451,11 @@ class JobOrchestrator:
         chunk.started_at = datetime.now(UTC)
         db_session.add(chunk)
         await db_session.commit()
+
+        # Architecture.md §6.26.4 (S7 — dich FR->VI): dung DUNG bien nay cho
+        # MOI loi goi pricing_provider.translate() trong ham nay (chinh +
+        # retry qua 2 helper ben tren) — khong hardcode "en" o bat ky cho nao.
+        source_lang = job.source_lang or "en"
 
         units = doc.units
         translations: dict[str, str] = {}
@@ -2462,7 +2510,9 @@ class JobOrchestrator:
             extra_requests = 0
 
             result = await with_retry(
-                lambda p=payload_json: pricing_provider.translate(p, system_prompt, "en", "vi")
+                lambda p=payload_json: pricing_provider.translate(
+                    p, system_prompt, source_lang, "vi"
+                )
             )
             await _accumulate_and_check_budget(
                 result.input_tokens, result.output_tokens, result.estimated_cost_usd
@@ -2559,6 +2609,7 @@ class JobOrchestrator:
                             unit,
                             job_id=job.id,
                             chunk_index=chunk.chunk_index,
+                            source_lang=source_lang,
                         )
                         extra_requests += 1
                         await _accumulate_and_check_budget(it, ot, cost)
@@ -2572,6 +2623,7 @@ class JobOrchestrator:
                         expected_ids,
                         job_id=job.id,
                         chunk_index=chunk.chunk_index,
+                        source_lang=source_lang,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)
@@ -2627,6 +2679,7 @@ class JobOrchestrator:
                         expected_ids,
                         job_id=job.id,
                         chunk_index=chunk.chunk_index,
+                        source_lang=source_lang,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)
@@ -2681,6 +2734,7 @@ class JobOrchestrator:
                         unit,
                         job_id=job.id,
                         chunk_index=chunk.chunk_index,
+                        source_lang=source_lang,
                     )
                     extra_requests += 1
                     await _accumulate_and_check_budget(it, ot, cost)

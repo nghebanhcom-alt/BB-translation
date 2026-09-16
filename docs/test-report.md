@@ -2918,3 +2918,166 @@ từ giờ**, và cần xác nhận lại việc restart này không làm gián 
 khi kill: không có job `processing` nào tại thời điểm đó); (c) cân nhắc thêm bước "restart +
 xác nhận" vào quy trình release để không lặp lại kiểu lệch code-đã-duyệt-vs-code-đang-chạy này —
 đúng tinh thần Protocol E dù đối tượng ở đây là code thay vì `.env`/DB migration.
+
+## S7 — Dịch FR→VI bên cạnh EN→VI (2026-09-16) — QA live E2E (R5-03 + R6-03)
+
+Phạm vi: `docs/review-report.md` mục "S7 — Dịch FR→VI ... 2026-09-16" (APPROVE, dòng 3367-3548).
+Đối chiếu `docs/Architecture.md` §6.26 (§6.26.1-6.26.9) và `docs/design-log.md` "S7 — Dịch FR→VI".
+Brief yêu cầu: live E2E thật cho EPUB FR, PDF FR, pdf_scan FR (guard MinerU), regression EN — không
+tin mock, mở file output kiểm tra nội dung thật.
+
+### 0. Môi trường — kiểm tra trước khi chạy (R5-03 pre-check)
+
+- `DEEPSEEK_API_KEY` trong `.env`: gọi thật `POST https://api.deepseek.com/v1/chat/completions` →
+  200 OK, có `choices[0].message.content` thật — **key sống, không phải placeholder**.
+  `default_provider` trong bảng `settings` (SQLite) = `deepseek` — đúng provider job thật sẽ dùng.
+- `pdf2zh --version` → `v1.9.11`, `babeldoc --version` → `0.6.4` — **khớp đúng version** Tech Lead
+  đã trích nguồn ở §6.26.1 (không lệch version, không cần verify lại theo R5-05).
+- MinerU: `curl http://localhost:8010/health` → `{"status":"healthy","version":"3.4.5", ...}` —
+  **khớp đúng version 3.4.5** đã trích nguồn ở §6.26.1. `docker ps` không gọi được từ sandbox này
+  (`no such file or directory` cho docker socket) nhưng bản thân service đã sống và trả lời HTTP
+  thật — đủ điều kiện R5-03 (gọi thật, không cần biết nó chạy trong container gì).
+- **Phát hiện quan trọng — môi trường, không phải bug Dev**: tiến trình `uvicorn` đang chạy khi bắt
+  đầu QA (PID 90254) đã khởi động lúc `14:31:33`, TRƯỚC KHI `src/core/job_orchestrator.py`,
+  `src/core/cost_gate.py`, `src/api/routes/jobs.py` được ghi lần cuối (`21:48:07` theo `stat -f %Sm`)
+  — tức server đang chạy **code CŨ, không có S7**, dù `git status`/nội dung file trên đĩa đã đúng
+  S7. 2 job chạy thử đầu tiên qua HTTP (`d8351b9a`, `f3df347a`) đều cho `source_lang: null` dù nội
+  dung tài liệu test rõ ràng là tiếng Pháp — verify độc lập bằng cách gọi thẳng
+  `estimate_translation_cost()`/`create_job()` trong 1 process Python MỚI (không qua HTTP, tự
+  import lại module từ đĩa) → cho đúng `source_lang="fr"` ngay lập tức, chứng minh code trên đĩa
+  đúng, chỉ có tiến trình server là cũ. Đã `kill 90254` rồi khởi động lại
+  `uvicorn src.api.main:app` sạch — xác nhận trước khi kill không có job nào đang `translating`
+  (2 job cũ đều đã `completed`). **Đây là lần thứ 2 sự cố này xảy ra trong cùng ngày** (lần đầu ghi
+  ở mục BL-12 phía trên, "(c)") — PM nên cân nhắc nghiêm túc đưa bước "restart server + xác nhận
+  version" vào quy trình chuẩn trước khi QA chạy live E2E, không chỉ ghi chú non-blocking mỗi lần.
+
+### 1. EPUB FR→VI — live E2E thật
+
+Tạo EPUB nguồn thật (`data:` không cần — file rời): 1 chương, 6 đoạn văn tiếng Pháp thật (~587 token
+theo `detect_source_lang`) chủ đề "la recette du pain au levain" (không phải câu ngắn nhồi từ khoá).
+`mimetype` ghi STORED, đứng đầu archive (đúng chuẩn OCF, tránh dính lại BL-12).
+
+- Upload → `file_type: "epub"` đúng.
+- `POST /api/jobs` (`provider=deepseek`, `confirm_cost=true`) → job `e3be4dce-...`.
+- Poll `GET /api/jobs/{id}`: `status` đi từ `queued` → `translating` (đã thấy `source_lang: "fr"`
+  **ngay từ bước `translating` đầu tiên**, không phải chỉ lúc `completed`) → `completed`.
+- **Mở file output thật** (`GET .../download` → `translated_vi.epub`, `unzip -p ... OEBPS/chap1.xhtml`):
+  nội dung là bản dịch tiếng Việt THẬT, đối chiếu nghĩa với bản gốc — `"pain au levain"` →
+  `"bánh mì levain"`, `"boulanger"` → `"người thợ làm bánh"`, `"four préchauffé"` → `"lò nướng được
+  làm nóng trước"`, đủ 6 đoạn, không đoạn nào rỗng/giữ nguyên tiếng Pháp. Không chỉ tin
+  `status: completed` — đúng tinh thần R6-03 (cách Bug #5 từng bị phát hiện).
+- `actual_cost = $0.0022002` (đo thật từ response, khớp DB).
+- **PASS.**
+
+### 2. Regression EPUB EN→VI — live E2E thật
+
+Cùng khuôn nội dung (bản tiếng Anh thật, không phải bản dịch máy của bản FR) chủ đề tương tự.
+
+- `source_lang: "en"` xuất hiện đúng từ bước `translating` đầu tiên.
+- Mở output: `"The recipe for sourdough bread"` → `"Công thức làm bánh mì sourdough"` — bản dịch
+  tiếng Việt thật, đúng nghĩa.
+- `actual_cost = $0.00187374` — cùng bậc độ lớn với job FR tương đương (không có dấu hiệu chi phí
+  bị lệch bất thường do đổi field `source_lang`).
+- Tự chạy lại `pytest tests/test_language_detector.py tests/test_prompt_builder.py
+  tests/test_cost_estimator.py tests/test_cost_gate_source_lang.py
+  tests/integration/test_job_orchestrator_source_lang.py tests/integration/test_epub_job_source_lang.py
+  tests/integration/test_term_extraction_service.py tests/test_jobs_route_to_detail.py
+  tests/integration/test_create_job_source_lang_api.py -q` (sau khi restart server) → **81 passed**,
+  khớp số Reviewer đã báo — không tự tin theo lời, tự chạy lại độc lập.
+- **PASS.**
+
+### 3. PDF FR→VI (babeldoc) — live E2E thật, kèm verify `lang_in`
+
+Tạo PDF thật bằng PyMuPDF (không phải PDF scan giả): 3 trang, ~587 token tiếng Pháp (nội dung
+tiếp nối câu chuyện EPUB, để dễ so sánh nghĩa). File đầu tiên (1 trang, ~233 token) chủ động bị bỏ
+qua khỏi kết luận — `token_count < 500` khiến `detection.lang = None` và job fallback đúng
+`source_lang="en"` theo thiết kế §6.26.3 (không phải bug, đã tự verify bằng cách gọi
+`detect_source_lang()` trực tiếp trên `_extract_full_text()` của đúng file đó — `token_count=233`).
+
+- File 3 trang: `source_lang: "fr"` xuất hiện đúng từ `translating`.
+- **Verify `lang_in` truyền cho babeldoc bằng artifact thật** (không chỉ tin field DB): đọc
+  `data/processing/{job_id}/prompt.txt` mà babeldoc thực sự dùng — dòng đầu là *"Dịch từ tiếng Pháp
+  sang tiếng Việt"* (không phải "tiếng Anh"), đúng ánh xạ `_SOURCE_LANG_NAME_VI["fr"]`.
+- Mở `translated_vi.pdf` (PyMuPDF `get_text()` từng trang): nội dung tiếng Việt thật, đúng nghĩa
+  bản Pháp gốc (đối chiếu cả 3 trang).
+- `actual_cost = $0.00170236`.
+- **PASS.**
+
+### 4. pdf_scan FR (MinerU guard) — live E2E thật, quan sát qua kết quả thật KHÔNG QUA MOCK
+
+Không có quyền truy cập log nội bộ MinerU (Docker) hay proxy HTTP từ sandbox này, nên dùng phép
+verify gián tiếp nhưng CHẶT: theo đúng nguồn xác thực Tech Lead đã trích ở §6.26.1, MinerU
+**raise lỗi ngay lập tức** nếu nhận `lang="fr"` (`validate_public_ocr_lang()` — `fr` không nằm
+trong `PUBLIC_OCR_LANGUAGES`). Vậy nếu app từng lỡ truyền `lang="fr"` cho MinerU, job này sẽ
+**fail ngay ở bước OCR**, không thể tới `status: completed` với `ocr_confidence` hợp lệ.
+
+- Chuyển đúng file PDF 3 trang FR ở mục 3 thành ảnh (`page.get_pixmap(dpi=150)` → PDF ảnh thuần,
+  `get_text()` = 0 ký tự mọi trang) → upload → `file_type: "pdf_scan"` đúng.
+- Job hoàn tất: `status: completed`, `ocr_confidence: 0.9918837209302325`, `ocr_dropped_spans: 0`,
+  `source_lang: "fr"` (re-detect đúng ở Step 3 sau OCR, trên cầu nối searchable PDF — không phải
+  detect trên file scan gốc rỗng chữ). **Job không hề fail** ⇒ theo đúng logic loại trừ ở trên,
+  MinerU đã được gọi với `lang` hợp lệ (`"en"`), không phải `"fr"` — khớp đúng thiết kế §6.26.5
+  bước #1 và code đã Reviewer trace tay (mục 1 review-report.md S7).
+- OCR confidence 0.99 trên văn bản tiếng Pháp có dấu (`é, è, à, ç` xuất hiện nhiều trong nội dung
+  test) — dữ liệu đo thật hữu ích cho backlog `BL-16` (A-3, §6.26.7: "MinerU model `ch` OCR tiếng
+  Pháp có dấu chính xác tới đâu — chạy 1 scan FR thật, đối chiếu `ocr_confidence`"). **Không đóng
+  BL-16** (1 mẫu nhỏ, font renderer sạch — không đại diện cho scan thật từ máy in/photo) nhưng cung
+  cấp 1 điểm dữ liệu thật đầu tiên: 0.99, ngang mức tốt của scan EN thông thường.
+- Mở `translated_vi.pdf`: nội dung tiếng Việt thật, đúng nghĩa 3 trang.
+- `actual_cost = $0.00326854`.
+- **PASS** (bao gồm cả nhánh guard MinerU).
+
+### 5. Term-extraction guard cho job FR (bước #13, §6.26.5)
+
+Log thật của job PDF FR (mục 3): `src.core.term_extraction_service: Job ...: source_lang='fr' !=
+'en' — bo qua trich xuat tu moi (US-20, §6.26.5 buoc #13)` — guard hoạt động đúng, log tường minh,
+không silent skip. **PASS.**
+
+**Phát hiện phụ (không phải lỗi S7, pre-existing, non-blocking nhưng đáng báo cáo)**: term-extraction
+cho job **EPUB** (cả FR lẫn EN) hiện LUÔN fail với
+`TermExtractionSourceError: file_type=epub chua co nguon source_text cho US-20` — đọc
+`src/core/term_extraction_service.py:73-82`: nhánh EPUB được viết từ trước khi US-22 (dịch EPUB)
+hoàn thiện, với comment tự thừa nhận "nhánh này KHÔNG THỂ bị gọi qua đường đi bình thường hiện tại
+... khi US-22 lên production, sửa ĐÚNG cho nhánh này, KHÔNG đoán" — nhưng US-22 đã lên production từ
+lâu (EPUB dịch chạy hoàn toàn bình thường) và nhánh này chưa từng được sửa lại. Job vẫn
+`status: completed` đúng thiết kế (lỗi bị bắt riêng, không đổi status), nên **không chặn release
+S7** — nhưng tính năng "Các từ mới" (US-20) hiện **không hoạt động cho bất kỳ job EPUB nào**, không
+riêng job FR. Tái hiện được cả trước và sau khi restart server, cả job EN lẫn FR — không phải
+regression do S7. Đề nghị PM tạo backlog riêng (không phải S7) giao Tech Lead/Dev, vì đây là 1 tính
+năng đã document bị hỏng âm thầm (silent — job vẫn "completed", user không biết "Các từ mới" rỗng vì
+sao).
+
+### 6. Đối chiếu checklist bắt buộc
+
+- **R5-03**: đạt cho cả 3 external dependency liên quan S7 — DeepSeek (gọi thật, `actual_cost` đo
+  được khớp usage thật), pdf2zh/babeldoc (chạy thật, `prompt.txt` là artifact thật babeldoc đọc),
+  MinerU (health thật + suy luận chặt từ hành vi thật, không mock).
+- **R6-03**: cả 3 nhánh pipeline nhiều bước (EPUB: parse→dịch→ghi lại; PDF digital: babeldoc
+  render; PDF scan: MinerU OCR→cầu nối→babeldoc) đã chạy xuyên suốt với dữ liệu thật, **mở file
+  output cuối cùng** xác nhận nội dung tiếng Việt thật khớp nghĩa bản gốc — không chỉ tin `status`.
+- **R6-02**: đã assert giá trị cụ thể truyền giữa các bước bằng cách đọc thẳng artifact trung gian
+  thật (`prompt.txt` chứa "tieng Phap", không chỉ tin field `lang_in` trong DB/log).
+- **Tổng chi phí LLM thật đợt QA S7**: `$0.0022002 + $0.00187374 + $0.00170236 + $0.00326854 =
+  $0.00904288` (< 1 cent) — đúng ước lượng nhỏ theo yêu cầu brief, không có dấu hiệu runaway.
+
+### Kết luận S7
+
+**`ready_for_release: YES`** cho cả 3 nhánh: EPUB FR/EN, PDF digital FR/EN (babeldoc), pdf_scan FR
+(MinerU guard). Không có mục nào phải chặn theo kiểu "release blocked pending live verification" —
+cả 3 external dependency (DeepSeek, babeldoc, MinerU) đều đã gọi thật thành công trong đúng bối cảnh
+S7 (FR làm ngôn ngữ nguồn), không chỉ mock. Lineage `source_lang` xuyên suốt (cost_gate → Job row →
+prompt file → provider call → output) đã verify bằng dữ liệu thật ở cả 2 loại file (PDF, EPUB) và cả
+2 giá trị (`"fr"`, `"en"`), khớp đúng thiết kế §6.26.4/6.26.5 Tech Lead đã audit và Reviewer đã trace
+tay.
+
+**Không blocking, nhưng PM cần xử lý (theo thứ tự ưu tiên)**:
+1. **Bug âm thầm phát hiện thêm, không thuộc S7**: term-extraction (US-20) hỏng hoàn toàn cho MỌI
+   job EPUB (không riêng FR) — mục 5 ở trên. Đề nghị PM mở backlog riêng, KHÔNG gộp vào S7.
+2. **Quy trình**: đây là lần thứ 2 trong ngày server production chạy code CŨ hơn commit đã duyệt tại
+   thời điểm QA bắt đầu (lần 1 ở mục BL-12 phía trên) — cả 2 lần đều do QA tự phát hiện bằng cách so
+   sánh trực tiếp, không có cơ chế nào tự cảnh báo. Đề nghị PM cân nhắc nghiêm túc thêm bước kỹ
+   thuật (không chỉ note trong report) — ví dụ endpoint `/health` trả thêm `git_commit`/mtime của
+   module chính, để QA/PM đối chiếu 1 dòng thay vì phải tự suy luận qua `stat`/`ps`.
+3. Backlog A-1..A-4 (`BL-14`..`BL-17`) đã có entry đúng R5-06 — mục 4 ở trên bổ sung 1 điểm dữ liệu
+   thật cho `BL-16` (OCR confidence 0.99 trên FR có dấu, mẫu nhỏ) nhưng KHÔNG đủ để đóng backlog đó
+   (cần scan thật từ máy quét/ảnh chụp, không phải PDF render sạch từ PyMuPDF).

@@ -152,3 +152,22 @@ def test_legacy_failed_job_without_finished_at_or_completed_at_shows_none() -> N
     )
     detail = _to_detail(job, _OCR_THRESHOLD)
     assert detail.duration_seconds is None
+
+
+# === S7 — dich FR->VI (Architecture.md §6.26 mo rong pham vi, 2026-09-16) ==
+# UI (web/index.html, web/history.html) doc `source_lang` qua JobDetail —
+# field nay phai duoc serialize dung tu Job.
+
+
+def test_job_detail_passes_through_source_lang_fr() -> None:
+    job = _make_job(source_lang="fr")
+    detail = _to_detail(job, _OCR_THRESHOLD)
+    assert detail.source_lang == "fr"
+
+
+def test_job_detail_passes_through_source_lang_none() -> None:
+    """Job cu truoc S7 (cot moi, NULL) -> API tra ve None, UI coi nhu EN->VI
+    (deny-by-default, khong crash)."""
+    job = _make_job(source_lang=None)
+    detail = _to_detail(job, _OCR_THRESHOLD)
+    assert detail.source_lang is None

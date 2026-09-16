@@ -78,6 +78,9 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     # BL-10 (Architecture.md 6.23.9). SQLite cho phep `ADD COLUMN NOT NULL`
     # khi co DEFAULT hang — cot moi o list nay: nullable HOAC co DEFAULT hang.
     ("chunks", "cost_source", "TEXT NOT NULL DEFAULT 'estimated'"),
+    # Architecture.md 6.26.2 (S7 — dich FR->VI): 'en' | 'fr' | NULL, xem
+    # docstring day du o src/models/job.py.
+    ("jobs", "source_lang", "TEXT"),
 ]
 
 

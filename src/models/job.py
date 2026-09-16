@@ -93,6 +93,15 @@ class Job(SQLModel, table=True):
     # Ghi lai 1 lan roi giu nguyen qua cac lan retry (BR-CHUNK-05-style) —
     # user ep "ocr" cho 1 file pdf_digital khong the tu doi lai "txt" giua
     # chung job do retry.
+    source_lang: str | None = Field(default=None)
+    # 'en' | 'fr' | NULL — Architecture.md 6.26.2 (S7 — dich FR->VI). NULL =
+    # CHUA detect (job cu truoc S7, hoac Job row tao ngoai API) — moi noi doc
+    # gia tri nay PHAI coi NULL tuong duong "en" (deny-by-default, R8-02).
+    # Ghi 1 LAN roi giu nguyen qua moi lan retry/resume — cung khuon voi
+    # chunk_size_used/parse_method o tren: mot job resume giua chung khong
+    # duoc doi ngon ngu nguon, vi prompt file/cache key cua cac chunk da xong
+    # da sinh theo gia tri cu. Cot moi, them qua `_NEW_NULLABLE_COLUMNS`
+    # (src/models/database.py) — GIU DU LIEU DB hien co, khong xoa/tao lai.
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
     finished_at: datetime | None = Field(default=None)

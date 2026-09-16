@@ -263,3 +263,69 @@ async def test_write_prompt_file_caps_glossary_entries(
     table_lines = [line for line in content.splitlines() if line.startswith("| ")]
     entry_lines = [line for line in table_lines if line not in ("| EN | VI |", "|---|---|")]
     assert len(entry_lines) == 1
+
+
+# === S7 — dich FR->VI (Architecture.md §6.26.6/6.26.8) =====================
+#
+# R6-02 lineage + byte-identical regression: doi do dai chuoi cho nhanh EN =
+# doi `prompt_overhead_chars` x `segment_count` = doi cost estimate cua MOI
+# job EN dang chay (docs/design-log.md "S7" muc 4).
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_source_lang_en_is_byte_identical_to_default(
+    session: AsyncSession,
+) -> None:
+    manager = GlossaryManager(session)
+    default_prompt = await build_system_prompt(manager)
+    explicit_en_prompt = await build_system_prompt(manager, source_lang="en")
+    assert explicit_en_prompt == default_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_source_lang_fr_mentions_french(
+    session: AsyncSession,
+) -> None:
+    manager = GlossaryManager(session)
+    prompt = await build_system_prompt(manager, source_lang="fr")
+    assert "tieng Phap" in prompt
+    assert "Dich tu tieng Phap sang tieng Viet" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_babeldoc_prompt_text_source_lang_en_is_byte_identical_to_default(
+    session: AsyncSession,
+) -> None:
+    manager = GlossaryManager(session)
+    default_prompt = await build_babeldoc_prompt_text(manager)
+    explicit_en_prompt = await build_babeldoc_prompt_text(manager, source_lang="en")
+    assert explicit_en_prompt == default_prompt
+
+
+@pytest.mark.asyncio
+async def test_write_babeldoc_prompt_file_source_lang_fr_content(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """R6-02 (khong chi 'da goi'): prompt FILE THAT sinh ra tu source_lang —
+    khong phai chi ham build_* tra ve dung chuoi ma con phai THUC SU duoc
+    ghi vao file ma orchestrator/BabeldocRunner doc."""
+    manager = GlossaryManager(session)
+    path = tmp_path / "job-fr" / "prompt.txt"
+
+    await write_babeldoc_prompt_file(manager, path=path, source_lang="fr")
+
+    content = path.read_text(encoding="utf-8")
+    assert "tieng Phap" in content
+    assert "${" not in content  # babeldoc contract: khong duoc chua template
+
+
+def test_source_lang_fr_output_has_no_length_regression_vs_en() -> None:
+    """§6.26.6 vd o cost_estimator.py: chi assert do dai KHONG am — do dai
+    chinh xac khong quan trong, quan trong la hai nhanh khong dung CHUNG 1
+    bien duoc gan gia tri sai cho nhau (dev-time regression guard, nhe)."""
+    from src.core.prompt_builder import _babeldoc_intro, _intro
+
+    assert _intro("en") != _intro("fr")
+    assert _babeldoc_intro("en") != _babeldoc_intro("fr")
+    assert len(_intro("fr")) > 0
+    assert len(_babeldoc_intro("fr")) > 0

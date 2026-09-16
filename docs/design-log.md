@@ -6796,3 +6796,82 @@ Cả 2 câu chọn đúng mặc định Tech Lead đề xuất ⇒ không cần 
 implement thẳng theo §6.25 + Final Decision này. Backlog mới cần thêm (theo mục 8 ở trên, R5-06):
 đo hành vi reading system thật (Apple Books/Calibre/Kobo/Kindle Previewer) với `mimetype` bị nén +
 cài `epubcheck` để kiểm định output — chưa có owner, PM thêm vào `backlog[]`.
+
+---
+
+## S7 — Dịch FR→VI (thiết kế, Tech Lead, 2026-09-16)
+
+Hợp đồng hiện hành nằm ở `docs/Architecture.md` **§6.26** (§6.26.1–6.26.9). Mục này chỉ ghi *vì sao*
+tới được thiết kế đó — không lặp lại nội dung hợp đồng.
+
+### 1. Điều đã verify thật (Protocol 5 R5-01) và điều bất ngờ
+
+Ba câu hỏi contract ban đầu đều trả lời được bằng **đọc source tool đã cài**, không phải suy đoán:
+
+- `pdf2zh v1.9.11` — `lang_in` KHÔNG bị validate, và chỉ đi tới 3 chỗ (cache key, `${lang_in}` của
+  file `--prompt`, `source_lang` của provider dịch máy). Font output chọn theo `lang_out` duy nhất.
+  ⇒ FR "miễn phí" ở tầng pdf2zh.
+- `babeldoc 0.6.4` — **bất ngờ theo hướng tốt**: prompt nó gửi LLM chỉ nói `lang_out`
+  (`translator/translator.py:293`), `lang_in` chỉ còn nằm trong `__str__`/cache key. babeldoc vốn đã
+  **không quan tâm ngôn ngữ nguồn**. Ngôn ngữ nguồn thật sự chỉ tới LLM qua `--custom-system-prompt`
+  của chính app ⇒ chỗ phải sửa là `prompt_builder.py` của mình, không phải tham số CLI.
+- `MinerU 3.4.5` — **bất ngờ theo hướng xấu**: `"fr"` KHÔNG nằm trong `PUBLIC_OCR_LANGUAGES` và
+  `validate_public_ocr_lang()` raise thẳng. Nếu thiết kế theo phản xạ "map `source_lang` vào mọi
+  tham số `lang` của mọi tool", nhánh `pdf_scan` FR sẽ **luôn chết ngay lần gọi đầu** — đúng shape
+  sự cố MinerU 2026-09 mà Protocol 5 sinh ra để chặn. Lối đi đúng: giữ `lang="en"`, vì `"en"` là
+  **alias** của model `"ch"` mà chính source mô tả là phủ *Latin*.
+
+### 2. Vì sao không thêm thư viện detect ngôn ngữ
+
+Cân nhắc `langdetect`/`lingua`/`fasttext`. Loại, vì mỗi dependency mới là một contract phải verify
+theo Protocol 5 — trong khi bài toán chỉ là phân biệt **2 lớp** trên văn bản vài nghìn token.
+Prototype hư-từ thuần Python chạy thật trên 6 sách EN trong `data/uploads/` (2026-09-16) cho
+`en_share` ∈ [0,143 ; 0,306] và `fr_share` ≤ 0,0007 — **tách biệt > 200 lần**. Không có chỗ cho một
+thư viện ngoài cải thiện gì. Chiều FR chưa đo được (không có tài liệu FR thật) ⇒ ⚠️ ASSUMED A-2.
+
+Cũng loại `dc:language` trong OPF của EPUB: chỉ dùng được cho EPUB ⇒ tạo 2 nhánh detect lệch nhau
+giữa PDF và EPUB, đúng loại rủi ro §6.14.7 tồn tại để chặn; và metadata của EPUB convert/lậu hay sai.
+
+### 3. Protocol 8 audit — kết quả đáng chú ý nhất
+
+14 bước hậu kỳ được rà (bảng đầy đủ ở §6.26.5). Ba kết luận không hiển nhiên:
+
+- **`font_shrink_page()` KHÔNG phải Bug #9 lần hai.** Câu hỏi đặt ra ban đầu ("giả định bản dịch dài
+  hơn X% có còn đúng khi nguồn là FR không?") hoá ra **đặt sai chỗ**: đọc `font_shrink.py:236-247`
+  thì bước này **đo bề rộng glyph thật** trên trang output so với `block_bbox`, không có hằng số nào
+  suy ra từ độ dài bản gốc. Tỷ lệ giãn chữ chỉ là *động cơ* viết ra bước này, chưa bao giờ là *tham
+  số* của nó. Khác hẳn Bug #9, nơi lý do tồn tại (pdf2zh không tự co chữ) **thật sự không còn đúng**
+  với babeldoc. ⇒ GIỮ BẬT, không đổi hằng số. Phụ chú: FR dài hơn EN 15–20% ⇒ VI/FR ngắn hơn VI/EN
+  ⇒ bước này sẽ kích hoạt *ít* hơn, không nhiều hơn.
+- **Guard tỷ lệ dấu tiếng Việt (`text_quality.py`) mới là chỗ thật sự suy yếu.** `_VN_DIACRITIC_CHARS`
+  chứa `à á è é ì í ò ó ù ú â ê ô ý` — trùng chữ Pháp thường gặp. Unit FR **chưa dịch** có thể đạt
+  ≥ 0,02 ⇒ lọt tầng 2. Nhưng guard này chỉ kích hoạt khi tỷ lệ **THẤP** ⇒ với FR nó chỉ *bỏ sót*,
+  không bao giờ *báo nhầm*; và `_check_epub_output_guard()` là lớp phòng thủ độc lập bắt đúng ca này
+  bằng so sánh chuỗi. ⇒ GIỮ BẬT không đổi ngưỡng (siết ngưỡng mới là rủi ro), ghi backlog A-4.
+- **Bước duy nhất bị SKIP theo R8-02**: gợi ý "Các từ mới" (US-20). `term_extractor` chỉ nạp
+  `en_function_words.txt` ⇒ hư từ Pháp không bị lọc, n-gram ứng viên thành rác. Chưa verify cách
+  hiệu chỉnh ⇒ deny-by-default, skip cho job FR.
+
+### 4. Điểm dễ sai khi implement (ghi lại để Reviewer soi đúng chỗ)
+
+- Đổi độ dài chuỗi prompt cho nhánh EN = đổi `prompt_overhead_chars` × `segment_count` = đổi cost
+  estimate của **mọi job EN đang chạy**. Vì vậy §6.26.6 bắt buộc test "byte-identical cho `en`".
+- `cost_gate` và lúc chạy thật phải dùng **cùng một** `source_lang`, nếu không Lớp 2 ước sai (§6.11.6).
+- `source_lang` ghi 1 lần rồi giữ nguyên qua resume — cùng lý do với `chunk_size_used`: chunk đã xong
+  được sinh theo giá trị cũ.
+
+### 5. Không có câu CLARIFY mới
+
+HOI-09 đã phủ hết 4 trục quyết định (định dạng, glossary, UI, ưu tiên). Hệ quả "glossary EN lọc theo
+`term_en` ⇒ gần như rỗng với tài liệu FR" là **hệ quả trực tiếp** của lựa chọn "dùng chung glossary
+EN, không làm glossary FR ở v1" mà Hiếu đã chốt — ghi nhận là giới hạn đã biết ở §6.26.5 bước #2,
+không hỏi lại (Protocol B: phát hiện giữa lúc WRITE → ghi mặc định, gộp vào đợt CLARIFY sau).
+
+### 6. Bổ sung phạm vi (Hiếu, 2026-09-16, qua PM/AskUserQuestion, trước khi Dev bắt đầu implement)
+
+Vì UI dùng auto-detect (không cho user tự chọn source language), Hiếu yêu cầu thêm: **cột hiển thị
+ngôn ngữ nguồn đã detect (EN/FR)** trên UI danh sách job (`web/index.html`) và lịch sử
+(`web/history.html`), đọc từ `jobs.source_lang` (đã có trong thiết kế §6.26.2, chỉ chưa expose ra
+UI). Lý do: auto-detect có thể sai (xem BL-15, ngưỡng detect chiều FR chưa verify) — user cần thấy
+hệ thống đã nhận diện gì để phát hiện detect sai sớm, thay vì chỉ biết sau khi đọc bản dịch. Không
+đổi thiết kế backend, chỉ thêm hiển thị — gộp vào cùng phạm vi implement S7, không tách step riêng.

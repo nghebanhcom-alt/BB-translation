@@ -171,6 +171,10 @@ class JobDetail(BaseModel):
     # BR-HIST-01: `finished_at - created_at`, CHI khac None khi job da o mot
     # trong 4 trang thai KET THUC (completed/failed/cancelled/cost_capped) —
     # job dang chay khong duoc hien con so nay (BR-HIST-02).
+    # Architecture.md §6.26.2/6.26 mo rong pham vi (Hieu, 2026-09-16): NULL =
+    # chua detect (coi nhu "en", xem src/models/job.py) — UI dung field nay
+    # de hien badge "FR->VI"/"EN->VI" (web/index.html, web/history.html).
+    source_lang: str | None = None
 
 
 class JobListResponse(BaseModel):
@@ -296,6 +300,7 @@ def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
         started_at=job.started_at,
         finished_at=job.finished_at,
         duration_seconds=duration_seconds,
+        source_lang=job.source_lang,
     )
 
 
@@ -639,6 +644,12 @@ async def create_job(
         estimated_cost=cost_estimate.estimate.estimated_cost_usd
         if request.job_type == "translate"
         else None,
+        # Architecture.md §6.26.4 point 1 (S7 — dich FR->VI): ket qua
+        # detect_source_lang() cua cost_gate — co the la None (pdf_scan chua
+        # OCR, hoac tai lieu qua ngan) va se duoc detect LAI o
+        # JobOrchestrator.run_job() Step 3 / run_epub_job() khi con NULL luc
+        # do. None cho job_type != "translate" (khong qua cost gate).
+        source_lang=cost_estimate.source_lang if request.job_type == "translate" else None,
     )
     session.add(job)
     await session.commit()

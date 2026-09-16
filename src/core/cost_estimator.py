@@ -33,6 +33,15 @@ OUTPUT_TO_INPUT_TOKEN_RATIO = 1.3
 #: Architecture.md 6.6.6 default heuristic: ~4 EN characters per token.
 CHARS_PER_TOKEN_EN = 4.0
 
+#: Architecture.md §6.26.5 audit bước #6 (S7 — dịch FR→VI), ⚠️ ASSUMED A-1
+#: (docs/design-log.md): `tiktoken` không có trong `.venv` lúc viết thiết kế
+#: nên không đo trực tiếp được. Chọn THẤP hơn CHARS_PER_TOKEN_EN có chủ đích
+#: — tiếng Pháp nhiều dấu (é/è/à/ç) nên chars/token thấp hơn EN; chars/token
+#: thấp hơn ⇒ token cao hơn ⇒ ước DƯ (đúng chiều an toàn §6.11.6 "được phép
+#: ước dư, cấm ước thiếu"). Backlog A-1 (project_state.json, source:
+#: tech-lead): đo lại bằng tài liệu FR thật ở lần chạy live đầu tiên.
+CHARS_PER_TOKEN_FR = 3.0
+
 #: Architecture.md 6.11.4 Lop 1 — measured directly from the real pdf2zh
 #: cache backing the $6.50 incident (Architecture.md 6.11.2, S1;
 #: tests/fixtures/pdf2zh/cost_golden_howbakingworks.json): Vietnamese output
@@ -119,18 +128,33 @@ def estimate_job_cost(total_pages: int, provider: TranslationProvider) -> CostEs
     )
 
 
+def _chars_per_token_for_source(source_lang: str) -> float:
+    """Architecture.md §6.26.5 audit bước #6 — `source_lang == "fr"` dùng
+    `CHARS_PER_TOKEN_FR` (ước DƯ có chủ đích), mọi giá trị khác (kể cả "en")
+    giữ nguyên `CHARS_PER_TOKEN_EN` — golden file EN không bị ảnh hưởng.
+    """
+    return CHARS_PER_TOKEN_FR if source_lang == "fr" else CHARS_PER_TOKEN_EN
+
+
 def _estimate_input_tokens(
-    source_text_chars: int, segment_count: int, prompt_overhead_chars: int
+    source_text_chars: int,
+    segment_count: int,
+    prompt_overhead_chars: int,
+    source_lang: str = "en",
 ) -> int:
     """Shared core of the input-token formula (Architecture.md 6.11.3/6.11.4:
     `estimate_chunk_cost()` and `estimate_job_cost_v2()` "phai dung chung 1
     ham loi" — pdf2zh re-sends the whole prompt file for every segment
     (F6, ~85% of the real $6.50 incident's cost), so the overhead term is
     multiplied by `segment_count`, not added once.
+
+    `source_lang` (S7, Architecture.md §6.26.5 audit bước #6) chỉ đổi hằng
+    số chars/token dùng ở đây — "en"/mặc định giữ nguyên hành vi cũ.
     """
+    chars_per_token = _chars_per_token_for_source(source_lang)
     return int(
-        source_text_chars / CHARS_PER_TOKEN_EN
-        + segment_count * prompt_overhead_chars / CHARS_PER_TOKEN_EN
+        source_text_chars / chars_per_token
+        + segment_count * prompt_overhead_chars / chars_per_token
     )
 
 
@@ -141,6 +165,7 @@ def estimate_chunk_cost(
     provider: TranslationProvider,
     vi_expansion: float = 1.3,
     vi_token_factor: float = 1.5,
+    source_lang: str = "en",
 ) -> tuple[int, int, float]:
     """Post-render, per-chunk cost estimate (Architecture.md 6.6.6).
 
@@ -155,9 +180,16 @@ def estimate_chunk_cost(
     call) — Architecture.md 6.6.2 R3.1, the same out-of-band role as
     `estimate_job_cost()`.
 
+    `source_lang` (S7, Architecture.md §6.26.5 audit bước #6): mặc định "en"
+    giữ nguyên hành vi cũ byte-for-byte; `"fr"` đổi hằng số chars/token phía
+    INPUT sang `CHARS_PER_TOKEN_FR` qua `_estimate_input_tokens()` — output
+    (VI) vẫn dùng `CHARS_PER_TOKEN_EN` như cũ, không liên quan ngôn ngữ nguồn.
+
     Returns `(input_tokens, output_tokens, cost_usd)`.
     """
-    input_tokens = _estimate_input_tokens(len(source_text), segment_count, prompt_overhead_chars)
+    input_tokens = _estimate_input_tokens(
+        len(source_text), segment_count, prompt_overhead_chars, source_lang
+    )
     output_tokens = int(len(source_text) * vi_expansion * vi_token_factor / CHARS_PER_TOKEN_EN)
     cost_usd = provider.estimate_cost(input_tokens, output_tokens)
     return input_tokens, output_tokens, cost_usd
@@ -168,6 +200,7 @@ def estimate_job_cost_v2(
     segment_count: int,
     prompt_overhead_chars: int,
     provider: TranslationProvider,
+    source_lang: str = "en",
 ) -> CostEstimate:
     """Pre-job cost estimate (Architecture.md 6.11.4 Lop 1) — REPLACES
     `estimate_job_cost()` for every real call site (`POST /api/estimate`,
@@ -191,13 +224,19 @@ def estimate_job_cost_v2(
     Verified against `tests/fixtures/pdf2zh/cost_golden_howbakingworks.json`
     (Architecture.md 6.11.6): must land in [1.0x, 1.6x] of the real token
     count from that incident — allowed to over-estimate, never to under.
+
+    `source_lang` (S7, Architecture.md §6.26.5 audit bước #6): mặc định "en"
+    giữ nguyên chuỗi/kết quả golden file cũ byte-for-byte/số-for-số; `"fr"`
+    đổi hằng số chars/token sang `CHARS_PER_TOKEN_FR` (ước DƯ có chủ đích).
     """
     if source_text_chars < 0:
         raise ValueError("source_text_chars must be >= 0")
     if segment_count < 0:
         raise ValueError("segment_count must be >= 0")
 
-    input_tokens = _estimate_input_tokens(source_text_chars, segment_count, prompt_overhead_chars)
+    input_tokens = _estimate_input_tokens(
+        source_text_chars, segment_count, prompt_overhead_chars, source_lang
+    )
     output_tokens = int(source_text_chars * VI_CHAR_EXPANSION / CHARS_PER_TOKEN_VI)
     estimated_cost_usd = provider.estimate_cost(input_tokens, output_tokens)
 

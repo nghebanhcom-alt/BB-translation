@@ -55,6 +55,13 @@
               </p>
             </div>
             <div class="flex items-center gap-2">
+              <!-- Architecture.md §6.26 mo rong pham vi (Hieu, 2026-09-16):
+                   hien ngon ngu nguon DA DETECT (auto-detect, khong co
+                   dropdown chon thu cong) — user can thay de phat hien detect
+                   sai som (BL-15). Chi hien khi job da co source_lang; NULL/
+                   "en" deu coi la EN->VI (deny-by-default). -->
+              <span x-show="f.job" class="text-xs px-2 py-1 rounded bg-gray-100 text-gray-600"
+                    x-text="(f.job?.source_lang === 'fr' ? 'FR' : 'EN') + '→VI'"></span>
               <span class="text-xs px-2 py-1 rounded"
                     :class="statusBadgeClass(f.job?.status)"
                     x-text="f.job?.status || 'chưa dịch'"></span>

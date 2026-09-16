@@ -3361,3 +3361,188 @@ không bỏ sót owner theo R5-06): đo hành vi reading system thật (Apple Bo
 Previewer) với `mimetype` bị nén trước khi chuẩn hoá + cài `epubcheck` để có kiểm định OCF độc lập
 cho output — hiện `⚠️ ASSUMED`/`[UNVERIFIED]` ở Architecture.md §6.25.4 chưa có owner cụ thể trong
 `backlog[]`.
+
+---
+
+## S7 — Dịch FR→VI bên cạnh EN→VI (auto-detect ngôn ngữ nguồn, PDF + EPUB) — 2026-09-16
+
+Phạm vi: `src/models/job.py`, `src/models/database.py`, `src/core/language_detector.py` (mới),
+`src/core/wordlists/fr_function_words.txt` (mới), `src/core/cost_estimator.py`, `src/core/cost_gate.py`,
+`src/core/prompt_builder.py`, `src/core/job_orchestrator.py`, `src/core/term_extraction_service.py`,
+`src/api/routes/jobs.py`, `web/index.html`, `web/history.html`. Đối chiếu `docs/Architecture.md` §6.26
+(§6.26.1–6.26.9), `docs/design-log.md` "S7 — Dịch FR→VI", `docs/CHANGELOG.md` đoạn Dev vừa append.
+
+### 1. Correctness quan trọng nhất — MinerU KHÔNG BAO GIỜ nhận `lang="fr"`
+
+Tự đọc code, không tin lời Dev. `_run_mineru_and_record_quality()` (`job_orchestrator.py:1864-1870`)
+gọi `self._mineru_runner.parse_document(file_path, output_dir, parse_method=..., task_timeout_seconds=...,
+should_cancel=...)` — **không hề có tham số `lang` nào ở call site này**, nghĩa là `job.source_lang`
+không có đường nào chạm tới lời gọi MinerU. `MinerURunner.parse_document()` (`src/services/mineru_runner.py:110-134`)
+có `lang: str = "en"` làm default và forward thẳng `lang=lang` vào request — vì call site không bao giờ
+truyền `lang=`, giá trị luôn là `"en"` bất kể job FR hay EN. Đây đúng thiết kế §6.26.5 bước #1 (giữ
+`lang="en"`, KHÔNG map `source_lang` vào MinerU). Có test pin trực tiếp ca này:
+`test_pdf_scan_mineru_always_called_with_lang_en_even_for_fr_job`
+(`tests/integration/test_job_orchestrator_source_lang.py:289-326`) — job dựng với `source_lang="fr"` từ
+đầu, assert `call.kwargs.get("lang", "en") == "en"` cho MinerU **và** `call.kwargs["lang_in"] == "fr"`
+cho `pdf2zh_runner.translate_pages` trong cùng 1 test — tức vừa xác nhận MinerU không đổi, vừa xác nhận
+`lang_in` FR thật sự đi tới bước dịch. Tự chạy `pytest tests/integration/test_job_orchestrator_source_lang.py -q`
+→ **7 passed**. **Kết luận: đúng, không phải bug.**
+
+### 2. Regression job EN cũ (`source_lang=NULL`)
+
+`test_translate_pages_receives_lang_in_en_for_null_source_lang` tạo job với `source_lang=None`, assert
+`call.kwargs["lang_in"] == "en"` cho `translate_pages()` **và** `job.source_lang == "en"` sau khi refresh
+(Step 3 tự detect+persist). `test_prompt_builder.py` có test byte-identical cho `source_lang="en"` (đọc
+code `prompt_builder.py`: `_intro("en")`/`_babeldoc_intro("en")` map qua `_SOURCE_LANG_NAME_VI["en"] =
+"tieng Anh"`, đúng chuỗi cũ — `build_prompt_text()`/`write_prompt_file()` (pdf2zh) **hoàn toàn không đổi
+signature**, nên không thể lệch byte nào cho nhánh EN qua pdf2zh). `estimate_job_cost_v2` giữ default
+`source_lang="en"` → `_chars_per_token_for_source("en") == CHARS_PER_TOKEN_EN` không đổi, golden test
+`test_estimate_job_cost_v2_never_underestimates_golden_incident` vẫn xanh (đã tự chạy, xem mục 7). Đây
+là assertion cụ thể trên giá trị, không chỉ tin tên test. **Đạt.**
+
+### 3. `cost_gate` lúc estimate vs lúc chạy thật — cùng `source_lang`
+
+Trace tay: `estimate_translation_cost()` (`cost_gate.py:106-136`) detect `source_lang` từ `full_text`
+(file gốc, chưa OCR với pdf_scan) rồi gọi `estimate_job_cost_v2(..., source_lang=source_lang)` — với
+`source_lang = detection.lang or "en"` (ép "en" cho estimate, nhưng `DetailedCostEstimate.source_lang`
+giữ `detection.lang` thô = `None` cho pdf_scan, đúng ý đồ §6.26.4 "không ép en ở persist"). Lúc chạy
+thật, `estimate_chunk_cost()` (Lớp 2, `job_orchestrator.py:2315-2326`) nhận `source_lang=job.source_lang
+or "en"` — với pdf_scan, `job.source_lang` đã được Step 3 detect lại trên `full_text` sau OCR (dòng
+735-739) trước khi bất kỳ chunk nào chạy, nên khi tới Lớp 2 giá trị đã ổn định và nhất quán với giá trị
+dùng ở Step 5 (`write_prompt_file`/`write_babeldoc_prompt_file`) và Step 7 (`translate_pages`). Không
+phát hiện lệch. **Đạt.**
+
+### 4. `source_lang` ghi 1 lần, giữ nguyên qua resume
+
+Đọc `Job.source_lang` (`src/models/job.py`) — comment tự nêu đúng khuôn `chunk_size_used`/`parse_method`.
+Code thực thi khớp: `job_orchestrator.py:735` (`if job.source_lang is None: ... persist`) và dòng 1169
+(nhánh EPUB) chỉ detect khi còn `None`, không bao giờ ghi đè giá trị đã có. Có test thật
+(`test_source_lang_survives_resume_after_chunk_failure`, dòng 383-441): job 90 trang, `source_lang="fr"`
+chốt sẵn, chunk 2 fail giả lập, resume bằng runner mới — verify `lang_in="fr"` xuyên suốt cả 2 lần chạy
+(không đọc lại `job.source_lang` để verify không đổi tường minh sau resume, nhưng gián tiếp đã đủ: nếu
+bị ghi đè thành detect-lại-từ-đầu thì `lang_in` các chunk sau resume sẽ không còn `"fr"` một cách ổn
+định — non-blocking, xem mục "Suggestion" bên dưới). **Đạt về bản chất, có 1 gợi ý nhỏ.**
+
+### 5. Hai điểm Dev báo lệch thiết kế gốc — đánh giá
+
+**(a) Guard term-extraction đặt trong service, không chỉ ở call site (`jobs.py:537`).** Đọc
+`term_extraction_service.py:145-160`: guard `if (job.source_lang or "en") != "en": return 0` nằm NGAY
+đầu `extract_and_store_terms()`, trước khi hàm này chạm bất kỳ logic n-gram nào — bảo vệ đồng thời
+đường tự động (`_run_job_background`) và đường thủ công (`POST /api/jobs/{id}/extract-terms`). Đây là
+cải tiến hợp lý so với thiết kế gốc (đặt ở call site jobs.py:537 sẽ bỏ sót nhánh gọi thứ 2 nếu có, đúng
+loại rủi ro Protocol 8/6.14.7 vốn muốn tránh — "1 nguồn sự thật" tốt hơn "2 chỗ phải nhớ sửa giống
+nhau"). Không tạo lỗ hổng nào — **hợp lý, chấp nhận**.
+
+**(b) Không thêm `source_lang` vào `build_prompt_text()`/`write_prompt_file()` (pdf2zh).** Đã tự đọc
+`prompt_builder.py:140-241`: `_FILE_GLOSSARY_INSTRUCTION` (dòng 153-156, `'... GIU NGUYEN tieng Anh'`)
+vẫn hard-code "tieng Anh" cho MỌI `source_lang`, khác với bảng §6.26.6 liệt kê `_GLOSSARY_INSTRUCTION`/
+`_FILE_GLOSSARY_INSTRUCTION` là 2 trong 5 chuỗi "phải nhận `source_lang`". Xét về NGỮ NGHĨA: câu này nói
+về **glossary entries** (`term_en`/`term_vi` — glossary dùng chung EN theo HOI-09, §6.26.5 bước #2),
+không phải về ngôn ngữ TÀI LIỆU nguồn — "giữ nguyên tiếng Anh" ở đây đúng là hành vi mong muốn cho cả
+job FR (glossary vẫn là các từ mượn tiếng Anh/Pháp thông dụng trong ngành bánh, ví dụ `ganache`,
+`levain`), nên việc không đổi câu này không tạo ra output sai. Còn `_FILE_INTRO` (câu duy nhất thực sự
+nêu "dịch từ ngôn ngữ X") dùng `${lang_in}` — pdf2zh tự thay thế bằng `lang_in="fr"` truyền qua CLI
+(đã verify §6.26.1), nên tên ngôn ngữ vẫn đúng ở tầng pdf2zh dù `prompt_builder.py` không đổi. Đây là
+lý do Dev đưa ra hợp lý — nhưng **bảng §6.26.6 của Architecture.md hiện đang liệt kê sai/thừa 2 mục
+`_GLOSSARY_INSTRUCTION`/`_FILE_GLOSSARY_INSTRUCTION`**, cần Tech Lead cập nhật lại bảng cho khớp thực
+tế (không phải lỗi Dev — non-blocking, ghi bên dưới).
+
+### 6. R8-01/R8-04 — trace tay `job_orchestrator.py` theo bảng audit §6.26.5
+
+Đã trace từng bước (không chỉ tin "Dev nói đã làm đúng"):
+- Bước #1 MinerU: xem mục 1 — đúng, giữ `"en"`.
+- Bước #3 `font_shrink_page` (`_needs_font_shrink`, dòng 623-642, gọi tại dòng 2225): không đụng gì
+  tới `source_lang`, đúng thiết kế "đo bề rộng glyph thật, không phụ thuộc ngôn ngữ nguồn" — code
+  không có nhánh nào tham chiếu `job.source_lang` trong `font_shrink.py` (grep xác nhận 0 hit).
+- Bước #8 `overlay_rotated_text` (dòng 991-1008): `glossary_prompt=await build_system_prompt(...,
+  source_lang=job.source_lang or "en")` — đúng bảng lineage.
+- Bước #13 term-extraction: SKIP đúng cho FR (mục 5a).
+- Step 5 (`write_prompt_file`/`write_babeldoc_prompt_file`, dòng 774-794): chỉ nhánh babeldoc truyền
+  `source_lang=`; nhánh pdf2zh không truyền — khớp việc `build_prompt_text()` không có tham số này
+  (xem mục 5b, không phải thiếu sót).
+- Step 7 (`translate_pages`, dòng 2131-2143): `lang_in=job.source_lang or "en"` — 1 ĐIỂM GỌI DUY NHẤT
+  cho cả 2 engine (đúng nguyên tắc §6.14.7 "không rẽ nhánh if engine==").
+- EPUB (`run_epub_job()` dòng 1153-1196, `_process_epub_chunk()` dòng 2450-2520): `source_lang =
+  job.source_lang or "en"` gán 1 lần rồi dùng lại cho MỌI lời gọi `pricing_provider.translate()`
+  trong hàm (chính + 2 helper retry `_retry_single_unit`/`_retry_whole_epub_request`, dòng 2370/2403)
+  — không còn literal `"en"` nào sót lại (grep `"en", "vi"` trong `job_orchestrator.py`: 0 hit sau khi
+  sửa).
+
+Không phát hiện bước nào lệch khỏi bảng audit Tech Lead đã duyệt. **Đạt.**
+
+### 7. Test coverage — tự chạy, không chỉ tin số 37
+
+Đọc `tests/test_language_detector.py`: 2 đoạn văn EN/FR ~500-700 từ THẬT (văn xuôi nhiều đoạn về khoa
+học làm bánh mì, không phải câu ngắn nhồi từ khoá) — không phải fixture giả tạo. `fr_function_words.txt`
+(213 dòng) grep xác nhận KHÔNG chứa bất kỳ từ nào trong danh sách "mơ hồ bị loại" mà Tech Lead liệt kê
+(`a, en, on, son, plus, sur, or, but, part, pain, coin, chat, mode, note, page, table, sale, fin`).
+Tự chạy toàn bộ 9 file test liên quan S7:
+
+```
+pytest tests/test_language_detector.py tests/test_prompt_builder.py tests/test_cost_estimator.py \
+  tests/test_cost_gate_source_lang.py tests/integration/test_job_orchestrator_source_lang.py \
+  tests/integration/test_epub_job_source_lang.py tests/integration/test_term_extraction_service.py \
+  tests/test_jobs_route_to_detail.py tests/integration/test_create_job_source_lang_api.py -q
+```
+→ **81 passed**, 0 fail. `ruff check` trên toàn bộ 9 file nguồn đã sửa/tạo → sạch. `ruff format --check`
+→ 1 vi phạm tiền tồn tại ở `src/api/routes/jobs.py:384`, KHÔNG liên quan tới đoạn diff S7 (đã tự đối
+chiếu qua `git diff` — dòng 384 không nằm trong bất kỳ hunk nào của tăng này) — khớp đúng lời Dev báo
+trong CHANGELOG, xác nhận độc lập chứ không chỉ tin. **Đạt.**
+
+### 8. `web/index.html` / `web/history.html`
+
+Cả 2 file dùng `x-text` (Alpine.js) để render `job.source_lang`/`f.job?.source_lang` — `x-text` set
+`textContent`, tự động escape, không có đường XSS nào (khác `x-html` mới đáng lo). Logic hiển thị
+`(x === 'fr' ? 'FR' : 'EN') + '→VI'` coi mọi giá trị khác `'fr'` (kể cả `null`/`'en'`) là `EN→VI` — đúng
+deny-by-default (R8-02), khớp comment trong code. `history.html` cập nhật đúng `colspan="9"` (từ 8) cho
+dòng "Chưa có job nào" khớp số cột mới. Không có vấn đề.
+
+### 9. Checklist bắt buộc theo brief Reviewer (CLAUDE.md)
+
+- **R5-04**: Không có file `*_runner.py`/`*_provider.py` nào bị sửa trong tăng S7 — `mineru_runner.py`
+  chỉ bị ĐỌC (không sửa) để xác nhận default `lang="en"`. → **N/A** cho R5-04 (phạm vi tăng này không
+  đổi bất kỳ external contract wrapper nào). Ghi chú: Tech Lead đã verify contract MinerU/pdf2zh/babeldoc
+  từ nguồn thật ở §6.26.1 (Architecture.md), Dev không cần verify lại vì không đổi cách gọi 3 tool này.
+- **R6-04**: `job_orchestrator.py` là `*_orchestrator.py` gọi tuần tự nhiều service — đã tự trace tay
+  từng lời gọi bước N+1 xem biến truyền vào có bắt nguồn từ bước N hay không (mục 6 ở trên), không chỉ
+  xác nhận "cả 2 bước được gọi đúng tham số riêng". Kết luận: **đạt**, không phát hiện đứt gãy lineage
+  kiểu Bug #5 — `job.source_lang` là 1 biến DUY NHẤT được persist ở Step 3/E1, mọi bước sau chỉ ĐỌC lại
+  (không detect song song/độc lập ở nơi khác).
+- **R8-01**: FR là biến thể mới đi qua pipeline dùng chung (`_process_chunk()`, `run_epub_job()`) —
+  Tech Lead đã audit đủ 14 bước ở §6.26.5, Dev implement khớp bảng đó (mục 6). Không có bước nào bị bỏ
+  sót audit. **Đạt** (không cần SKIP thêm gì ngoài bước #13 đã quyết).
+- **Protocol 5 R5-03**: Dev tự nêu rõ trong CHANGELOG "CHƯA chạy R6-03 live E2E (PDF FR thật + EPUB FR
+  thật) — QA phải chạy trước khi release, hoặc ghi rõ 'release blocked pending live verification' nếu
+  chưa chạy được" — đúng tinh thần R5-03/R6-03, không tự nhận ready_for_release. **Đạt** (nghĩa vụ đã
+  chuyển đúng cho QA, không bị bỏ qua).
+
+### Kết luận
+
+**APPROVE.** MinerU luôn nhận `lang="en"` — đã tự đọc code + test xác nhận, không phải bug. Lineage
+`source_lang` xuyên suốt pipeline (cost_gate → create_job → run_job Step 3 → mọi bước hậu kỳ) đã trace
+tay từng điểm, khớp bảng §6.26.4/6.26.5. Regression EN giữ nguyên (test byte-for-byte + golden cost
+test vẫn xanh). 81 test liên quan S7 tự chạy xanh, ruff sạch (trừ 1 vi phạm format tiền tồn tại không
+liên quan). Không có blocking issue.
+
+**Backlog / non-blocking (PM đưa vào `project_state.json` `backlog[]`, kèm owner theo R5-06 nếu áp
+dụng):**
+
+1. Architecture.md §6.26.6 hiện liệt kê `_GLOSSARY_INSTRUCTION`/`_FILE_GLOSSARY_INSTRUCTION` là 2
+   trong 5 chuỗi "phải nhận `source_lang`", nhưng Dev không sửa 2 chuỗi này (lý do hợp lý, xem mục 5b)
+   — đề nghị Tech Lead cập nhật lại bảng §6.26.6 cho khớp implementation thực tế, tránh gây hiểu nhầm
+   cho lần đọc sau. `source: "tech-lead"`.
+2. `test_source_lang_survives_resume_after_chunk_failure` verify `lang_in` ổn định qua resume nhưng
+   không đọc lại `job.source_lang` sau lần chạy đầu (trước khi resume) để assert tường minh giá trị
+   chưa bị đổi ngay tại thời điểm failure — hiện tại verify gián tiếp qua `lang_in` ở lần resume vẫn
+   đủ chặt, nhưng thêm 1 dòng `await session.refresh(job); assert job.source_lang == "fr"` ngay sau
+   `first_result` sẽ khiến test này tự-tài liệu-hoá rõ hơn ý định. Không gây rủi ro thực tế, mức độ
+   thấp — có thể gộp vào lần review kế tiếp.
+3. R5-06 backlog A-1..A-4 (§6.26.7, `CHARS_PER_TOKEN_FR` chưa đo bằng `tiktoken` thật, ngưỡng detect
+   chiều FR chưa đo trên tài liệu FR thật, MinerU OCR tiếng Pháp có dấu chưa chạy thật, guard
+   diacritic EPUB tầng 2 chưa có ca thật FR) — Dev đã nhắc trong CHANGELOG là chưa tự thêm vào
+   `project_state.json`, PM/Tech Lead cần xác nhận cả 4 mục đã có entry `backlog[]` với
+   `source: "tech-lead"` trước khi coi tăng S7 đủ điều kiện đóng, đúng R5-06.
+4. R6-03 live E2E (PDF FR thật + EPUB FR thật qua toàn chuỗi, mở file kiểm tra có chữ Việt thật) CHƯA
+   chạy — bắt buộc QA chạy trước khi release theo R5-03, hoặc QA phải ghi rõ "release blocked pending
+   live verification" trong `test-report.md` nếu môi trường QA cũng không có pdf2zh/babeldoc/MinerU/API
+   key thật.

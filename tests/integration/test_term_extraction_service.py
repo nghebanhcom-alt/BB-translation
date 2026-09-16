@@ -327,3 +327,46 @@ async def test_extract_and_store_terms_real_glossary_114_end_to_end(
     surfaces_lower = {row.term_en.lower() for row in rows}
     for leaked_term in ("pound", "ounce", "bloom", "tempering", "kneading", "teaspoon", "whipping"):
         assert leaked_term not in surfaces_lower
+
+
+# === S7 — dich FR->VI (Architecture.md §6.26.5 audit buoc #13, R8-02) ======
+#
+# `term_extractor._load_function_words()` chi nap en_function_words.txt — hu
+# tu tieng Phap khong bi loc, ung vien n-gram thanh rac. SKIP cho job FR
+# (deny-by-default), guard dat trong `extract_and_store_terms()` (khong phai
+# rieng jobs.py:537) de ca duong tu dong LAN duong thu cong /extract-terms
+# deu duoc bao ve.
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_terms_skips_for_source_lang_fr(
+    tmp_path: Path, session: AsyncSession
+) -> None:
+    pdf_path = tmp_path / "book_fr.pdf"
+    _make_pdf(pdf_path, "levain levain levain croissant croissant croissant")
+    job = _make_job(id="job1", file_path=str(pdf_path), source_lang="fr")
+    session.add(job)
+    await session.commit()
+
+    written = await extract_and_store_terms("job1", session, Settings())
+
+    assert written == 0
+    rows = (await session.exec(select(SuggestedTerm).where(SuggestedTerm.job_id == "job1"))).all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_terms_runs_for_source_lang_none_treated_as_en(
+    tmp_path: Path, session: AsyncSession
+) -> None:
+    """NULL == "en" (deny-by-default cho FR, KHONG deny cho job EN cu/chua
+    detect) — job truoc S7 khong bi mat tinh nang US-20."""
+    pdf_path = tmp_path / "book.pdf"
+    _make_pdf(pdf_path, "laminated dough laminated dough laminated dough")
+    job = _make_job(id="job1", file_path=str(pdf_path), source_lang=None)
+    session.add(job)
+    await session.commit()
+
+    written = await extract_and_store_terms("job1", session, Settings())
+
+    assert written > 0

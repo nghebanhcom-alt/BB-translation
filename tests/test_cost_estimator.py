@@ -13,9 +13,7 @@ from src.core.cost_estimator import (
 from src.services.claude_provider import ClaudeProvider
 from src.services.ollama_provider import OllamaProvider
 
-_GOLDEN_PATH = (
-    Path(__file__).parent / "fixtures" / "pdf2zh" / "cost_golden_howbakingworks.json"
-)
+_GOLDEN_PATH = Path(__file__).parent / "fixtures" / "pdf2zh" / "cost_golden_howbakingworks.json"
 
 
 def test_estimate_job_cost_formula() -> None:
@@ -226,3 +224,85 @@ def test_estimate_job_cost_v2_negative_inputs_raise() -> None:
         estimate_job_cost_v2(
             source_text_chars=1, segment_count=-1, prompt_overhead_chars=0, provider=provider
         )
+
+
+# === S7 — dich FR->VI (Architecture.md §6.26.5 audit buoc #6) ==============
+
+
+def test_estimate_job_cost_v2_source_lang_en_is_default_and_matches_no_arg() -> None:
+    """Byte/so-for-so regression: `source_lang="en"` (hoac bo qua) phai cho
+    KET QUA GIONG HET truoc khi co S7 — golden file EN khong bi anh huong."""
+    provider = ClaudeProvider(api_key="sk-ant-fake")
+    no_arg = estimate_job_cost_v2(
+        source_text_chars=12345, segment_count=9, prompt_overhead_chars=456, provider=provider
+    )
+    explicit_en = estimate_job_cost_v2(
+        source_text_chars=12345,
+        segment_count=9,
+        prompt_overhead_chars=456,
+        provider=provider,
+        source_lang="en",
+    )
+    assert explicit_en.estimated_input_tokens == no_arg.estimated_input_tokens
+    assert explicit_en.estimated_output_tokens == no_arg.estimated_output_tokens
+    assert explicit_en.estimated_cost_usd == no_arg.estimated_cost_usd
+
+
+def test_estimate_job_cost_v2_source_lang_fr_estimates_more_input_tokens_than_en() -> None:
+    """Architecture.md §6.26.5 buoc #6: CHARS_PER_TOKEN_FR (3.0) < CHARS_PER_TOKEN_EN
+    (4.0) co chu dich — chars/token THAP hon => token CAO hon => uoc DU, dung
+    chieu an toan §6.11.6 ('duoc phep uoc du, cam uoc thieu')."""
+    provider = ClaudeProvider(api_key="sk-ant-fake")
+    en_estimate = estimate_job_cost_v2(
+        source_text_chars=10000,
+        segment_count=5,
+        prompt_overhead_chars=200,
+        provider=provider,
+        source_lang="en",
+    )
+    fr_estimate = estimate_job_cost_v2(
+        source_text_chars=10000,
+        segment_count=5,
+        prompt_overhead_chars=200,
+        provider=provider,
+        source_lang="fr",
+    )
+    assert fr_estimate.estimated_input_tokens > en_estimate.estimated_input_tokens
+    # Output (VI) khong lien quan source_lang — khong doi.
+    assert fr_estimate.estimated_output_tokens == en_estimate.estimated_output_tokens
+
+
+def test_estimate_chunk_cost_source_lang_en_default_matches_no_arg() -> None:
+    provider = ClaudeProvider(api_key="sk-ant-fake")
+    source_text = "a" * 4000
+    no_arg = estimate_chunk_cost(
+        source_text=source_text, segment_count=7, prompt_overhead_chars=300, provider=provider
+    )
+    explicit_en = estimate_chunk_cost(
+        source_text=source_text,
+        segment_count=7,
+        prompt_overhead_chars=300,
+        provider=provider,
+        source_lang="en",
+    )
+    assert explicit_en == no_arg
+
+
+def test_estimate_chunk_cost_source_lang_fr_estimates_more_input_tokens() -> None:
+    provider = ClaudeProvider(api_key="sk-ant-fake")
+    source_text = "a" * 4000
+    en_input, _, _ = estimate_chunk_cost(
+        source_text=source_text,
+        segment_count=7,
+        prompt_overhead_chars=300,
+        provider=provider,
+        source_lang="en",
+    )
+    fr_input, _, _ = estimate_chunk_cost(
+        source_text=source_text,
+        segment_count=7,
+        prompt_overhead_chars=300,
+        provider=provider,
+        source_lang="fr",
+    )
+    assert fr_input > en_input

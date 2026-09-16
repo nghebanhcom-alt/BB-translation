@@ -29,6 +29,7 @@ from src.core.config import Settings
 from src.core.cost_estimator import CostEstimate, estimate_job_cost_v2
 from src.core.glossary_manager import GlossaryManager
 from src.core.job_orchestrator import _count_pdf_pages, _count_text_segments, _extract_full_text
+from src.core.language_detector import detect_source_lang
 from src.core.prompt_builder import build_epub_batch_prompt, build_prompt_text, build_system_prompt
 from src.services.epub_document import EpubDocument
 from src.services.translation import TranslationProvider
@@ -44,6 +45,13 @@ class DetailedCostEstimate:
     segment_count: int
     prompt_overhead_chars: int
     total_units: int | None = None
+    #: Architecture.md §6.26.4 (S7 — dich FR->VI): ket qua CHINH THUC cua
+    #: `detect_source_lang()` cho job nay — "en" | "fr" | None. `create_job()`
+    #: (jobs.py) ghi thang gia tri nay vao `Job.source_lang` KHONG doi thanh
+    #: "en" o day: nhanh pdf_scan co `full_text` gan rong (chua OCR) nen
+    #: detect tra None co chu dich, de `run_job()` Step 3 detect LAI tren
+    #: cau noi searchable PDF sau OCR — ghi "en" som se khoa cung gia tri sai.
+    source_lang: str | None = None
 
 
 @dataclass
@@ -104,6 +112,13 @@ async def estimate_translation_cost(
         )
 
     full_text = _extract_full_text(file_path)
+    # Architecture.md §6.26.4 point 1: detect 1 LAN o day. `file_path` cua
+    # 1 job pdf_scan CHUA co text layer (OCR chua chay — chi chay trong
+    # `JobOrchestrator.run_job()`) nen `full_text` gan rong -> `token_count`
+    # < 500 -> `detection.lang is None` co chu dich (KHONG ep "en" o day —
+    # xem docstring `DetailedCostEstimate.source_lang`).
+    detection = detect_source_lang(full_text)
+    source_lang = detection.lang or "en"
     glossary_manager = GlossaryManager(db_session)
     prompt_text = await build_prompt_text(
         glossary_manager,
@@ -121,6 +136,7 @@ async def estimate_translation_cost(
         segment_count=segment_count,
         prompt_overhead_chars=prompt_overhead_chars,
         provider=provider,
+        source_lang=source_lang,
     )
     return DetailedCostEstimate(
         estimate=estimate,
@@ -128,6 +144,7 @@ async def estimate_translation_cost(
         segment_count=segment_count,
         prompt_overhead_chars=prompt_overhead_chars,
         total_units=None,
+        source_lang=detection.lang,
     )
 
 
@@ -167,12 +184,17 @@ async def _estimate_epub_translation_cost(
     doc = EpubDocument.load(file_path)
     full_text = doc.full_text()
 
+    # Architecture.md §6.26.4 point 1 — cung 1 lan detect nhu nhanh PDF o tren.
+    detection = detect_source_lang(full_text)
+    source_lang = detection.lang or "en"
+
     glossary_manager = GlossaryManager(db_session)
     base_system_prompt = await build_system_prompt(
         glossary_manager,
         project_id=batch_id,
         only_terms_present_in=full_text,
         max_glossary_entries=max_glossary_entries,
+        source_lang=source_lang,
     )
     real_prompt = build_epub_batch_prompt(base_system_prompt)
     prompt_overhead_chars = len(real_prompt)
@@ -194,6 +216,7 @@ async def _estimate_epub_translation_cost(
         segment_count=llm_request_count,
         prompt_overhead_chars=prompt_overhead_chars,
         provider=provider,
+        source_lang=source_lang,
     )
     return DetailedCostEstimate(
         estimate=estimate,
@@ -201,6 +224,7 @@ async def _estimate_epub_translation_cost(
         segment_count=llm_request_count,
         prompt_overhead_chars=prompt_overhead_chars,
         total_units=len(doc.units),
+        source_lang=detection.lang,
     )
 
 

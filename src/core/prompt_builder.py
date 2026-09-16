@@ -39,11 +39,23 @@ from pathlib import Path
 from src.core.glossary_manager import GlossaryManager
 from src.utils.unit_conversion_table import build_unit_conversion_section
 
-_INTRO = (
-    "Ban la chuyen gia dich thuat tai lieu nganh banh. "
-    "Dich tu tieng Anh sang tieng Viet.\n\n"
-    "QUY TAC BAT BUOC:"
-)
+#: Architecture.md §6.26.6 (S7 — dich FR->VI) — bang du lieu, KHONG re nhanh
+#: `if lang == ...` rai rac trong than ham. `source_lang` khong khop key nao
+#: (khong nen xay ra — moi noi doc `job.source_lang or "en"`) roi ve "en".
+_SOURCE_LANG_NAME_VI: dict[str, str] = {"en": "tieng Anh", "fr": "tieng Phap"}
+
+
+def _source_lang_name(source_lang: str) -> str:
+    return _SOURCE_LANG_NAME_VI.get(source_lang, _SOURCE_LANG_NAME_VI["en"])
+
+
+def _intro(source_lang: str) -> str:
+    return (
+        "Ban la chuyen gia dich thuat tai lieu nganh banh. "
+        f"Dich tu {_source_lang_name(source_lang)} sang tieng Viet.\n\n"
+        "QUY TAC BAT BUOC:"
+    )
+
 
 _GLOSSARY_INSTRUCTION = (
     '1. Dich cac thuat ngu theo bang duoi day. Neu cot VI la "(keep)" hoac trong, '
@@ -83,6 +95,7 @@ async def build_system_prompt(
     project_id: str | None = None,
     only_terms_present_in: str | None = None,
     max_glossary_entries: int = 80,
+    source_lang: str = "en",
 ) -> str:
     """Trả về full system prompt string ghép glossary + unit conversion + style rules.
 
@@ -95,6 +108,11 @@ async def build_system_prompt(
     truyền `only_terms_present_in` để khớp đúng cách `cost_gate.py` đã lọc khi
     ước chi phí Lớp 2 (§6.11.6: prompt thật và prompt dùng để ước chi phí phải
     cùng một tập glossary, nếu không Lớp 2 có thể ước THẤP hơn thật).
+
+    `source_lang` (S7, Architecture.md §6.26.6): mặc định "en" giữ NGUYÊN
+    chuỗi CŨ byte-for-byte (test regression bắt buộc) — đổi độ dài chuỗi này
+    đổi `prompt_overhead_chars` × `segment_count` = đổi cost estimate của MỌI
+    job EN đang chạy. `"fr"` nội suy tên ngôn ngữ qua `_intro()`.
     """
     glossary_snippet = await glossary_manager.build_prompt_snippet(
         project_id=project_id,
@@ -105,7 +123,7 @@ async def build_system_prompt(
         glossary_snippet = "(Khong co glossary entry nao duoc cau hinh.)"
 
     sections = [
-        _INTRO,
+        _intro(source_lang),
         _GLOSSARY_INSTRUCTION,
         "",
         glossary_snippet,
@@ -268,9 +286,17 @@ async def write_prompt_file(
 # single-brace) to the LLM already, so this content omits pdf2zh's
 # double-brace `{{v0}}` placeholder hint, which uses a different convention.
 
-_BABELDOC_INTRO = (
-    "Ban la chuyen gia dich thuat tai lieu nganh banh. Dich tu tieng Anh sang tieng Viet."
-)
+
+def _babeldoc_intro(source_lang: str) -> str:
+    #: §6.26.6: noi dung babeldoc KHONG duoc chua `${...}` (khong co co che
+    #: template) — nen noi tinh ten ngon ngu tai thoi diem build bang Python
+    #: f-string, KHAC voi `_FILE_INTRO` (pdf2zh, giu `${lang_in}` de pdf2zh
+    #: tu thay the).
+    return (
+        "Ban la chuyen gia dich thuat tai lieu nganh banh. "
+        f"Dich tu {_source_lang_name(source_lang)} sang tieng Viet."
+    )
+
 
 _BABELDOC_GLOSSARY_INSTRUCTION = (
     'Dich cac thuat ngu theo bang duoi day. Neu cot VI la "(keep)" hoac trong, '
@@ -319,12 +345,17 @@ async def build_babeldoc_prompt_text(
     project_id: str | None = None,
     only_terms_present_in: str | None = None,
     max_glossary_entries: int = 80,
+    source_lang: str = "en",
 ) -> str:
     """Build babeldoc's `--custom-system-prompt` CONTENT (no template syntax,
     no `${text}`/footer — see module docstring and the contract note above).
     Mirrors `build_prompt_text()`'s glossary-filtering/unit-hint logic so both
     engines get the same glossary/unit coverage, just packaged for babeldoc's
     different substitution contract.
+
+    `source_lang` (S7, Architecture.md §6.26.6): mặc định "en" giữ NGUYÊN
+    chuỗi CŨ byte-for-byte — xem `build_system_prompt()` cho lý do (cost
+    estimate của mọi job EN đang chạy).
     """
     glossary_snippet = await glossary_manager.build_prompt_snippet(
         project_id=project_id,
@@ -344,7 +375,7 @@ async def build_babeldoc_prompt_text(
     )
     unit_block = build_unit_conversion_section() if include_units else ""
 
-    sections = [_BABELDOC_INTRO, "", glossary_block]
+    sections = [_babeldoc_intro(source_lang), "", glossary_block]
     if unit_block:
         sections += ["", unit_block]
     sections += ["", _BABELDOC_CONCISENESS_RULE, "", _BABELDOC_TYPOGRAPHY_RULES]
@@ -358,6 +389,7 @@ async def write_babeldoc_prompt_file(
     project_id: str | None = None,
     only_terms_present_in: str | None = None,
     max_glossary_entries: int = 80,
+    source_lang: str = "en",
 ) -> Path:
     """Write babeldoc's `--custom-system-prompt` CONTENT to disk for one job.
 
@@ -372,6 +404,7 @@ async def write_babeldoc_prompt_file(
         project_id=project_id,
         only_terms_present_in=only_terms_present_in,
         max_glossary_entries=max_glossary_entries,
+        source_lang=source_lang,
     )
 
     path.parent.mkdir(parents=True, exist_ok=True)

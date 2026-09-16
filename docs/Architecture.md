@@ -8484,6 +8484,190 @@ lớp nguồn file phổ biến, **chắc chắn tái diễn**, không phải s�
 
 ---
 
+### 6.26. S7 — Dịch FR→VI bên cạnh EN→VI (auto-detect ngôn ngữ nguồn, PDF + EPUB)
+
+Quyết định nền (HOI-09, Hiếu chốt 2026-09-16, không hỏi lại): **PDF + EPUB**; **dùng chung glossary
+EN hiện có**, không tạo glossary FR ở v1; **auto-detect** ngôn ngữ nguồn, KHÔNG có dropdown thủ công.
+
+#### 6.26.1. Nguồn xác thực (Protocol 5 R5-01)
+
+| Câu hỏi | Kết luận | Nguồn |
+|---|---|---|
+| pdf2zh có nhận `lang_in="fr"` không? | **CÓ**, không có whitelist/validate nào. `BaseTranslator.__init__` chỉ làm `self.lang_map.get(lang_in.lower(), lang_in)`; `OpenAIlikedTranslator` (service app đang dùng) kế thừa `OpenAITranslator` → `lang_map = {}` ⇒ `"fr"` đi qua nguyên vẹn | Đọc source đã cài `pdf2zh v1.9.11` (`pdf2zh --version`): `.../site-packages/pdf2zh/translator.py:46-52`, `:939-940`; CLI flag `--lang-in/-li` trong `pdf2zh --help` |
+| pdf2zh dùng `lang_in` làm gì? | 3 chỗ, KHÔNG chỗ nào đụng layout/font: (1) khoá cache dịch (`translator.py:54-60`), (2) giá trị thay cho `${lang_in}` trong file `--prompt` (`translator.py:113-126`), (3) tham số `source_lang` của các provider dịch máy (DeepL/Google — app không dùng). Font output chọn theo **`lang_out`** duy nhất (`high_level.py:189` `download_remote_fonts(lang_out.lower())`) | như trên |
+| babeldoc có hỗ trợ tiếng Pháp làm nguồn không? | **CÓ — và nó vốn đã không quan tâm ngôn ngữ nguồn**. Prompt babeldoc gửi LLM chỉ nêu `lang_out`: `";; Treat next line as plain text input and translate it into {self.lang_out} …"`. `lang_in` chỉ còn xuất hiện ở `__str__` (khoá cache) | Đọc source đã cài `babeldoc 0.6.4` (`babeldoc --version`): `.../site-packages/babeldoc/translator/translator.py:293`, `:85-96`, `:191`; `grep -rn "\.lang_in"` toàn package chỉ ra 4 hit, không hit nào ở bước layout/typesetting |
+| babeldoc CLI flag | `--lang-in/-li`, default `"en"` (`main.py:131-135`) | như trên |
+| MinerU (nhánh `pdf_scan`) có nhận `lang="fr"` không? | **KHÔNG**. Tập ngôn ngữ công khai `PUBLIC_OCR_LANGUAGES` không có `fr`; `validate_public_ocr_lang()` raise `ValueError("Language fr not supported")`. Nhưng `"en"` là **alias** map sang model `"ch"` mà mô tả chính thức là *"Chinese, English, Japanese, Chinese Traditional, **Latin**"* — tức đã phủ chữ Latinh (gồm tiếng Pháp) | Đọc source đã cài `MinerU 3.4.5` (`version.py`): `.../site-packages/mineru/utils/ocr_language.py:3-16`, `:18-20`, `:51` (`_CH_LANG_ALIASES = {"en", "japan", "chinese_cht", "latin"}`), `:116-125` |
+| Tỷ lệ text expansion FR so với EN | ~15–20% (FR dài hơn EN) | Version Internationale, Kwintessential, Eriksen (WebSearch 2026-09-16) — xem §6.26.5 |
+| Chars/token của tiếng Pháp dưới `cl100k_base` | **⚠️ ASSUMED — chưa verify với nguồn thật**: `tiktoken` không có trong `.venv` (`ModuleNotFoundError`), không đo được tại chỗ | — |
+
+#### 6.26.2. Data model + API
+
+`jobs.source_lang TEXT NULL` — cột mới, thêm qua `_NEW_NULLABLE_COLUMNS` (`src/models/database.py:62`),
+**giữ nguyên DB hiện có**, không xoá/tạo lại. Giá trị hợp lệ: `'en' | 'fr' | NULL`.
+
+- `NULL` = **chưa detect** (job cũ trước S7, hoặc Job row tạo ngoài API). Mọi nơi đọc phải coi
+  `NULL` ⇒ `"en"` — đúng hành vi hiện hành, deny-by-default (R8-02).
+- Ghi **một lần rồi giữ nguyên** qua mọi lần retry/resume — cùng khuôn với `chunk_size_used` và
+  `parse_method` (§6.21.3): một job resume giữa chừng không được đổi ngôn ngữ nguồn, vì prompt
+  file/cache key của các chunk đã xong được sinh theo giá trị cũ.
+- `JobCreateRequest` **KHÔNG** thêm field nào (HOI-09: auto-detect, không có dropdown).
+- `JobDetailResponse` thêm `source_lang: str | None` (chỉ đọc, để UI hiện badge "FR→VI"/"EN→VI" và
+  để QA verify lineage mà không phải mở SQLite).
+
+#### 6.26.3. Bộ detect — `src/core/language_detector.py` (module mới)
+
+```python
+@dataclass(frozen=True)
+class LanguageDetection:
+    lang: str | None        # "en" | "fr" | None (không kết luận được)
+    en_share: float
+    fr_share: float
+    token_count: int
+
+def detect_source_lang(text: str) -> LanguageDetection: ...
+```
+
+Phương pháp: **tỷ lệ hư từ (function word) phân biệt được**, thuần Python, **không thêm dependency
+ngoài**. Lý do không dùng `langdetect`/`lingua`/`fasttext`: bài toán chỉ là phân biệt 2 lớp trên
+văn bản cỡ vài nghìn token — thêm 1 external dependency là thêm 1 contract phải verify theo
+Protocol 5 mà không mua thêm độ chính xác nào (xem số đo bên dưới). Cân nhắc rồi loại: `dc:language`
+trong OPF của EPUB — chỉ dùng được cho EPUB, sẽ tạo 2 nhánh detect lệch nhau giữa PDF và EPUB (đúng
+loại rủi ro §6.14.7 tồn tại để chặn) và metadata EPUB lậu/convert thường sai. Ghi backlog làm tín
+hiệu phụ nếu sau này cần.
+
+Wordlist: `src/core/wordlists/en_function_words.txt` (**đã có sẵn**, đang dùng cho `term_extractor`)
+và `src/core/wordlists/fr_function_words.txt` (**mới**). Cả 2 danh sách chỉ chứa từ **phân biệt
+được**; từ mơ hồ 2 ngôn ngữ bị loại tường minh khỏi danh sách FR: `a, en, on, son, plus, sur, or,
+but, part, pain, coin, chat, mode, note, page, table, sale, fin`.
+
+Luật kết luận (`lang` = winner khi thoả CẢ 3, ngược lại `None`):
+
+| Điều kiện | Ngưỡng | Cơ sở |
+|---|---|---|
+| `token_count` | ≥ 500 | chống kết luận trên bìa/mục lục |
+| `max(en_share, fr_share)` | ≥ 0,05 | **đo thật** 6 tài liệu EN trong `data/uploads/` (2026-09-16): `en_share` ∈ [0,143 ; 0,306] ⇒ ngưỡng 0,05 còn dư ~2,9 lần |
+| tỷ số winner/loser | ≥ 3,0 | **đo thật** cùng 6 tài liệu: `fr_share` ≤ 0,0007 ⇒ tỷ số thực tế > 200 lần. ⚠️ ASSUMED cho chiều FR (chưa có tài liệu FR thật để đo) |
+
+`lang is None` ⇒ ghi `source_lang = "en"` + `logger.warning` — **không** để job fail, không đoán bừa.
+
+#### 6.26.4. Data lineage (R6-01) — artifact nào, ai đọc
+
+Detect chạy **đúng 1 lần cho mỗi job**, tại 2 điểm bổ sung nhau (không phải 2 nhánh song song):
+
+1. **`cost_gate.estimate_translation_cost()`** (`src/core/cost_gate.py:106`) đã có sẵn
+   `full_text = _extract_full_text(file_path)` / `full_text = doc.full_text()` (EPUB, `:168`).
+   Thêm `detection = detect_source_lang(full_text)` ngay tại đó; `CostEstimateResult` mang thêm
+   `source_lang: str | None`. `create_job()` (`src/api/routes/jobs.py:619`) ghi giá trị đó vào
+   `Job(source_lang=...)`.
+   *Với `pdf_scan`, `_extract_full_text()` trả gần rỗng (đã ghi chú sẵn ở `cost_gate.py:89`) ⇒
+   `token_count < 500` ⇒ `lang is None` ⇒ **để `source_lang = NULL`, KHÔNG ghi "en" ở bước này**.*
+2. **`run_job()` Step 3** (`job_orchestrator.py:726`): `full_text = _extract_full_text(translation_source_path)`
+   — với `pdf_scan` đây là **cầu nối searchable PDF sau OCR**, không phải `job.file_path` (§6.10).
+   Nếu `job.source_lang is None` tại đây thì detect trên `full_text` này rồi persist. Nhánh EPUB:
+   `run_epub_job()` cùng khuôn, nguồn text là `source_doc.full_text()` (biến đã có, `:1153-1163`).
+
+Từ đó trở đi **mọi bước đọc `job.source_lang`**, không ai detect lại, không ai truyền literal `"en"`:
+
+| Bước | Hiện tại | Sau S7 |
+|---|---|---|
+| Step 5 — `write_prompt_file()` / `write_babeldoc_prompt_file()` (`:762`, `:771`) | chuỗi cứng "tieng Anh" | nhận `source_lang=`, xem §6.26.6 |
+| Step 7 — `translate_pages()` (`:2104`) | không truyền `lang_in` ⇒ default `"en"` của `Pdf2zhRunner`/`BabeldocRunner` | truyền tường minh `lang_in=job.source_lang or "en"` |
+| Step 8 — `overlay_rotated_text(glossary_prompt=build_system_prompt(...))` (`:988`) | "tieng Anh" | `source_lang=` |
+| EPUB — `build_system_prompt()` (`:1163`) | "tieng Anh" | `source_lang=` |
+| EPUB retry — `pricing_provider.translate(p, system_prompt, "en", "vi")` (`:2344`, `:2371`, `:2465`) | literal `"en"` | `job.source_lang or "en"` |
+| `cost_gate` — `build_prompt_text()` (`:108`) / `build_system_prompt()` (`:171`) | "tieng Anh" | `source_lang=detection.lang or "en"` — **cùng một chuỗi prompt** với lúc chạy thật, nếu không Lớp 2 ước sai (§6.11.6) |
+
+**Mặc định của `Pdf2zhRunner.translate_pages(lang_in="en")` / `BabeldocRunner` được GIỮ NGUYÊN**, không
+đổi thành tham số bắt buộc: các test/caller hiện có vẫn đúng, và giá trị thật luôn được truyền tường
+minh từ orchestrator.
+
+#### 6.26.5. Protocol 8 audit — TỪNG bước hậu kỳ hiện có (R8-01)
+
+FR là **biến thể mới đi qua pipeline dùng chung** đã có từ trước. Bảng dưới liệt kê *mọi* bước, kể
+cả bước có từ trước FR — đúng chỗ Bug #9 đã lọt.
+
+| # | Bước (vị trí) | Tồn tại để giải quyết vấn đề gì của biến thể cũ (EN) | FR có cùng vấn đề đó không? | Quyết định |
+|---|---|---|---|---|
+| 1 | OCR MinerU + cầu nối searchable PDF (`_build_ocr_bridge`, `:1850`) | scan không có text layer | Có (độc lập ngôn ngữ). Nhưng `lang="fr"` **bị MinerU từ chối** (6.26.1) | **GIỮ `lang="en"`** — alias → model `"ch"` phủ *Latin*. TUYỆT ĐỐI không map `source_lang` vào tham số `lang` của MinerU |
+| 2 | Lọc glossary theo `only_terms_present_in` (`glossary_manager.py:165-170`) | pdf2zh gửi prompt file cho **mỗi segment** ⇒ glossary không lọc nhân token lên theo số segment (§6.6.5) | Vấn đề token **vẫn y nguyên**. Nhưng hệ quả khác: entry khớp theo `term_en` word-boundary ⇒ sách FR chỉ giữ lại các mục vốn là từ mượn Pháp (`ganache`, `génoise`, `levain`, `brioche`…), phần còn lại rụng | **GIỮ NGUYÊN** (không nới lọc — nới lọc là tái lập đúng nguyên nhân sự cố $6.50). Hệ quả "glossary gần như rỗng cho tài liệu FR" là **giới hạn đã biết & Hiếu đã chấp nhận** khi chốt HOI-09. Thêm log `glossary_entries_after_filter` kèm `source_lang` |
+| 3 | `font_shrink_page()` (`:2194`, gated bằng `Runner.needs_font_shrink`) | pdf2zh vẽ bản dịch VI **đúng vị trí/cỡ chữ của bản gốc**, không tự co ⇒ tràn khung (Bug #9 §6.14) | **CÓ — và không đổi gì cả.** Thuật toán **đo thật** bề rộng glyph đã render so với `block_bbox` của chính trang output (`font_shrink.py:236-247`), **không** có hằng số nào suy ra từ độ dài bản gốc. Hằng số duy nhất là `MAX_FONT_SHRINK_RATIO=0.80`, `CONDENSED_SCALE=0.85` — thuộc tính của *bản vẽ*, không của ngôn ngữ nguồn. Font dùng để đo/vẽ chọn theo **lang_out = vi**, không theo nguồn (`font_shrink.py` docstring; `high_level.py:189`) | **GIỮ BẬT** cho FR, **không đổi hằng số nào**. Xem ghi chú độ dài bên dưới |
+| 4 | `_map_babeldoc_drop_report_to_findings` (`:2230`, gated `_reports_own_paragraph_drops`) | babeldoc tự bỏ đoạn không vừa khung (§6.22) | Có, độc lập ngôn ngữ nguồn (đọc report của babeldoc, không đọc text) | **GIỮ BẬT** |
+| 5 | Đo token thật (`_reports_token_usage`, `:2255`) | parse `Total tokens:` trên stdout babeldoc (§6.23) | Có, độc lập ngôn ngữ | **GIỮ BẬT** |
+| 6 | Ước chi phí `estimate_chunk_cost` / `estimate_job_cost_v2` | không under-estimate (sự cố $6.50) | **KHÁC**: `CHARS_PER_TOKEN_EN = 4.0` là hằng số của **tiếng Anh**. Tiếng Pháp nhiều dấu (é/è/à/ç) ⇒ chars/token thấp hơn ⇒ công thức hiện tại **ước THIẾU** input token cho tài liệu FR | Thêm `CHARS_PER_TOKEN_FR = 3.0` (**⚠️ ASSUMED**, chọn *thấp* có chủ đích: chars/token thấp ⇒ token cao ⇒ ước **dư**, đúng chiều an toàn §6.11.6 "được phép ước dư, cấm ước thiếu"). `VI_CHAR_EXPANSION = 1.16` **giữ nguyên cho FR**: FR đã dài hơn EN 15–20% nên VI/FR thực tế ≈ 1,0 ⇒ 1,16 tiếp tục ước dư. Golden file EN (`cost_golden_howbakingworks.json`) **không bị ảnh hưởng** vì hằng số mới chỉ áp khi `source_lang == "fr"` |
+| 7 | Guard `BR-OCR-03` bản dịch 0 ký tự (`:951`) | Bug #5 shape "completed nhưng rỗng" | Có, độc lập ngôn ngữ | **GIỮ BẬT** |
+| 8 | `overlay_rotated_text` (`:977`, babeldoc + flag) | babeldoc bỏ chữ xoay | Có. Nhưng nó gọi LLM bằng `glossary_prompt` sinh từ `build_system_prompt()` — **chuỗi cứng "tieng Anh"** | **GIỮ BẬT**, truyền `source_lang` (§6.26.4) |
+| 9 | `compress_pdf_images` (`:1029`) | ảnh raw của babeldoc | Độc lập ngôn ngữ | **GIỮ BẬT** |
+| 10 | Bilingual PDF (`:1052`) | ghép trang gốc ↔ trang dịch | Độc lập ngôn ngữ | **GIỮ BẬT** |
+| 11 | EPUB — `_check_epub_output_guard()` (`:491-537`) | bắt "LLM trả nguyên văn bản gốc" bằng cách **so sánh text unit gốc ≠ unit dịch** | Có. So sánh chuỗi ⇒ **độc lập ngôn ngữ nguồn** | **GIỮ BẬT** |
+| 12 | EPUB — guard tỷ lệ dấu tiếng Việt (`text_quality.diacritic_ratio`) | bắt output VI **mất dấu** (Bug #EPUB-4) | **KHÁC — suy yếu.** `_VN_DIACRITIC_CHARS` (`text_quality.py:15-17`) chứa `à á è é ì í ò ó ù ú â ê ô ý` — **trùng với chữ Pháp thường gặp** (`é` chiếm ~2% chữ cái trong văn bản Pháp). Một unit FR **chưa dịch** có thể đạt tỷ lệ ≥ 0,02 ⇒ lọt tầng 2 (`EPUB_DIACRITIC_RATIO_UNIT = 0.02`, min 40 chữ cái). Tầng 1 (0,08, min 200 chữ cái) vẫn bắt được | **GIỮ BẬT KHÔNG ĐỔI NGƯỠNG.** Guard chỉ kích hoạt khi tỷ lệ **THẤP** ⇒ với FR nó chỉ có thể *bỏ sót*, không bao giờ *báo nhầm* ⇒ giữ nguyên là an toàn, siết ngưỡng mới là rủi ro. Lớp bù: bước #11 ở trên là lớp phòng thủ **độc lập** và bắt đúng ca này bằng so sánh chuỗi. Ghi backlog: cân nhắc loại `à á è é ì í ò ó ù ú â ê ô ý` khỏi mẫu đếm khi `source_lang == "fr"` |
+| 13 | Gợi ý "Các từ mới" — `extract_and_store_terms` (`jobs.py:537`, US-20) | rút thuật ngữ EN từ tài liệu vừa dịch | **KHÔNG.** `term_extractor._load_function_words()` chỉ nạp `en_function_words.txt` (`term_extractor.py:79-88`); hư từ Pháp (`le/la/des/pour/avec`) không bị lọc ⇒ ứng viên n-gram thành rác. Hiệu chỉnh cho FR **chưa verify** | **SKIP cho job FR (R8-02 deny-by-default)**: `if settings.term_extraction_enabled and (job.source_lang or "en") == "en"`. Ghi backlog bổ sung wordlist FR |
+| 14 | Duplicate-detection theo `file_hash`, cost gate Lớp 2/3, chunking theo trang, merge chunk | — | Độc lập ngôn ngữ | **GIỮ BẬT** |
+
+**Ghi chú riêng về "bản dịch dài hơn bản gốc bao nhiêu %"** (câu hỏi gốc của R8-01 cho bước #3):
+tiếng Pháp dài hơn tiếng Anh ~15–20% cho cùng nội dung ([Version Internationale](https://www.versioninternationale.com/en/blog/the-expansion-rate-in-translation-english-french-german/),
+[Kwintessential](https://www.kwintessential.co.uk/blog/translation-text-expansion-how-it-affects-design-2),
+[Eriksen](https://eriksen.com/language/text-expansion/)) ⇒ VI/FR **ngắn hơn** VI/EN ⇒ `font_shrink_page`
+sẽ kích hoạt **ÍT hơn** trên tài liệu FR, không nhiều hơn. Quan trọng hơn con số: `font_shrink_page`
+**không hề dùng** tỷ lệ này — nó đo bề rộng thật trên trang output. Giả định "bản dịch dài hơn X%" chỉ
+là *động cơ* viết ra bước này, chưa bao giờ là *tham số* của nó. Đây chính là khác biệt với Bug #9,
+nơi lý do tồn tại (pdf2zh không tự co chữ) **không còn đúng** với babeldoc.
+
+#### 6.26.6. Prompt — chuỗi cứng "tieng Anh" (`src/core/prompt_builder.py`)
+
+Thêm bảng dữ liệu, **không** rẽ nhánh `if lang == ...` rải rác:
+
+```python
+_SOURCE_LANG_NAME_VI: dict[str, str] = {"en": "tieng Anh", "fr": "tieng Phap"}
+```
+
+5 chuỗi phải nhận `source_lang: str = "en"`: `_INTRO`, `_GLOSSARY_INSTRUCTION`, `_FILE_GLOSSARY_INSTRUCTION`,
+`_BABELDOC_INTRO`, `_BABELDOC_GLOSSARY_INSTRUCTION` (`prompt_builder.py:42-51`, `:135-138`, `:271-278`).
+
+Ràng buộc bắt buộc khi implement:
+
+- Với `source_lang="en"`, chuỗi sinh ra phải **giống hệt từng byte** chuỗi hiện tại — có test assert
+  điều này. Không được "nhân tiện sửa câu chữ": `prompt_overhead_chars` nhân với `segment_count`
+  trong `cost_estimator.py`, đổi độ dài prompt là đổi cost estimate của mọi job EN đang chạy.
+- `_FILE_INTRO` (`:129-133`) **giữ nguyên `${lang_in}`/`${lang_out}`** — pdf2zh tự thay bằng
+  `string.Template.safe_substitute` (`translator.py:113-126`, verified). Không hard-code tên ngôn ngữ
+  vào dòng này để tránh nói 2 lần 2 kiểu.
+- Nội dung babeldoc **KHÔNG được chứa `${...}`** (§6.14 / docstring `prompt_builder.py:256-269`) ⇒
+  `_BABELDOC_INTRO` phải nội suy tên ngôn ngữ tại thời điểm build, bằng Python f-string.
+
+#### 6.26.7. Mục ⚠️ ASSUMED và backlog bắt buộc (R5-01 + R5-06)
+
+| # | Mục | Vì sao chưa verify | Việc phải làm ở lần chạy live FR đầu tiên |
+|---|---|---|---|
+| A-1 | `CHARS_PER_TOKEN_FR = 3.0` | `tiktoken` không có trong `.venv` | Đo thật `len(text)/len(encode(text))` trên tài liệu FR thật, cập nhật hằng số nếu lệch > 15% |
+| A-2 | Ngưỡng detect chiều FR (`fr_share ≥ 0,05`, tỷ số ≥ 3,0) | không có tài liệu FR thật để đo; chiều EN **đã đo** trên 6 file thật | Log `en_share/fr_share/token_count` của mọi job; nếu `fr_share` thật < 0,10 ⇒ ngưỡng quá sát, phải hạ/đổi tiêu chí |
+| A-3 | MinerU model `"ch"` OCR tiếng Pháp có dấu (`é`, `ç`, `œ`) chính xác tới đâu | chỉ đọc được mô tả *"Latin"* trong source, chưa chạy thật trên scan FR | Chạy 1 scan FR thật, đối chiếu `ocr_confidence` với mức EN hiện hành |
+| A-4 | `epub_diacritic` tầng 2 bỏ sót unit FR chưa dịch | chưa dựng được ca thật | Đo `diacritic_ratio` của unit FR gốc trên EPUB FR thật |
+
+R5-06: cả 4 mục **phải** có entry tương ứng trong `backlog[]` (`project_state.json`), `source: "tech-lead"`,
+trước khi Dev bắt đầu implement.
+
+#### 6.26.8. Test bắt buộc khi implement
+
+- **R6-02 (lineage, không chỉ "đã gọi")**: `translator_runner.translate_pages.assert_called_with(..., lang_in="fr", ...)`
+  cho job có `source_lang="fr"`, và `lang_in="en"` cho `source_lang=None` (job cũ). Assert
+  `prompt_path.read_text()` chứa `"tieng Phap"` — tức prompt file thật sự sinh **từ** `job.source_lang`.
+- Regression EN: 6 tài liệu EN trong `data/uploads/` (danh sách ở §6.26.3) phải cho `detect == "en"`.
+- Byte-identical: prompt `source_lang="en"` khớp chuỗi cũ (§6.26.6).
+- Bước #13: job `source_lang="fr"` ⇒ `extract_and_store_terms` **không** được gọi.
+- Bước #1: với `pdf_scan` FR, assert `mineru_runner.parse_document` được gọi với `lang="en"` —
+  **không** phải `"fr"` (nếu truyền `"fr"` MinerU raise, §6.26.1).
+- **R6-03 (live E2E)**: ít nhất 1 lần chạy xuyên suốt 1 PDF FR thật + 1 EPUB FR thật, mở file output
+  kiểm tra **có chữ Việt thật**, không chỉ tin `status == "completed"`.
+
+#### 6.26.9. Ngoài phạm vi v1
+
+Glossary FR riêng (cột `term_fr`); dropdown chọn ngôn ngữ thủ công; ngôn ngữ nguồn thứ 3; dịch
+tài liệu **trộn** EN+FR (detector trả 1 nhãn cho cả tài liệu — sách trộn nặng sẽ rơi vào
+`lang is None` ⇒ fallback `"en"`, đúng hành vi hiện hành).
+
+---
+
 ## 7. Docker Setup
 
 ### 7.1. docker-compose.yml

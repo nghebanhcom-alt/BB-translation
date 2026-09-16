@@ -46,6 +46,7 @@
         <tr>
           <th class="p-2 text-left">Tên file</th>
           <th class="p-2 text-left">Loại</th>
+          <th class="p-2 text-left">Ngôn ngữ nguồn</th>
           <th class="p-2 text-left">Ngày tạo</th>
           <th class="p-2 text-left">Trạng thái</th>
           <th class="p-2 text-left">Số trang</th>
@@ -61,6 +62,10 @@
           <tr class="border-t">
             <td class="p-2" x-text="job.filename"></td>
             <td class="p-2 text-gray-500" x-text="job.job_type"></td>
+            <!-- Architecture.md §6.26 mo rong pham vi (Hieu, 2026-09-16):
+                 auto-detect, khong co dropdown chon thu cong — hien de user
+                 phat hien detect sai som (BL-15). NULL/"en" -> EN->VI. -->
+            <td class="p-2 text-gray-500" x-text="(job.source_lang === 'fr' ? 'FR' : 'EN') + '→VI'"></td>
             <td class="p-2 text-gray-500" x-text="new Date(job.created_at).toLocaleString('vi-VN')"></td>
             <td class="p-2">
               <span class="text-xs px-2 py-1 rounded" :class="statusBadgeClass(job.status)" x-text="job.status"></span>
@@ -79,7 +84,7 @@
             </td>
           </tr>
         </template>
-        <tr x-show="jobs.length === 0"><td colspan="8" class="p-4 text-center text-gray-400">Chưa có job nào</td></tr>
+        <tr x-show="jobs.length === 0"><td colspan="9" class="p-4 text-center text-gray-400">Chưa có job nào</td></tr>
       </tbody>
     </table>
 

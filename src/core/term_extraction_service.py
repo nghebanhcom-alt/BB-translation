@@ -142,6 +142,22 @@ async def extract_and_store_terms(
         logger.info("term_extraction_enabled=False — bo qua job %s", job_id)
         return 0
 
+    # Architecture.md §6.26.5 audit buoc #13 (S7 — dich FR->VI), R8-02
+    # deny-by-default: `_load_function_words()` (term_extractor.py) chi nap
+    # `en_function_words.txt` — hu tu tieng Phap (le/la/des/pour/avec...)
+    # khong bi loc, khien ung vien n-gram thanh rac. Chua verify cach hieu
+    # chinh cho FR (backlog) -> SKIP, khong chay ra ket qua rac. Guard o
+    # DAY (khong phai rieng o jobs.py:537) de ca duong tu dong
+    # (_run_job_background) LAN duong thu cong (POST .../extract-terms) deu
+    # duoc bao ve nhu nhau — 2 call site, 1 nguon su that.
+    if (job.source_lang or "en") != "en":
+        logger.info(
+            "Job %s: source_lang=%r != 'en' — bo qua trich xuat tu moi (US-20, §6.26.5 buoc #13)",
+            job_id,
+            job.source_lang,
+        )
+        return 0
+
     source_text = await _extract_source_text_for_terms(job)
     existing_forms = await _collect_existing_glossary_forms(session, job.batch_id)
     candidates = extract_terms(source_text, existing_forms, settings)

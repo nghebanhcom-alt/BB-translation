@@ -8271,3 +8271,146 @@ cài `epubcheck` để kiểm định output độc lập — PM cần thêm và
 ### KHÔNG commit
 
 Theo brief — PM điều phối commit sau khi Reviewer duyệt qua vòng thật (Protocol 7, Protocol A).
+
+## S7 — Dịch FR→VI bên cạnh EN→VI (auto-detect ngôn ngữ nguồn, PDF + EPUB)
+
+Implement theo `docs/Architecture.md` §6.26 (§6.26.1–6.26.9) — thiết kế đã qua audit Protocol 8
+(R8-01/R8-02) và Protocol 5 (R5-01, contract pdf2zh/babeldoc/MinerU đã Tech Lead verify sẵn từ
+source thật, không có phần nào `[UNVERIFIED]` cần Dev tự spike thêm).
+
+### Data model
+
+- `jobs.source_lang TEXT NULL` — cột mới, thêm qua `_NEW_NULLABLE_COLUMNS`
+  (`src/models/database.py`), giữ nguyên DB hiện có. `NULL` ⇒ coi như `"en"` ở MỌI nơi đọc
+  (deny-by-default, R8-02). Field mới trên `src/models/job.py`.
+- `JobDetail` (`src/api/routes/jobs.py`) thêm `source_lang: str | None` (chỉ đọc) — `_to_detail()`
+  serialize từ `job.source_lang`.
+
+### Module mới — `src/core/language_detector.py`
+
+`detect_source_lang(text: str) -> LanguageDetection` — heuristic tỷ lệ hư từ (function word),
+thuần Python, KHÔNG thêm dependency ngoài. Wordlist: tái dùng `en_function_words.txt` đã có (cho
+`term_extractor`), thêm mới `src/core/wordlists/fr_function_words.txt` (loại tường minh các từ mơ
+hồ EN/FR theo đúng danh sách Tech Lead chỉ định ở §6.26.3). Kết luận `lang` chỉ khi CẢ 3 điều kiện
+thoả: `token_count >= 500`, `max(en_share, fr_share) >= 0.05`, tỷ số winner/loser `>= 3.0` — ngược
+lại `lang = None`, KHÔNG đoán bừa.
+
+Verify thật (không phải giả định): chạy trên 8 tài liệu EN thật trong `data/uploads/` (dev machine,
+không commit — `data/` gitignored) — mọi tài liệu ≥500 token đều detect đúng `"en"`, tách biệt
+en_share/fr_share > 40 lần. Test suite dùng 2 đoạn văn EN/FR thật (~600 từ mỗi bên, tự viết, không
+phải câu ngắn bịa sẵn) tại `tests/test_language_detector.py`.
+
+### Data lineage (R6-01/R6-02) — detect chạy đúng 1 lần/job
+
+1. **`cost_gate.estimate_translation_cost()`** (`src/core/cost_gate.py`): thêm
+   `detect_source_lang(full_text)` ngay tại cả nhánh PDF lẫn EPUB; `DetailedCostEstimate` mang thêm
+   `source_lang: str | None`. Nhánh `pdf_scan`: `full_text` gần rỗng (chưa OCR) ⇒ `token_count < 500`
+   ⇒ `source_lang = None` **có chủ đích** — KHÔNG ép "en" ở bước này, để `run_job()` Step 3 detect
+   lại trên cầu nối searchable PDF sau OCR.
+2. **`api/routes/jobs.py::create_job()`**: ghi thẳng `cost_estimate.source_lang` vào
+   `Job(source_lang=...)` (chỉ cho `job_type == "translate"`, `None` cho `parse_only`).
+3. **`job_orchestrator.py::run_job()` Step 3 / `run_epub_job()`**: fallback detect khi
+   `job.source_lang is None` lúc đó (ca `pdf_scan`, hoặc job tạo ngoài API/test) — detect trên
+   `full_text`/`doc.full_text()` rồi persist **1 lần**, giữ nguyên qua mọi lần resume (cùng khuôn
+   với `chunk_size_used`).
+4. Từ đó mọi bước đọc `job.source_lang or "en"`, không ai detect lại/hardcode `"en"` nữa — 6 điểm đã
+   sửa theo đúng bảng lineage §6.26.4:
+   - Step 5 `write_prompt_file()`/`write_babeldoc_prompt_file()` — babeldoc nhận `source_lang=`
+     (pdf2zh's `_FILE_INTRO` giữ nguyên `${lang_in}`, không đổi).
+   - Step 7 `translate_pages(lang_in=job.source_lang or "en")`.
+   - Step 8 `overlay_rotated_text(glossary_prompt=await build_system_prompt(..., source_lang=...))`.
+   - EPUB `build_system_prompt(..., source_lang=job.source_lang or "en")`.
+   - EPUB retry (`_retry_single_unit`/`_retry_whole_epub_request`/`_process_epub_chunk` main call) —
+     `pricing_provider.translate(p, system_prompt, source_lang, "vi")`, không còn literal `"en"`.
+   - `cost_gate` — `build_prompt_text()`/`build_system_prompt()`/`estimate_job_cost_v2(source_lang=)`.
+
+### MinerU — guard bắt buộc, KHÔNG đổi
+
+`_run_mineru_and_record_quality()`/`_build_ocr_bridge()` **KHÔNG hề đụng tới** `job.source_lang` —
+`MinerURunner.parse_document()` luôn dùng mặc định `lang="en"` (alias sang model `"ch"`, phủ Latin
+theo Architecture.md §6.26.1, đã Tech Lead verify từ source MinerU 3.4.5). Test
+`test_pdf_scan_mineru_always_called_with_lang_en_even_for_fr_job` pin `job.source_lang="fr"` và
+assert MinerU vẫn nhận `lang="en"`.
+
+### `src/core/prompt_builder.py` — chuỗi cứng "tieng Anh"
+
+Thêm bảng `_SOURCE_LANG_NAME_VI = {"en": "tieng Anh", "fr": "tieng Phap"}`, không rẽ nhánh
+`if lang == ...` rải rác. `_INTRO`/`_BABELDOC_INTRO` (chuỗi duy nhất thật sự nhắc tên ngôn ngữ) đổi
+thành hàm `_intro(source_lang)`/`_babeldoc_intro(source_lang)`. `build_system_prompt()`,
+`build_babeldoc_prompt_text()`, `write_babeldoc_prompt_file()` nhận thêm `source_lang: str = "en"`.
+`_FILE_INTRO` (pdf2zh) giữ nguyên `${lang_in}`/`${lang_out}` — không đổi, pdf2zh tự thay thế.
+`build_prompt_text()`/`write_prompt_file()` (pdf2zh) **không đổi signature** — không cần, nội dung
+độc lập với `source_lang`. Test byte-identical bắt buộc: `source_lang="en"` (hoặc bỏ qua) cho ra
+chuỗi giống hệt bản cũ (`test_prompt_builder.py`).
+
+### `src/core/cost_estimator.py` — `CHARS_PER_TOKEN_FR`
+
+Thêm hằng số `CHARS_PER_TOKEN_FR = 3.0` (⚠️ ASSUMED — `tiktoken` không có trong `.venv`, backlog
+A-1 đo lại ở lần chạy live đầu tiên), thấp hơn `CHARS_PER_TOKEN_EN=4.0` có chủ đích: chars/token
+thấp ⇒ token ước cao hơn ⇒ **ước dư**, đúng chiều an toàn §6.11.6. `_estimate_input_tokens()`,
+`estimate_chunk_cost()`, `estimate_job_cost_v2()` nhận thêm `source_lang: str = "en"` — mặc định
+giữ nguyên golden file EN (`test_estimate_job_cost_v2_never_underestimates_golden_incident` vẫn
+xanh, không đổi input). Output (VI) không đổi theo `source_lang`.
+
+### `src/core/term_extraction_service.py` — SKIP cho job FR (R8-02)
+
+`extract_and_store_terms()` thêm guard `if (job.source_lang or "en") != "en": return 0` — đặt
+TRONG service (không phải chỉ ở call site `jobs.py:537`) để cả đường tự động
+(`_run_job_background`) LẪN đường thủ công (`POST /api/jobs/{id}/extract-terms`) đều được bảo vệ
+như nhau, một nguồn sự thật duy nhất (lý do: `term_extractor._load_function_words()` chỉ nạp
+`en_function_words.txt`, hư từ Pháp không bị lọc ⇒ n-gram rác).
+
+### Protocol 8 audit (14 bước hậu kỳ, §6.26.5) — không đổi gì ngoài 2 mục trên
+
+Đã đọc và làm đúng theo bảng Tech Lead: `font_shrink_page()` giữ nguyên (đo bề rộng glyph thật,
+không phụ thuộc `source_lang`); glossary filter giữ nguyên (hệ quả "glossary gần rỗng cho FR" là
+giới hạn đã biết, Hiếu chấp nhận theo HOI-09); guard diacritic tiếng Việt giữ nguyên ngưỡng (chỉ có
+thể bỏ sót, không báo nhầm — lớp `_check_epub_output_guard()` bù độc lập).
+
+### UI (bổ sung phạm vi 2026-09-16, qua PM/AskUserQuestion)
+
+`web/index.html` (danh sách job) và `web/history.html` (lịch sử, thêm cột "Ngôn ngữ nguồn") hiện
+badge `EN→VI`/`FR→VI` đọc từ `source_lang` trả về qua `JobDetail`. Auto-detect, không có dropdown
+chọn thủ công (đúng HOI-09) — badge chỉ để user phát hiện detect sai sớm.
+
+### Test (37 test mới, tất cả PASS lần chạy đầu, không cần sửa lại)
+
+- `tests/test_language_detector.py` (6 test) — 2 đoạn văn EN/FR thật ~600 từ, ngưỡng token/share/tỷ
+  số, gibberish/rỗng/quá ngắn trả `None`.
+- `tests/test_prompt_builder.py` (+5 test) — byte-identical `source_lang="en"`, nội dung "tieng
+  Phap" cho `source_lang="fr"`, prompt file thật (không chỉ hàm build trả đúng chuỗi).
+- `tests/test_cost_estimator.py` (+6 test) — byte/số-for-số identical cho "en", FR ước input token
+  cao hơn EN cùng input (không ảnh hưởng output).
+- `tests/test_cost_gate_source_lang.py` (mới, 5 test) — PDF digital EN/FR thật (dựng bằng PyMuPDF
+  `insert_textbox`), `pdf_scan` gần rỗng giữ `None` (không ép "en"), EPUB FR thật, so sánh input
+  token EN vs FR.
+- `tests/integration/test_job_orchestrator_source_lang.py` (mới, 7 test) — `lang_in` thật truyền
+  vào `translate_pages()` (pdf2zh + babeldoc), MinerU luôn "en" dù job FR, detect+persist từ văn bản
+  EN/FR thật khi `source_lang=None`, sống sót qua resume sau khi 1 chunk fail.
+- `tests/integration/test_epub_job_source_lang.py` (mới, 3 test) — `source_lang` thật truyền vào
+  `provider.translate()` cho EPUB (chính + qua toàn bộ pipeline), detect từ EPUB FR thật.
+- `tests/integration/test_term_extraction_service.py` (+2 test) — skip hoàn toàn cho FR, vẫn chạy
+  bình thường cho `source_lang=None` (coi như EN).
+- `tests/test_jobs_route_to_detail.py` (+2 test) — `source_lang` serialize đúng qua `JobDetail`.
+- `tests/integration/test_create_job_source_lang_api.py` (mới, 3 test) — E2E qua `TestClient` thật:
+  `POST /api/jobs` ghi đúng `source_lang` detect từ file EN/FR thật, `GET /api/jobs/{id}` trả đúng,
+  `parse_only` giữ `None`.
+
+Toàn bộ `tests/` (881 test, tăng từ baseline 844) + `ruff check .` + `ruff format --check` (trên
+mọi file đã sửa/tạo trong tăng này) sạch. 1 vi phạm format tiền-tồn tại không liên quan
+(`src/api/routes/jobs.py:384`, xác nhận bằng `git stash` — có từ trước tăng này) — KHÔNG sửa, ngoài
+phạm vi.
+
+### Chưa làm / cần theo dõi
+
+- **R6-03 (live E2E)**: CHƯA chạy 1 lần thật với PDF FR + EPUB FR ngoài đời (không có pdf2zh/
+  babeldoc/MinerU thật + API key thật trong môi trường Dev này) — QA phải chạy trước khi release,
+  hoặc ghi rõ "release blocked pending live verification" theo R5-03 nếu chưa chạy được.
+- **Backlog A-1..A-4** (§6.26.7): cần xác nhận đã có entry trong `project_state.json` `backlog[]`
+  với `source: "tech-lead"` trước khi coi tăng này đã đủ điều kiện đóng (R5-06) — Dev không tự thêm
+  vào `project_state.json`, để PM/Tech Lead xử lý.
+- Không tự ý đổi gì trong Architecture.md/design-log.md — chỉ đọc, không ghi (ngoài phạm vi Dev).
+
+### KHÔNG commit
+
+Theo brief — PM điều phối commit sau khi Reviewer duyệt qua vòng thật (Protocol 7, Protocol A).
