@@ -375,7 +375,8 @@
       "owner_role": "tech-lead",
       "status": "done",
       "blocked_by": [],
-      "output": "Dev implement, Reviewer APPROVE, QA live E2E PASS mọi nhánh (EPUB FR/EN, PDF FR babeldoc, pdf_scan FR MinerU guard đúng), chi phí thật $0.009. ready_for_release YES. CHƯA commit. Phát hiện phụ: BL-20 (bug EPUB term-extraction có từ trước S7), BL-21 (quy trình restart server)"
+      "output": "Dev implement, Reviewer APPROVE, QA live E2E PASS mọi nhánh (EPUB FR/EN, PDF FR babeldoc, pdf_scan FR MinerU guard đúng), chi phí thật $0.009. ready_for_release YES. Phát hiện phụ: BL-20 (bug EPUB term-extraction có từ trước S7), BL-21 (quy trình restart server)",
+      "closed_commit": "dbf9306"
     },
     {
       "id": "S8",
