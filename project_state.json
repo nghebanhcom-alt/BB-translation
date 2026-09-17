@@ -301,7 +301,7 @@
     },
     {
       "id": "BL-20",
-      "text": "term_extraction_service.py raise lỗi cho MỌI job EPUB, bị nuốt nên job vẫn completed. Fix xong: lineage + rerun IntegrityError bug, Reviewer APPROVE (2 vòng), QA PASS — CHỜ commit",
+      "text": "term_extraction_service.py raise lỗi cho MỌI job EPUB, bị nuốt nên job vẫn completed. Fix xong: lineage + rerun IntegrityError bug, Reviewer APPROVE (2 vòng), QA PASS. Commit cca5241",
       "source": "qa",
       "ref": "docs/test-report.md 'BL-20 — QA gate cuối, lần 2' (2026-09-17)",
       "status": "done"
