@@ -8774,3 +8774,65 @@ task).
 
 **Chưa qua Reviewer thật trong session này (R7-01)** — không tự báo "xong", báo lại PM để dispatch
 Reviewer + QA re-run live E2E (R5-03) trước khi coi S8 là `ready_for_release`.
+
+---
+
+## 2026-09-17 — BL-21: `GET /health` trả danh tính code đang chạy + `scripts/restart_server.sh`
+
+Theo thiết kế Tech Lead `docs/Architecture.md` §5.4 (đọc file trước khi implement — không suy đoán
+contract).
+
+### Code
+
+- `src/api/main.py`:
+  - Thêm `_run_git()` (fail-soft wrapper `subprocess.run(["git", ...])`, timeout 5s, không bao giờ
+    raise) — chạy đúng **một lần lúc import module**, kết quả cache vào `_GIT_COMMIT`,
+    `_GIT_COMMIT_FULL`, `_GIT_DIRTY_AT_START`. Lỗi/không phải git repo → `"unknown"` /
+    `git_dirty_at_start = None`, không chặn startup.
+  - Thêm `_code_snapshot()` (walk `src/**/*.py` bỏ qua `__pycache__`, + `.env` nếu tồn tại — KHÔNG
+    gồm `web/**`/`fonts/`/`docker/`/`.venv/` đúng theo §5.4.2) và `_fingerprint()` (sha256 8 ký tự
+    đầu của các cặp `relpath\0mtime_ns:size` đã sort).
+  - `_STARTED_AT`, `_STARTED_MONOTONIC`, `_PID`, `_CODE_SNAPSHOT_AT_START`,
+    `_CODE_FINGERPRINT_AT_START` — cache module-level lúc import, không tính lại mỗi request.
+  - Mở rộng handler `/health` hiện có (không tạo endpoint mới): trả thêm `version`, `pid`,
+    `started_at`, `uptime_seconds`, `git_commit`, `git_commit_full`, `git_dirty_at_start`,
+    `code_stale` (so `_fingerprint(_code_snapshot())` hiện tại với fingerprint lúc import),
+    `code_changed_count`, `code_changed_files` (sort, cắt tối đa 10), `code_fingerprint_at_start`,
+    `code_fingerprint_now`. Vẫn không chạm DB, không gọi `git` trong request path.
+  - Sửa `from datetime import datetime, timezone` → `from datetime import UTC, datetime`
+    (`ruff` UP017) khi thêm `_STARTED_AT`.
+- `scripts/restart_server.sh` (mới, theo §5.4.4): trước khi kill, `GET /api/jobs?status=<active
+  statuses>` (đúng `_ACTIVE_JOB_STATUSES` ở `src/api/routes/jobs.py:847-859`) — `total > 0` thì từ
+  chối restart (in danh sách job, exit 1) trừ khi truyền `--force` (in cảnh báo rõ ràng đang force
+  qua job active). Sau khi start lại: poll `/health` tối đa 30s, báo lỗi nếu `code_stale != false`
+  ngay sau restart.
+
+### Test
+
+- `tests/test_health.py`: assert cũ `response.json() == {"status": "ok"}` đã đỏ sau khi mở rộng
+  schema — sửa thành kiểm từng field + kiểu dữ liệu, và assert `code_stale=False`/`code_changed_*`
+  rỗng trên process fresh chưa bị đụng file nào.
+  - Thêm `test_health_reports_code_stale_after_file_touched`: dùng file giả trong `tmp_path` (không
+    đụng file thật trong `src/`, tránh gây nhiễu fingerprint cho test khác/server thật đang chạy) —
+    monkeypatch `_CODE_SNAPSHOT_AT_START`/`_CODE_FINGERPRINT_AT_START` và tạm thay `_code_snapshot`
+    để mô phỏng 1 file đã đổi mtime sau lúc "import", assert `/health` trả `code_stale=True` và file
+    đó có mặt trong `code_changed_files`, rồi khôi phục state module gốc ở `finally`.
+
+`pytest` toàn repo: 921 passed. `ruff check` + `ruff format --check` sạch trên
+`src/api/main.py`/`tests/test_health.py` (22 file khác trong repo lệch `ruff format` từ trước, không
+liên quan tới thay đổi này, không đụng vào).
+
+### Tự verify live (R5-03/R6-03 tinh thần — external-facing behavior, không phải external tool)
+
+Trước khi restart đã kiểm `GET /api/jobs?status=...` (server thật, PID 15918) trả `total: 0` — không
+có job `processing`/`translating` đang chạy, an toàn để restart. Chạy `scripts/restart_server.sh`
+thật trên server production (port 8000):
+- Restart thành công, `/health` sau restart trả đủ schema mới, `code_stale=false`.
+- `touch src/api/main.py` (không sửa nội dung) trên server đang chạy → `GET /health` ngay lập tức
+  trả `code_stale=true`, `code_changed_files=["src/api/main.py"]` — đúng cơ chế thiết kế để chặn
+  chính 4 lần QA bị lọt code cũ ngày 2026-09-17.
+- Restart lại lần 2 để đưa server về trạng thái sạch (`code_stale=false`) sau khi verify xong.
+
+**Chưa qua Reviewer thật trong session này (R7-01)** — không tự báo "xong", báo lại PM để dispatch
+Reviewer (checklist R5-04 áp dụng N/A vì §5.4 không mô tả contract tool bên thứ ba nào — toàn bộ là
+stdlib + source code của chính repo, đã trích dẫn) trước khi coi BL-21 là `ready_for_release`.

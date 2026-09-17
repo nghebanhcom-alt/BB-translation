@@ -692,6 +692,15 @@ Base URL: `http://localhost:8000/api`
 |--------|----------|-------|---------|----------|
 | POST | `/estimate` | Uoc tinh chi phi | `{job_ids, model}` | `{total_pages, est_tokens, est_cost_usd}` |
 
+#### Ops / Health (BL-21)
+
+Hai endpoint nay KHONG co prefix `/api` (base URL la `http://localhost:8000`):
+
+| Method | Endpoint | Mo ta | Response |
+|--------|----------|-------|----------|
+| GET | `/health` | Liveness + **danh tinh code dang chay** (chi tiet §5.4) | `{status, version, pid, started_at, uptime_seconds, git_commit, git_commit_full, git_dirty_at_start, code_stale, code_changed_count, code_changed_files, code_fingerprint_at_start, code_fingerprint_now}` |
+| GET | `/api/version` | Phien ban app (§6.19) | `{version}` |
+
 ### 5.2. WebSocket API
 
 Endpoint: `ws://localhost:8000/ws`
@@ -814,6 +823,167 @@ class DeepLProvider(TranslationProvider):
 class OllamaProvider(TranslationProvider):
     """Ollama local. Model: gemma2 hoac llama3.1."""
 ```
+
+---
+
+### 5.4. `GET /health` — danh tính code đang chạy (BL-21)
+
+> **Vấn đề gốc**: server production chạy `uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000`
+> (verify: `ps aux`, PID 15918, 2026-09-17) — **không có `--reload`**. Ngày 2026-09-17 việc này chặn
+> QA **4 lần** (BL-12, S7, BL-20, S8): Dev sửa code, QA test, thấy hành vi cũ, mất thời gian mới
+> phát hiện phải restart. Mỗi lần phát hiện bằng cách so `mtime` file với giờ start — thủ công, không
+> lặp lại được, không ai nhớ làm trước khi test.
+>
+> **Điểm mấu chốt (tại sao `git_commit` một mình KHÔNG đủ)**: trong cả 4 lần, code fix **chưa commit**.
+> `git rev-parse HEAD` lúc đó trả đúng commit cũ cho CẢ process cũ lẫn code mới trên đĩa → hai bên
+> trùng nhau, `git_commit` không phân biệt được gì. Trường quyết định phải là **so sánh trạng thái
+> file trên đĩa ở thời điểm import với trạng thái file trên đĩa lúc gọi `/health`**, không phải commit.
+
+#### 5.4.1. Response schema
+
+```json
+{
+  "status": "ok",
+  "version": "1.3.1",
+  "pid": 15918,
+  "started_at": "2026-09-17T22:19:04.512+07:00",
+  "uptime_seconds": 3120,
+  "git_commit": "ada760c",
+  "git_commit_full": "ada760c39025e986683db73a31770cacc86e84bd",
+  "git_dirty_at_start": true,
+  "code_stale": true,
+  "code_changed_count": 2,
+  "code_changed_files": ["src/core/job_orchestrator.py", ".env"],
+  "code_fingerprint_at_start": "9f2c41ab",
+  "code_fingerprint_now": "3b71d008"
+}
+```
+
+| Field | Nguồn giá trị | Tính lúc nào |
+|---|---|---|
+| `status` | luôn `"ok"` (giữ nguyên contract cũ, `tests/test_health.py` phải sửa theo) | — |
+| `version` | `_read_app_version()` (đã có, `src/api/main.py`) | mỗi request (đọc `pyproject.toml`, rẻ) |
+| `pid` | `os.getpid()` | startup |
+| `started_at` | `datetime.now(timezone.utc).astimezone().isoformat()` | startup (import module) |
+| `uptime_seconds` | `time.monotonic() - _STARTED_MONOTONIC`, làm tròn `int` | mỗi request |
+| `git_commit` / `git_commit_full` | `git rev-parse --short HEAD` / `git rev-parse HEAD`, `cwd=_PROJECT_ROOT` | **startup, cache biến module** |
+| `git_dirty_at_start` | `git status --porcelain` khác rỗng → `true` | **startup, cache biến module** |
+| `code_fingerprint_at_start` | fingerprint (§5.4.2) | startup |
+| `code_fingerprint_now` | fingerprint (§5.4.2) | mỗi request |
+| `code_stale` | `code_fingerprint_now != code_fingerprint_at_start` | mỗi request |
+| `code_changed_files` | danh sách relpath khác nhau giữa 2 snapshot, **sort, cắt còn tối đa 10** | mỗi request |
+| `code_changed_count` | tổng số file khác (không bị cắt) | mỗi request |
+
+**Không gọi `git` trong request path.** 3 field git là subprocess chạy **một lần** lúc import
+(`subprocess.run([...], cwd=_PROJECT_ROOT, capture_output=True, text=True, timeout=5, check=False)`),
+kết quả gán vào biến module. Lý do: `/health` sẽ bị poll trong vòng lặp bởi `scripts/restart_server.sh`
+(§5.4.4); subprocess mỗi request là chi phí và là điểm hỏng không cần thiết.
+
+**Fail-soft bắt buộc**: `git` không có / không phải repo / timeout → `git_commit = "unknown"`,
+`git_commit_full = "unknown"`, `git_dirty_at_start = null`. `/health` **không bao giờ** được 500 hay
+chặn startup vì lý do git — nó là công cụ chẩn đoán, hỏng nó không được kéo theo hỏng app.
+
+**Không chạm DB.** `/health` cố tình chỉ đọc filesystem: nó phải trả lời được *ngay cả khi* DB hỏng
+(đó là lúc cần chẩn đoán nhất). Số job đang chạy lấy từ `GET /api/jobs?status=...` (§5.4.4).
+
+#### 5.4.2. `code_fingerprint` — định nghĩa chính xác
+
+Snapshot = `dict[relpath -> f"{stat.st_mtime_ns}:{stat.st_size}"]`, lấy trên đúng tập file sau
+(relpath tính từ `_PROJECT_ROOT`):
+
+- `src/**/*.py` — 79 file, đo thật `1,4 ms` cho một lần walk + stat (đo 2026-09-17, máy Hiếu). Bỏ qua
+  mọi thư mục `__pycache__`.
+- `.env` — **bắt buộc có trong tập này**: `get_settings()` là `@lru_cache`
+  (`src/core/config.py:333-334`) và **không chỗ nào trong `src/` gọi `cache_clear()`** (grep, 0 kết
+  quả) → sửa `.env` cũng cần restart y hệt sửa code. An toàn vì app **không bao giờ tự ghi `.env`**:
+  `PUT /api/settings` ghi vào bảng `settings` trong DB (`src/api/routes/settings.py:3-6`), nên
+  fingerprint chỉ đổi khi người thật sửa file.
+
+`code_fingerprint_*` = 8 ký tự đầu của `sha256` chuỗi các cặp `relpath\0value\n` đã sort. Hai
+fingerprint chỉ để so bằng nhau và để in ra log — không mang ý nghĩa gì khác.
+
+**KHÔNG đưa vào tập fingerprint**:
+
+- `web/**` — `StaticFiles` đọc lại từ đĩa mỗi request, sửa frontend **không bao giờ** cần restart.
+  Đưa vào sẽ tạo `code_stale=true` giả mỗi lần sửa HTML/JS → làm hỏng đúng tín hiệu ta đang xây.
+- `fonts/`, `docker/`, `.venv/` — không được load vào bộ nhớ process này. Đổi version tool bên thứ ba
+  trong `.venv` vẫn thuộc Protocol E + Protocol 5 R5-05, `/health` **không** cover việc đó (non-goal
+  ghi rõ ở đây để không ai tưởng nhầm `/health` xanh là môi trường đã đồng bộ hoàn toàn).
+
+**Giới hạn đã biết (ghi rõ, không giấu)**:
+
+1. Fingerprint so *đĩa lúc import* với *đĩa bây giờ*, **không** chứng minh process đã thực sự load
+   đúng những module đó (import trễ, module chưa từng được import). Đây là chẩn đoán đủ tốt, không
+   phải bằng chứng hình thức.
+2. `git checkout` sang branch có nội dung y hệt vẫn làm đổi `mtime_ns` → `code_stale=true` dù code
+   giống hệt. Sai theo hướng **an toàn** (giục restart thừa), không bao giờ sai theo hướng báo "fresh"
+   trong khi thực ra stale. Chấp nhận.
+
+#### 5.4.3. Luật quy trình đi kèm (phần quan trọng hơn cả code)
+
+- **QA**: trước MỌI đợt live test, gọi `curl -s localhost:8000/health`. `code_stale == true` →
+  **KHÔNG test**, yêu cầu restart trước. Trong `docs/test-report.md` mỗi đợt live phải ghi 1 dòng:
+  `health: git_commit=<...> code_stale=<false> started_at=<...>`. Không có dòng này = đợt test đó
+  không chứng minh được nó test code nào.
+- **Dev**: sau khi sửa code cần QA verify live, tự chạy `scripts/restart_server.sh` rồi dán output
+  `/health` vào phần bàn giao.
+- `code_stale` là **tín hiệu, không phải cơ chế cưỡng chế** — app vẫn chạy bình thường khi
+  `code_stale=true`, không tự restart, không từ chối request. Tự restart khi thấy file đổi chính là
+  `--reload`, đã bị loại ở §5.4.5.
+
+#### 5.4.4. `scripts/restart_server.sh` — restart có chốt an toàn
+
+Cần thiết vì §5.4.5 quyết định KHÔNG bật `--reload`: restart phải là hành động tường minh, và phải
+không giết job đang chạy.
+
+1. `curl -s localhost:8000/api/jobs?status=created,queued,chunking,translating,post_processing,merging,parsing&limit=1`
+   → đọc field `total`. Tập status này là `_ACTIVE_JOB_STATUSES` (`src/api/routes/jobs.py:847-859`);
+   `GET /api/jobs` nhận `status` dạng danh sách phân tách bởi dấu phẩy (`jobs.py:691-703`).
+2. `total > 0` → **in cảnh báo và thoát rc=1**, liệt kê job đang chạy. Chỉ đi tiếp khi có `--force`
+   (dùng khi cố ý huỷ). Lý do ở §5.4.5.
+3. Ghi lại `git_commit` + `code_fingerprint_now` trước khi kill (để đối chiếu sau).
+4. Kill process uvicorn cũ, chờ port 8000 nhả, start lại bằng đúng câu lệnh đang dùng
+   (`uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000`), log ra `logs/`.
+5. Poll `/health` tối đa 30 s cho tới khi lên; in ra `git_commit`, `started_at`, `code_stale` mới.
+   `code_stale != false` ngay sau restart → báo lỗi to (nghĩa là có ai đó vừa sửa file trong lúc
+   restart, hoặc fingerprint sai).
+
+#### 5.4.5. Quyết định: KHÔNG bật `--reload`, kể cả trên máy Dev/Hiếu
+
+**Quyết định (Tech Lead, mặc định — Hiếu có thể lật lại, không chặn Dev implement `/health`)**:
+server trên port 8000 **không dùng `--reload`** trong mọi môi trường. Lý do, theo thứ tự nặng dần:
+
+1. **Job chạy in-process.** `_schedule_background()` / `_run_job_background()`
+   (`src/api/routes/jobs.py:69`, `:521`) chạy job dịch ngay trong process uvicorn, không phải worker
+   riêng. `--reload` giết worker mỗi khi bất kỳ file watch được thay đổi → job đang dịch chết giữa
+   chừng. Một job có thể dài ~25 phút (comment về `parsing`/MinerU, `jobs.py:854-858`).
+2. **Chết giữa chừng = mất tiền thật.** Các chunk đã gọi LLM trước lúc reload đã bị tính phí và đã
+   ghi vào sổ chi tiêu (§6.11), nhưng output thì mất. Reload là hành động vô tình (chỉ cần lưu file);
+   đánh đổi "tiện tay" lấy rủi ro tiêu tiền là sai chiều.
+3. **`fail_orphaned_jobs()` chỉ dọn dẹp, không cứu.** Nó chạy lúc startup (`lifespan`,
+   `src/api/main.py`) và đánh job mồ côi thành `failed` — đúng, nhưng nghĩa là mỗi lần reload nhầm là
+   một job hỏng phải chạy lại từ đầu.
+4. **Reset state trong bộ nhớ.** AIMD concurrency controller (§6.12) và `@lru_cache` các loại mất
+   trạng thái đã hội tụ sau mỗi reload → hành vi đo được trong lúc QA không còn ổn định để so sánh.
+
+`--reload` giải quyết đúng một triệu chứng — "quên restart" — mà `/health` + `restart_server.sh` giải
+quyết **không kèm 4 rủi ro trên**, với cái giá là một lệnh tường minh. Đây là đánh đổi có chủ đích:
+ưu tiên job không bị ngắt hơn tiện tay của người sửa code.
+
+Muốn có reload khi nghịch UI/route: chạy **process thứ hai, port khác** (ví dụ `--reload --port 8001`)
+và **không chạy job dịch trên đó**. Không bao giờ bật `--reload` cho instance mà QA đang dùng.
+
+#### 5.4.6. Phạm vi sửa cho Dev
+
+- `src/api/main.py` — thêm hằng module `_STARTED_AT`, `_STARTED_MONOTONIC`, `_GIT_COMMIT`,
+  `_GIT_COMMIT_FULL`, `_GIT_DIRTY_AT_START`, `_CODE_FINGERPRINT_AT_START` + hàm
+  `_code_snapshot() -> dict[str, str]` / `_fingerprint(snapshot) -> str`; mở rộng handler `/health`
+  hiện có (`src/api/main.py:111-113`) — **mở rộng, không tạo endpoint mới**.
+- `tests/test_health.py` — assert hiện tại là `response.json() == {"status": "ok"}` (so sánh dict
+  tuyệt đối) nên sẽ đỏ; sửa thành kiểm từng field + thêm test: sửa mtime một file `src/**/*.py` giả
+  lập (tmp monkeypatch) → `code_stale` thành `true` và file đó có trong `code_changed_files`.
+- `scripts/restart_server.sh` — mới, theo §5.4.4.
+- Frontend: **không sửa**. `code_stale` phục vụ QA/Dev qua `curl`, không phải end user.
 
 ---
 

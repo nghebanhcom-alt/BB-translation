@@ -7196,3 +7196,55 @@ return sớm như cũ). Muốn huỷ hẳn một job đã cắt: xoá job và t�
   container" (nguồn: `src/services/epub_document.py:1106-1115`, `:1231-1242`).
 - §6.28.3 ví dụ JSON: `structural` đổi từ scalar sang `dict[doc_href, "full"|"skipped"]` (nguồn:
   `job_orchestrator.py:_record_epub_structural_result`, `MAX_REMOVED=3` cho phép nhiều doc/job).
+
+---
+
+## 2026-09-17 — BL-21: `/health` trả danh tính code đang chạy (Tech Lead)
+
+**Hợp đồng hiện hành**: `docs/Architecture.md` §5.4 (+ hàng `/health` trong bảng §5.1).
+
+### RCA — tại sao note thủ công không đủ
+
+4 lần chặn QA trong cùng một ngày (BL-12, S7, BL-20, S8) có cùng cơ chế: server chạy
+`uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000` không `--reload` (verify `ps aux`,
+PID 15918), Dev sửa code, QA test process cũ. Mỗi lần phát hiện bằng cách so `mtime` file với giờ
+start — một thao tác thủ công, không ai nhớ làm TRƯỚC khi test, chỉ làm SAU khi kết quả đã lạ. Biện
+pháp "ghi note nhắc restart" đã ngầm tồn tại và đã thất bại 4 lần: một chỉ thị không có cơ chế kiểm
+tra thì không được thực thi (cùng dạng root cause với R5-06).
+
+### Phản biện với chính đề xuất trong backlog BL-21
+
+BL-21 đề xuất `/health` trả `git_commit`. **Chỉ `git_commit` là KHÔNG đủ cho đúng 4 ca đã xảy ra**:
+cả 4 lần code fix đều ở trạng thái **chưa commit** khi QA cần test. `git rev-parse HEAD` trả cùng một
+hash cho process cũ lẫn đĩa mới → field đó bằng nhau, không phát hiện được gì. Nếu implement đúng
+nguyên văn BL-21, `/health` sẽ báo xanh trong cả 4 ca nó sinh ra để bắt.
+
+→ Trường quyết định là `code_stale`: so fingerprint `(mtime_ns, size)` của `src/**/*.py` + `.env` tại
+thời điểm **import module** với fingerprint **lúc gọi `/health`**. `git_commit`/`git_dirty_at_start`
+giữ lại vì hữu ích cho việc ghi test-report (truy vết "đợt test này chạy trên commit nào"), nhưng
+chúng là thông tin phụ, không phải tín hiệu chính.
+
+`.env` nằm trong tập fingerprint vì `get_settings()` là `@lru_cache` (`src/core/config.py:333-334`)
+và không chỗ nào gọi `cache_clear()` (grep toàn `src/`, 0 kết quả) → sửa `.env` cũng cần restart.
+Không tạo báo động giả vì `PUT /api/settings` ghi DB chứ không ghi `.env`
+(`src/api/routes/settings.py:3-6`). `web/**` bị loại khỏi fingerprint vì `StaticFiles` đọc lại đĩa
+mỗi request — đưa vào sẽ làm `code_stale` kêu mỗi lần sửa HTML và tín hiệu sẽ nhanh chóng bị bỏ qua.
+
+### Final Decision — không bật `--reload`
+
+Mặc định Tech Lead, Hiếu có thể lật lại, **không chặn Dev implement `/health`**. Lý do đầy đủ ở
+§5.4.5; tóm tắt: job dịch chạy in-process (`jobs.py:69`, `:521`), job có thể dài ~25 phút
+(`jobs.py:854-858`), reload giết job giữa chừng → mất tiền LLM đã tiêu (§6.11) mà không có output,
+`fail_orphaned_jobs()` chỉ dọn xác chứ không cứu, và AIMD (§6.12) mất trạng thái đã hội tụ. `--reload`
+kích hoạt bởi một thao tác vô tình (lưu file) nên rủi ro đó là rủi ro thường trực, không phải ngoại lệ.
+Thay bằng `scripts/restart_server.sh` có chốt: từ chối restart khi còn job ở `_ACTIVE_JOB_STATUSES`
+(`jobs.py:847-859`), trừ khi `--force`.
+
+Muốn reload khi nghịch UI: dựng process thứ hai port khác, không chạy job trên đó.
+
+### Ghi chú nguồn (R5-01)
+
+Mục §5.4 **không mô tả contract của tool bên thứ ba nào**: toàn bộ field lấy từ stdlib Python
+(`os`, `time`, `datetime`, `hashlib`, `subprocess` gọi `git`) và từ source code của chính repo này,
+đã trích dẫn file:line tại chỗ. Con số `79 file / 1,4 ms` là đo thật trên máy Hiếu 2026-09-17, không
+phải ước lượng. Không có mục nào ở trạng thái `⚠️ ASSUMED` → không phát sinh mục `backlog[]` theo R5-06.

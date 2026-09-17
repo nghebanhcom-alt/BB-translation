@@ -319,10 +319,10 @@
     },
     {
       "id": "BL-21",
-      "text": "Quy trình — lần 2 trong ngày QA/Dev vô tình test nhầm code cũ vì server production không tự restart (không --reload). Đề xuất thêm /health trả về git_commit hiện tại để phát hiện nhanh thay vì dựa note thủ công",
+      "text": "Quy trình — server production không tự restart, chặn tiến độ nhiều lần. Fix xong: /health mở rộng git_commit + code_stale (fingerprint mtime/size), scripts/restart_server.sh an toàn. Reviewer APPROVE",
       "source": "qa",
-      "ref": "docs/test-report.md 'S7 — Dịch FR→VI ... QA live E2E' (2026-09-16), tương tự ghi nhận ở BL-12",
-      "status": "open"
+      "ref": "docs/review-report.md — review BL-21 2026-09-17",
+      "status": "done"
     },
     {
       "id": "BL-22",
@@ -378,6 +378,20 @@
       "text": "⚠️ ASSUMED — S8: hành vi reader thật khi EPUB mất 1 spine item chưa đo. Cần mở file output bằng Apple Books/Calibre + epubcheck nếu cài được",
       "source": "qa",
       "ref": "docs/Architecture.md §6.28.8 (S8-E1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-32",
+      "text": "scripts/restart_server.sh có race condition thật giữa bước kiểm job active và pkill (cửa sổ hở vài trăm ms) — rủi ro thấp vì thao tác thủ công, không có automation tạo job song song",
+      "source": "reviewer",
+      "ref": "docs/review-report.md — review BL-21 2026-09-17, non-blocking",
+      "status": "open"
+    },
+    {
+      "id": "BL-33",
+      "text": "Chưa có shellcheck để lint scripts/restart_server.sh (script mới của BL-21)",
+      "source": "reviewer",
+      "ref": "docs/review-report.md — review BL-21 2026-09-17, non-blocking",
       "status": "open"
     },
     {

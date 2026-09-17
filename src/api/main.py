@@ -1,9 +1,15 @@
+import hashlib
 import logging
+import os
+import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,6 +83,76 @@ def _read_app_version() -> str:
         return "unknown"
 
 
+def _run_git(*args: str) -> str | None:
+    """Fail-soft git wrapper for BL-21 (Architecture.md Section 5.4.1): git
+    missing / not a repo / timeout must never crash startup or `/health`,
+    since `/health` is a diagnostic tool and must stay up even when its own
+    diagnostics fail.
+    """
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=_PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _code_snapshot() -> dict[str, str]:
+    """BL-21 (Architecture.md Section 5.4.2): mtime_ns+size of `src/**/*.py`
+    plus `.env` (excludes `web/**`, `fonts/`, `docker/`, `.venv/` per the
+    documented non-goals — see Section 5.4.2 for why each is excluded).
+    """
+    snapshot: dict[str, str] = {}
+    src_dir = _PROJECT_ROOT / "src"
+    for path in src_dir.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        relpath = path.relative_to(_PROJECT_ROOT).as_posix()
+        snapshot[relpath] = f"{stat.st_mtime_ns}:{stat.st_size}"
+
+    env_path = _PROJECT_ROOT / ".env"
+    if env_path.is_file():
+        try:
+            stat = env_path.stat()
+            snapshot[".env"] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            pass
+
+    return snapshot
+
+
+def _fingerprint(snapshot: dict[str, str]) -> str:
+    payload = "".join(f"{relpath}\0{value}\n" for relpath, value in sorted(snapshot.items()))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+_STARTED_AT = datetime.now(UTC).astimezone().isoformat()
+_STARTED_MONOTONIC = time.monotonic()
+_PID = os.getpid()
+
+_git_commit_full = _run_git("rev-parse", "HEAD")
+_GIT_COMMIT_FULL = _git_commit_full if _git_commit_full else "unknown"
+_git_commit_short = _run_git("rev-parse", "--short", "HEAD")
+_GIT_COMMIT = _git_commit_short if _git_commit_short else "unknown"
+_git_status_output = _run_git("status", "--porcelain")
+_GIT_DIRTY_AT_START = bool(_git_status_output) if _git_status_output is not None else None
+
+_CODE_SNAPSHOT_AT_START = _code_snapshot()
+_CODE_FINGERPRINT_AT_START = _fingerprint(_CODE_SNAPSHOT_AT_START)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
@@ -109,8 +185,35 @@ app.include_router(websocket_router, tags=["websocket"])
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    """BL-21 (Architecture.md Section 5.4): returns "code identity" so QA
+    can detect a stale process (fix applied to disk, server not restarted)
+    without manually diffing mtimes against server start time — the failure
+    mode that blocked QA 4 times on 2026-09-17.
+    """
+    current_snapshot = _code_snapshot()
+    current_fingerprint = _fingerprint(current_snapshot)
+    changed_files = sorted(
+        relpath
+        for relpath in set(_CODE_SNAPSHOT_AT_START) | set(current_snapshot)
+        if _CODE_SNAPSHOT_AT_START.get(relpath) != current_snapshot.get(relpath)
+    )
+
+    return {
+        "status": "ok",
+        "version": _read_app_version(),
+        "pid": _PID,
+        "started_at": _STARTED_AT,
+        "uptime_seconds": int(time.monotonic() - _STARTED_MONOTONIC),
+        "git_commit": _GIT_COMMIT,
+        "git_commit_full": _GIT_COMMIT_FULL,
+        "git_dirty_at_start": _GIT_DIRTY_AT_START,
+        "code_stale": current_fingerprint != _CODE_FINGERPRINT_AT_START,
+        "code_changed_count": len(changed_files),
+        "code_changed_files": changed_files[:10],
+        "code_fingerprint_at_start": _CODE_FINGERPRINT_AT_START,
+        "code_fingerprint_now": current_fingerprint,
+    }
 
 
 @app.get("/api/version")

@@ -4345,3 +4345,136 @@ Non-blocking findings (đưa vào `backlog[]`):
    §6.28.6.3/§6.28.3, R6-03 chưa chạy) vẫn còn treo từ đợt review S8 trước — không phải lỗi của fix
    này nhưng cần QA/PM đảm bảo không bị quên khi đóng S8 hẳn — owner: qa/tech-lead (đã có trong mục
    findings đợt trước, nhắc lại để không lạc mất qua 2 đợt review).
+
+---
+
+## 2026-09-17 — Review BL-21: `GET /health` mở rộng (`git_commit`/`code_stale`) + `scripts/restart_server.sh`
+
+**Phạm vi**: `src/api/main.py` (`_run_git`, `_code_snapshot`, `_fingerprint`, hằng module-level,
+handler `/health` mở rộng), `scripts/restart_server.sh` (mới), `tests/test_health.py`. Đối chiếu với
+`docs/Architecture.md` §5.4 (đọc §5.4.1–§5.4.6, dòng ~829–990) và `docs/design-log.md` mục "BL-21"
+cuối file.
+
+### 1. `code_stale` fingerprint — tập file đưa vào/loại trừ
+
+Đọc trực tiếp `_code_snapshot()` (`src/api/main.py:108-133`): walk `src_dir = _PROJECT_ROOT / "src"`
+bằng `rglob("*.py")`, bỏ qua mọi path có `__pycache__` trong `path.parts`, cộng thêm `.env` nếu tồn
+tại. Không có bất kỳ tham chiếu nào tới `web/`, `fonts/`, `docker/`, `.venv/` trong hàm — các thư mục
+này bị loại trừ **tự nhiên** (không nằm trong `src/`), đúng đặc tả §5.4.2, không phải loại trừ bằng
+blacklist dễ viết sai pattern. Đã tự đếm `find src -name "*.py" -not -path "*/__pycache__/*" | wc -l`
+→ **79**, khớp chính xác con số Tech Lead đo trong Architecture.md §5.4.2. Đạt yêu cầu #1.
+
+### 2. Git subprocess chỉ chạy 1 lần lúc import
+
+`_GIT_COMMIT`, `_GIT_COMMIT_FULL`, `_GIT_DIRTY_AT_START` được gán ở top-level module
+(`src/api/main.py:145-150`), ngoài mọi hàm — chạy đúng 1 lần lúc Python import `src.api.main`. Handler
+`/health` (`:187-216`) chỉ đọc lại 3 biến module này, không gọi `_run_git()` hay `subprocess` gì
+trong request path — xác nhận bằng đọc code, không có lời gọi `subprocess`/`_run_git` nào bên trong
+`async def health()`. Đạt yêu cầu #2, không cần đo hiệu năng thêm vì cấu trúc code loại trừ khả năng
+gọi lại theo thiết kế (không phải do timing may rủi).
+
+### 3. Fail-soft khi thiếu `git`/không phải repo
+
+`_run_git()` (`:86-105`) bọc `subprocess.run` trong `try/except (OSError, subprocess.TimeoutExpired)`
+→ trả `None`; đồng thời trả `None` nếu `returncode != 0`. Không có nhánh nào raise ra ngoài hàm. Đã tự
+verify sống (không chỉ đọc code): chạy Python import `src.api.main` với `PATH` không có `git` (dùng
+`uv run --no-project python3 -c "..."` với `PATH` trỏ tới thư mục fake không chứa `git`) →
+```
+GIT_COMMIT= unknown
+GIT_COMMIT_FULL= unknown
+GIT_DIRTY_AT_START= None
+```
+Import module thành công, không crash — khớp đúng contract "fail-soft" ở §5.4.1. Do 3 biến git chỉ
+được tính lúc import (mục 2), patch `_run_git` sau khi module đã import sẽ không mô phỏng đúng ca
+thật (git thật sự biến mất lúc SERVER khởi động) — nên đã chọn cách verify đúng bản chất hơn là giả
+lập ở đúng thời điểm import, thay vì monkeypatch `_run_git` rồi gọi `/health` (không có ý nghĩa vì
+`/health` không gọi lại `_run_git`). Đạt yêu cầu #3.
+
+### 4. `scripts/restart_server.sh` — race condition khi kiểm job active
+
+Đọc kỹ logic dòng 29-48: script `curl` `/api/jobs?status=<active>` lấy `total`, nếu `>0` thì từ chối
+(trừ `--force`). Xác nhận có race condition thật: giữa lúc script đọc xong `ACTIVE_TOTAL=0` (dòng 30)
+và lúc `pkill -f "$APP_PATTERN"` thực thi (dòng 53), có một khoảng hở — nếu một job mới chuyển sang
+trạng thái active (ví dụ do 1 request `POST /api/jobs` khác chạy song song) đúng trong khoảng hở đó,
+job sẽ bị kill giữa chừng mà script không phát hiện được, vì không có lock nào giữa bước kiểm tra và
+bước kill.
+
+**Đánh giá mức độ rủi ro**: THẤP, không blocking. Lý do: (a) script này chạy thủ công bởi Dev/PM
+ngay sau khi sửa code xong, không phải cron/automation — cửa sổ race chỉ vài trăm ms giữa 2 lệnh
+`curl` (round-trip HTTP nội bộ localhost) và không có traffic nền tự động tạo job mới trong quy trình
+hiện tại (không có scheduler tạo job); (b) hậu quả nếu xảy ra trùng đúng khoảnh khắc đó là mất 1 job
+đang chạy — đúng loại rủi ro mà `--force` documented đã chấp nhận có thể xảy ra có chủ đích, ở đây
+chỉ là vô tình với xác suất cực thấp; (c) khắc phục triệt để (lock ở DB, hoặc kiểm tra lại NGAY TRƯỚC
+`pkill`) là khả thi nhưng brief đã nói rõ "không cần fix race condition tuyệt đối". Ghi 1 non-blocking
+suggestion vào backlog thay vì block PR — xem mục Non-blocking findings bên dưới.
+
+### 5. Test `code_stale` mới (`tests/test_health.py::test_health_reports_code_stale_after_file_touched`)
+
+Đọc kỹ: test tạo `fake_file` trong `tmp_path` (không đụng file thật `src/`), lưu
+`original_snapshot`/`original_fingerprint`, tạm ghi đè `main_module._CODE_SNAPSHOT_AT_START` để coi
+như file giả đã có mặt từ lúc "import" (với stat cũ), rồi sửa nội dung file giả (đổi mtime), tạm thay
+`main_module._code_snapshot` bằng lambda merge kết quả thật + entry file giả với stat MỚI, gọi
+`/health`, assert `code_stale=True` và file giả có trong `code_changed_files`, khôi phục cả 2 biến
+module ở `finally`. Đây không phải `monkeypatch` fixture chuẩn của pytest (dùng `try/finally` thủ
+công thay vì fixture `monkeypatch`) nhưng đạt đúng hiệu quả tương đương — không rò rỉ state sang test
+khác (đã tự chạy `pytest tests/test_health.py -v` 2 lần liên tiếp, cả 2 lần `test_health` (chạy sau
+trong file) vẫn PASS với `code_stale=False`, xác nhận state được khôi phục đúng). Test có ý nghĩa
+thật: nó lắp cả 2 phía (snapshot "at start" giả lập + snapshot "now" giả lập) nên đang test đúng logic
+so sánh diff trong handler `/health`, không phải giả lập kết quả mong muốn sẵn rồi assert lại chính nó
+— nếu handler tính sai (`current_fingerprint` không so đúng `_CODE_FINGERPRINT_AT_START`, hoặc
+`changed_files` tính sai) test này sẽ đỏ. Đạt yêu cầu #5.
+
+### 6. Tự chạy lại test + lint
+
+```
+uv run pytest tests/test_health.py -v   → 2 passed
+uv run pytest -q                         → 921 passed, 1246 warnings in 142.17s   (khớp đúng số Dev báo)
+uv run ruff check src/api/main.py tests/test_health.py       → All checks passed!
+uv run ruff format --check src/api/main.py tests/test_health.py → 2 files already formatted
+```
+
+Đạt yêu cầu #6. (`ruff check`/`format` không áp dụng được cho `scripts/restart_server.sh` — đó là
+shell script, không phải Python; không có `shellcheck` cài trên máy này để lint riêng, ghi nhận là
+giới hạn của lần review này chứ không phải bỏ qua.)
+
+### 7. Thư mục `logs/` untracked
+
+`git status` cho thấy `logs/` (chứa `uvicorn.log` do `restart_server.sh` sinh ra, dòng 15/62/79) là
+runtime artifact, không nên track. Đã tự thêm `logs/` vào `.gitignore` (việc nhỏ, đúng tinh thần được
+phép tự làm khi không cần hỏi lại). Đạt yêu cầu #7.
+
+### Checklist bắt buộc (CLAUDE.md)
+
+- **R5-04**: N/A cho `_run_git()`/`_code_snapshot()` — đây không phải wrapper gọi *external tool cần
+  verify contract* theo nghĩa Protocol 5 (pdf2zh/MinerU/LLM SDK); `git` chỉ được dùng như tiện ích
+  đọc metadata versioning, output (`rev-parse`, `status --porcelain`) là hành vi git cơ bản đã biết
+  rõ, không có schema phức tạp nào bị suy đoán. design-log.md (mục BL-21, đoạn "Ghi chú nguồn R5-01")
+  cũng đã tự xác nhận đúng điều này. Xác nhận N/A hợp lý, không phải im lặng bỏ qua.
+- **R6-04**: N/A — `/health` không phải orchestrator gọi tuần tự nhiều service với dữ liệu chuyền
+  qua nhau; toàn bộ field trong response đọc độc lập từ biến module/filesystem, không có bước N+1
+  nào tiêu thụ output của bước N theo nghĩa Protocol 6.
+- **R8-01**: N/A — không có biến thể/engine mới đi qua pipeline dùng chung nào trong phạm vi BL-21.
+- **Protocol 5 R5-03**: N/A cho phần code — không có external tool call nào cần smoke test riêng
+  ngoài `git` (đã tự verify fail-soft ở mục 3). Live verify tinh thần R6-03 cho chính tính năng
+  `/health`/`restart_server.sh` đã được Dev tự làm trên server thật và ghi lại trong CHANGELOG (touch
+  file → `code_stale=true` → restart → `code_stale=false`) — đã đọc log đó, hợp lý.
+
+### Kết luận
+
+**APPROVE.**
+
+Không phát hiện issue blocking. Cả 7 yêu cầu review trong brief đều xác nhận đúng bằng cách đọc code
+trực tiếp + tự chạy lại test/lint thật + tự verify sống fail-soft bằng cách import module với `git`
+bị ẩn khỏi `PATH` (không chỉ đọc code suông). `pytest` toàn repo 921 passed khớp báo cáo Dev, `ruff`
+sạch trong phạm vi sửa.
+
+Non-blocking findings (đưa vào `backlog[]`):
+1. `scripts/restart_server.sh` có race condition giữa bước kiểm `total` job active và bước `pkill`
+   (mục 4 ở trên) — rủi ro thấp (thao tác thủ công, cửa sổ hở rất hẹp), nhưng nếu muốn khắc phục
+   triệt để: kiểm tra lại `/api/jobs?status=...` một lần nữa NGAY TRƯỚC dòng `pkill` (dòng 53), hoặc
+   thêm 1 giây `sleep` + double-check. Không blocking — owner: dev (khi có thời gian rảnh, không cần
+   gấp).
+2. `scripts/restart_server.sh` chưa có công cụ lint tự động (`shellcheck` không cài trên máy review)
+   — nếu project muốn giữ chuẩn lint cho shell script tương lai (đã có thêm 1 script mới trong repo),
+   cân nhắc thêm `shellcheck` vào toolchain — owner: tech-lead (quyết định có đáng đầu tư hay không,
+   hiện tại chỉ có 1 script).
