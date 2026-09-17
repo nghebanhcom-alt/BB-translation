@@ -950,28 +950,11 @@ không giết job đang chạy.
 
 #### 5.4.5. Quyết định: KHÔNG bật `--reload`, kể cả trên máy Dev/Hiếu
 
-**Quyết định (Tech Lead, mặc định — Hiếu có thể lật lại, không chặn Dev implement `/health`)**:
-server trên port 8000 **không dùng `--reload`** trong mọi môi trường. Lý do, theo thứ tự nặng dần:
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"5.4.5. Quyết định: KHÔNG bật `--reload`, kể cả trên máy Dev/Hiếu"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-1. **Job chạy in-process.** `_schedule_background()` / `_run_job_background()`
-   (`src/api/routes/jobs.py:69`, `:521`) chạy job dịch ngay trong process uvicorn, không phải worker
-   riêng. `--reload` giết worker mỗi khi bất kỳ file watch được thay đổi → job đang dịch chết giữa
-   chừng. Một job có thể dài ~25 phút (comment về `parsing`/MinerU, `jobs.py:854-858`).
-2. **Chết giữa chừng = mất tiền thật.** Các chunk đã gọi LLM trước lúc reload đã bị tính phí và đã
-   ghi vào sổ chi tiêu (§6.11), nhưng output thì mất. Reload là hành động vô tình (chỉ cần lưu file);
-   đánh đổi "tiện tay" lấy rủi ro tiêu tiền là sai chiều.
-3. **`fail_orphaned_jobs()` chỉ dọn dẹp, không cứu.** Nó chạy lúc startup (`lifespan`,
-   `src/api/main.py`) và đánh job mồ côi thành `failed` — đúng, nhưng nghĩa là mỗi lần reload nhầm là
-   một job hỏng phải chạy lại từ đầu.
-4. **Reset state trong bộ nhớ.** AIMD concurrency controller (§6.12) và `@lru_cache` các loại mất
-   trạng thái đã hội tụ sau mỗi reload → hành vi đo được trong lúc QA không còn ổn định để so sánh.
-
-`--reload` giải quyết đúng một triệu chứng — "quên restart" — mà `/health` + `restart_server.sh` giải
-quyết **không kèm 4 rủi ro trên**, với cái giá là một lệnh tường minh. Đây là đánh đổi có chủ đích:
-ưu tiên job không bị ngắt hơn tiện tay của người sửa code.
-
-Muốn có reload khi nghịch UI/route: chạy **process thứ hai, port khác** (ví dụ `--reload --port 8001`)
-và **không chạy job dịch trên đó**. Không bao giờ bật `--reload` cho instance mà QA đang dùng.
+**Hợp đồng**: KHÔNG bật `--reload` ở bất kỳ môi trường nào (kể cả máy Dev/Hiếu). Mọi thay đổi code
+áp dụng bằng `scripts/restart_server.sh` (§5.4.4), và `GET /health` (§5.4.1) là nguồn xác nhận code
+đang chạy. Lý do đầy đủ: xem design-log.
 
 #### 5.4.6. Phạm vi sửa cho Dev
 
@@ -1559,49 +1542,12 @@ registry song song cho lop render. Them provider moi = them entry o ca hai cho.
 
 ### 6.7. EPUB Handling
 
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.7. EPUB Handling"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
+
 > ⛔ **SECTION NÀY ĐÃ BỊ SUPERSEDE HOÀN TOÀN BỞI §6.20 (2026-09-08). KHÔNG IMPLEMENT THEO ĐÂY.**
 >
-> Giữ nguyên câu chữ bên dưới **chỉ để đối chiếu lịch sử** (đúng kỷ luật R7-03: không xoá nội
-> dung cũ). Toàn bộ §6.7 vi phạm Protocol 5 R5-01: mọi contract CLI của `bilingual_book_maker`
-> và `ebook-convert` ở đây được viết **không có mục "Nguồn xác thực"**, khác hẳn §6.9.1/§6.10.1/
-> §6.11.1/§6.12.1/§6.14.1. Khi Tech Lead verify thật (§6.20.1 — cài `bbook-maker==1.1.0` thật,
-> đọc source thật, chạy thật), kết quả là:
-> - Cờ `--model claude` / `--claude_key` / `--prompt` **có tồn tại** trong bản PyPI 1.1.0 (may mắn
->   đúng), nhưng đường Claude **hỏng hoàn toàn** với `anthropic` SDK hiện tại và hỏng **im lặng
->   với exit code 0** (§6.20.2 E-06/E-07) — tức là claim "khac biet co loi so voi pdf2zh:
->   bilingual_book_maker **co** backend Claude native" ở dưới, dù đúng về mặt chữ, dẫn tới một
->   kết luận thiết kế SAI.
-> - `bilingual_book_maker` **không có** backend DeepSeek (provider mặc định của app) — §6.20.2 E-03.
-> - Nhánh Calibre `ebook-convert` **ra khỏi scope** theo BR-EPUB-01 (PRD amendment 2026-09-08:
->   output EPUB-only, không tự convert PDF). 6 cờ liệt kê bên dưới **chưa từng được verify** và
->   không được dùng lại nếu sau này mở lại tính năng convert PDF.
->
-> Quyết định thay thế: **Phương án B — `ebooklib` parse + Translation Engine nội bộ của app**,
-> xem §6.20.3/§6.20.4.
-
-**Flow**: bilingual_book_maker dich EPUB → EPUB dich → (optional) Calibre convert sang PDF.
-
-> **Ap dung cung nguyen tac 6.6.2 R1**: bilingual_book_maker cung la tool all-in-one — no tu goi
-> LLM qua `--model claude --claude_key ...` / `--model gemini` / `--model deepseek`. Orchestrator
-> **khong** duoc goi `provider.translate()` song song voi no. Quy tac dich di qua `--prompt` cua
-> bilingual_book_maker. Cost cung tinh theo phuong an uoc luong o 6.6.6 (`cost_source = 'estimated'`).
-> Khac biet co loi so voi pdf2zh: bilingual_book_maker **co** backend Claude native (`--model claude`)
-> → khong can di qua OpenAI-compat layer. Chi tiet mapping cho EPUB se chot o increment EPUB.
-
-**Ly do tach rieng khoi PDF pipeline**:
-- EPUB co structure khac (HTML chapters, CSS styling)
-- bilingual_book_maker da optimize cho EPUB flow
-- pdf2zh khong xu ly EPUB
-
-**EPUB → PDF conversion**:
-```bash
-ebook-convert input.epub output.pdf \
-    --pdf-page-margin-top 72 \
-    --pdf-page-margin-bottom 72 \
-    --pdf-default-font-size 12 \
-    --embed-all-fonts \
-    --pdf-page-numbers
-```
+> Hợp đồng EPUB hiện hành: **§6.20** (Phương án B — `ebooklib` parse + Translation Engine nội bộ).
+> Nguyên văn §6.7 cũ + lý do bác bỏ `bilingual_book_maker`/Calibre đã chuyển sang design-log.
 
 ### 6.8. Markdown Parse-only Mode (PRD US-15)
 
@@ -1852,21 +1798,12 @@ confidence         = sum(s["score"] for s in ocr_spans) / ocr_span_count   neu c
 **khong phai loi** — `jobs.ocr_confidence` de NULL, khong canh bao. Code cu `raise MinerUError`
 khi thieu confidence la sai ca ky thuat lan nghiep vu.
 
-> **SUA SAU PHAN BIEN DOMAIN EXPERT (2026-09-08)** — cau cu o dong nay viet `confidence is None`
-> nghia la "khong co span nao qua OCR (file thuc ra co text layer)". **Cau do SAI voi du lieu
-> that.** Domain Expert tu chay `MinerURunner.parse_document(parse_method="txt")` that qua MinerU
-> 3.4.5 tren chinh file Figoni 1-25 trang ban `pdf_digital` (`data/uploads/0f92a0d4-…-1-25.pdf`,
-> task `cdbd0988-1182-456d-bf23-791e03490bc6`, 89.0s): ket qua `confidence = 0.997628187250996`,
-> `ocr_span_count = 1004` — **KHONG phai None**. Phan bo score trong `middle.json`: 1002 span
-> `text` + 2 span `inline_equation` **deu co key `score`**; 998 span co `score == 1.0`, 6 span
-> `< 1.0`. Nghia la MinerU 3.4.5 gan `score = 1.0` cho span lay tu text layer chu khong bo trong
-> key `score`.
->
-> **He qua bat buoc**: o `parse_method="txt"`, `confidence` (a) gan nhu khong bao gio `None`, va
-> (b) **khong mang y nghia chat luong OCR** — no la trung binh bi pha loang boi 998 so 1.0. Moi
-> noi tieu thu gia tri nay PHAI re theo `job.file_type` chu khong theo gia tri runner tra ve; xem
-> S15-6 (da sua) o §6.15.3. Gia tri `None` van co the xay ra (tai lieu khong co span nao co key
-> `score`) nen nhanh `None` trong `_compute_quality()` giu nguyen, khong sua code runner.
+> **SỬA SAU PHẢN BIỆN DOMAIN EXPERT (2026-09-08)**: ở `parse_method="txt"`, `confidence` (a) gần như
+> KHÔNG BAO GIỜ `None` (MinerU 3.4.5 gán `score = 1.0` cho span lấy từ text layer — đo thật:
+> `confidence = 0.9976`, `ocr_span_count = 1004`), và (b) **không mang ý nghĩa chất lượng OCR**.
+> **Hệ quả bắt buộc**: mọi nơi tiêu thụ giá trị này PHẢI rẽ theo `job.file_type`, KHÔNG theo giá trị
+> runner trả về — xem S15-6 (§6.15.3). Nhánh `None` trong `_compute_quality()` giữ nguyên.
+> Số đo đầy đủ + task/log gốc: design-log.
 
 **Vi sao khong chon Option C (heuristic ngoai MinerU, vd do dai text / dien tich trang)**: khong
 co calibration, phu thuoc font size / mat do chu / ngon ngu; trong khi ta da co san tin hieu that
@@ -2000,29 +1937,7 @@ page gom ca `preproc_blocks` va `discarded_blocks` (S3 xu ly ca hai), di xuong `
 
 #### 6.9.7. Can PM/user quyet dinh (anh huong PRD — Tech Lead KHONG tu sua)
 
-**Van de**: PRD AC-11.2 viet "OCR confidence score < 80%". Ban PRD do ngam dinh MinerU tra ve 1
-con so confidence cap tai lieu. **Con so do khong ton tai.** Cai ta thay the la mot dai luong
-KHAC: trung binh confidence recognition cua cac span da qua OCR, do BB-Translation tu tinh.
-
-Vi MinerU da vut san moi span < 0.5, phan bo cua dai luong moi bi don ve phia cao; nguong 0.80
-tren dai luong cu **khong tuong duong** 0.80 tren dai luong moi. Chua co du lieu that de calibrate.
-
-**Khuyen nghi cua Tech Lead** (can PM xac nhan voi user, khong tu ap):
-1. **Giu tinh nang canh bao** (khong bo theo Option B) — no van co gia tri that, chi la doi
-   dinh nghia phep do.
-2. **Giu nguong 0.80 lam gia tri khoi diem**, dat trong setting `ocr_confidence_threshold` de
-   chinh duoc sau, khong phai hang so trong code.
-3. **PM cap nhat cau chu AC-11.2** tu "OCR confidence score (tu MinerU)" thanh "diem tin cay OCR
-   tong hop do BB-Translation tinh tu span-level recognition score cua MinerU (Architecture 6.9.5)",
-   va ghi ro nguong 0.80 la **provisional, se recalibrate sau khi co >= 10 file scan that**.
-4. Bo sung 1 trang thai thu ba vao AC-11.2: **`ocr_confidence = NULL`** (khong span nao qua OCR)
-   → khong canh bao. Hien AC-11.2 chi co 2 nhanh, thieu nhanh nay.
-5. Cannh bao nen hien thi kem `dropped_span_count` ("MinerU da bo qua N vung chu khong doc duoc")
-   — cu the va huu ich cho user hon mot con so %.
-
-**Neu user khong muon nhan them scope**: fallback la Option B — bo canh bao khoi v1.0, ghi
-AC-11.2 thanh known limitation giong US-15. Tech Lead **khong khuyen nghi** huong nay vi chi phi
-thuc thi cua khuyen nghi tren chi la ~40 dong `_compute_quality()`.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.9.7. Can PM/user quyet dinh (anh huong PRD — Tech Lead KHONG tu sua)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.9.8. Trien khai runtime — Docker khong dung duoc tren macOS
 
@@ -2058,16 +1973,7 @@ thuc thi cua khuyen nghi tren chi la ~40 dong `_compute_quality()`.
 
 #### 6.10.0. Van de
 
-QA Vong 3 (`docs/test-report.md` → "Bug #5") chung minh bang E2E that: voi 1 job `pdf_scan`,
-MinerU chay dung, OCR chinh xac 100%, `ocr_confidence = 0.9908` luu dung DB — nhung
-`translated_vi.pdf` **trong hoan toan** (`text_len = 0` moi trang), job van bao `completed`.
-
-Root cause kien truc (khong phai 1 cho thieu wire): `run_job()` chi lay
-`ocr_result.quality.confidence`; moi buoc doc noi dung sau do — `_extract_full_text()`,
-`_extract_chunk_text()`, `_count_text_segments()`, va quan trong nhat
-`pdf2zh_runner.translate_pages(input_path=...)` — deu dung lai `job.file_path`, tuc **file scan
-goc khong co text layer**. Ket qua OCR (`document.md`, `middle.json`) khong bao gio di vao luong
-dich. Giua `MinerUResult` (Markdown + JSON) va `pdf2zh` (chi an **file PDF**) **chua co cau noi**.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.10.0. Van de"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.10.1. Nguon xac thuc
 
@@ -2085,24 +1991,7 @@ dich. Giua `MinerUResult` (Markdown + JSON) va `pdf2zh` (chi an **file PDF**) **
 
 #### 6.10.2. Danh gia 3 huong — ket qua research
 
-**Huong B — de pdf2zh tu OCR: BAC BO (khong kha thi).**
-pdf2zh 1.9.11 khong chua tu "ocr" nao trong source (S12); no doc text bang pdfminer.six tren
-content stream (S13). OCR duy nhat trong cay phu thuoc la RapidOCR cho *table detection* cua
-babeldoc (S14), khong phai page text recognition, va duong babeldoc mac dinh khong bat. Khong co
-flag `--ocr`. => Khong ton tai duong nao de pdf2zh tu doc chu tu anh. Day chinh la ly do co hoc
-khien Bug #5 im lang: pdf2zh nhan file khong co text object → khong co gi de dich → exit 0.
-
-**Huong A nguyen ban — MinerU tu xuat searchable PDF: BAC BO (tinh nang khong ton tai).**
-Da doc het danh sach file MinerU ghi ra (S10): `_layout.pdf` va `_span.pdf` la **anh visualization
-ve bbox** (`draw_layout_bbox`/`draw_span_bbox`), `_origin.pdf` la **ban sao file goc**. Khong co
-output nao la PDF da nhung lai text layer. `return_original_file` khong phai thu ta tuong (S11).
-=> MinerU **khong** lam ho ta buoc nay.
-
-**Huong C — render lai PDF tu Markdown: KHONG CHON (con phuong an tot hon).**
-Mat toan bo layout goc — vi pham yeu cau cot loi PRD US-04 ("giu nguyen layout"), va tao ra
-duong code thu hai hoan toan khac cho `pdf_scan` (chunking, font-shrink, bilingual merge, cost
-accounting deu phai viet lai). Chi dung lam fallback neu A' that bai — A' da duoc chung minh la
-khong that bai (6.10.3).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.10.2. Danh gia 3 huong — ket qua research"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.10.3. **QUYET DINH: Huong A' — cau noi "searchable PDF" do BB-Translation tu dung**
 
@@ -2410,169 +2299,23 @@ PDF scan that) va mo `translated_vi.pdf` kiem tra **co chu tieng Viet that**, kh
 > (co bang chung truc tiep, khong suy doan — CLAUDE.md Protocol 5) va spec giai
 > phap cho Dev.
 
-#### 6.11.0. Su co
+#### 6.11.0–6.11.3. Su co $6.50, ket luan dieu tra va root cause (tom tat)
 
-User cung cap screenshot OpenAI dashboard ngay **2026-09-04**:
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.11.0. Su co"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-| Chi so OpenAI bao | Gia tri |
-|---|---|
-| Chi phi | **$6.50** |
-| So request | **2,989** |
-| Token | **1,548,096** |
+**Tóm tắt hợp đồng còn hiệu lực** (RCA đầy đủ: design-log):
 
-Trong khi do toan bo bao cao QA cong lai (`docs/test-report.md`) chi ra ~**$0.007**:
-Vong 4 `actual_cost=$0.0019`, Vong 5 "chi phi thuc te ~$0.0053", Vong 6 $0 (het credit).
-Lech **~1000 lan**.
-
-#### 6.11.1. Nguon xac thuc (Protocol 5 R5-01)
-
-Toan bo ket luan duoi day doc truc tiep tu **cache SQLite that cua pdf2zh** con
-nguyen tren may tai thoi diem dieu tra:
-
-- **S1** — `~/.cache/pdf2zh/cache.v1.db` (23 MB, mtime `2026-09-04 19:00`), bang
-  `_translationcache`, schema:
-  `(id INTEGER PK, translate_engine VARCHAR(20), translate_engine_params TEXT,
-  original_text TEXT, translation TEXT)` — **khong co cot timestamp**, nen moc
-  thoi gian suy ra tu `id` tang dan + mtime file, khong phai tu cot ngay thang.
-- **S2** — File nguon that:
-  `/Users/hieutt/Downloads/Figoni, Paula - How baking works_ exploring the
-  fundamentals of baking science (2007_2008, Wiley) - libgen.li.pdf`,
-  **415 trang** (do bang PyMuPDF).
-- **S3** — `docs/test-report.md` muc "QA Vong 5" va "QA Vong 6".
-- **S4** — `src/core/cost_estimator.py`, `src/core/job_orchestrator.py`
-  (`_count_text_segments`, `_extract_chunk_text`), `src/services/pdf2zh_service_map.py`.
-
-#### 6.11.2. Ket luan dieu tra — nguon con $6.50
-
-**Gia thuyet ban dau cua PM (job 81 trang cua QA Vong 5) la SAI.** Bang chung phan bac:
-
-Truy van S1 nhom theo model:
-
-| engine | model | so dong | id range | tong `original_text` |
-|---|---|---|---|---|
-| openai | **gpt-4o** | **2,941** | 2 → 2,988 | 699,103 chars |
-| openai | gpt-4o-mini | 39 | rai rac 1 → 2,677 | 1,398 chars |
-| google | (null) | 6 | 2,989 → 2,994 | 174 chars |
-
-**Ba bang chung doc lap xac dinh thu pham la job dich SACH THAT, chay bang `gpt-4o`:**
-
-1. **Noi dung cache la sach that, khong phai file test QA.** Cac dong dau tien:
-   `"HOW BAKING WORKS"`, `"S E C O N D   E D I T I O N"`,
-   `"Exploring the Fundamentals of Baking Science"` — chinh la trang bia cua S2.
-   File test cua QA Vong 5/6 chi chua 5 cau lap lai
-   (`"Page N. Today the oven is very hot."`) — dung 39 dong `gpt-4o-mini`
-   (dedup cache lam 81 trang lap chi con 39 chuoi duy nhat, khop hoan hao voi
-   bao cao QA Vong 5 `api_tokens_used` tong 30,925).
-2. **Model la `gpt-4o`, khong phai `gpt-4o-mini`.** 2,941/2,986 dong dung `gpt-4o`
-   — dat hon `gpt-4o-mini` **16.67 lan**. Day la default cu truoc khi Increment 6
-   doi default sang `gpt-4o-mini`.
-3. **Pham vi da dich**: marker in-an trong cache (`c01.indd` … `c11.indd`, so trang
-   `1` → `248`) cho thay job da dich het chuong 1–11, tuong ung ~**270 trang PDF**
-   tren tong 415 — tuc job chay duoc ~65% cuon sach thi het credit.
-
-**Doi chieu so hoc (tinh tu S1, khong goi API moi):**
-
-```
-requests (dong cache gpt-4o)      = 2,941        [OpenAI bao 2,989 — lech 1.6%, la cac
-                                                  request loi/retry khong vao cache]
-tong prompt_chars (lap moi request)= 3,864,474    (1,314 chars/request)
-tong original_text chars           =   699,103
-tong translation chars             =   809,717
-
-input_tokens  ≈ (3,864,474 + 699,103)/4 = 1,140,894
-output_tokens ≈ 809,717 / 2.0 (tieng Viet co dau ~2 chars/token) = 404,858
-TONG                                     = 1,545,753 token
-```
-
-**OpenAI bao 1,548,096 token — lech 0.15%.**
-
-```
-Chi phi @ gia gpt-4o ($2.50/MTok in, $10.00/MTok out):
-  input  1,140,894 × 2.50/1e6 = $2.85
-  output   404,858 × 10.0/1e6 = $4.05
-  TONG                        = $6.90
-```
-
-**OpenAI bao $6.50 — lech 6%.** Cung 1 bo du lieu tai tao doc lap ca **so request**,
-**so token** va **so tien** trong sai so vai phan tram. Ket luan la chac chan.
-
-> **Neu cung job do chay bang `gpt-4o-mini`: $0.414.** Tuc rieng viec chon nham model
-> da nhan chi phi len **16.7 lan**.
-
-#### 6.11.3. Root cause — 4 loi doc lap cong don
-
-**RC-1 (chinh, ~85% chi phi): prompt file duoc gui lai NGUYEN VAN cho TUNG SEGMENT.**
-Da ghi trong 6.6.1 finding F6 va 6.6.5, nhung **chua bao gio duoc dinh gia bang so that**.
-Do tu S1: prompt = **1,314 chars ≈ 328 token**, `original_text` trung binh chi **238 chars
-≈ 59 token**. Tuc **84.7% toan bo input token la prompt boilerplate lap lai**, chi 15.3%
-la noi dung that can dich.
-
-> **Canh bao khuyech dai chua duoc mo hinh hoa**: job nay chay voi **0 glossary entry**
-> (`"(Khong co glossary entry nao ap dung cho tai lieu nay.)"`, xac nhan trong
-> `translate_engine_params` cua S1). Voi cap **80 entry** cua 6.6.5, moi dong glossary
-> ~35–45 chars → prompt phinh len ~4,500 chars ≈ **1,125 token/segment**, tuc input
-> token **tang ~3.4 lan** so voi lan chay da do. Dung use-case that cua user (sach nganh
-> banh + glossary day du) se **DAT HON** lan chay $6.50 nay, khong phai re hon.
-
-**RC-2: cong thuc uoc tinh TRUOC JOB (`estimate_job_cost`) sai bac do lon.**
-`src/core/cost_estimator.py::AVG_INPUT_TOKENS_PER_PAGE = 500` — hang so **chua tung
-duoc do tu tai lieu that** (docstring tu thua nhan: *"Not measured from real documents
-yet"*). Thuc te do duoc: `1,140,894 input token / ~270 trang` = **4,225 token/trang**
-→ heuristic thap hon thuc te **8.4 lan**.
-
-Ngoai ra `estimate_job_cost()` **hoan toan khong biet den F6** — no khong co tham so
-`segment_count`, khong nhan prompt overhead, chi nhan `total_pages`. Tuc chinh con so
-duy nhat user nhin thay TRUOC KHI bam Dich duoc tinh bang cong thuc bo qua nguyen nhan
-chiem 85% chi phi that.
-
-Ap len ca cuon sach 415 trang:
-
-| | input tok | output tok | @gpt-4o | @gpt-4o-mini |
-|---|---|---|---|---|
-| `estimate_job_cost` hien tai (500/trang) | 207,500 | 269,750 | **$3.22** | $0.19 |
-| Ngoai suy tu so do that (S1) | 2,607,524 | 665,000 | **~$13.2** | ~$0.79 |
-| Sai so | | | **thap hon 4.1×** | thap hon 4.2× |
-
-**RC-3: KHONG CO hard cap o bat ky lop nao.** Ra soat toan bo `src/`:
-`estimated_cost` chi duoc **ghi vao DB va hien thi**, khong co nhanh code nao so sanh
-no voi mot nguong va tu choi chay. Khong co bien dem chi phi tich luy trong khi chay.
-Khong co gioi han cap batch. `max_concurrent_files = 3` (`src/core/config.py:62`) gioi
-han **so file song song**, khong gioi han **tien**. Job chi dung khi (a) user bam cancel
-thu cong, (b) `pdf2zh` timeout 3600s/chunk, hoac (c) **het sach credit** — day chinh
-xac la cach job nay dung lai.
-
-**RC-4: `actual_cost`/`api_tokens_used` la UOC LUONG nhung bi bao cao nham la SO DO THAT.**
-`job_orchestrator.py:582-583` gan `chunk.api_tokens_used` tu ket qua
-`estimate_chunk_cost()` — thuan tuy so hoc tren do dai text, **khong he cham vao
-`response.usage` cua OpenAI** (dung nhu 6.6.6 da thiet ke, `cost_source="estimated"`).
-Nhung `docs/test-report.md` muc "QA Vong 5" viet:
-
-> *"tong `api_tokens_used` 3 chunk = 14551+15286+1088 = 30,925 token that da dung,
-> **lay tu `response.usage` OpenAI that, khong phai uoc luong**"*
-
-**Cau nay SAI.** Con so do la uoc luong, va viec no bi trinh bay nhu so do dem that la
-ly do bao cao QA duoc tin tuong qua muc, khong ai truy tiep. (`docs/test-report.md`
-QA Vong 6 cung ghi sai tuong tu: *"~2980 dong cache cu (tu QA Vong 3/4 truoc do)"* —
-thuc te QA Vong 3/4 chi dich 1–2 trang; 2,941 dong do la job sach that.)
-
-**Danh gia lai `estimate_chunk_cost()` (khac han — cong thuc nay DUNG huong):**
-No **co** nhan `segment_count × prompt_overhead_chars`, tuc **co** mo hinh hoa F6.
-Kiem chung nguoc lai so do that (pages 1–270 cua S2):
-
-| | Cong thuc du doan | Thuc te do (S1) | Lech |
-|---|---|---|---|
-| input tokens | 1,671,165 | 1,140,894 | **+46%** (an toan, du cao) |
-| output tokens | 360,172 | 404,858 | **−11%** (thieu, can sua) |
-| tong | 2,031,337 | 1,545,753 | +31% (an toan) |
-
-→ `estimate_chunk_cost()` la **nen mong dung**, chi can hieu chinh `vi_token_factor`.
-`estimate_job_cost()` moi la ham phai viet lai.
-
-**Do chinh xac cua `_count_text_segments()`** (`job_orchestrator.py:127`): dem
-non-empty PyMuPDF blocks. Do tren S2: pages 1–270 → **4,525 blocks** vs **2,989 request
-that** → uoc luong **cao hon 1.51 lan**. Sai lech theo huong AN TOAN (over-estimate) —
-dung ban chat can co cho mot ham dung de chan chi tieu. Giu nguyen, khong "toi uu" cho
-sat hon.
+- Sự cố 2026-09-04: 1 job dịch sách thật chạy `gpt-4o` tốn **$6.50** thật trong khi báo cáo QA cộng
+  lại chỉ ~$0.007 — lệch ~1000×. Điều tra tái tạo được cả số request, số token và số tiền từ cache
+  `~/.cache/pdf2zh/cache.v1.db` (sai số vài %).
+- 4 nguyên nhân cộng dồn, được các lớp phòng thủ ở §6.11.4 tham chiếu trực tiếp:
+  **RC-1** prompt file gửi lại nguyên văn cho TỪNG segment (84,7% input token là boilerplate);
+  **RC-2** `estimate_job_cost()` cũ dùng `AVG_INPUT_TOKENS_PER_PAGE = 500` chưa từng đo thật (thấp
+  hơn thực tế 8,4×) và không biết tới `segment_count`; **RC-3** KHÔNG có hard cap ở bất kỳ lớp nào
+  (kể cả cấp batch và đường retry); **RC-4** `actual_cost`/`api_tokens_used` là ước lượng nhưng bị
+  báo cáo nhầm là số đo thật.
+- Hằng số đo được từ sự cố, đang dùng trong `cost_estimator.py`: `CHARS_PER_TOKEN_VI = 2.0`,
+  `VI_CHAR_EXPANSION = 1.16`; `gpt-4o` đắt hơn `gpt-4o-mini` **16,7×**.
 
 #### 6.11.4. Quyet dinh thiet ke — phong thu 4 lop
 
@@ -2800,38 +2543,21 @@ mot bai hoc chi nam trong tai lieu.
 
 #### 6.11.8. Thu tu implement cho Dev
 
-1. **Lop 0** (UI/nhan/canh bao) — effort thap nhat, chan ngay kieu nham model.
-2. **Lop 1 + golden file 6.11.6** — phai xong truoc Lop 2, vi Lop 2 dung ket qua cua no.
-3. **Lop 2** (pre-flight gate, job + batch + retry).
-4. **Lop 3** (running accumulator + status `cost_capped`).
-5. **Lop 4** (`LLMMeteringProxy`) — increment rieng.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.11.8. Thu tu implement cho Dev"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-**Gate release (R5-03 + R6-03)**: QA **khong duoc** `ready_for_release` cho tinh nang
-nao trong section nay neu chua co it nhat 1 lan chay that chung minh **cap thuc su chan
-duoc job** (dat tran that thap, chay 1 job that, xac nhan job dung o `cost_capped` va
-chi phi thuc te khong vuot xa tran). Mock-only **khong du** — day chinh xac la kieu
-xac nhan ma su co $6.50 da chung minh la khong dang tin.
-
----
-
+**Gate release (R5-03 + R6-03) — còn hiệu lực**: không `ready_for_release` cho tính năng nào trong
+§6.11 nếu chưa có ít nhất 1 lần chạy thật chứng minh cap **thực sự chặn được job** (đặt trần thấp,
+chạy job thật, job dừng ở `cost_capped`). Mock-only không đủ.
 
 ### 6.12. Adaptive Concurrency Controller (AIMD) cho `pdf2zh --thread`
 
 #### 6.12.0. Su co
 
-Job dich "How baking works" (Figoni, Paula) fail:
-`Chunk 0 that bai: pdf2zh vuot qua timeout 3600s ... (trang 1-40)`.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.12.0. Su co"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-Nguyen nhan: `Pdf2zhRunner.translate_pages()` (`src/services/pdf2zh_runner.py:63-77`) dung
-argv **khong bao gio** chua flag `--thread`, nen pdf2zh luon chay o mac dinh cua chinh no
-la 4 luong. Voi sach dac chu (~7063 doan van uoc tinh cho ca cuon; 1 chunk 40 trang chua
-hang tram doan), 4 luong khong du de ve dich trong 3600s.
-
-Section nay chot thiet ke 1 **AIMD adaptive concurrency controller**: hoc dan muc `--thread`
-an toan nhat cho tung cap `(provider, model)` qua ket qua that cua tung chunk, thay vi
-hardcode 1 con so doan mo.
-
----
+**Bối cảnh (1 dòng)**: `Pdf2zhRunner` không truyền `--thread` nên pdf2zh chạy mặc định 4 luồng →
+chunk 40 trang của sách đặc chữ vượt timeout 3600s. §6.12 chốt 1 AIMD controller học mức `--thread`
+an toàn theo từng cặp `(provider, model)`. Chi tiết sự cố: design-log.
 
 #### 6.12.1. Nguon xac thuc (Protocol 5 R5-01)
 
@@ -2859,41 +2585,7 @@ Phien ban pdf2zh da cai va dung de verify: **v1.9.11**
 
 #### 6.12.2. Phat hien chan thiet ke: tin hieu rate-limit nam o STDOUT, khong phai STDERR
 
-Gia dinh ban dau khi mo thiet ke nay la "grep **stderr** tim dong `RateLimitError, retrying`".
-Gia dinh do **SAI**. Da verify bang cach chay that (Protocol 5 R5-02, spike truoc khi thiet ke):
-
-```
-$ ~/.local/share/uv/tools/pdf2zh/bin/python -c "
-import logging
-from rich.logging import RichHandler
-logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
-logging.getLogger('pdf2zh.translator').warning(
-    'RateLimitError, retrying in 3.5 seconds... (Attempt 7/100)')
-" > out.txt 2> err.txt
-$ wc -c out.txt err.txt
-     243 out.txt
-       0 err.txt
-```
-
-**Hai loi chi mang, ca hai deu du de lam AIMD im lang sai:**
-
-1. **Sai stream.** 243 byte ra stdout, **0 byte ra stderr**. `Pdf2zhRunner` hien tai vut bo
-   stdout (`_stdout_bytes, stderr_bytes = await ...communicate()` —
-   `pdf2zh_runner.py:90-92`) va chi giu `stderr`. Neu Dev implement dung theo gia dinh cu,
-   bo dem tin hieu se **luon bang 0**, AIMD se luon tang thread cho toi tran roi timeout —
-   te hon ca hien trang. Nguon: S8 + S9.
-
-2. **Sai ca khi da doc dung stream.** Khi stdout khong phai TTY, rich wrap o 80 cot va cat
-   doi chinh chuoi can grep:
-
-```
-[09/05/26 06:06:25] WARNING  WARNING:pdf2zh.translator:RateLimitError <string>:6
-                             , retrying in 3.5 seconds... (Attempt
-                             7/100)
-```
-
-   `grep "RateLimitError, retrying"` -> **0 match**, du dong log co that. Ca so attempt
-   (`7/100`) cung bi tach sang dong khac.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.12.2 — spike phát hiện stdout/stderr (log capture)"**.
 
 **Quyet dinh chot:**
 
@@ -2988,33 +2680,12 @@ class Pdf2zhTimeoutError(RuntimeError):
 
 ##### 6.12.3.1. Quyet dinh: `stdout` / `rate_limit_hits` CO default (`""` / `0`)
 
-**Boi canh:** spec tren khong noi ro 2 field moi co default hay khong. Dev escalate theo
-R5-02: neu de no-default, 16 test integration co san (`tests/integration/test_job_orchestrator.py`
-2 cho, `test_job_cancel.py` 1 cho, `test_cost_capped_orchestrator.py` dung lai fixture cua
-file dau) fail ngay, du chung khong lien quan gi den rate-limit.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.12.3.1 — bối cảnh + lý do chọn default"**.
 
 **Quyet dinh (Tech Lead, da chot — khong de mo): GIU default `stdout=""`, `rate_limit_hits=0`,
 2 field dat o cuoi dataclass.** Ap dung cung quy tac cho `Pdf2zhError` (xem duoi).
 
-**Ly do:**
-
-1. **Trong production khong ton tai code path nao roi vao default.** `translate_pages()` tinh
-   `rate_limit_hits = len(RATE_LIMIT_LINE_RE.findall(stdout + "\n" + stderr))` **mot lan, truoc
-   moi nhanh re** (`pdf2zh_runner.py`), roi truyen tuong minh vao ca 3 loi ra: return
-   `Pdf2zhResult(...)`, `raise Pdf2zhTimeoutError(...)`, `raise Pdf2zhError(...)`. Day la
-   **producer duy nhat** cua 3 kieu nay trong `src/`. Default vi vay chi cham toi test stub.
-2. **No-default KHONG mua duoc su an toan ma Dev lo.** Rui ro that su la "`rate_limit_hits=0`
-   gia khien AIMD phan loai nham `success` va **tang** thread (+2) dung luc dang bi throttle"
-   (6.12.4). Nhung bat buoc truyen tuong minh khong chan duoc dieu do — mot call site sai van
-   go duoc so `0` vao. No chi doi loi im lang thanh loi go tay, khong doi thanh loi bi chan.
-3. **Lop phong thu that nam o cho khac va da duoc quy dinh:** test #2/#3 tai 6.12.9 (R6-02)
-   assert `rate_limit_hits` **bat nguon tu `stdout` cua ket qua buoc truoc** (golden file), va
-   R6-04 buoc Reviewer trace tay. Do la co che duy nhat bat duoc gia tri 0 gia; kieu du lieu
-   thi khong.
-4. **Chi phi cua no-default la thuc va lech huong:** sua 16 test khong lien quan chi de go
-   `stdout=""`, `rate_limit_hits=0` vao — dung cai gia tri ma default da cho — la thay doi
-   thuan tuy nghi thuc, lam nhieu diff cua increment AIMD va tang be mat merge conflict, doi
-   lai zero bao ve them (xem 2).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.12.3.1 — 4 lý do chi tiết"**.
 
 **Rang buoc di kem (bat buoc, khong phai khuyen nghi):**
 
@@ -3439,139 +3110,17 @@ ma gia dinh ban dau cua thiet ke nay da mac phai.
 
 #### 6.12.10. Trang thai verify va gate release
 
-| Hang muc | Trang thai | Chan gi |
-|---|---|---|
-| `--thread` flag, default 4, mapping sang `ThreadPoolExecutor` | VERIFIED (S1, S2) | — |
-| Retry + log line cua `OpenAITranslator` | VERIFIED (S3) | — |
-| DeepSeek ke thua retry | VERIFIED (S4) | — |
-| Log ra **stdout** chu khong stderr; wrap 80 cot cat chuoi; `COLUMNS=200` sua duoc | VERIFIED bang chay that (S9, S10, S11) | — |
-| Gioi han concurrency DeepSeek 500/2500 | VERIFIED (S12) | — |
-| Gioi han cho **`deepseek-chat`** cu the | `[UNVERIFIED]` (S13) | Khong chan implement (floor 8 an toan doc lap voi so nay). Chan viec **vien dan** 500/2500 de nang floor deepseek len cao hon. |
-| Anthropic compat 429 -> `openai.RateLimitError`? | `[UNVERIFIED]` (S6) | **CHAN** viec bat AIMD cho provider `claude`. Claude = thread co dinh 4 cho toi khi spike 6.12.6 xanh. |
-| Google compat 429 -> `openai.RateLimitError`? | `[UNVERIFIED]` (S5) | **CHAN** viec nang floor gemini tu 4 len 8. Khong chan AIMD cho gemini o floor 4. |
-
-**Thu tu implement cho Dev:**
-
-1. **6.12.3 + 6.12.2 D1/D2** (capture stdout, `COLUMNS=200`, `_drain`, exception mang tin
-   hieu). Blocker tuyet doi — moi thu con lai vo nghia neu bo dem luon bang 0.
-2. **Golden file** (Protocol 5 muc 3): chay pdf2zh that o `--thread` cao voi DeepSeek cho
-   toi khi cham 429, luu stdout that vao `tests/fixtures/pdf2zh/deepseek_ratelimit/`.
-   Moi mock cua buoc 3-5 sinh tu file nay.
-3. **6.12.8** (schema: bang `concurrency_state`, 3 cot moi, 2 setting moi).
-4. **6.12.4** (`src/core/concurrency_controller.py` — thuan logic, khong I/O, de unit test).
-5. **6.12.7** (`chunk_size` cold-start + `Job.chunk_size_used`).
-6. **6.12.6** (Ollama fixed thread; Claude khoa o floor).
-7. Spike Claude + spike Gemini (6.12.6) — increment rieng, sau khi 1-6 xanh.
-
-**Gate release (R5-03 + R6-03):** QA **khong duoc** `ready_for_release` cho section nay neu
-chua co it nhat 1 lan chay **xuyen suot** that: 1 job that >= 3 chunk voi DeepSeek, roi mo DB
-xac nhan (a) `chunks.thread_used` **thay doi giua cac chunk** dung theo luat 6.12.4, (b)
-`concurrency_state.current_thread` cuoi cung khac gia tri floor ban dau, (c) file PDF output
-co chu that. Chi kiem tra `job.status == "completed"` la **khong du** — day dung la kieu xac
-nhan da bo lot Bug #5.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.12.10. Trang thai verify va gate release"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ### 6.13. Prompt caching cho luong dich that (Claude qua `openailiked`) — dieu tra & khuyen nghi
 
-> Nguon goc: yeu cau dieu tra "co dang lam prompt caching cho Claude tren duong pdf2zh
-> khong, vi RC-1 (6.11.3) cho thay 84.7–95% input token la boilerplate lap lai (prompt +
-> glossary)". Ket luan: **KHONG lam** — co 2 rao can doc lap, moi cai da du de chan, va
-> `default_provider` hien tai (DeepSeek) da tu dong huong loi tuong duong ma khong can sua
-> gi. Ghi lai day du de khong ai dieu tra lai cau hoi nay lan nua.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.13. Prompt caching cho luong dich that (Claude qua `openailiked`) — "**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-#### 6.13.1. Nguon xac thuc (Protocol 5 R5-01 / global CLAUDE.md muc "gan nhan verify")
-
-| # | Claim | Nguon xac thuc |
-|---|---|---|
-| V1 | Anthropic OpenAI-compat layer (`https://api.anthropic.com/v1/`, dung qua `-s openailiked`) **khong ho tro prompt caching**. Nguyen van: *"Prompt caching is not supported, but it is supported in the Anthropic SDKs"*. | Fetch truc tiep `https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk` (redirect tu `docs.claude.com/en/api/openai-sdk`) ngay 2026-09-05, muc "Important OpenAI compatibility limitations" → "API behavior". Doc hien tai con neu ro compat layer *"not considered a long-term or production-ready solution for most use cases"* — dung y da ghi o F4 (6.6.1), nay verify lai truc tiep tu doc goc thay vi suy doan. |
-| V2 | Bang header cua cung trang tren (`Header compatibility`) chi liet ke cac header rate-limit chuan (`x-ratelimit-*`, `retry-after`, `request-id`, ...). **Khong co header nao lien quan `cache_control` hay tuong duong** de "lach" gioi han V1 qua `extra_headers`. | Cung nguon voi V1, bang "Header compatibility" doc day du. |
-| V3 | `pdf2zh` v1.9.11 (`translator.py`, class `OpenAITranslator.do_translate()`, ke thua boi `OpenAIlikedTranslator` dung cho Claude — 6.6.3): goi `self.client.chat.completions.create(model=self.model, **self.options, messages=...)` voi `self.options = {"temperature": 0}` **co dinh, khong nhan them tham so nao**. Khong co `extra_headers`, `extra_body`, hay bat ky co che nao cho phep chen `cache_control` vao request. | Doc truc tiep source da cai: `~/.local/share/uv/tools/pdf2zh/lib/python3.12/site-packages/pdf2zh/translator.py` dong ~398-431 (constructor + `do_translate`). |
-| V4 | `pdf2zh` khong co co che config/env/`--config` nao cho phep tiem them request param tuy y vao loi goi API — `ConfigManager` (`pdf2zh/config.py`) chi quan ly key-value don gian (API key, base URL, model...) cho tung translator, khong co "extra params" passthrough. | Doc truc tiep source `pdf2zh/config.py` (toan bo file, khong co bat ky `extra_headers`/`extra_body`/generic-param nao). |
-| V5 | DeepSeek context caching (dung mac dinh o `default_provider = "deepseek"`, `src/core/config.py:71`) **tu dong hoan toan, khong can header/tham so gi tu client**. Nguyen van: *"The DeepSeek API Context Caching on Disk Technology is enabled by default for all users, allowing them to benefit without needing to modify their code."* Co the kiem chung qua `usage.prompt_cache_hit_tokens` / `usage.prompt_cache_miss_tokens` trong response. | Fetch truc tiep `https://api-docs.deepseek.com/guides/kv_cache` ngay 2026-09-05. Xac nhan claim `[CHUA VERIFY]` da ghi trong `config.py` comment (PRD US-14) la **DUNG**. |
-
-#### 6.13.2. Ket luan — 2 rao can doc lap, ca hai deu chan hoan toan (khong phai 1 cai de vuot qua)
-
-1. **Rao can phia Anthropic (V1, V2)**: day la gioi han **server-side** cua Anthropic, khong
-   phai gioi han client co the cau hinh de vuot qua. Compat layer tu choi ap dung caching bat
-   ke request gui gi — khong co header/param "lach" nao duoc liet ke.
-2. **Rao can phia `pdf2zh` (V3, V4)**: ke ca **neu** V1 sai (Anthropic co ho tro), `pdf2zh`
-   hien tai van khong co duong nao de app truyen `cache_control` vao request ma khong **fork**
-   `OpenAITranslator.do_translate()` — day la thay doi vuot qua muc "config fix", tuong duong
-   viet lai 1 phan `pdf2zh`, ke thua toan bo rui ro bao tri (update `pdf2zh` version se mat
-   patch, phai re-apply — dung kieu rui ro ma 6.6.7 muc 1 da canh bao cho ca nhanh Claude).
-
-Ca hai rao can deu **doc lap va deu du de tu minh chan giai phap** — khong ton tai "fix don
-gian, an toan, khong fork" nhu cau hoi dat ra ban dau da hy vong.
-
-#### 6.13.3. Uoc tinh chi phi bi bo lo (chi de tra loi "co dang lam khong", KHONG dung de bao cao)
-
-Ngoai suy tu so do that S1 (6.11.2, job 0-glossary, 2,941 request `gpt-4o`) + he so phinh
-prompt do 80-entry glossary (~3.4 lan, da tinh o RC-1 6.11.3), ap cho **quy mo do PM cung cap
-cho task nay (~7,063 segment cho 1 cuon sach)** — day la so **[CHUA VERIFY]** rieng, PM chua
-dua nguon do dac (khac voi S1/RC-1 la so do that):
-
-```
-prompt_chars/segment (co glossary 80 entry, ngoai suy RC-1) ~ 4,500 → ~1,125 token (cache-able,
-    la phan template+glossary CO DINH, khong doi giua cac segment cung 1 job)
-original_text/segment (do that S1)                           ~ 238 chars → ~59.5 token (KHONG
-    cache-able — la noi dung that can dich, khac nhau moi request)
-
-7,063 segment:
-  tong input token          ~ 7,063 * (1,125 + 59.5)         ~ 8,367,000 token
-  phan CO THE cache (prefix)~ 7,063 * 1,125                  ~ 7,946,000 token (~95% input)
-```
-
-Neu Anthropic prompt caching hoat dong tren duong nay (KHONG hoat dong — xem 6.13.2), muc
-giam gia cache-hit theo tai lieu Anthropic cong bo la **toi da ~90% gia input** cho phan
-cache-hit. Ap dung ly thuyet (khong the do that vi khong the bat duoc):
-
-```
-Gia Claude dung lam vi du minh hoa (KHONG phai gia dang dung — provider mac dinh la DeepSeek,
-xem 6.13.4), lay Claude Sonnet ~$3/MTok input lam moc tham khao:
-  Khong cache: 8,367,000 token * $3/1e6                      ~ $25.1 (chi phan input)
-  Co cache (90% off cho ~95% input, sau request dau):
-      cached ~7,946,000 * $0.30/1e6                          ~ $2.38
-      uncached ~421,000 * $3/1e6                             ~ $1.26
-      tong                                                    ~ $3.64
-  Tiet kiem ly thuyet                                         ~ $21.5 (~86% phan input)
-```
-
-Con so nay **chi mang tinh minh hoa muc do "dang gia" ve nguyen tac** — khong dung de len ke
-hoach ngan sach that, vi (a) 7,063 segment/cuon la so `[CHUA VERIFY]` PM cung cap chua co
-nguon do dac, (b) he so phinh 3.4 lan la ngoai suy RC-1 chua duoc do lai tren 1 job glossary
-day du that, (c) **quan trong nhat**: khong the trien khai (6.13.2) nen day mai mai la so ly
-thuyet, khong bao gio thanh so that.
-
-#### 6.13.4. Khuyen nghi cuoi cung
-
-**KHONG dau tu build prompt caching cho nhanh Claude.** Ly do tong hop:
-
-1. Khong co giai phap ky thuat kha thi ma khong fork `pdf2zh` (6.13.2) — vi pham nguyen tac
-   "khong fix don gian, an toan" la dieu kien de task nay chuyen sang implement (xem yeu cau
-   goc cua task).
-2. `default_provider = "deepseek"` (`src/core/config.py:71`) — Claude **khong phai** duong
-   dich mac dinh cua app. Nhanh Claude da duoc 6.6.2 xep hang **te nhat trong 6 provider tren
-   duong pdf2zh** vi F6 (glossary lap lai + khong caching), va 6.6.7 da canh bao day la
-   "duong phu thuoc rui ro".
-3. DeepSeek — provider mac dinh, re nhat — **da tu dong huong loi context caching phia
-   server ma khong can sua code gi** (V5, xac nhan tu `[CHUA VERIFY]` thanh **verified**).
-   Dau tu rieng cho Claude, trong khi provider mac dinh da co san co che tuong duong mien
-   phi, la uu tien sai.
-4. Neu tuong lai co nhu cau that su chuyen sang Claude lam mac dinh (vd chat luong thuat ngu
-   nganh banh), giai phap dung la **khong dung `-s openailiked` qua `pdf2zh` nua** ma xay
-   1 duong dich rieng goi thang Anthropic Messages API native (nhu `ClaudeProvider` da co san
-   o `src/services/claude_provider.py`, hien chi dung cho `cost_estimator.py`) — day la quyet
-   dinh kien truc lon (bo qua toan bo co che chunking/cache/glossary cua `pdf2zh`, tu implement
-   lai), **ngoai pham vi task nghien cuu nay**, can PRD + Architecture rieng neu duoc uu tien.
-
-**Trang thai cac claim trong muc nay**: V1–V5 (6.13.1) da verify tu nguon that, ghi ro cach
-verify. Uoc tinh 6.13.3 dung input `[CHUA VERIFY]` (segment count 7,063 do PM cung cap, chua
-co nguon do dac) — **khong** duoc trich dan nhu so that o bat ky noi nao khac trong tai lieu
-nay hay brief cho Dev/QA.
-
----
-
+> **Kết luận chốt (điều tra 2026-09-05, chi tiết đã chuyển sang design-log)**: KHÔNG triển khai
+> prompt caching cho luồng dịch thật ở v1. Hai rào cản độc lập, mỗi cái đủ để chặn hoàn toàn:
+> (1) pdf2zh/babeldoc tự gọi API, app không chèn được `cache_control` vào request; (2) prompt của
+> nhánh dịch nhỏ hơn ngưỡng tối thiểu để cache có hiệu lực. Chỉ mở lại khi app tự gọi API cho nhánh
+> PDF (như nhánh EPUB §6.20 đang làm).
 
 ### 6.14. `BabeldocRunner` — engine dich PDF thu hai, chay SONG SONG `Pdf2zhRunner`
 
@@ -3836,49 +3385,7 @@ dung kieu loi im lang ma Protocol 6 sinh ra de chan.
 
 #### 6.14.6. QA gate (R5-03 + R6-03) — E2E song song 2 engine tren cung file that
 
-**File test**: `data/uploads/898a567a-5034-41ed-8a95-7fc7dc1b4ca9_Figoni, Paula - How baking
-works_ exploring the fundamentals of baking science (2007_2008, Wiley) - libgen.li-1-25.pdf`,
-**trang 14** (dung file va dung trang cua research CHANGELOG va cua ca 2 spike B6/B10 — khong
-duoc doi sang file khac, moi so lieu doi chieu deu gan voi no).
-
-**Bat buoc chay that, khong mock** (R5-03): provider that (DeepSeek — la provider mac dinh va co
-key that trong `.env`), qua **`JobOrchestrator` cua app**, khong phai goi CLI bang tay.
-
-| # | Buoc | Tieu chi PASS |
-|---|---|---|
-| 1 | Tao job voi `PDF_TRANSLATE_ENGINE=pdf2zh`, trang 14 | job `completed`, `translated_vi.pdf` ton tai |
-| 2 | Tao job voi `PDF_TRANSLATE_ENGINE=babeldoc`, **cung file, cung trang** | job `completed` |
-| 3 | Mo **ca hai** file output bang PyMuPDF, `get_text()` | ca hai `len(text) > 0`; text cua ban babeldoc chua **chu tieng Viet co dau** thuc su (khong phai `""`, khong phai text EN nguyen ban). Day chinh la kieu kiem tra da tim ra Bug #5 — **khong duoc dung o field `status`** |
-| 4 | Dem so trang cua `mono_path` tung chunk | bang `page_end - page_start + 1` (chan bay B8) |
-| 5 | Dem so muc danh sach xuong dong dung tren trang 14 cua ca 2 output | babeldoc **≥ 25/35** (research bang tay dat 31/35; nguong 25 de duong bien cho khac biet moi truong), pdf2zh giu nguyen ~0/35. Neu babeldoc < 25 → **khong release**, escalate: nghia la pipeline cua app lam mat tac dung cua `--split-short-lines` |
-| 6 | Kiem tra khong con loi cat ngang tu (`"điện t"` / `"ử"`) trong output babeldoc | 0 truong hop |
-| 7 | Ghi lai `chunk.rate_limit_hits`, `chunk.thread_used`, `duration_seconds` cua **ca hai** lan chay vao `docs/test-report.md` | So lieu that dau tien de tune 6.14.5 — **bat buoc bao cao ve Tech Lead** du PASS |
-| 8 | Job `pdf_scan` (E2E OCR → dich, R6-03): 1 file scan that, `PDF_TRANSLATE_ENGINE=babeldoc` | Output co chu tieng Viet **that** (khong trong). Day la lan duy nhat chung minh cau noi 6.10 con dung voi engine moi |
-
-**Golden files** (Protocol 5 muc 3): stdout/stderr that cua ca 2 lan chay luu vao
-`tests/fixtures/babeldoc/` — moi mock ve sau phai sinh tu day. Spike B6/B10 cua Tech Lead cung
-nen duoc Dev capture lai vao day o increment dau tien.
-
-**Khoi tao moi truong** (R5-03): `babeldoc` phai cai bang venv **rieng** Python 3.12
-(`uv tool install --python 3.12 "babeldoc==0.6.4"`) — Python 3.14 crash vi dung API private
-`concurrent.futures.thread._WorkItem` (CHANGELOG). Neu tren may QA khong cai duoc, QA ghi dung
-cau: `"release blocked pending live verification: babeldoc"`.
-
-**Pin version (P0.1/P0.3, Final Decision U1/U4/V-4)**: lenh cai dat o tren PHAI ghim dung
-`babeldoc==0.6.4`, khong duoc de trong (`uv tool install --python 3.12 babeldoc` se tu keo
-version moi nhat tren PyPI trong tuong lai). Ly do: toan bo so do o T3/U1/U2 va toan bo thiet
-ke G1e (overlay `insert_text(morph=…)`, U3) deu gan chat voi hanh vi cua dung ban 0.6.4 nay
-(nguong goc xoay `il_creater_active.py:1292-1300` — dia chi da sua 2026-09-11 theo R5-05, bản
-truoc ghi `il_creater.py:968-974` la class KHONG chay trong luong dich, xem 6.22.1; thu tu
-"gian truoc bop sau" cua `typesetting.py`) —
-doi version ma khong biet la doi silent, co the lam sai lech moi ket luan da verify. Repo nay
-chua co script/CI tu dong hoa viec cai `babeldoc` (khong tim thay trong README, script setup,
-hay Dockerfile — xem `docker/Dockerfile` va `docs/Architecture.md` section 7 cho danh sach day
-du cac buoc cai dat thu cong); day la lenh huong dan THU CONG duy nhat, nen viec pin o day la
-đủ cho toan bo project (khong can them file cai dat rieng). Neu sau nay them script tu dong
-hoa (CI, Dockerfile), phai pin cung dung `==0.6.4` o do, khong duoc de mac dinh "latest".
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.14.6. QA gate (R5-03 + R6-03) — E2E song song 2 engine tren cung fil"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.14.7. Feature flag — chon engine, rollback tuc thoi
 
@@ -3927,38 +3434,11 @@ trước Cost Safety (6.11). Mục này ghi rõ phần nào còn dùng được,
 
 #### 6.15.1. Nguồn xác thực (Protocol 5 R5-01)
 
-| # | Claim | Nguồn |
-|---|---|---|
-| P-01 | `Job.job_type` (`translate` \| `parse_only`) **đã tồn tại** trong DB, không cần thêm cột | đọc trực tiếp `src/models/job.py` (field `job_type: str = Field(default="translate")`) |
-| P-02 | `POST /api/jobs` đã nhận `job_type`, đã bỏ qua cost gate cho `parse_only`, nhưng gọi `_mark_parse_only_unsupported()` đánh `failed` ngay | đọc `src/api/routes/jobs.py::create_job` + `_mark_parse_only_unsupported()` |
-| P-03 | `MinerURunner.parse_document(file_path, output_dir, parse_method="ocr"\|"txt", lang, start_page_id, end_page_id) -> MinerUResult(markdown_path, images_dir, quality, task_id, middle_json_path)` | đọc trực tiếp `src/services/mineru_runner.py` (interface nội bộ của team, contract MinerU đã VERIFIED ở §6.9.1) |
-| P-04 | `run_job()` reject EPUB ở **Step 1**, TRƯỚC mọi rẽ nhánh khác | đọc `src/core/job_orchestrator.py::run_job` Step 1 |
-| P-05 | `GET /api/jobs/{id}/download` trả **1 file đơn** qua `FileResponse`, media_type hardcode `application/pdf` | đọc `src/api/routes/download.py` |
-| P-06 | `ebooklib` / `beautifulsoup4` / `markdownify` **không có** trong `.venv` của project | `importlib.metadata.distributions()` trên `.venv` thật — 0 kết quả cho cả 3 |
-| P-07 | `ebooklib==0.20` + `beautifulsoup4==4.15.0` **cài và import được trên Python 3.14.7** (đúng Python của `.venv` project) | tự cài vào venv scratch riêng bằng `uv venv --python 3.14` + chạy `import ebooklib, bs4; epub.read_epub` — PASS |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.15.1. Nguồn xác thực (Protocol 5 R5-01)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.15.2. Phần của §6.8 CÒN DÙNG ĐƯỢC nguyên trạng
 
-- Quyết định lõi: `parse_only` chạy Parsing Engine (MinerU) rồi **dừng**, skip Translation Engine +
-  Glossary + Unit Conversion (BR-PARSE-01). Không mâu thuẫn với bất kỳ thay đổi nào sau đó.
-- Cột `job_type` — đã có sẵn (P-01), §6.8 không cần "ALTER TABLE" nữa.
-- Mapping input → tham số MinerU: `pdf_digital` → `parse_method="txt"`, `pdf_scan` → `parse_method="ocr"`,
-  cả hai qua HTTP async task flow của §6.9.3 (không gọi CLI `mineru`). Khớp 1:1 với P-03.
-- Cấu trúc output `output/{job_id}/document.md` + `images/` (BR-PARSE-03). **Lưu ý (2026-09-08)**:
-  cây thư mục đúng, nhưng **ví dụ tên file ảnh ở §6.8:1474-1481 (`page_003_img_01.png`) sai thực
-  tế** — tên thật là SHA-256 + `.jpg` (xem L-6, §6.15.5). Không được viết test/AC theo mẫu tên đó.
-- Chi phí LLM = 0 (BR-PARSE-05).
-
-**Đã rà, KHÔNG liên quan tới `parse_only`** (ghi lại để người đọc sau không phải rà lại — xác nhận
-bằng code chứ không suy đoán, Domain Expert kiểm độc lập cùng kết luận 2026-09-08):
-- `babeldoc_toc_split_enabled` (Bug #7 Ca C) chỉ được đọc **một chỗ duy nhất**:
-  `job_orchestrator.py:248`, bên trong property `_translator_runner`, mà property này chỉ được gọi
-  từ `_process_chunk()`. `run_parse_only()` (S15-1) không đi qua `_process_chunk()`.
-- `compress_pdf_images()` (US-16 / US-16 v2) chỉ được gọi tại `job_orchestrator.py:573-574` trong
-  Step 8 của luồng translate, gate bởi `pdf_translate_engine == "babeldoc"`, input là `merged_path`.
-  `parse_only` không có `merged_path` và không sinh PDF output → không có gì để nén.
-- `MinerURunner.parse_document()` là HTTP call độc lập, không import gì từ `babeldoc_runner.py` /
-  `image_compress.py`.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.15.2. Phần của §6.8 CÒN DÙNG ĐƯỢC nguyên trạng"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.15.3. Phần PHẢI SỬA (spec cho Dev)
 
@@ -4135,86 +3615,21 @@ Docker). UI phải nói rõ điều này trước khi user chọn chế độ, v
 
 ##### Bổ sung sau phản biện Domain Expert (2026-09-08) — 5 điểm §6.15 bản gốc BỎ SÓT
 
-**S15-10 [BLOCKING] — `_find_completed_duplicate()` phải lọc `job_type`.**
-`src/api/routes/jobs.py:322-326` chỉ lọc `Job.file_hash == file_hash, Job.status == "completed"`
-(tự đọc lại code, xác nhận Expert đúng). Hiện **vô hại vì chưa có job `parse_only` nào
-`completed`** — nhưng **ngay khi US-15 ship**: user parse file X xong (job parse_only →
-`completed`), sau đó bấm "Dịch" chính file X → API trả `200 duplicate_found` trỏ tới **job
-parse-only**, frontend hiện "đã dịch rồi, tải?" và link tải là ZIP Markdown. Đây đúng cái bẫy
-"cùng một biến, hai ý nghĩa" mà §6.20.7 tự cảnh báo.
-**Sửa**: thêm `Job.job_type == "translate"` vào `where`. **Không** dedupe cho parse_only ở v1 —
-chi phí = $0, chạy lại vô hại, thêm nhánh là thêm bề mặt lỗi.
-**Test regression bắt buộc**: `create_job(job_type="translate")` trên file đã có 1 job
-`parse_only` `completed` → phải ra **202 + job mới**, không phải `200 duplicate_found`.
+**Hợp đồng còn hiệu lực rút ra từ 5 điểm này** (phân tích đầy đủ: design-log):
 
-**S15-11 [BLOCKING] — `retry_job()` đang chặn `parse_only`, mâu thuẫn trực tiếp với S15-9.**
-`jobs.py:585-586` raise 400 `"parse_only chua duoc ho tro, khong the retry"`, và `:594-605` gọi
-`_resolve_provider_or_400` + `_enforce_cost_gate` **vô điều kiện**. Kịch bản thật trên máy user
-(§6.9.8 — `mineru-api` chạy tay bằng `uv tool`, không phải service tự bật): tạo job → S15-9 fail
-sớm đúng như thiết kế → user bật MinerU → bấm "Tiếp tục" → **400, job chết vĩnh viễn, phải upload
-lại**. Fail sớm mà không retry được thì fail sớm là một cái bẫy.
-**Sửa**: bỏ `:585-586`; với `parse_only` **bỏ qua** `_resolve_provider_or_400` +
-`_enforce_cost_gate` (giống hệt `create_job:475-485` đã làm) → đặt thẳng `status="queued"` +
-`_schedule_background`. Nhãn nút retry trên `web/index.html:139-140` hiện là "Tiếp tục dịch" →
-rẽ theo `job_type` thành "Chạy lại" cho job parse.
-
-**S15-12 [BLOCKING] — Thiếu status riêng `"parsing"`, rủi ro `rmtree` trong lúc MinerU đang ghi.**
-§6.15 bản gốc không nói job ở status nào trong lúc MinerU chạy (có thể tới ~25 phút, xem S15-14).
-Nếu Dev tự chọn: (a) mượn `"translating"` → UI hiện "Đang dịch" cho job không dịch, và
-`current_chunk/total_chunks` hiện `-/-`; (b) đặt `"parsing"` mà **không** sửa các chỗ hardcode
-danh sách status → user xoá được job đang chạy và `DELETE` sẽ `rmtree(data/processing/{job_id})`
-**trong lúc `_write_images()` đang ghi**.
-**Chốt: thêm status `"parsing"`**, kèm **checklist bắt buộc 6 chỗ** (Reviewer grep `"translating"`
-để kiểm, R6-04):
-
-| # | Vị trí | Hậu quả nếu quên |
-|---|---|---|
-| 1 | `jobs.py:648-655` `_ACTIVE_JOB_STATUSES` | guard `DELETE /api/jobs/{id}` (`:672-679`) hở → `rmtree` khi đang ghi (`:708-709`) |
-| 2 | `jobs.py:631` `cancel_job` | (đang chặn `completed/failed/cancelled` → **đã đúng**, chỉ cần xác nhận không đụng) |
-| 3 | `web/js/app.js:16-25` `RESTORABLE_STATUSES` | job biến mất khỏi UI sau F5 |
-| 4 | `web/js/app.js:32-38` `CANCELLABLE_STATUSES` | mất nút "Dừng" |
-| 5 | `web/index.html:110` | thanh progress không hiện |
-| 6 | `web/history.html:23-30` + `web/js/history.js:15-27` | filter + badge màu thiếu trạng thái |
-
-**S15-13 — Cancel hiện VÔ HIỆU với `parse_only`; và `_run_rotated_text_probe` KHÔNG chạy.**
-- `cancel_requested` chỉ được đọc sau mỗi chunk (Step 7); `parse_only` là **1 lời gọi MinerU duy
-  nhất** tới 3600s → nút "Dừng" không có tác dụng. **Sửa**: `_poll_until_done()`
-  (`mineru_runner.py:181-226`) nhận thêm callback `should_cancel: Callable[[], Awaitable[bool]]`,
-  gọi mỗi vòng poll; `True` → ngừng chờ, job `cancelled`. **Known limitation**: MinerU vẫn chạy
-  nốt task server-side — `⚠️ ASSUMED, chưa verify` MinerU 3.4.5 có endpoint huỷ task hay không
-  (§6.9.2 không liệt kê). Chấp nhận được: compute local, chi phí $0.
-- `_run_rotated_text_probe` (Bug #6 Phase 1, `job_orchestrator.py:680`) **không chạy** cho
-  parse_only: theo `mineru_det_probe.py:11-17` chữ xoay vẫn được nhận dạng (chỉ mất góc), và
-  Markdown không có khái niệm góc. Ghi tường minh vì `run_parse_only()` cho `pdf_scan` sẽ **chép
-  lại một phần** `_build_ocr_bridge()` — R6-01 đòi nói rõ bước nào được tái dùng, bước nào không.
-  **Sửa cấu trúc**: tách `job_orchestrator.py:658-665` (gọi MinerU + ghi quality + cảnh báo) thành
-  helper `_run_mineru_and_record_quality()` dùng chung cho cả 2 nhánh — **một** định nghĩa duy
-  nhất cho "gọi OCR" (đúng tinh thần Protocol 6, và cũng là chỗ áp rule rẽ theo `file_type` của
-  S15-6 để 2 nhánh không thể lệch nhau).
-
-**S15-14 — 3 trường "finalize" chưa spec + timeout tính theo số trang.**
-- `completed_at` **phải** được set (như `job_orchestrator.py:607` của nhánh translate) — nếu
-  quên, tên file tải về rơi vào fallback `updated_at` (`download.py:52-53`), lệch hành vi so với PDF.
-- `actual_cost = 0.0`, `cost_source = "metered"`. Lý do chọn `metered` chứ không phải `estimated`:
-  **0 là số đo thật** (không có lời gọi LLM nào), và frontend rẽ theo `cost_source` để hiện cảnh
-  báo "ước tính, có thể sai lệch" (§6.11.4 Lop 0 mục 2) — hiện cảnh báo ước tính cho một con số
-  chắc chắn bằng 0 là nhiễu vô nghĩa.
-- `job.model`: `create_job:500` ghi `model=provider_name` (DeepSeek mặc định) cho **cả** parse_only
-  → tab Lịch sử hiện "deepseek" cho job không dùng LLM. **Giữ nguyên backend** (đụng vào sẽ vướng
-  `_resolve_provider_or_400` ở đường retry), chỉ **ẩn cột model trên UI** khi
-  `job_type == "parse_only"`.
-- **Timeout**: `mineru_task_timeout_seconds = 3600` là hằng số cho mọi file. Đo thật: 89 s / 25
-  trang ≈ **3,6 s/trang** → sách 415 trang ≈ 25 phút, Le Cordon Bleu 418 trang/277 MB **sát trần
-  3600s**. Chốt: timeout cho `parse_only` = `max(600, pages × 6)` giây (hệ số 6 = 3,6 đo được ×
-  1,65 biên an toàn), và BR-PARSE-05 ("thời gian ước tính" trên UI) dùng hệ số 3,6 s/trang.
-- **Batch**: MinerU thật báo `max_concurrent_requests: 1` (`curl localhost:8010/health` →
-  `{"status":"healthy","version":"3.4.5","max_concurrent_requests":1,…}`). Batch 3 file
-  (`max_concurrent_files=3`) submit 3 task, MinerU **xếp hàng server-side**, mà `_poll_until_done`
-  đếm `elapsed` **từ lúc submit — tính cả thời gian nằm trong hàng đợi** → file thứ 3 có thể hết
-  timeout khi còn chưa được xử lý. Chốt v1: **known limitation "batch parse_only nên ≤ 2 cuốn
-  dày"** + timeout theo số trang ở trên. Không đổi cách đếm timeout ở v1 vì tên status "đang xử
-  lý" của MinerU là `⚠️ ASSUMED, chưa verify` (§6.9.2 chỉ liệt kê `completed`/`failed`) — sửa theo
-  giả định về payload của tool bên thứ ba là đúng thứ Protocol 5 cấm.
+- **S15-10**: `_find_completed_duplicate()` PHẢI lọc thêm `Job.job_type == "translate"`. Không dedupe
+  cho `parse_only` (chi phí $0, chạy lại vô hại).
+- **S15-11**: `retry_job()` KHÔNG được chặn `parse_only`; với `parse_only` bỏ qua
+  `_resolve_provider_or_400` + `_enforce_cost_gate`, đặt thẳng `queued` + `_schedule_background`.
+- **S15-12**: có status riêng `"parsing"`, và phải khai báo ở đủ 6 chỗ: `_ACTIVE_JOB_STATUSES`,
+  `cancel_job`, `RESTORABLE_STATUSES`, `CANCELLABLE_STATUSES`, `web/index.html` progress,
+  `web/history.html` + `history.js` (filter/badge). Thiếu chỗ 1 → `DELETE` `rmtree` khi đang ghi.
+- **S15-13**: `_poll_until_done()` nhận `should_cancel` callback → job `cancelled` được giữa chừng
+  (MinerU vẫn chạy nốt server-side — known limitation, $0). `_run_rotated_text_probe` KHÔNG chạy cho
+  `parse_only`. Gọi MinerU + ghi quality + cảnh báo dùng CHUNG helper `_run_mineru_and_record_quality()`.
+- **S15-14**: `completed_at` phải set; `actual_cost = 0.0`, `cost_source = "metered"`; ẩn cột model
+  trên UI khi `job_type == "parse_only"`; timeout parse-only = `max(600, pages × 6)` giây (đo thật
+  3,6 s/trang); known limitation: batch parse_only nên ≤ 2 cuốn dày (MinerU `max_concurrent_requests: 1`).
 
 #### 6.15.4. Data lineage (Protocol 6 — R6-01) — CẬP NHẬT 2026-09-08
 
@@ -4265,196 +3680,31 @@ loại input** — đúng thứ Protocol 6 tồn tại để chặn; (iii) Miner
 
 #### 6.15.6. Gate release bổ sung cho US-15 (Protocol 5 R5-03 + Protocol 6 R6-03)
 
-1. **R5-03 `txt` mode**: đã có **1 lần live** (run của Expert, task `cdbd0988-…`). QA vẫn **phải
-   tự chạy lại qua `run_parse_only()` thật** của app, không qua script của Expert.
-2. **R6-03 E2E**: tải ZIP về, **giải nén**, mở `document.md` → có chữ thật (**không chỉ tin
-   `status`**); đếm `![](images/…)` và **mở ít nhất 1 ảnh thật**; kiểm 1 bảng HTML và **1 list 2
-   cột trong Markdown thô** (L-3).
-3. **Golden fixture (Protocol 5 mục 3)**: `tests/test_mineru_runner.py` hiện **không** trỏ tới
-   `tests/fixtures/mineru/` (grep `fixtures/mineru|golden` → 0 kết quả) → mock đang là **viết
-   tay**. Dev phải capture từ run thật vào
-   `tests/fixtures/mineru/parse_only_txt_figoni25/` (`document.md`, `summary.json`, `middle.json`)
-   và test S15-6 **phải** dùng chính `middle.json` này (998 span `score=1.0`).
-4. **Regression chéo S15-10**: file đã có job `parse_only completed` → `create_job(translate)` phải
-   ra **202 + job mới**.
-5. **§6.21 (công thức)**: bắt buộc chạy đủ 5 case của bảng "Gate bắt buộc" ở §6.21.4.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.15.6. Gate release bổ sung cho US-15 (Protocol 5 R5-03 + Protocol 6 "**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.15.7. Cập nhật S15-8 sau khi US-22 hoàn tất (2026-09-10) — spec thi hành cho nhánh EPUB→Markdown
 
-S15-8 (§6.15.3) và §6.20.5 được viết **trước** khi US-22 implement xong. Mục này ghi lại các điểm
-spec cũ **đã lệch với code thật** và là **spec thi hành** cho Dev. Ở đâu mâu thuẫn, **mục này
-thắng**; phần S15-8 không bị mục này nhắc tới thì vẫn còn hiệu lực nguyên trạng (đặc biệt: quyết
-định "MỘT loader, HAI projection", lý do bác `units_to_markdown()`, và toàn bộ §6.21.2).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.15.7. Cập nhật S15-8 sau khi US-22 hoàn tất (2026-09-10) — spec thi "**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
-**Nguồn xác thực (Protocol 5 R5-01)**: đọc trực tiếp code thật ở commit hiện tại —
-`src/services/epub_document.py` (toàn file), `src/core/job_orchestrator.py:1208-1444`,
-`src/api/routes/jobs.py:318-352, 575-600, 1018-1040`, `src/core/config.py`, `pyproject.toml:26`,
-`uv.lock:1082`, và chạy thật `.venv/bin/python -c "import importlib.metadata as m;
-print(m.version('markdownify'))"` → **`1.2.3`, đã cài, import được**.
+**Ràng buộc còn hiệu lực cho nhánh EPUB→Markdown** (spec thi hành đầy đủ + lý do: design-log):
 
-##### A. Điểm LỆCH #1 (chặn implement thẳng theo spec cũ): `spine_documents` KHÔNG tồn tại
-
-S15-8 giả định `EpubDocument` phơi ra `.spine_documents -> list[tuple[str, BeautifulSoup]]`. Code
-thật **không có** thuộc tính này (grep `spine_documents` trong `src/` → 0 kết quả). Cấu trúc thật
-của class (`epub_document.py:524-528`) chỉ có:
-
-```
-@dataclass
-class EpubDocument:
-    path: Path                      # đường dẫn file .epub gốc (giữ lại, đọc lại zip được)
-    opf_dir: str                    # thư mục chứa .opf, từ META-INF/container.xml
-    _units: list[EpubUnit]          # projection DỊCH, expose qua property `units`
-```
-
-`load()` (`:530-596`) parse soup của từng document trong spine **bên trong vòng lặp cục bộ rồi vứt
-đi** — không giữ lại soup nào, và **không giữ lại cả danh sách `doc_href` theo thứ tự spine**.
-
-**Spec đã cập nhật — Dev làm như sau** (rẻ hơn và ít rủi ro bộ nhớ hơn spec cũ):
-
-1. Thêm field `_spine_hrefs: list[str] = field(default_factory=list)` + property công khai
-   `spine_hrefs -> list[str]`. `load()` **append `doc_href` vào list này ngay sau guard X6**
-   (`epub_document.py:566-573`, chỗ đã raise nếu `doc_href` không có trong zip) — tức thứ tự spine
-   được tính **đúng MỘT lần**, ở **đúng loader chung**, thoả tinh thần "MỘT loader" của S15-8 mà
-   **không** phải giữ toàn bộ soup của cả cuốn sách trong RAM.
-2. `to_markdown(images_out_dir)` **mở lại `zipfile.ZipFile(self.path)`** và với mỗi href trong
-   `self._spine_hrefs` gọi lại `_parse_xhtml(zf.read(href))` — dùng lại đúng helper `_parse_xhtml`
-   đã có (`:323`, Y1: `features="xml"` + fallback có kiểm chứng), **không** viết parser thứ hai.
-3. **KHÔNG** expose `spine_documents` như spec cũ. Lý do: 1 EPUB sách bánh vài trăm trang giữ đồng
-   thời hàng trăm soup lxml là chi phí bộ nhớ vô ích khi consumer duy nhất (`to_markdown`) duyệt
-   tuần tự một lần.
-4. Ràng buộc R6-02 của S15-8 **vẫn giữ nguyên**: `to_markdown()` phải chạy trên **cùng một
-   instance** đã `load()` (đọc `self._spine_hrefs`, `self.path`) — cấm gọi `load()` lần thứ hai bên
-   trong `to_markdown()`. Đây chính là sợi dây lineage Reviewer phải trace.
-
-##### B. Điểm LỆCH #2: `to_markdown()` phải tự đọc ảnh từ zip — `EpubDocument` hiện KHÔNG có API ảnh nào
-
-`load()` chỉ đọc `META-INF/container.xml` + các XHTML trong spine. **Không có** method nào liệt kê
-hay đọc ảnh. `to_markdown()` phải tự làm, và **điểm dễ sai nhất là gốc đường dẫn tương đối**:
-
-- `src` của `<img>` là tương đối so với **chính file XHTML chứa nó**, **KHÔNG** phải so với
-  `opf_dir`. Cách tính đúng:
-  `zip_entry = posixpath.normpath(posixpath.join(posixpath.dirname(doc_href), src))`
-  (`doc_href` ở đây đã là đường dẫn tuyệt đối trong zip, vì `load()` đã join `opf_dir` theo X6 —
-  `:565`). Dùng lại đúng công thức này, đừng join `opf_dir` lần nữa (sẽ ra sai).
-- Ghi bytes ra `images_out_dir / <basename>`, và rewrite `img["src"] = f"images/{basename}"`
-  **trên soup, TRƯỚC khi gọi `markdownify`** (để `markdownify` tự sinh `![alt](images/x.jpg)`).
-- **Trùng tên basename giữa 2 thư mục khác nhau** trong zip (ví dụ `ch1/img/f01.jpg` và
-  `ch2/img/f01.jpg`): nếu tên đích đã tồn tại **và** bytes khác nhau → thêm hậu tố tăng dần
-  (`f01_2.jpg`). Không được ghi đè im lặng (mất ảnh) và không được để 2 link Markdown trỏ nhầm nhau.
-- `src` là URL tuyệt đối (`http://…`) hoặc `data:` URI → **giữ nguyên, không copy**.
-- Entry không tồn tại trong zip → **không raise** (không được để 1 ảnh hỏng làm hỏng cả job
-  parse-only); bỏ `src` về nguyên trạng và ghi 1 dòng log warning. Khác hẳn guard X6 của `load()`
-  (ở đó lệch href = Bug #5 tái sinh, phải raise).
-
-##### C. §6.21.2 (`normalize_sup_sub`) — CHƯA có code nào, KHÔNG có gì để tái dùng
-
-Đã grep `src/` (`normalize_sup_sub|sup_sub|vulgar|fraction|6\.21`): **0 implementation**. Đây
-**không** phải thiếu sót — nhánh PDF→Markdown của US-15 (đã xong) không hề chuẩn hoá gì, vì
-Markdown do MinerU sinh, app không chen được vào (đúng như §6.21.3 đã ghi). Nghĩa là:
-
-- Nhánh EPUB→Markdown là **consumer ĐẦU TIÊN** của §6.21.2 → Dev **phải viết mới** `normalize_sup_sub(soup)`
-  đúng theo spec §6.21.2 (Bước 1 phân số + guard hỗn số, Bước 2 Unicode/ASCII fallback, 2 bảng ánh
-  xạ). Đặt trong `src/services/epub_document.py` như §6.21.2 chỉ định.
-- Bảng 7 dòng "Kết quả đã chạy thật" ở §6.21.2 là **bảng kỳ vọng test bắt buộc**, không phải ví dụ
-  minh hoạ.
-- Setting `markdown_supsub_style` (§6.21.2) **chưa tồn tại** trong `src/core/config.py` → Dev thêm
-  mới: `markdown_supsub_style: Literal["unicode", "pandoc"] = "unicode"`, **`.env`-only**, KHÔNG
-  thêm vào `SETTINGS_DB_OVERRIDABLE_FIELDS`.
-- `normalize_sup_sub()` chạy trên **bản soup của `to_markdown()`**. Nó **không được** đụng tới
-  luồng `units`/`write_translated()` của US-22 (EPUB→EPUB giữ `<sup>`/`<sub>` nguyên vẹn theo X2 —
-  `tests/test_epub_document.py:275-289` đang assert đúng điều đó; làm hỏng assert này = phá US-22).
-
-##### D. `markdownify` — ĐÃ CÀI, nhưng chưa pin đúng như S15-8 yêu cầu
-
-`pyproject.toml:26` khai `markdownify>=1.2.3`; `uv.lock` khoá `1.2.3`; `.venv` cài `1.2.3`
-(đã chạy thật). Không cần thêm dependency. **Nhưng** S15-8 ràng buộc "pin version" và hiện đang là
-`>=` — vì `normalize_sup_sub()` đã xử lý xong `sup`/`sub` **trước** khi `markdownify` nhìn thấy,
-rủi ro `sup_symbol` đổi mặc định đã bị vô hiệu hoá, **nhưng** hành vi `ol`/`ul` lồng/`img`/
-`figcaption` vẫn phụ thuộc thư viện. Chốt: **giữ `>=1.2.3`** (không siết `==`, tránh xung đột
-resolve về sau) và bù bằng **golden test bắt buộc** trên `ops/xhtml/chapter01.html` như S15-8 đã
-yêu cầu — đổi version mà output đổi thì golden test đỏ ngay.
-
-##### E. Wiring — vị trí sửa chính xác
-
-| # | File / vị trí hiện tại | Việc phải làm |
-|---|---|---|
-| W-1 | `src/api/routes/jobs.py:318-332` `_reject_epub_parse_only()` | **XOÁ hàm** + 2 call site (`:588` trong `create_job`, `:1027` trong `create_batch`). Đây chính là chốt chặn 400 cần gỡ |
-| W-2 | `src/api/routes/jobs.py:334-351` `_resolve_parse_method()` | Hiện `("auto", "epub")` → `"ocr"` — **vô nghĩa cho EPUB** (không có MinerU trong nhánh này). Sửa: trả **`None`** cho `file_type == "epub"`, và call site `:637-640` giữ `None` cho EPUB. `Job.parse_method` là cột nullable, `None` đúng nghĩa "không áp dụng" |
-| W-3 | `src/core/job_orchestrator.py:1216-1227` (nhánh `if job.file_type == FileType.EPUB: raise EpubNotSupportedError`) | **Thay** bằng `return await self._run_epub_parse_only(job, db_session)`. Phải đặt **trước** `_count_pdf_pages()` (`:1231`) và trước guard/health MinerU (`:1241-1245`) — EPUB không dùng MinerU, và `job.total_pages` **luôn NULL** cho EPUB (`upload.page_count`, §6.20.6) |
-| W-4 | `src/core/job_orchestrator.py:124` `EpubNotSupportedError` | Sau W-3 không còn call site nào → xoá class + import trong `tests/integration/test_job_orchestrator.py:15` và test `:1674` (test đó phải được **thay** bằng test nhánh mới, không xoá trắng) |
-| W-5 | `web/index.html:91-96` (checkbox `parse_force_ocr`) | Ẩn khi `f.file_type === 'epub'` — đó là lựa chọn MinerU `txt`/`ocr`, không có nghĩa với EPUB. `web/js/app.js:300` gửi `parse_method` → phải gửi `undefined` cho EPUB |
-| W-6 | `src/api/routes/download.py:65-67` | **Không phải sửa** — đã branch theo `job.job_type == "parse_only"` → `.zip`, không quan tâm `file_type`. Đây là lý do §6.15/S15-8 bắt output EPUB phải **giống hệt** cây output PDF |
-
-##### F. `_run_epub_parse_only()` — hình dạng bắt buộc (R6-01 data lineage)
-
-Method mới trên `JobOrchestrator`, **song song** với `_run_parse_only_pipeline()` (nhánh PDF), KHÔNG
-nhét thêm `if` vào trong nhánh PDF (nhánh PDF gắn chặt với MinerU từ đầu tới cuối). Bắt buộc tái sử
-dụng **nguyên xi** phần "đóng gói" của nhánh PDF (`job_orchestrator.py:1362-1444`) để 2 nhánh không
-trôi khác nhau — Dev tách phần đó thành helper dùng chung
-`_finalize_parse_only_output(job, markdown_text, image_files, db_session)`:
-
-```
-job.status = "parsing"; commit                     # KHÔNG gọi MinerU health, KHÔNG parse_method
-doc = EpubDocument.load(Path(job.file_path))       # raise EpubDrmError/EpubParseError -> job failed
-output_dir   = self._output_dir / job.id
-images_dir   = output_dir / "images";  images_dir.mkdir(parents=True, exist_ok=True)
-markdown_text = doc.to_markdown(images_out_dir=images_dir)     # <-- SỢI DÂY LINEAGE (R6-01)
-_finalize_parse_only_output(...)   # ghi document.md, guard đọc lại, zip eager, guard zip,
-                                   # output_path, actual_cost=0.0/"metered", completed, broadcast
-```
-
-Lineage tường minh (R6-01) — **artifact nào, ai đọc field nào**:
-
-| Bước | Sinh ra | Bước sau đọc |
-|---|---|---|
-| `EpubDocument.load(job.file_path)` | instance `doc` (`_spine_hrefs`, `path`, `opf_dir`) | `doc.to_markdown()` đọc **chính instance này**, cấm `load()` lại |
-| `doc.to_markdown(images_out_dir=output_dir/"images")` | **giá trị trả về** = chuỗi Markdown; **side effect** = các file ảnh trong `images_dir` | `_finalize_parse_only_output` ghi chuỗi đó vào `output_dir/"document.md"`, zip `document.md` + `images/*` |
-| `output_dir/"parse_result.zip"` | file zip | `job.output_path`, rồi `download.py` |
-
-Guard bắt buộc, **giống nhánh PDF, không được bỏ**: Markdown rỗng sau strip → raise
-`ParseOnlyEmptyOutputError`; đọc **lại** `document.md` từ đĩa để kiểm (không tin biến trong RAM);
-`zipfile.testzip()` + đếm entry `images/` khớp số file thật → `ParseOnlyZipGuardError`.
-
-**Không** có cancel/timeout polling ở nhánh EPUB (không có tác vụ dài bên ngoài để poll — parse
-thuần local, xong trong vài giây); `_should_cancel`/`MinerUCancelledError` là chuyện riêng của
-MinerU. Guard `EpubDrmError`/`EpubParseError` đã có sẵn hình dạng HTTP 400 tương ứng ở
-`jobs.py:365-390` cho luồng translate — ở đây rơi vào `except Exception` của `run_parse_only()`
-(`:1294`) → `job.status="failed"` + `error_message`, đúng contract sẵn có.
-
-##### G. Test bắt buộc (bổ sung cho §6.15.6)
-
-1. **R6-02 nối 2 projection** (S15-8 đã yêu cầu, giữ nguyên): từ **một** `load()`, assert số
-   `h2`/`h3` trong `to_markdown()` **==** số unit có `tag in {"h2","h3"}`. ⚠️ Lưu ý đã kiểm:
-   `_is_droppable_content()` (`:282`) có thể **drop** một heading toàn chữ số (ví dụ `<h2>1</h2>`)
-   khỏi `units` trong khi `to_markdown()` vẫn giữ nó → nếu file mẫu có ca này, assert phải trừ đúng
-   số đó và **ghi rõ lý do trong test**, không được nới assert thành `>=` cho qua chuyện.
-2. **Golden test** `to_markdown()` trên `ops/xhtml/chapter01.html` (S15-8): 10 `<img>`, 214
-   `<strong>`, 26 `<em>`, 2 `h2`, 34 `h3` — các số này lấy từ chính bảng đo của S15-8.
-3. **Bảng §6.21.2 7 dòng** cho `normalize_sup_sub()`, đặc biệt ca hỗn số N-1 (`1 1/3`, KHÔNG phải
-   `11/3`).
-4. **Không hồi quy US-22**: `tests/test_epub_document.py` phải **xanh nguyên** — `units` vẫn chứa
-   `<sup>1</sup>/<sub>3</sub>` thô.
-5. **R6-03 live E2E**: upload EPUB thật → `job_type=parse_only` → tải zip → giải nén → `document.md`
-   có chữ thật + **mở được ít nhất 1 file trong `images/`**, và link `![](images/…)` trong Markdown
-   trỏ đúng file tồn tại (không chỉ tin `status="completed"` — đây đúng là cách Bug #5 bị bắt).
-
----
+- `EpubDocument` KHÔNG expose `spine_documents`; thứ tự spine giữ ở `_spine_hrefs`/`spine_hrefs`,
+  điền **một lần** trong `load()`. `to_markdown()` mở lại zip và dùng lại helper `_parse_xhtml`.
+- `to_markdown()` phải chạy trên **cùng instance đã `load()`** — cấm gọi `load()` lần hai (R6-02).
+- Đường dẫn ảnh tính theo thư mục của **chính file XHTML** chứa `<img>`:
+  `posixpath.normpath(posixpath.join(posixpath.dirname(doc_href), src))`; trùng basename → thêm hậu
+  tố tăng dần; URL tuyệt đối/`data:` giữ nguyên; entry thiếu trong zip → log warning, KHÔNG raise.
+- `normalize_sup_sub()` (§6.21.2) chỉ chạy trên soup của `to_markdown()`, KHÔNG đụng
+  `units`/`write_translated()` của US-22.
+- `markdown_supsub_style: Literal["unicode","pandoc"] = "unicode"` — `.env`-only, KHÔNG vào
+  `SETTINGS_DB_OVERRIDABLE_FIELDS`. `markdownify>=1.2.3` + golden test trên `chapter01.html`.
+- `_resolve_parse_method()` trả `None` cho `file_type == "epub"`; `download.py` không phải sửa.
 
 ### 6.16. US-17 + US-18 — Glossary: thêm từ mới có xác nhận ghi đè, và search server-side
 
 #### 6.16.1. Nguồn xác thực (đo thật trên chính stack của project)
 
-Không suy đoán về SQLite/SQLAlchemy — chạy thật trên `.venv` của project (SQLAlchemy 2.0.52,
-SQLModel 0.0.42, aiosqlite 0.22.1, Python 3.14.7) với đúng model `GlossaryEntry` hiện có:
-
-| # | Đo được | Kết quả thật |
-|---|---|---|
-| G-01 | `col(GlossaryEntry.term_en).contains("ganache")` sinh SQL `term_en LIKE '%' \|\| 'ganache' \|\| '%'` | khớp row `"Ganache"` → **LIKE của SQLite case-insensitive cho ASCII, mặc định, không cần `lower()`** |
-| G-02 | `.ilike("%GANACHE%")` sinh `lower(term_en) LIKE lower('%GANACHE%')` | cũng khớp — nhưng `lower()` của SQLite **cũng chỉ ASCII** |
-| G-03 | `.ilike("%đường%")` trên row `"Đường Nâu"` | **0 kết quả**. `.ilike("%Đường%")` → 1 kết quả. Xác nhận EC-18.2 của BA là ĐÚNG: chữ Việt có dấu KHÔNG được fold hoa/thường |
-| G-04 | `.ilike("%_%")` (gạch dưới thô) trên bảng 7 dòng | trả về **cả 7 dòng** — `_` là wildcard, không escape là lỗi thật, không phải lý thuyết |
-| G-05 | `.contains("50%", autoescape=True)` sinh `term_en LIKE '%' \|\| '50/%' \|\| '%' ESCAPE '/'` | khớp đúng 1 dòng `"50% hydration"` — **`autoescape=True` là API đúng để dùng** |
-| G-06 | `count_statement` và `list_statement` dùng **cùng 1 biểu thức điều kiện** OR `(term_en LIKE ... OR term_vi LIKE ...)` | `total` khớp đúng số dòng trả về (3/3) |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.16.1. Nguồn xác thực (đo thật trên chính stack của project)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.16.2. US-18 — `GET /api/glossary?q=`
 
@@ -4564,19 +3814,7 @@ assertion mà test cost gate §6.11 đã làm đúng: đếm thật bằng `SELE
 
 #### 6.17.1. Phát hiện chặn thiết kế: `updated_at` KHÔNG dùng làm mốc kết thúc được
 
-PRD US-19 giả định đây là thay đổi thuần tầng response ("các cột này ĐÃ có trong `Job` table, chỉ
-thiếu ở tầng serialize"). Đúng cho `total_pages` và `started_at`. **Sai cho mốc kết thúc.**
-
-Đo thật (grep toàn `src/`, đọc `src/models/job.py`):
-
-| # | Sự thật | Hệ quả |
-|---|---|---|
-| H-01 | `Job.completed_at` chỉ được gán ở **đúng 1 chỗ**: nhánh thành công cuối `run_job()` (Step 10) | job `failed`/`cancelled`/`cost_capped` có `completed_at = NULL` |
-| H-02 | `Job.updated_at` **không có `onupdate=`**, và chỉ có **1 writer duy nhất** trong toàn `src/`: `ProgressTracker.update()` (`src/core/progress_tracker.py`) — gọi sau MỖI chunk xong | với job `failed`, `updated_at` = lúc chunk **cuối cùng THÀNH CÔNG**, không phải lúc fail |
-| H-03 | Nhánh fail của Step 7 `return` **trước** `progress_tracker.update()` | job fail ngay ở chunk 0 → `updated_at` vẫn bằng `created_at` → "thời gian dịch ≈ 0 giây" cho một job chạy 20 phút rồi chết |
-
-Fallback `completed_at or updated_at` (cách làm hiển nhiên nhất) vì thế **cho ra con số sai một
-cách im lặng** đúng ở kịch bản AC-19.2 của BA quan tâm nhất ("nó chạy bao lâu rồi mới chết?").
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.17.1. Phát hiện chặn thiết kế: `updated_at` KHÔNG dùng làm mốc kết t"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.17.2. Quyết định: thêm cột `Job.finished_at`
 
@@ -4650,45 +3888,7 @@ Nút **"Xoá job"** đã có từ 2026-09-06 **giữ nguyên** (BA đính chính
 
 #### 6.18.1. Mâu thuẫn phải giải: BR-TERM-03 ($0 mặc định) vs "thuật ngữ chuyên môn" (cần LLM)
 
-PM nêu đúng mâu thuẫn: rule-based miễn phí nhưng không phân biệt được `flour` (từ thường) với
-`laminated dough` (thuật ngữ); LLM-based chính xác hơn nhưng tốn 1 lượt gọi/job kể cả khi user
-không cần — vi phạm BR-TERM-03.
-
-**Cách gỡ: đây không phải bài toán phân loại nhị phân, mà là bài toán XẾP HẠNG cho một danh sách
-người duyệt.** Khu vực "Chờ duyệt" theo thiết kế của chính user là nơi user **triage bằng mắt** —
-mỗi dòng có 2 nút "Thêm" / "Bỏ qua". Với giao diện đó, chi phí của một false-positive là **một cú
-bấm**, còn chi phí của một false-negative là **thuật ngữ đó vĩnh viễn không bao giờ được gợi ý**.
-Hai loại lỗi không hề đối xứng. Vậy nên tiêu chí đúng cho v1 là **recall cao + xếp hạng tốt**,
-không phải precision cao.
-
-Rule-based đạt được điều đó với chi phí $0. LLM không mua thêm được recall (nó chỉ lọc bớt), nên
-trả tiền cho nó ở bước liệt kê là trả tiền cho thứ không cần thiết.
-
-**Quyết định: rule-based cho bước LIỆT KÊ (mặc định, $0, đúng BR-TERM-03). LLM chỉ xuất hiện ở
-nút "Gợi ý bản dịch" người dùng chủ động bấm.**
-
-Chốt thêm 2 điều để rule-based không thành rác:
-1. **N-gram 1–3 từ, không phải chỉ từ đơn** — EC-20.6 của BA đúng: `baker's percentage`,
-   `double boiler`, `laminated dough` là nhóm giá trị nhất và trích xuất theo từ đơn bỏ sót toàn bộ.
-2. ~~**Có bộ lọc từ phổ thông tiếng Anh**~~ — **ĐIỂM NÀY ĐÃ BỊ BÁC BỎ, xem §6.18.8.**
-
-> ### ⚠️ §6.18.1 và §6.18.2 (bản 2026-09-08 sáng) ĐÃ BỊ THAY THẾ MỘT PHẦN
->
-> **Khung tư duy** của §6.18.1 (đây là bài toán XẾP HẠNG cho người duyệt, không phải phân loại
-> nhị phân; recall > precision; rule-based $0 mặc định, LLM chỉ khi user bấm) **giữ nguyên hiệu
-> lực** — Domain Expert đã phản biện độc lập và đồng ý với khung này.
->
-> **Hai thứ bị thay thế**, do (a) phản biện Domain Expert 2026-09-08 với số đo trên sách thật, và
-> (b) **quyết định mới của user cùng ngày**:
-> - **điểm 2 ở trên** (bộ lọc `en_common.txt` ~3.000 từ) — bị bác bỏ hoàn toàn, xem §6.18.8 mục T2;
-> - **bước 6 của §6.18.2** (cắt cứng còn 40 term) — bị bác bỏ, xem §6.18.8 mục T1.
->
-> Ví dụ minh hoạ "`flour` bị loại" trong đoạn văn trên **cũng sai với dữ liệu thật**: với danh
-> sách phổ thông tiêu biểu (google-10000), `flour` xếp hạng **9751** nên **KHÔNG** bị lọc, trong
-> khi `proof` (2933), `score` (1154), `cream` (2966), `rest` (1539), `turn`, `cup` — **đều là
-> glossary entry thật của user** — thì **BỊ** lọc. Bộ lọc chạy ngược đúng hướng xấu nhất.
->
-> Dev đọc **§6.18.8 trước**, rồi mới đọc §6.18.2 để lấy phần chưa bị thay thế.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.18.1. Mâu thuẫn phải giải: BR-TERM-03 ($0 mặc định) vs "thuật ngữ ch"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.18.2. Thuật toán trích xuất (spec cho Dev — `src/core/term_extractor.py`, module MỚI)
 
@@ -4861,63 +4061,17 @@ if result.status == "completed" and settings.term_extraction_enabled:
 
 #### 6.18.7. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)
 
-1. **BR-TERM-04 (phạm vi "Bỏ qua")** — user đã chốt per-job. Tech Lead **thực hiện đúng** như chốt,
-   nhưng ghi lại rủi ro đã đo được: cuốn thứ hai cùng chủ đề sẽ gợi ý lại đúng những từ user đã từ
-   chối ở cuốn thứ nhất. Nếu sau 2-3 cuốn user thấy phiền, việc nâng lên "nhớ toàn cục" chỉ là đổi
-   `UNIQUE(job_id, term_en)` thành một bảng `dismissed_terms(term_en)` riêng — không phá gì đã có.
-   **Không cần quyết định lại bây giờ**, chỉ cần biết đường lùi tồn tại.
-2. **EC-20.1 (từ đã có trong glossary nhưng tài liệu dùng bản dịch khác)** — v1 **không** phát hiện
-   được (app không có cặp EN↔VI cho nhánh PDF, xem §6.6.2 R1). Đây là "đề xuất SỬA", khác hẳn "từ
-   MỚI", và trộn chung sẽ khiến user vô tình ghi đè entry đã curate. **Ngoài scope US-20.** Ghi
-   nhận: khi US-22 (§6.20) lên production, EPUB **sẽ có** cặp EN↔VI thật → tính năng "đề xuất sửa
-   bản dịch" trở nên khả thi, nhưng chỉ cho EPUB.
-3. **EC-20.5 (rác OCR leo vào danh sách)** — ~~`term_min_occurrences=3` lọc được phần lớn (lỗi OCR
-   hiếm khi lặp y hệt 3 lần)~~. **SỬA 2026-09-08**: lập luận này **sai với lỗi hệ thống**. Đo
-   thật trên Figoni: `avor` xuất hiện **638 lần**, `rst` 147 lần — artifact của tầng trích xuất
-   text lặp lại hàng trăm lần, `min_occurrences` không phải phòng tuyến cho loại này. Phòng tuyến
-   đúng là bước chuẩn hoá ở T2 (§6.18.8). `min_occurrences` vẫn giữ, nhưng chỉ với đúng vai trò
-   "sàn tần suất", không phải "chống rác OCR".
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.18.7. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.18.8. Final Decision sau phản biện Domain Expert + quyết định mới của user (2026-09-08)
 
-**Tác giả**: Tech Lead — thiết kế, KHÔNG implement.
-**Quan hệ tài liệu**: mục này **thay thế (supersede)** — §6.18.1 điểm 2, §6.18.2 **bước 1, 3, 4,
-5, 6** và bảng config, §6.18.5 bước 3, §6.18.7 mục 3. Mọi phần khác của §6.18 **giữ nguyên hiệu
-lực**. Khi mâu thuẫn, **mục này thắng**.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.18.8 — bối cảnh Final Decision US-20"**.
 
-**Hai nguồn thay đổi, phải phân biệt rõ**:
-- **(a) Phản biện Domain Expert** — 4 lỗi đo được trên dữ liệu thật của user (2 cuốn sách đã dịch
-  + 1 bản OCR MinerU + 114 glossary entry thật).
-- **(b) Quyết định MỚI của user cùng ngày** (trả lời trực tiếp 2 câu hỏi Expert đặt cho PM):
-  *"Chỉ khuyến nghị từ mới khi từ đó không có trong glossary. CÓ thể mở pool nếu cần nhưng thoả
-  mãn điều kiện trước"* và *"Chỉ gợi ý các từ không có trong glossary"*. Tức: **điều kiện lọc DUY
-  NHẤT là "không có trong glossary"** — không trần số lượng tuỳ ý, và **BR-TERM-04 giữ nguyên
-  per-job** (không thêm cơ chế nhớ "đã bỏ qua" xuyên nhiều cuốn).
-
-Quyết định (b) làm **đổi trọng tâm kỹ thuật của cả US-20**: trước đây trọng tâm là "chọn con số
-trần và công thức xếp hạng cho vừa 40 slot"; bây giờ trọng tâm là **làm cho phép so khớp "đã có
-trong glossary" thật sự chính xác** (T3) và **làm cho ứng viên sạch ngay từ tầng token** (T2) —
-vì mọi thứ qua được 2 cửa đó đều sẽ hiển thị.
+Các mục T1–T8 dưới đây là hợp đồng hiện hành của thuật toán trích xuất thuật ngữ (US-20).
 
 ##### T0. Số đo nền (kế thừa từ phản biện, Tech Lead KHÔNG đo lại)
 
-Ghi rõ ranh giới kế thừa để Reviewer/QA biết cái gì đã được verify và bởi ai. Nguồn: Figoni *How
-Baking Works* 415 trang (1.149.727 ký tự) + Cauvain *Baking Problems Solved* 298 trang, cả hai
-trích bằng **chính `_extract_full_text()` của app** (`src/core/job_orchestrator.py:131`); glossary
-thật 114 entry đọc từ `data/bb_translation.db`.
-
-| Đo được | Figoni | Cauvain |
-|---|---|---|
-| Pool ứng viên sau lọc + khử lồng (`min_occ=3`) | **5.177** | 2.343 |
-| Term user đã tự curate, xuất hiện ≥3 lần trong sách | 60 | 29 |
-| **Median tần suất** của các term đó | **13** | 11 |
-| Tần suất thấp nhất lọt top-40 theo spec cũ | ≥172 | ≥68 |
-| **recall@40** (spec cũ) | **1/60** | 5/29 |
-| recall@500 | 18/60 | 14/29 |
-
-Kết luận không thể tránh: **term user thật sự muốn nằm rải rác từ hạng #11 tới #4438** — không có
-công thức xếp hạng nào cứu được một con số trần cứng bằng 40. Đó là lý do quyết định (b) của user
-là đúng về kỹ thuật, không chỉ là sở thích.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"T0. Số đo nền (kế thừa từ phản biện, Tech Lead KHÔNG đo lại)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### T1. Bỏ trần cứng 40 → liệt kê hết, phân trang ở UI
 
@@ -5095,32 +4249,11 @@ có sẵn vì nó phản ánh gu của **chính user** (YA-4.7), không phải c
 
 ##### T7. Những điểm của Expert tôi KHÔNG làm theo (kèm lý do)
 
-| Đề xuất Expert | Quyết định | Lý do |
-|---|---|---|
-| FD-2: giữ `en_common.txt` + thêm `baking_sense_allowlist.txt` | **Làm mạnh hơn: bỏ hẳn list** | Xem T2. Không phải bất đồng về phát hiện (phát hiện đúng 100%), mà là chọn cách sửa triệt để hơn — allowlist là vá lỗ cho một bộ lọc mà lý do tồn tại đã biến mất sau quyết định (b) của user |
-| FD-3 (a)(c): **lọc bỏ** n-gram có hư từ ở giữa và tên riêng | **Đổi thành demote + ẩn mặc định** (T4) | Dưới luật mới, xoá vĩnh viễn vì lý do ngoài "đã có trong glossary" là thêm luật thứ hai; và `Swiss meringue`/`Silpat`/`Fahrenheit` là glossary entry thật lại đúng dạng tên riêng |
-| FD-6: `max_suggested_terms_per_job = 500` (trần lưu) + UI phân trang 40 | **Trần lưu 20.000, UI phân trang 50** | 500 vẫn cắt mất **4.677/5.177** ứng viên của Figoni — vẫn là một con số tuỳ ý, đúng thứ user vừa bác. Giữ trần chỉ để chống tràn |
-| FD-6: sàn tần suất theo số trang | **Đổi sang số token** | `total_pages` NULL cho EPUB theo thiết kế (§6.20.6) |
-| FD-7: PM hỏi user đổi "trần 40" → "pool + phân trang" | **User đã trả lời rồi** (nguồn (b)) | Không hỏi lại |
-| FD-7 (tuỳ chọn): nút trả phí thứ hai "Lọc bằng LLM" chạy trên pool | **KHÔNG làm ở v1** | Trực tiếp mâu thuẫn với luật user vừa chốt: điều kiện lọc **duy nhất** là glossary. Thêm một bộ lọc LLM là đưa lại đúng thứ vừa bị bỏ, lần này còn tốn tiền. (Số giá DeepSeek Expert nêu cũng còn `[CHƯA VERIFY]` phần alias `deepseek-chat`.) |
-| FD-8: PM hỏi lại user về phạm vi BR-TERM-04, kèm số đo 17/40 dòng trùng nhau giữa 2 cuốn | **Đã hỏi, user giữ nguyên per-job** | User trả lời trực tiếp: *"Chỉ gợi ý các từ không có trong glossary"* cho cả câu hỏi về trùng lặp giữa nhiều cuốn. **Rủi ro Expert đo được vẫn ghi nhận nguyên trạng**: top-40 của Figoni và Cauvain (khác tác giả, khác nước, cách nhau 7 năm) trùng **17/40 dòng** — user sẽ gặp lại cùng bộ từ đó ở mọi cuốn nếu không bấm "Thêm". Giảm nhẹ: T1 (không còn top-40 nên 17 dòng đó không còn chiếm 40% màn hình đầu) + BR-TERM-02 (mỗi từ đã "Thêm" biến mất vĩnh viễn). Đường lùi vẫn nguyên: bảng `dismissed_terms(term_en)` riêng, không phá gì đã có |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"T7. Những điểm của Expert tôi KHÔNG làm theo (kèm lý do)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### T8. Gate release bổ sung cho US-20
 
-1. **R6-02**: test lineage `pdf_scan` phải assert đọc **đúng `job.ocr_bridge_path`** (đã có ở
-   §6.18.5), **và** test lineage `parse_only` phải assert đọc
-   `Path(job.output_path).parent / "document.md"` — **không** phải `job.output_path` (nay là file
-   `.zip`, S15-4).
-2. **R6-03 live cho nhánh `pdf_scan`** `[CHƯA VERIFY]`: DB hiện chỉ có 9 job `pdf_digital`
-   completed, **không còn `searchable.pdf` nào trên đĩa** → chưa ai đo được text layer của file
-   cầu nối có mang lỗi OCR lặp (kiểu `ganaehe`) hay không. QA **phải** chạy 1 job `pdf_scan` thật
-   và **mở danh sách gợi ý ra xem**, không chỉ tin là có rows.
-3. **Test T3 với glossary THẬT**: assert `pound`, `ounce`, `bloom`, `tempering`, `whipping`,
-   `kneading`, `teaspoon`, `crusts`, `meringues`, `mousses` **KHÔNG** xuất hiện trong danh sách
-   gợi ý khi glossary thật (114 entry) đang được áp — đây là bài kiểm trực tiếp cho luật duy nhất
-   user chốt.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"T8. Gate release bổ sung cho US-20"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ### 6.19. US-21 — Hiển thị phiên bản
 
@@ -5174,91 +4307,15 @@ sau này quay lại phương án A, **phải pin version và verify lại từ �
 
 #### 6.20.2. Sự thật đã verify về `bbook-maker==1.1.0`
 
-| # | Sự thật | Nguồn | Hệ quả |
-|---|---|---|---|
-| E-01 | Cờ `--model`, `--claude_key`, `--openai_key`, `--prompt`, `--test`, `--test_num`, `--resume`, `--proxy`, `--api_base`, `--single_translate`, `--only_filelist`, `--exclude_filelist`, `--translate-tags`, `--accumulated_num`, `--use_context`, `--temperature`, `--block_size`, `--model_list`, `--interval` **đều tồn tại** | `bbook_maker --help` chạy thật | §6.7 cũ tình cờ đúng tên cờ |
-| E-02 | `--single_translate` = "output translated book, no bilingual"; cài đặt: `insert_trans()` chèn `<p>` dịch ngay sau `<p>` gốc rồi `p.extract()` xoá bản gốc | `--help` + `loader/helper.py:19-31` | Ra được bản **đơn ngữ** — điểm §6.7 cũ đánh dấu `[CHƯA VERIFY]` |
-| E-03 | `MODEL_DICT` = `{openai, chatgptapi, gpt4, gpt4omini, gpt4o, o1preview, o1, o1mini, o3mini, google, caiyun, deepl, deeplfree, claude, claude-3-5-*, gemini, geminipro, groq, tencentransmart, customapi, xai, qwen, qwen-mt-*}`. **KHÔNG có `deepseek`. KHÔNG có `ollama`** (ollama đi qua `--model chatgptapi --ollama_model <name>`) | `translator/__init__.py:14-42` | **Provider mặc định của app (DeepSeek) không được hỗ trợ native.** Phải lách qua `--model openai --model_list deepseek-chat --api_base https://api.deepseek.com/v1 --openai_key <deepseek key>` |
-| E-04 | Output ghi **cạnh file input**, tên **cố định** `f"{input_stem}_bilingual.epub"` — kể cả khi `--single_translate`. **Không có cờ `--output`** nào | `loader/epub_loader.py:546,551` + `--help` (không có `--output`) | Runner phải copy input vào thư mục tạm riêng mỗi chunk (đúng bài học F9 của pdf2zh) |
-| E-05 | `--only_filelist 'a.html,b.html'`: file **không** nằm trong danh sách thì `process_item()` `return` **mà KHÔNG gọi `new_book.add_item(item)`** | `loader/epub_loader.py:384-387` (đối chiếu: nhánh `exclude_filelist` ở `:388-391` **có** `add_item`) | EPUB output **bị thiếu hẳn** các chương không được chọn → không thể dùng làm cơ chế chunk nếu không tự ghép lại |
-| E-06 | `make_bilingual_book()` bọc toàn bộ trong `except (KeyboardInterrupt, Exception) as e: print(e); … sys.exit(0)` | `loader/epub_loader.py:553-560` | **Mọi lỗi dịch thoát với exit code 0.** Runner kiểm `returncode` sẽ tưởng thành công |
-| E-07 | **Chạy thật**: `bbook_maker --model claude --claude_key sk-ant-fake … --single_translate --test --test_num 2` → **EXIT CODE 0**, stdout in `Messages.create() got an unexpected keyword argument 'temperature'`, không sinh `book_bilingual.epub`, chỉ sinh `book_bilingual_temp.epub` + `.book.temp.bin` + thư mục `log/` | tự chạy, log giữ tại scratchpad | Xác nhận E-06 bằng thực nghiệm. Đồng thời: **đường Claude của tool HỎNG** với `anthropic` SDK hiện tại — `claude_translator.py:101` truyền `temperature=` vào `messages.create()`, mà SDK `anthropic` 1.3.0 (trong `.venv` project) và 1.4.0 (mới nhất) **đều không còn tham số này** (`inspect.signature` kiểm thật). `Requires-Dist: anthropic` **không pin version** → lỗi này sẽ tự tái diễn |
-| E-08 | `ChatGPTAPI.translate()`: `except Exception as e: print(str(e)); return` → trả **`None`** cho từng đoạn lỗi (chỉ `RateLimitError` mới retry, tối đa 3 lần) | `translator/chatgptapi_translator.py:213-216` | Lỗi cấp-đoạn bị nuốt im lặng, không đếm được |
-| E-09 | `insert_trans()`: `if text is None: text = ""` — rồi vẫn chèn `<p>` **rỗng** và (với `--single_translate`) **xoá bản gốc** | `loader/helper.py:19-31` | Kịch bản Bug #5 ở quy mô nguyên cuốn: chương trống, exit 0 |
-| E-10 | `helper.translate_with_backoff` = `@backoff.on_exception(backoff.expo, Exception, …)` **không có `max_tries`/`max_time`** | `loader/helper.py:35-41` | Retry **vô hạn** trên nhánh `--accumulated_num > 1`. Với `--model claude` nó gọi `translate(text, context_flag)` (2 tham số) trong khi `Claude.translate(self, text)` chỉ nhận 1 → `TypeError` mỗi lần → vòng lặp không thoát |
-| E-11 | **Không có bất kỳ token/usage/cost accounting nào** trong toàn package (grep `usage` trên `translator/`, `loader/`, `cli.py`, `utils.py` → 0 kết quả) | grep source đã cài | `cost_source` sẽ mãi là `'estimated'`, y hệt pdf2zh (§6.6.6) |
-| E-12 | `--prompt` nhận chuỗi template / chuỗi JSON / đường dẫn `.txt`/`.json`/`.md`; placeholder là **`{text}`** và **`{language}`**, thay bằng `str.format()` | `cli.py::parse_prompt_arg` + `claude_translator.py:47-52` | Khác pdf2zh (`string.Template`, `${text}`): ở đây mọi dấu `{`/`}` trong glossary phải escape thành `{{`/`}}`. Prompt file của app **không dùng lại được** |
-| E-13 | Trạng thái resume là 1 file **pickle** `.{stem}.temp.bin` cạnh input, chứa list bản dịch theo **chỉ số tuyến tính toàn sách** | `loader/epub_loader.py:115-120, 562-567, 613-618` | Không tương thích với chunk theo `--only_filelist` (chỉ số lệch nhau giữa các lần chạy khác tập file) |
-| E-14 | `--model chatgptapi` với key sai → `set_gpt35_models()` gọi `models.list()` ngay lúc khởi tạo → **exit code 1** kèm traceback thật | tự chạy `--openai_key sk-fake-…` | Đây là nhánh DUY NHẤT fail-fast; nó xảy ra **trước** `make_bilingual_book()` nên không bị `sys.exit(0)` nuốt |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.2. Sự thật đã verify về `bbook-maker==1.1.0`"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.3. Sự thật đã đo về cấu trúc EPUB thật và về `ebooklib`
 
-| # | Đo được trên file thật | Con số |
-|---|---|---|
-| B-01 | Số `ITEM_DOCUMENT` (tài liệu XHTML) trong cả cuốn | **5** (spine cũng 5) |
-| B-02 | Phân bố ký tự văn bản theo tài liệu | `cover.html` 0 · `title.html` 32 · `copyright.html` 1.438 · **`chapter01.html` 50.899** · `backmatter01.html` 0 |
-| B-03 | Tỉ lệ nội dung nằm trong 1 tài liệu duy nhất | **50.899 / 52.369 = 97,2%** |
-| B-04 | Số đơn vị dịch (`p,h1..h6,li,blockquote,td,th`, bỏ đoạn rỗng/toàn số) | **384** (373 trong đó thuộc `chapter01.html`) |
-| B-05 | `ebooklib==0.20` + `bs4` cài & chạy được trên **Python 3.14.7** (đúng Python của `.venv` project) | PASS |
-| B-06 | `epub.write_epub()` round-trip: **dời toàn bộ thư mục** `ops/…` → `EPUB/…`, đổi tên OPF thành `content.opf`, ghi lại `container.xml`, và **ghi lại toàn bộ XHTML + `toc.ncx`** (bs4/lxml serialize lại) | 28 entry vào / 28 entry ra, ảnh + font + CSS giữ **byte-identical** (20/20), nhưng **mọi đường dẫn đổi** |
-| B-07 | **Ghi đè tại chỗ bằng `zipfile`** (chỉ thay đúng entry XHTML đã dịch, giữ nguyên thứ tự entry, giữ `mimetype` là entry đầu + `ZIP_STORED`) | **27/27 entry còn lại byte-identical**, thứ tự entry giữ nguyên, `ebooklib` đọc lại OK (5 docs, spine 5) |
-| B-08 | Không có `META-INF/encryption.xml` trong file mẫu | không DRM |
-
-~~**B-03 là con số quyết định cả section này.**~~
-
-> **SỬA SAU PHẢN BIỆN DOMAIN EXPERT (2026-09-08) — B-03 KHÔNG được phép là con số quyết định.**
-> Expert tái lập độc lập toàn bộ B-01..B-08 bằng **stdlib** (`zipfile` + `html.parser` +
-> `ElementTree`, không dùng chung code path với tôi) và xác nhận **mọi số đều đúng** (B-03 đo lại
-> = 97,4%, lệch <0,3% do parser khác). **Nhưng** Expert đọc `ops/9781603424073.opf` và tìm ra
-> điều tôi bỏ sót: `<dc:format>35 Pages</dc:format>`, `<dc:publisher>Storey Publishing</dc:publisher>`,
-> mô tả *"Storey's Country Wisdom Bulletins"* — **đây là một bulletin 35 trang, N=1, KHÔNG đại
-> diện cho sách thương mại**. NCX có đúng 1 navPoint nội dung; 34 "chương" thật (công thức) là
-> `<h3>` **bên trong** 1 file XHTML. Một cookbook thương mại 200–400 trang thường tách 1 XHTML
-> mỗi chương — trên sách như vậy `--only_filelist` của phương án A *có thể* chọn từng chương.
->
-> Tức là **B-03 chỉ chứng minh A thất bại trên file này**, không chứng minh A thất bại nói chung.
-> **Quyết định chọn phương án B KHÔNG đổi** (xem §6.20.4 đã sắp xếp lại thứ tự lý do) — nhưng
-> Dev/QA phải biết ranh giới bằng chứng: mọi con số cấu trúc EPUB trong §6.20.3 là **N=1 trên một
-> bulletin mỏng**. Xem thêm §6.20.11 mục 7 (xin user 1 EPUB sách dày thật trước spike).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.3. Sự thật đã đo về cấu trúc EPUB thật và về `ebooklib`"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.4. So sánh 2 phương án
 
-| Tiêu chí | **A — `bilingual_book_maker` all-in-one** | **B — `ebooklib` parse + Translation Engine nội bộ** |
-|---|---|---|
-| Đơn vị chunk nhỏ nhất khả thi | **1 tài liệu XHTML** (`--only_filelist`, E-05) | **1 nhóm đoạn văn**, ngưỡng theo số ký tự — ta tự quyết |
-| Áp lên sách thật (B-03) | 1 chunk chứa **97,2%** nội dung → Lớp 3 gần như **vô hiệu**, đúng thứ BR-EPUB-02 cấm | 52.369 ký tự → **7 chunk** (ngưỡng 8.000 ký tự), cân đối |
-| Ghép lại sau khi chunk | Phải tự ghép: E-05 nói tài liệu ngoài `--only_filelist` **bị xoá khỏi output** | Không cần ghép EPUB — chỉ gộp mapping `unit_id → text` rồi ghi 1 lần |
-| Resume (BR-CHUNK-05) | Pickle theo chỉ số toàn sách (E-13), **không tương thích** với chunk | Tái dùng nguyên `chunks` table đã có |
-| Cost metering | **Không có gì** (E-11) → `cost_source='estimated'` vĩnh viễn | `provider.translate()` trả token thật → **`cost_source='metered'`** — pipeline ĐẦU TIÊN của dự án làm được |
-| Provider mặc định (DeepSeek) | **Không hỗ trợ native** (E-03), phải lách qua `--model openai --model_list` | Hỗ trợ sẵn từ Increment 3 |
-| Provider Claude | **Hỏng** với SDK hiện tại (E-07), hỏng **im lặng** | Hoạt động (Increment 3, `ClaudeProvider` riêng của app) |
-| Hành vi khi lỗi | **exit 0** (E-06/E-07) + đoạn rỗng thay bản gốc (E-09) + retry vô hạn (E-10) | Exception Python bình thường, đi qua `with_retry` đã có |
-| Glossary injection | Qua `--prompt` `{text}`/`{language}` (E-12) — phải viết prompt builder thứ 2 | `build_system_prompt()` đã có, dùng nguyên |
-| Cancel giữa chừng | Không có (chỉ Ctrl-C) | Tái dùng `cancel_requested` đã verify sống ở QA Vòng 5 |
-| Công phải tự viết | Runner + parse output + prompt builder riêng + tự ghép EPUB từ các phần | ~~Parse XHTML → unit, ghi ngược, chunk plan (~1 module)~~ → **đánh giá lại 2026-09-08: 1 module + contract JSON app↔LLM (X4) + giữ inline markup (X2) + guard bilingual (X3). Phần khó thật nằm ở đó, KHÔNG phải "vài chục dòng BeautifulSoup"** |
-| Rủi ro Protocol 5 tồn dư | Cao — mọi hành vi phụ thuộc 1 tool không pin, đang đổi CLI (§6.20.1) | Thấp — `ebooklib`/`bs4` là thư viện Python thuần, dùng API core |
-
-**4 tiêu chí BỔ SUNG sau phản biện Domain Expert (2026-09-08)** — Expert đọc source A và đo trên
-chính file thật; 3 dòng đầu là **bằng chứng mới chống A**, dòng cuối là **chỗ tôi từng đánh giá B
-quá lạc quan**:
-
-| Tiêu chí (mới) | A | B (spec cũ) | B (sau khi sửa X1/X2) |
-|---|---|---|---|
-| Inline markup trong đoạn (`<strong>`, `<em>`, `<br/>`, `<a id>`) | **Mất hết**: A gán `new_p.string = text`; và A gửi `new_p.text` (`epub_loader.py:156`) — `.text` của bs4 nối string con **không có dấu cách**, trên đoạn nguyên liệu thật ra `'4 cups unbleached white flour2 teaspoons salt2 tablespoons honey…'` | **Mất hết** (spec cũ: "thay nội dung text của node") | Giữ được — gửi inner-HTML |
-| Phân số `<sup>1</sup>/<sub>3</sub>` | **Phá** — A mặc định `exclude_translate_tags="sup"` (`cli.py:288`, `epub_loader.py:55`) | **Phá** (spec cũ mượn đúng rule đó của A) | Đúng — xem X1 + §6.21 |
-| Dịch heading công thức | A mặc định `--translate-tags "p"` → **34 `<h3>` tiêu đề công thức KHÔNG được dịch** | dịch (danh sách tag gồm `h1..h6`) | như B |
-| Chất lượng prompt | `DEFAULT_PROMPT` của A (`chatgptapi_translator.py:69`) là **đúng 1 câu** generic. Luận điểm "cộng đồng đã tối ưu prompt riêng cho EPUB" (nêu trong brief cho Expert) **không có thật** — Expert đọc source xác nhận | `build_system_prompt()` có glossary + unit conversion + typography rules | B hơn hẳn, **với điều kiện** có contract JSON (X4) |
-
-Hệ quả: §6.20.11 mục 6 ("chất lượng dịch khác, không hiển nhiên tốt/xấu hơn") là **quá dè dặt
-theo hướng có lợi cho A** — A không có ưu thế prompt nào. Đã sửa tại chỗ ở mục đó.
-
-**Điều KHÔNG so sánh được (và tại sao nó không cứu được phương án A)**: A có ưu thế thật là "đã
-tối ưu sẵn cho EPUB" — nhưng đọc source rồi thì phần "tối ưu" đó cụ thể là: chọn tag để dịch,
-chèn `<p>` dịch cạnh `<p>` gốc, và giữ item không phải văn bản. Cả ba đều là vài chục dòng
-`BeautifulSoup`. Đây **khác hẳn** lý do §6.6.2 R5 từ chối tự viết cho PDF: ở PDF, phần tự viết là
-**layout engine** (line-breaking, reflow, font fallback, formula placeholder) — hàng tuần công.
-EPUB là HTML reflow, **không có bài toán typeset nào cả**. Sự bất đối xứng đó là lý do quyết định
-ở đây ngược với quyết định ở §6.6.2 mà không hề mâu thuẫn với nó.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.4. So sánh 2 phương án"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### **QUYẾT ĐỊNH: Phương án B.**
 
@@ -5701,106 +4758,11 @@ so với 2.859 giây/25 trang của babeldoc (§6.14.6) thì đây không phải
 
 #### 6.20.10. Gate release (Protocol 5 R5-03 + Protocol 6 R6-03)
 
-Bắt buộc trước `ready_for_release` cho US-22:
-1. **R5-02 (Dev spike, làm TRƯỚC khi implement đầy đủ)**: `ebooklib` + `bs4` + `markdownify` cài vào
-   `.venv` thật của project, `EpubDocument.load()` + `write_translated()` chạy trên file EPUB thật
-   trong `data/uploads/`, assert lại **B-07** (27/27 entry byte-identical, thứ tự entry giữ nguyên,
-   `mimetype` đầu file + STORED). Nếu số đo khác §6.20.3 → escalate Tech Lead, **không** tự sửa
-   thiết kế.
-
-   **THỨ TỰ BẮT BUỘC trong spike (bổ sung sau phản biện Domain Expert 2026-09-08)** — 6 bước dưới
-   đây phải xanh TRƯỚC khi viết implementation đầy đủ; mỗi bước là 1 điểm chặn X/Y đã biết, làm sai
-   thứ tự thì lỗi chỉ lộ ra sau khi đã code xong:
-
-   | # | Bước | Kỳ vọng (số đo đã có, Dev phải tái lập) |
-   |---|---|---|
-   | a | `doc_href` ∈ `zip.namelist()` cho **100%** unit (X6) | 5/5 document. Đo trước khi sửa: `item.file_name` **0/5**; sau khi join `opf_dir`: **5/5** |
-   | b | Round-trip `chapter01.html` qua parser `xml` → `ET.fromstring()` OK (Y1) | 5/5 XHTML well-formed; `viewBox` **không** bị hạ thành `viewbox` |
-   | c | 6 dòng `<sup>1</sup>/<sub>3</sub>` ra đúng (X1, §6.21) | `1/3 cup soy grits` ×5 **và** `1 1/3 cups unbleached white flour` ×1 — **không** phải `11/3` |
-   | d | Đoạn nguyên liệu 4 `<br/>` ra đúng 4 dòng + giữ bold (X2) | inner-HTML giữ nguyên `<strong>…</strong><br/>×3` |
-   | e | 1 request THẬT tới DeepSeek với payload JSON → **capture golden fixture** (X4) | `tests/fixtures/epub_llm/deepseek_batch_response_*.json`. **Cấm viết mock tay** — định dạng output LLM là external contract theo tinh thần Protocol 5 |
-   | f | So ước tính (đã có X5) với `actual_cost` metered | tỉ lệ **≥ 1,0×** (được cao, cấm thấp — §6.11.6) |
-2. **R5-03 (live, không mock)**: 1 job EPUB thật, provider thật (DeepSeek — rẻ nhất, đã verify sống
-   nhiều lần), chạy hết. Xác nhận `cost_source='metered'` và `actual_cost` là **số đo thật khác 0**
-   (đây là điểm khác biệt lớn nhất so với PDF; nếu nó ra `'estimated'` thì thiết kế đã bị hiểu sai).
-3. **R6-03 (E2E xuyên suốt, kiểm NỘI DUNG output)**: **mở file `.epub` output ra**, đọc lại bằng
-   `EpubDocument`, xác nhận có **tiếng Việt thật, đúng nghĩa** trong ít nhất 3 chương/đoạn khác
-   nhau — không chỉ tin `status='completed'`. Đây đúng cách QA Vòng 3 tìm ra Bug #5.
-4. **Cost gate sống**: hạ `max_cost_per_job_usd` xuống dưới ước tính đã biết của file đó → xác nhận
-   **HTTP 402** và **không có `Job` row nào được tạo** (đếm bằng SQL, đúng cách QA Vòng 7 đã làm).
-   Rồi `confirm_cost=true` + trần thấp → xác nhận job dừng ở `cost_capped` **giữa chừng**, tức
-   **`chunk_index > 0`** — đây chính là điều BR-EPUB-02 yêu cầu và là điều phương án A không làm được.
-5. **DRM**: upload 1 file EPUB có `META-INF/encryption.xml` (tự dựng bằng `zipfile`) → xác nhận
-   400 với đúng câu tiếng Việt của AC-22.3, và file mẫu thật (B-08, không DRM) vẫn qua bình thường.
-6. **Mở bằng reader THẬT (bổ sung sau phản biện Domain Expert 2026-09-08)** — bước 3 ở trên đọc lại
-   bằng chính `EpubDocument`, tức là **app tự chấm điểm bài của app**; đúng thứ phản biện US-16 v2
-   đã chỉ ra là không đủ. QA phải mở file output bằng **Apple Books hoặc Calibre viewer** và kiểm
-   bằng mắt **1 công thức có phân số + danh sách nguyên liệu**: phân số phải là `1/3`/`1 1/3` (X1),
-   4 nguyên liệu phải nằm **4 dòng** và còn in đậm (X2), bản VI nằm ngay dưới bản EN (bilingual).
-   Trang trắng = triệu chứng XHTML không well-formed (Y1) — reader strict không báo lỗi.
-7. **`epubcheck` nếu cài được** — bắt `duplicate id` (Y2: bản copy phải strip `id`; file thật có
-   **32 unit** chứa `<a id="page_N"/>`) và well-formedness. `⚠️ ASSUMED, chưa verify`: chưa ai kiểm
-   `epubcheck` có cài được trên máy này không. **Không cài được → không chặn release**, nhưng QA
-   phải ghi rõ trong `test-report.md`: *"release blocked pending live verification: epubcheck"* nếu
-   mục 6 cũng không chạy được (R5-03).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.10. Gate release (Protocol 5 R5-03 + Protocol 6 R6-03)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.11. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)
 
-> **PM/user đã chốt (2026-09-08, qua AskUserQuestion, xem project_state.json)**: mục 1 và 2
-> dưới đây ĐÃ CÓ quyết định — giữ nguyên phần phân tích của Tech Lead làm hồ sơ, nhưng Dev
-> triển khai theo quyết định cuối trong dòng "→ CHỐT" của từng mục, không phải theo đề xuất
-> nghiêng-về ban đầu.
-
-1. **Thêm 3 cột DB → phải xoá/tạo lại DB dev.** `Job.finished_at` (§6.17.2), `Job.total_units`
-   (§6.20.6), `Chunk.unit_start`/`unit_end` + đổi `Chunk.page_start`/`page_end` thành nullable
-   (§6.20.7), cộng bảng mới `suggested_terms` (§6.18.3). Đây là tiền lệ đã có nhiều lần trong dự án
-   (`SQLModel.metadata.create_all()` không thêm cột vào bảng đã tồn tại), nhưng **user sẽ mất lịch
-   sử job hiện có**. Cần xác nhận: xoá DB dev, hay Dev viết 1 script migration `ALTER TABLE` nhỏ để
-   giữ lịch sử? Tech Lead nghiêng về **script migration** lần này, vì tab Lịch sử vừa được đầu tư
-   thêm tính năng ở chính đợt này (US-19) — xoá sạch lịch sử ngay khi vừa làm nó đẹp hơn là một
-   trải nghiệm tệ.
-   → **CHỐT: viết migration script (`ALTER TABLE`), KHÔNG xoá DB.** Xác nhận có dữ liệu thật cần
-   giữ (`sqlite3 data/bb_translation.db "SELECT COUNT(*) FROM jobs, glossary_entries"` → 10 job đã
-   dịch, 114 glossary entry đã curate, đo trực tiếp 2026-09-08) — đủ giá trị thực tế để bắt buộc
-   theo hướng migration, không phải chỉ là sở thích. Dev phải viết script `ALTER TABLE` cho đúng 4
-   thay đổi liệt kê ở trên trước khi chạm `SQLModel.metadata.create_all()`.
-2. **`bilingual` cho EPUB** — `_OUTPUT_MODE_MAP` hiện có `monolingual`/`bilingual`, và §6.20.5 hỗ
-   trợ cả hai với chi phí gần bằng 0. Nhưng PRD US-22 chỉ nói "output là 1 file `.epub` đã dịch".
-   BA cũng đã hỏi (BA-Q6 câu phụ) và **chưa có câu trả lời**. Đề xuất: **bật `bilingual` cho EPUB
-   luôn** (nó chỉ là chèn thêm `<p>` thay vì thay thế, không thêm chi phí LLM nào). Cần user xác nhận.
-   → **CHỐT: bật `bilingual=True` mặc định cho EPUB.** Cập nhật PRD US-22 tương ứng (xem PRD.md).
-3. **`EPUB_CHUNK_CHAR_BUDGET = 8.000` là con số CHỌN, chưa được kiểm chứng ở quy mô lớn.** Đo trên
-   đúng 1 cuốn (B-04) cho 7 chunk — hợp lý cho việc chặn chi phí. Nhưng N=1, giống hệt tình trạng
-   hằng số AIMD của babeldoc (xem `blockers` trong `project_state.json`). Đây là setting `.env`
-   chỉnh được, không phải hằng số chôn trong code; ghi nhận là ⚠️ chưa kiểm chứng trên sách lớn.
-4. **US-15 nhánh EPUB phụ thuộc §6.20** (S15-8). Nếu PM muốn US-15 ra trước US-22, nhánh EPUB của
-   US-15 phải hoãn và trả 400 rõ ràng. Cần PM chốt thứ tự increment.
-5. **`--single_translate`/Calibre/`ebook-convert` chính thức RA KHỎI scope.** Không cài Calibre,
-   không có đường EPUB→PDF ở đợt này (BR-EPUB-01). Nếu sau này mở lại, 6 cờ `ebook-convert` trong
-   §6.7 cũ **chưa từng được verify** và phải làm lại từ đầu theo R5-01.
-6. **Rủi ro tồn dư của phương án B cần PM biết**: bản dịch EPUB đi qua **prompt của chính app**,
-   nghĩa là chất lượng dịch EPUB sẽ **khác** chất lượng dịch PDF (PDF đi qua prompt của
-   pdf2zh/babeldoc với ràng buộc riêng của chúng). ~~Không tốt hơn hay xấu hơn một cách hiển nhiên —
-   chỉ là **khác**~~ → **SỬA 2026-09-08 sau phản biện Domain Expert: câu này quá dè dặt theo hướng
-   có lợi cho phương án A, và sai với bằng chứng.** Expert đọc source A: `DEFAULT_PROMPT` của A
-   (`chatgptapi_translator.py:69`) là **đúng 1 câu generic**, không có glossary, không có unit
-   conversion, không có typography rule. **A không có ưu thế prompt nào** — luận điểm "cộng đồng đã
-   tối ưu prompt riêng cho EPUB" (nêu trong brief) là **không có thật**. Rủi ro tồn dư thật của B
-   nằm ở chỗ khác và đã được đóng ở §6.20.12: **contract JSON app↔LLM (X4)** — đây mới là phần app
-   lần đầu tự chịu trách nhiệm, và là phần babeldoc đã phải viết cả một "mandatory per-paragraph
-   JSON output contract" để giải. Đề nghị QA đọc kỹ nội dung 1 chương ở gate R6-03 (mục 3 của
-   §6.20.10) **và mở bằng reader thật** (mục 6, mới), không chỉ đếm ký tự.
-7. **[MỚI, cần PM xin user] Z1 — chỉ có đúng 1 file EPUB thật để làm bằng chứng.** Toàn bộ số đo
-   §6.20.3 là **N=1 trên một bulletin 35 trang** (§6.20.3 đã ghi), và Expert xác nhận đây là file
-   EPUB thật **duy nhất** trên máy (`~/Downloads/…Sourdough….epub` **byte-identical** với bản trong
-   `data/uploads/`, `cmp` xác nhận). Hệ quả cụ thể: **Y2 và Y4 hiện là phòng thủ lý thuyết** — file
-   mẫu có **0 `<table>`**, **0 `<ol>`/`<ul>`**, max unit chỉ **989 ký tự**, nên các rule cho bảng
-   lồng, list lồng và unit quá khổ **chưa từng chạm dữ liệu thật lần nào**. Đề nghị PM xin user
-   **≥1 EPUB cookbook dày thật** (nhiều chương) TRƯỚC spike R5-02, để Dev đo: số XHTML, có `<table>`
-   không, nested list, max unit, SVG có text, EPUB3 `nav.xhtml`. **Không chặn v1** (guard X3 + Y4
-   fail rõ ràng thay vì hỏng im lặng), nhưng nếu không có file này thì `EPUB_CHUNK_CHAR_BUDGET`,
-   `EPUB_UNIT_HARD_MAX_CHARS` và toàn bộ Y2 phải vào known limitations của PRD với nhãn
-   **⚠️ N=1, chưa kiểm chứng trên sách thương mại**.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.11. Cần PM/user quyết định (Tech Lead KHÔNG tự sửa)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.12. Final Decision sau phản biện Domain Expert (2026-09-08)
 
@@ -5815,20 +4777,7 @@ bộ 8 số đo B-01..B-08 — tất cả đúng. Không mở lại phương án
 
 ##### Ranh giới bằng chứng (ai đã verify cái gì)
 
-| Nhóm | Ai đo | Tech Lead có đo lại không |
-|---|---|---|
-| B-01..B-08, E-03/05/06/09/10/11/13 | Expert, bằng stdlib + đọc source, **không dùng chung code path** với Tech Lead | Không — lặp lần 3 không tạo thêm thông tin |
-| X1 (`sup` phá phân số), X2 (census inline markup), X6 (`doc_href`) | Expert đo trước | **CÓ, đo lại độc lập** — xem bảng dưới, và tìm thêm 3 điều Expert bỏ sót |
-| X5 (envelope JSON) | Expert đo trên text thuần | **CÓ, đo lại + mở rộng** — Expert thiếu số hạng inner-HTML (§6.20.6) |
-| X4 (không có contract JSON), Y6 (`with_retry` không retry 5xx) | Expert đọc code | **CÓ, tự đọc lại** `prompt_builder.py`, `openai_provider.py:66-93`, `retry.py:14-22` — xác nhận đúng |
-
-**Ba điều Expert BỎ SÓT, Tech Lead tìm thêm khi tự đo (đây là lý do phải đo lại, không chỉ đọc):**
-
-| # | Phát hiện mới | Số đo |
-|---|---|---|
-| N-1 | **Đề xuất sửa X1 của Expert (dùng `markdownify` mặc định) vẫn SAI ở ca hỗn số.** Expert chỉ đo dòng phân số thuần. Trên dòng thật `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour`, `markdownify` mặc định cho ra **`11/3 cups`** — mười một phần ba thay vì một-và-một-phần-ba, **sai 8,25×** lượng bột. Cùng lớp lỗi với `/3 cup` mà Expert bác bỏ, chỉ khác cơ chế | tự chạy `markdownify==1.2.3` trên 6 dòng thật; 5/6 đúng, **1/6 sai**. Xem §6.21 |
-| N-2 | **X2 (inner-HTML) có chi phí tiền bạc mà không ai tính**: nội dung gửi đi tăng **+9,3%** (57.247 vs 52.369 ký tự). Cộng với envelope thì tổng ước thấp là **29,0%**, không phải 19,6% như công thức của Expert | §6.20.6, bảng 3 dòng |
-| N-3 | **Y1 (parser `xml`) đòi thêm dependency `lxml` — chưa có trong `.venv` project.** `BeautifulSoup(..., "xml")` không dùng được nếu thiếu `lxml` | tự dựng venv sạch chỉ có `beautifulsoup4==4.15.0` → `FeatureNotFound: Couldn't find a tree builder with the features you requested: xml`. Kiểm `.venv` project: **không có `lxml`, `bs4`, `ebooklib`, `markdownify`** |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Ranh giới bằng chứng (ai đã verify cái gì)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### X1 — `extract()` bỏ `<sup>` — GIẢI QUYẾT
 
@@ -5847,18 +4796,7 @@ bộ 8 số đo B-01..B-08 — tất cả đúng. Không mở lại phương án
 
 ##### X2 — Inner-HTML thay vì text thuần — GIẢI QUYẾT
 
-Số đo tự tái lập trên `ops/xhtml/chapter01.html`: **373 unit, 263 unit (70%) có ít nhất 1 thẻ con**;
-phân bố `{strong: 214, a: 32, em: 26, br: 6, sup: 6, sub: 6, small: 1}` (Expert đo 273/383 = 71% —
-lệch nhỏ do khác rule đếm node lồng, kết luận giống hệt).
-
-Ca tệ nhất, đo trên đoạn thật:
-```
-RAW  : <p class="blockquote"><strong>4 cups unbleached white flour</strong><br/><strong>2 teaspoons salt</strong><br/>…
-get_text(" ", strip=True) → '4 cups unbleached white flour 2 teaspoons salt 2 tablespoons honey 4 cups potato water'
-```
-4 nguyên liệu gộp thành 1 dòng, mất bold. **Đây chính xác là Bug #7** (line-break/list bị gộp) —
-lỗi vừa tốn 8 vòng QA + 6 lần review để đóng ở nhánh PDF — tái sinh ở EPUB ngay increment đầu tiên,
-trên đúng nội dung quan trọng nhất của sách bánh.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.12 X2 — số đo inner-HTML trên chapter01.html"**.
 
 **Chốt**: `EpubUnit.text` = inner-HTML (`"".join(str(c) for c in node.children)`). Ghi ngược: parse
 fragment bản dịch bằng bs4 rồi `node.clear()` + append children của fragment.
@@ -5919,14 +4857,7 @@ trong prompt vẫn phải đủ mạnh để chạy đúng khi không có JSON m
 
 ##### X6 — `doc_href` (ebooklib ≠ zip) — GIẢI QUYẾT
 
-Tự chạy `ebooklib==0.20` trên chính file EPUB thật, xác nhận Expert đúng và bổ sung cách sửa đã đo:
-
-```
-container.xml → rootfile/@full-path = 'ops/9781603424073.opf' → opf_dir = 'ops'
-item.file_name (5 document) có trong zip.namelist() as-is : 0/5
-posixpath.normpath(posixpath.join(opf_dir, item.file_name)) : 5/5
-book.opf_dir                                               : KHÔNG TỒN TẠI (AttributeError)
-```
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.12 X6 — dump ebooklib 0.20 xác nhận doc_href"**.
 
 **Chốt cho `EpubDocument.load()`**:
 ```python
@@ -5952,25 +4883,15 @@ doc_href  = posixpath.normpath(posixpath.join(opf_dir, item.file_name))
 
 ##### Z1..Z3
 
-- **Z1** (N=1, xin thêm EPUB dày) → chuyển thành **§6.20.11 mục 7**, việc của PM/user.
-- **Z2** (bổ sung 4 dòng vào bảng so sánh, bỏ ngầm định "prompt cộng đồng") → **đã làm** tại
-  §6.20.4 bảng "4 tiêu chí BỔ SUNG" + §6.20.11 mục 6.
-- **Z3** (gọi đúng tên 2 ngân sách) → **đã làm** tại §6.20.7.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Z1..Z3"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### Điểm của Expert tôi KHÔNG làm theo (kèm lý do)
 
-| Đề xuất Expert | Quyết định | Lý do |
-|---|---|---|
-| §6 mục 3(c): kỳ vọng spike "6 dòng `<sup>` ra đúng `1/3`" | **Siết chặt hơn**: 5 dòng ra `1/3` **và** 1 dòng ra `1 1/3` | N-1: chính `markdownify` mà Expert đề xuất cho ra `11/3` ở dòng hỗn số. Kỳ vọng như Expert viết sẽ **pass** cho một implementation vẫn sai |
-| X2 "phương án tối thiểu nếu PM muốn giảm scope": `get_text("\n")` + tái tạo `<br/>` | **Từ chối phương án giảm scope** | Cứu dòng nhưng mất 214 `<strong>` — nửa nạc nửa mỡ của đúng Bug #7 vừa đóng, sẽ phải làm lại lần 2. Chi phí bản đầy đủ đã đo được là +9,3% token |
-| FD X5(b): `EPUB_JSON_ENVELOPE_CHARS_PER_UNIT = 26` | **Đổi thành 30, và thêm `EPUB_INLINE_MARKUP_FACTOR = 1.15`** | 26 là số đo trần trụi (26,7 làm tròn **xuống**) và thiếu hẳn số hạng inner-HTML (N-2). Công thức của Expert vẫn ước thấp ~9% — vi phạm §6.11.6 ở đúng lớp bảo vệ tài chính mà chính Expert đang bảo vệ |
-| Y1: "fallback `html.parser` khi XML parse fail" | **Nhận, nhưng thêm điều kiện** | Fallback chỉ được dùng khi **output sau fallback vẫn qua `ET.fromstring()`**. Fallback im lặng sang parser hạ-chữ-hoa-attribute là cách hỏng SVG mà không ai biết |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Điểm của Expert tôi KHÔNG làm theo (kèm lý do)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### Trạng thái §6.20 sau mục này
 
-**Đủ điều kiện giao Dev**, với 2 điều kiện đi kèm: (a) spike R5-02 chạy đúng thứ tự 6 bước a→f của
-§6.20.10 mục 1 **trước** khi viết implementation đầy đủ; (b) `lxml` + `ebooklib` + `bs4` +
-`markdownify` được thêm vào `pyproject.toml` và **pin version** trong cùng commit đầu tiên.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Trạng thái §6.20 sau mục này"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.13. Fix Bug #EPUB-B2-1 (cost variance) + Bug #EPUB-4 (mất dấu tiếng Việt) — sau QA vòng 1/5 (2026-09-09)
 
@@ -5987,27 +4908,11 @@ KHÔNG phải số đã verify. Điều đã verify và điều mới suy ra đ�
 
 ##### 6.20.13.0. Ba điều Tech Lead tự verify khi thiết kế (đọc source thật, không suy đoán)
 
-| # | Sự thật | Nguồn xác thực (đọc trực tiếp trong phiên này) |
-|---|---|---|
-| **V-1** | **One-shot example của contract X4 đang dạy model trả về tiếng Việt KHÔNG DẤU.** `_EPUB_BATCH_ONE_SHOT_EXAMPLE` (`src/core/prompt_builder.py:427-433`) có `'Dau ra: {"0": "<strong>2 cups</strong> bot mi, 1<sup>1</sup>/<sub>3</sub> tsp muoi, nuong o 350F."}'` — `bot mi`, `muoi`, `nuong o` là tiếng Việt không dấu. Quét toàn khối `_EPUB_BATCH_CONTRACT` + one-shot (dòng 409-433): **0 ký tự có dấu tiếng Việt**, ký tự non-ASCII duy nhất là dấu gạch ngang `—` | tự chạy script đếm ký tự trên `src/core/prompt_builder.py` dòng 409-433 |
-| **V-2** | **`max_tokens=8192` là trần CHO MỖI REQUEST** (`deepseek_provider.py:37` → `OpenAIProvider`), nên **134.274 token của 1 chunk KHÔNG THỂ đến từ 1 request duy nhất**. Chunk 0 (31 unit, ~3 request theo `EPUB_CHUNK_CHAR_BUDGET=8.000`/`EPUB_REQUEST_CHAR_BUDGET=3.000`) chỉ có thể đạt con số đó qua **vòng gọi lại RIÊNG LẺ** ở `job_orchestrator.py:1758-1774` — vòng này hiện **không có trần số lần**: 1 response hỏng/cụt → `parse_epub_batch_response()` trả `{}` → **mọi** id thiếu → tối đa `len(slice_units)` ≈ 18 request phụ **cho mỗi request hỏng**, mỗi request phụ lại gánh nguyên system prompt | đọc `job_orchestrator.py:1742-1783`, `deepseek_provider.py:29-47`, `prompt_builder.py:455-493` |
-| **V-3** | **`TranslationResult` KHÔNG có `finish_reason`** (`src/services/translation.py:27-32`), và §6.20.12 X4 cấm đổi signature `provider.translate()` (interface chung 5 provider). ⇒ Mọi cơ chế phát hiện runaway ở mục này **bắt buộc** chỉ được dùng `input_tokens`/`output_tokens` đã có, KHÔNG được dựa vào cờ truncation của SDK | đọc `src/services/translation.py:27-46` |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.0. Ba điều Tech Lead tự verify khi thiết kế (đọc source thật, "**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.13.1. Phân tích lại Bug #EPUB-B2-1 — tách 3 nguyên nhân KHÁC NHAU bị gộp làm một
 
-Brief giao việc mô tả B2-1 như "hành vi ngẫu nhiên của model". Đọc lại số liệu QA thì đó chỉ là
-**1 trong 3** thành phần, và **2 thành phần còn lại là tất định** (deterministic), lặp lại ở mọi
-lần chạy:
-
-| Thành phần | Bằng chứng | Tính chất |
-|---|---|---|
-| **C-1. Khuếch đại bởi vòng gọi lại từng-id không giới hạn** | V-2 ở trên: 1 response hỏng → tối đa ~18 request phụ. Đây là con đường DUY NHẤT (do trần `max_tokens`) để 1 chunk 31 unit đạt 134.274 token | Tất định **khi** có 1 response hỏng; hiện không có trần |
-| **C-2. Ước tính THẤP có hệ thống, không phải chỉ ở lần chạy bất thường** | Lần chạy full-book **bình thường** (không có sự cố): `actual = $0,0626` cho cả 7 chunk vs `estimate = $0,034` → **1,84× ước tính**. Vi phạm trực tiếp §6.11.6 ("được ước cao, **cấm** ước thấp"). Brief nói "không có bằng chứng công thức sai" — số liệu của chính QA nói ngược lại | **Tất định**, xem §6.20.13.6 |
-| **C-3. Model sinh dư/lặp output (runaway) ở 1 request cụ thể** | Không tái hiện ở lần 2 | Ngẫu nhiên, chỉ chặn được bằng heuristic |
-
-**Hệ quả cho thứ tự ưu tiên fix**: C-1 và C-2 phải fix trước và **không cần ngưỡng đoán mò nào**;
-C-3 mới là chỗ phải dùng heuristic có ngưỡng ⚠️ ASSUMED. Nếu chỉ fix C-3 (đúng nguyên văn brief)
-thì phần tất định — vốn là phần chắc chắn tái diễn mỗi lần chạy — vẫn còn nguyên.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.1. Phân tích lại Bug #EPUB-B2-1 — tách 3 nguyên nhân KHÁC NHAU"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.13.2. Lớp 4 — kiểm trần chi phí sau MỖI REQUEST (không ngưỡng đoán, ưu tiên cao nhất)
 
@@ -6093,58 +4998,14 @@ EPUB_MAX_SINGLE_ID_RETRIES = 5      # ⚠️ ASSUMED (xem lý do chọn ngay dư
   giá trị `len(missing_ids)` mỗi lần > 0 để vòng sau có số thật mà chỉnh; ghi rõ trong
   `test-report.md`.
 
-**(b) Phát hiện runaway per-request (C-3).** Helper MỚI, **đặt trong `src/core/cost_estimator.py`**
-(không phải `job_orchestrator.py`) — vì nó phải dùng lại **đúng 2 hằng số của estimator**, và để 2
-công thức không bao giờ trôi khỏi nhau (cùng lý do §6.11.4 mục 3):
+**(b) Phát hiện runaway per-request (C-3).** Helper `is_runaway_output(payload_chars, output_tokens)`
+nằm ở `src/core/cost_estimator.py`, dùng ĐÚNG 2 hằng số của estimator (`VI_CHAR_EXPANSION`,
+`CHARS_PER_TOKEN_VI`) — cấm viết công thức thứ hai. Gọi trong `_process_epub_chunk()` ngay sau khi
+cộng token/cost của mỗi request, với `payload_chars = len(payload_json)`.
 
-```python
-# src/core/cost_estimator.py
-EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0        # ⚠️ ASSUMED — xem "Cơ sở chọn ngưỡng"
-EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS = 1_500  # ⚠️ ASSUMED — chống false-positive ở payload nhỏ
-
-def is_runaway_output(payload_chars: int, output_tokens: int) -> bool:
-    """True khi output_tokens vuot xa muc ky vong cho CHINH payload nay
-    (Architecture.md 6.20.13.3b). Dung DUNG 2 hang so cua estimator
-    (VI_CHAR_EXPANSION, CHARS_PER_TOKEN_VI) — khong duoc viet cong thuc thu 2.
-    """
-    expected = int(payload_chars * VI_CHAR_EXPANSION / CHARS_PER_TOKEN_VI)
-    return output_tokens > max(EPUB_RUNAWAY_OUTPUT_FACTOR * expected,
-                               EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS)
-```
-
-Gọi tại `_process_epub_chunk()` **ngay sau dòng 1752** (sau khi cộng token/cost, trước
-`parse_epub_batch_response`), với `payload_chars = len(payload_json)` — tức là so với **input của
-chính request đó**, không phải ước tính cả sách (đúng yêu cầu brief).
-
-**Cơ sở chọn `EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0` — `⚠️ ASSUMED, chỉ có 1 điểm dữ liệu`:**
-- Mức kỳ vọng lấy từ chính công thức đã dùng cho cost gate: `output ≈ chars × VI_CHAR_EXPANSION
-  (1,16) / CHARS_PER_TOKEN_VI (2,0)` = `chars × 0,58`. Payload đầy 3.000 ký tự → kỳ vọng ~1.740
-  output token.
-- **Trần vật lý** `max_tokens = 8192` (V-2) → tỉ lệ tối đa mà 1 request đầy có thể đạt là
-  `8192 / 1740 = 4,7×`. Chọn **3,0×** để cơ chế **kích hoạt TRƯỚC khi chạm trần** (bắt được runaway
-  lúc nó còn đang sinh, không phải sau khi đã bị cắt cụt), mà vẫn còn biên **≥ 3×** so với dao động
-  bình thường (công thức estimator vốn ước **cao**, nên tỉ lệ thật của 1 response lành mạnh kỳ vọng
-  **< 1,0×**).
-- **Ngưỡng này CHƯA được đo trên phân bố thật.** Không ai có `output_tokens` per-request của lần
-  chạy bình thường (QA chỉ ghi tổng theo chunk). **Bắt buộc**: lần chạy live đầu tiên sau khi Dev
-  implement phải log `(payload_chars, output_tokens, ratio)` cho **mọi** request vào
-  `chunk_dir/requests.jsonl`, và QA ghi vào `test-report.md` giá trị **max ratio quan sát được**.
-  Nếu max ratio thật của lần chạy lành mạnh > 1,5 → ngưỡng 3,0 quá sát, phải nâng và ghi lại.
-  Đây chính là bước "đo thêm trước khi tự tin vào con số" của R5-02.
-
-> ### ⚠️ ĐÃ ĐO — 2026-09-11: điều kiện cảnh báo ở gạch đầu dòng trên ĐÃ XẢY RA. §6.20.13.3b **hết
-> hiệu lực nguyên trạng**, đọc **§6.20.15** cho hợp đồng hiện hành.
->
-> 797 request thật / 3 cuốn sách / `deepseek-v4-flash`: `ratio` **median 4,4× · p90 11,2× · p99
-> 20,3×**; **65,4% số request** vượt ngưỡng 3,0×. Ngưỡng dự báo "response lành mạnh < 1,0×" sai
-> khoảng **4–6×**. Nguyên nhân **không phải** model runaway mà là `output_tokens` (=
-> `usage.completion_tokens`) của DeepSeek V4 Flash **bao gồm cả token thinking** (thinking bật mặc
-> định, effort `high`) trong khi `epub_expected_output_tokens()` chỉ mô hình hoá phần **bản dịch**.
->
-> Hệ quả trực tiếp (đây là thứ đang giết job, không phải markup): vì `runaway` gần như **luôn**
-> `True`, nhánh **R-b** (`if runaway and missing_ids: raise`) biến thành *"abort ngay khi thiếu BẤT
-> KỲ id nào"* — toàn bộ thang cứu hộ C-1/Lớp B/Lớp C ở phía dưới trở thành **code chết** cho provider
-> này. Bản vá: §6.20.15 K-2/K-3.
+> ⚠️ **Định nghĩa `output_tokens` dùng cho phép đo này đã bị §6.20.15 (K-2/K-3) THAY ĐỔI** (phải trừ
+> token thinking → `answer_tokens`), và số đo chốt hằng số nằm ở §6.20.15 K-4. Đọc §6.20.15 cho hợp
+> đồng hiện hành. Thiết kế bản gốc + 797 request bác bỏ ngưỡng cũ: xem design-log.
 
 **Hành động khi phát hiện runaway — TRẢ LỜI CÂU HỎI 2 CỦA BRIEF: KHÔNG tự động retry.** Chia 2 ca,
 theo tiêu chí "kết quả có dùng được không", vì trade-off khác hẳn nhau:
@@ -6158,13 +5019,7 @@ theo tiêu chí "kết quả có dùng được không", vì trade-off khác h�
 tự quyết định có trả thêm tiền hay không — và đó là quyết định của **người trả tiền**, không phải
 của heuristic có ngưỡng ⚠️ ASSUMED.
 
-**Trả lời câu hỏi 3 của brief (cấu hình được hay hardcode)**: `EPUB_RUNAWAY_OUTPUT_FACTOR` và
-`EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS` **hardcode** ở `cost_estimator.py` (tiền lệ BR-IMGCOMP-03), KHÔNG
-đưa vào `.env`. Lý do: đây là **ngưỡng chẩn đoán nội bộ chưa có dữ liệu**, không phải chính sách
-tài chính của user — chính sách tài chính là `max_cost_per_job_usd` (đã cấu hình được, và Lớp 4 ở
-§6.20.13.2 đã làm nó có hiệu lực sớm hơn ~2,7×). Đưa 1 hằng số chưa đo vào `.env` là mời user chỉnh
-một con số mà chính team chưa hiểu, rồi khó lần lại được nguyên nhân khi sự cố tái diễn. Khi có đủ
-dữ liệu đo (yêu cầu log ở trên) → xem lại quyết định này, ghi vào §6.20.13 vòng sau.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.3b — lý do hardcode 2 hằng số runaway ngoài .env"**.
 
 ##### 6.20.13.4. Bug #EPUB-4 — nguyên nhân gốc gần như chắc chắn: prompt tự dạy model bỏ dấu (V-1)
 
@@ -6173,12 +5028,7 @@ verify được, và rẻ hơn nhiều để sửa** (V-1): **toàn bộ khối 
 model không có một ký tự tiếng Việt có dấu nào**, và ví dụ one-shot — thứ model bắt chước mạnh nhất
 — **demo output là `bot mi`, `muoi`, `nuong o 350F`**.
 
-> **Ranh giới bằng chứng (R5-01)**: sự thật "prompt không có dấu, one-shot demo output không dấu"
-> là **ĐÃ VERIFY** (đọc + quét ký tự trên `prompt_builder.py:409-433`). Còn "đó **là** nguyên nhân
-> của 30-37% unit mất dấu" là **`⚠️ ASSUMED`** — chưa có A/B test. Nó **giải thích được** đặc điểm
-> QA quan sát: batch lớn → tỉ lệ instruction/example (không dấu) so với ngữ cảnh sinh ra càng lớn,
-> và mất dấu xuất hiện theo **cụm liên tiếp trong cùng 1 request** (QA đo được), tức là hiện tượng
-> ở mức **response**, đúng chỗ one-shot example tác động.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.4 — ranh giới bằng chứng cho giả thuyết prompt gây mất dấu"**.
 
 **Sửa (bắt buộc, làm TRƯỚC mọi guard — rẻ nhất, tác động lớn nhất):**
 
@@ -6257,43 +5107,14 @@ Unit có `letters >= 40` và `ratio < 0,02` → gọi lại **riêng lẻ unit �
 > cứng 2 ý nghĩa vào 1 vòng là đúng loại "một biến, hai ý nghĩa" mà §6.20.7 và Bug #5 đã trả giá.
 > Chia sẻ code ở tầng helper, không ở tầng vòng lặp.
 
-**Cơ sở chọn ngưỡng — `⚠️ ASSUMED, chưa đo trên corpus tiếng Việt thật của ngành bánh`:**
-- Đo được trong phiên này: 1.084 đoạn văn tiếng Việt trong `docs/PRD.md` + `docs/Architecture.md`
-  (corpus tiếng Việt **duy nhất** có sẵn tại chỗ, **đã lẫn nhiều code/bảng/thuật ngữ Anh** nên
-  thiên **thấp**): median `0,219`, mean `0,216`, **p5 = `0,122`**, min `0,053` (min rơi đúng vào 1
-  dòng bảng Markdown gần như toàn tiếng Anh).
-- Ngưỡng request `0,08` = **thấp hơn p5 của corpus ~1,5×** và thấp hơn median ~2,7× → biên an toàn
-  rộng cho các unit hợp lệ giàu thuật ngữ Anh (`sourdough starter`, `450F`, tên riêng).
-- Ngưỡng unit `0,02` với sàn 40 chữ cái ≈ "gần như không có dấu nào", cùng tinh thần với tiêu chí
-  **QA đã dùng và đã kiểm bằng mắt** (`0 ký tự có dấu`, ≥3 chữ cái) — nhưng nâng sàn từ 3 lên 40
-  chữ cái để loại đúng lớp false-positive brief cảnh báo (`"2 tsp"`, tên riêng, `"350F"`, số liệu).
-  QA đo 116-143 unit dương tính bằng tiêu chí lỏng hơn và **xác nhận bằng mắt là dương tính thật**
-  → tiêu chí này gần như không có false-positive, chỉ có thể sót (false-negative), và sót là chiều
-  an toàn: sót chỉ mất chất lượng 1 unit, false-positive tốn tiền thật.
-- **Corpus dùng để chốt là docs của chính dự án, KHÔNG phải văn bản dịch xuất bản.** Trước khi
-  release, QA phải đo lại `diacritic_ratio` trên **các unit ĐÃ dịch tốt** của lần chạy live (dữ
-  liệu này QA đã có sẵn: `chunk_N/units.json` của lần full-book thành công) và ghi phân vị p1/p5
-  thật vào `test-report.md`. Nếu p1 thật < 0,10 → phải hạ ngưỡng request xuống dưới p1.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.5 — cơ sở chọn 4 ngưỡng diacritic (corpus nội bộ)"**.
 
-**Trả lời câu hỏi 2 của brief (retry 1 lần vẫn thiếu dấu thì sao) — CHỐT: (a) chấp nhận + ghi
-nhận, KHÔNG fail chunk.** Lý do, so trực tiếp với E-09/`EpubBatchTranslationError`:
+**Retry 1 lần vẫn thiếu dấu → CHỐT: chấp nhận + ghi nhận anomaly (§6.20.13.7), KHÔNG fail chunk.**
+BR-EPUB-05 vẫn là lớp fail-cứng cho lớp lỗi phá huỷ nội dung (E-09: thiếu hẳn bản dịch); mất dấu là
+lỗi chất lượng cục bộ, fail cứng sẽ vứt cả chunk đã trả tiền. Chi phí phép đo là O(số ký tự) thuần
+Python (<50 ms/sách), chỉ tốn thêm khi phải retry.
 
-| | E-09 (thiếu bản dịch) | Mất dấu |
-|---|---|---|
-| Nội dung | **Không tồn tại** — ghi vào file là **phá huỷ** nội dung gốc | Tồn tại, đúng nghĩa (QA xác nhận), chỉ kém chất lượng |
-| Người dùng có cứu được không | Không — chữ đã mất | Có — đọc vẫn hiểu, có thể dịch lại chương đó sau |
-| Fail cứng thì mất gì | Không mất gì thêm | Vứt cả chunk **đã trả tiền**, và với bug tái phát nhiều lần thì **sách không bao giờ dịch xong** |
-
-Fail cứng vì mất dấu biến 1 lỗi chất lượng cục bộ thành 1 lỗi chặn toàn job, đúng lúc user đã trả
-tiền — sai hướng đánh đổi. Ghi nhận thay vì chặn (§6.20.13.7), và để BR-EPUB-05 tiếp tục giữ vai
-trò lớp fail-cứng cho lớp lỗi phá huỷ nội dung.
-
-**Trả lời câu hỏi 3 của brief (overhead)**: phần **đo** là `O(số ký tự)` thuần Python, không gọi
-LLM — chạy cho **mọi** unit vẫn không đáng kể (~57.000 ký tự/sách, < 50 ms tổng). Chi phí chỉ phát
-sinh khi **phải retry**. Ước tính worst case theo đúng số QA đo (30% unit hỏng, mất dấu theo cụm
-trong ~30% request): tầng 1 bắt hầu hết → **~+30% số request** (≈ +6 request/sách ≈ **+$0,003**
-với DeepSeek). Nếu §6.20.13.4 sửa đúng gốc thì tầng 1 gần như không bao giờ kích hoạt → overhead
-≈ 0. **Không cần cơ chế "chỉ check khi nghi ngờ"** — không có phép đo nào rẻ hơn phép đo này.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.5 — so sánh E-09 vs mất dấu + ước tính overhead guard"**.
 
 ##### 6.20.13.6. SỬA `prompt_overhead_chars` của nhánh EPUB (fix C-2, Protocol 6 data lineage)
 
@@ -6328,21 +5149,9 @@ chuỗi prompt mà `_estimate_epub_translation_cost()` đo với chuỗi `system
 `_process_epub_chunk()` thực sự nhận, trên cùng 1 job/glossary — đây đúng loại "sợi dây nối 2 bước"
 mà Protocol 6 sinh ra để bảo vệ.
 
-**Phần CÒN LẠI của C-2 — chưa giải thích được, cấm đoán bừa.** Sau khi cộng ~6.300 input token bị
-sót, số học vẫn không khớp: để đạt `actual = $0,0626` thì output thật phải ~83.000 token, so với
-42.122 đã ước → **output thật ~2× ước tính**. Giả thuyết mạnh nhất, **`⚠️ ASSUMED, CHƯA VERIFY`**:
-`CHARS_PER_TOKEN_VI = 2,0` được đo trên **`cl100k_base` (OpenAI)** cho sự cố pdf2zh
-(`cost_estimator.py:36-42` ghi rõ nguồn), rồi được áp cho **DeepSeek** — tokenizer **khác**, chưa
-ai đo. Nếu DeepSeek tokenize tiếng Việt có dấu ở ~1,0-1,2 ký tự/token thì output token gấp đôi,
-khớp đúng độ lệch quan sát được.
-
-**KHÔNG đổi `CHARS_PER_TOKEN_VI` trong đợt này.** Thay vào đó, 1 task đo **rẻ và tất định** cho Dev,
-dùng **dữ liệu QA đã giữ lại** (không tốn thêm 1 đồng API nào):
-> Với lần chạy full-book thành công: `chars = tổng độ dài mọi value trong mọi `chunk_N/units.json``;
-> `tokens = sum(chunk.api_tokens_used)` trừ phần input ước được. Tính `chars/token` **thật của
-> DeepSeek trên tiếng Việt**, ghi vào Architecture.md kèm nguồn. Nếu < 2,0 → thêm hằng số
-> **theo provider** (không sửa hằng số dùng chung của nhánh PDF — nhánh đó đã được verify bằng
-> golden file `cost_golden_howbakingworks.json`, đổi nó là phá bằng chứng cũ).
+> **Phần còn lại của C-2 (nghi ngờ `CHARS_PER_TOKEN_VI` không đúng cho tokenizer DeepSeek) đã được
+> đo và đóng tại §6.20.15 K-4** — kết luận: giữ nguyên cả 3 hằng số, có số đo live 784 request.
+> Diễn biến đầy đủ: design-log.
 
 ##### 6.20.13.7. Ghi nhận anomaly (trả lời câu hỏi 4 của brief)
 
@@ -6386,31 +5195,11 @@ Exception MỚI (đặt cạnh `EpubBatchTranslationError`): `EpubChunkCostCapEx
 
 ##### 6.20.13.9. Thứ tự implement bắt buộc cho Dev
 
-1. §6.20.13.4 (sửa one-shot + rule 7) — rẻ nhất, có thể tự nó xoá phần lớn Bug #EPUB-4.
-2. §6.20.13.6 (`prompt_overhead_chars`) — phải làm **cùng lúc** với (1), vì (1) đổi độ dài prompt.
-3. §6.20.13.2 (Lớp 4 trần chi phí per-request) — cost-safety, không phụ thuộc ngưỡng đoán.
-4. §6.20.13.3a (trần số request phụ) → 3b (runaway detect).
-5. §6.20.13.5 (guard dấu 2 tầng) → §6.20.13.7 (anomalies/requests log).
-6. Task đo `chars/token` thật của DeepSeek (§6.20.13.6, dùng dữ liệu QA đã giữ, **không tốn API**).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.9. Thứ tự implement bắt buộc cho Dev"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.13.10. Gate release bổ sung cho vòng QA kế tiếp
 
-Cộng vào checklist §6.20.10 (không thay thế):
-- **G-1 (R6-03)**: chạy live full-book 1 lần, rồi đo lại **tỉ lệ unit mất dấu** trên file output
-  bằng đúng script QA vòng 1/5 đã dùng. **Tiêu chí pass: 0 unit** thoả `letters ≥ 40 và
-  ratio < 0,02`. Đây là điều kiện đóng Bug #EPUB-4, không phải "có tiếng Việt là được".
-- **G-2 (R5-03)**: nộp `requests.jsonl` thật vào `test-report.md`, gồm **max output-ratio** và
-  **p1/p5 của `diacritic_ratio`** đo được. Không có 2 số này → **không được** đánh dấu
-  `ready_for_release`: mọi ngưỡng ở §6.20.13 vẫn còn là ⚠️ ASSUMED cho tới khi có chúng.
-- **G-3 (cost)**: so `actual_cost` metered với `estimated_cost` của **cùng file đó** sau khi sửa
-  §6.20.13.6. Tiêu chí §6.11.6: tỉ lệ `actual/estimate` phải **≤ 1,0** (được ước cao, cấm ước
-  thấp). Lần đo trước fix là **1,84** — nếu vẫn > 1,0 thì phần C-2 chưa đóng, ghi rõ số đo và
-  escalate Tech Lead thay vì tự chỉnh hằng số.
-- **G-4 (Lớp 4)**: đặt `cost_cap` thấp hơn chi phí **1 request** → xác nhận job dừng
-  `cost_capped` **giữa chừng 1 chunk** (chunk đó `failed`, `api_cost` khác 0, `output_path` là
-  `NULL`), và file output **không** chứa bản dịch dở của chunk đó.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.13.10. Gate release bổ sung cho vòng QA kế tiếp"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.14. Chiến lược MỚI cho lớp lỗi "DeepSeek trả JSON malformed" sau khi chạm giới hạn Protocol 3 (Tech Lead, 2026-09-10)
 
@@ -6432,71 +5221,11 @@ Hệ quả trực tiếp lên thiết kế này:
 
 ##### 6.20.14.0. Nguồn xác thực cho mọi con số dưới đây
 
-Toàn bộ số liệu trong section này **tự đo lại** từ golden fixture THẬT đã có trong repo
-(`tests/fixtures/epub_llm/*.json`) + `docs/test-report.md` (QA vòng 3/5, 5/5) — **không gọi thêm API
-lần nào**, đúng tinh thần "tiết kiệm". Cách đo: đọc `request_payload` của từng fixture, `json.dumps(...,
-ensure_ascii=False)` để lấy đúng số ký tự payload thật đã gửi, đối chiếu `input_tokens`/`output_tokens`/
-`estimated_cost_usd` do chính provider trả về.
-
-**(a) Bảng tương quan "kích thước response ↔ JSON hỏng"** — mọi dòng đều là dữ liệu thật đã capture:
-
-| Fixture / nguồn | Số unit | Payload chars | `output_tokens` | Kết quả JSON |
-|---|---|---|---|---|
-| `..._ch1_trailing_garbage.json` | 1 | 997 | 420 | Hỏng NHẸ (thừa đúng 1 dấu `"`) — cứu được |
-| `..._ch1_5units.json` | 5 | 1.061 | 459 | **SẠCH hoàn toàn** |
-| `..._ch1_multi_json_object.json` (B2-3) | 11 | 3.209 | 1.279 | Hỏng NẶNG — 11 object rời |
-| `..._comma_separated_json_objects.json` (B2-4) | 32 | ~4.425 (suy từ `input_tokens`) | 1.392 | Hỏng NẶNG — 32 object rời, nối bằng `, ` |
-| `..._single_object_spurious_closing_braces.json` (B2-5) | 32 | ~4.425 | 1.398 | Hỏng NẶNG — 1 `{`, 32 `}` |
-
-**Giả thuyết chốt (⚠️ ASSUMED, chưa đủ mẫu để coi là quy luật)**: xác suất DeepSeek sinh JSON hỏng
-NẶNG tăng theo ĐỘ DÀI OUTPUT, không theo độ dài input. Bằng chứng ủng hộ: cả 3 biến thể thảm hoạ đều
-xảy ra ở `output_tokens ≥ 1.279`; chưa từng quan sát biến thể thảm hoạ nào ở `output_tokens ≤ 459`.
-**Bằng chứng NGƯỢC lại phải ghi rõ, không được giấu**: QA vòng 5/5 lần chạy 2 có **14 lần gọi THÀNH
-CÔNG** cho chunk 0-3 (173/384 unit → trung bình ~12,4 unit/request) — tức batch ~12 unit KHÔNG phải
-lúc nào cũng hỏng. Vậy đây là quan hệ **xác suất**, không phải ngưỡng cứng: giảm batch làm GIẢM tần
-suất lỗi, **không** loại bỏ được lỗi. Đó chính là lý do Lớp A một mình là không đủ và phải có Lớp B + C.
-
-**(b) Đơn giá DeepSeek thật, suy ngược từ 2 fixture** (giải hệ 2 phương trình từ `input_tokens`,
-`output_tokens`, `estimated_cost_usd` của `_ch1_5units` và `_multi_json_object`):
-
-```
-input  ≈ $0,22 / 1M token
-output ≈ $0,66 / 1M token
-```
-Kiểm chứng độc lập trên fixture thứ 3 (B2-4, không dùng để giải hệ):
-`2.299 × 2,2e-7 + 1.392 × 6,6e-7 = $0,0014245` — **khớp tuyệt đối** với `estimated_cost_usd` đã ghi
-trong fixture. Hai đơn giá này do đó là VERIFIED, không phải suy đoán.
-
-**(c) Chi phí cố định mỗi request (system prompt overhead)** — đây là con số quyết định "giảm batch
-size tốn thêm bao nhiêu". Giải hệ `input_tokens = O + payload_chars / k` trên 2 fixture cùng đời
-prompt (5 unit và 11 unit):
-
-```
-k ≈ 3,99 ký tự / token   (payload EN + markup)
-O ≈ 1.190 input token / request   →  ≈ $0,000262 / request
-```
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.0. Nguồn xác thực cho mọi con số dưới đây"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.14.1. Chẩn đoán lại: vì sao hướng vá cũ KHÔNG hội tụ
 
-Cả 3 fix B2-3/B2-4/B2-5 đều thuộc cùng một họ giả định: *"response là N giá trị JSON HỢP LỆ, chỉ khác
-nhau ở thứ nối giữa chúng"*. B2-5 phá đúng giả định nền đó (chỉ có 1 dấu `{` trong toàn bộ response),
-nên `_decode_concatenated_json_objects()` — dù đã tổng quát hoá đúng phạm vi nó nhắm tới — không thể
-cứu được, đúng như Reviewer đã tiên liệu.
-
-**Nhận định gốc**: `json.JSONDecoder` là công cụ **kiểm tra ngữ pháp**, mà thứ đang hỏng chính là ngữ
-pháp. Mọi fix xây trên nó đều phải đoán trước hình dạng hỏng. Nội dung cần lấy ra thì lại **không hề
-hỏng** ở cả 3 biến thể: 31/32 bản dịch của B2-5 đều đúng nghĩa, đủ dấu, đã trả tiền (QA tự mắt kiểm
-tra `raw_text`). Điều BẤT BIẾN qua cả 3 biến thể — và là thứ duy nhất đáng dựa vào — là:
-
-> mỗi bản dịch luôn xuất hiện dưới dạng một cặp `"<id>" : "<chuỗi JSON hợp lệ>"`, id nằm trong tập
-> id ngắn cục bộ đã gửi đi.
-
-Lớp B (§6.20.14.3) xây đúng trên bất biến đó và **không giả định gì về dấu ngoặc, dấu phẩy, hay cấu
-trúc lồng nhau** — đó là điểm khác biệt về bản chất so với 3 fix trước, không phải "vá biến thể thứ 4".
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.1. Chẩn đoán lại: vì sao hướng vá cũ KHÔNG hội tụ"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.14.2. Lớp A — Ép nhỏ request để GIẢM TẦN SUẤT sinh lỗi (rẻ nhất, làm trước)
 
@@ -6758,20 +5487,7 @@ không tự nới `EPUB_UNIT_HARD_MAX_CHARS`.
 
 ##### 6.20.14.5. Tương tác với các guard đang có — bảng kiểm bắt buộc đọc trước khi code
 
-Theo tinh thần Protocol 8 R8-01 (audit TỪNG bước có sẵn khi thêm hành vi mới vào một đường ống dùng
-chung), không chỉ bước mới:
-
-| Bước có sẵn | Có bị Lớp A/B/C ảnh hưởng? | Kết luận |
-|---|---|---|
-| Guard runaway C-3 (`is_runaway_output`) | Có — tỉ lệ tính trên `payload_chars` của chính request, batch nhỏ ⇒ `expected` nhỏ ⇒ ngưỡng có `EPUB_RUNAWAY_OUTPUT_FLOOR_TOKENS` che | **KHÔNG sửa** (floor đã đúng vai trò này). QA phải đo lại số false-positive từ `requests.jsonl` |
-| Guard mất dấu tầng 1 (request) | Có — request ít unit hơn ⇒ `request_letters` nhỏ hơn ⇒ dễ tụt dưới `EPUB_DIACRITIC_MIN_LETTERS_REQUEST` ⇒ guard **im lặng bỏ qua** nhiều request hơn | **KHÔNG sửa ngưỡng** ở vòng này (tầng 2 mức unit không đổi, vẫn phủ). Ghi vào gate: QA báo số request bị bỏ qua vì thiếu chữ |
-| Guard mất dấu tầng 2 (unit) | Không — đo trên từng unit, không phụ thuộc kích thước batch | Giữ nguyên |
-| BR-EPUB-05 (output guard) | Có — unit fallback = giống bản gốc | Đã tính: ngưỡng job 5% < khe hở 10% (C-2) |
-| Lớp 4 trần chi phí per-request | Có — nhiều request hơn ⇒ kiểm nhiều lần hơn, mỗi lần rẻ hơn | Tốt hơn, không sửa |
-| Resume BR-CHUNK-05 | Không — checkpoint vẫn theo chunk | Giữ nguyên; C-3 đọc lại file để đếm đúng sau resume |
-| Cost gate Lớp 2 | **Có — sẽ SAI nếu quên A-4** | Bắt buộc sửa cùng lúc |
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.5. Tương tác với các guard đang có — bảng kiểm bắt buộc đọc tr"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.14.6. Tổng hợp hằng số & artifact mới (cho Dev)
 
@@ -6794,50 +5510,15 @@ Artifact mới: `_salvage_epub_id_pairs()`, `EpubParseOutcome`,
 
 ##### 6.20.14.7. Thứ tự implement bắt buộc
 
-1. **Lớp B trước** — offline hoàn toàn, 0 đồng API, verify ngay được trên 5 golden fixture đã có
-   (gồm B2-5 hiện chưa có test nào). Đây là lớp duy nhất cứu được tiền đã trả cho response hỏng.
-2. **A-4** (lineage cost gate) — làm cùng lúc với A-1/A-2, không được tách ra sau.
-3. **A-1, A-2, A-3** — thuần config + 1 điều kiện cắt; test `plan_epub_chunks()` bằng unit giả có
-   nhiều tag ngắn (tái hiện đúng ca 32 unit) ⇒ assert không request nào quá 6 unit.
-4. **Lớp C** — C-1 → C-2 → C-3 → C-4 → C-5, theo đúng thứ tự đó (C-1 sai thứ tự sẽ làm guard mất dấu
-   retry nhầm unit fallback).
-5. Test R6-02 cho Lớp C: giả lập provider luôn trả thiếu đúng 1 id ⇒ assert job **completed**, file
-   output chứa unit EN đó **có class `bb-untranslated`**, và `untranslated_units.json` có đúng 1 dòng.
-   Giả lập trả thiếu 100% ⇒ assert vẫn `EpubBatchTranslationError` (E-09 chưa chết).
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.7. Thứ tự implement bắt buộc"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.14.8. Đã cân nhắc và HOÃN (giữ lại để không mất dấu vết suy nghĩ)
 
-- **Bỏ JSON, dùng delimiter dạng `<<<ID>>>…<<<END>>>`** (hướng 2 của escalation-log): về lý thuyết xoá
-  hẳn lớp lỗi "JSON syntax". Hoãn vì: phải viết lại contract prompt + parser + toàn bộ golden fixture
-  (5 file, capture lại tốn API thật), và Lớp B đã lấy được ~90% lợi ích đó với ~30 dòng code, 0 đồng.
-  Nếu sau khi có A+B+C mà tỉ lệ `salvaged_count > 0` vẫn cao trên dữ liệu live, đây là hướng tiếp theo.
-- **`response_format={"type": "json_object"}` của DeepSeek** (hướng 3): hấp dẫn nhưng
-  `TranslationProvider.translate()` là interface CHUNG cho 5 provider (Increment 3) — thêm tham số
-  riêng cho 1 provider là sửa contract chéo, và bản thân khả năng hỗ trợ **chưa verify** với nguồn thật
-  (R5-01). Không có số đo nào chứng minh nó tốt hơn A+B. Hoãn.
-- **Chấp nhận rủi ro, dựa vào Retry của user** (hướng 4): bị chính chỉ đạo "ưu tiên nhanh" loại — QA đã
-  chạy 3 lần full-book và không lần nào xong.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.8. Đã cân nhắc và HOÃN (giữ lại để không mất dấu vết suy nghĩ)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.20.14.9. Gate release cho vòng QA kế tiếp (cộng vào §6.20.10 và §6.20.13.10, không thay thế)
 
-- **H-1 (R6-03, quan trọng nhất)**: chạy live full-book Sourdough **1 lần**, yêu cầu `job.status =
-  completed` và **mở file `.epub` output ra xem chữ thật** — không tin field `status`.
-- **H-2**: báo cáo từ `requests.jsonl`: tổng số request, phân bố `output_tokens` (max/p95), **số
-  request có `salvaged_count > 0`**. Đây là bộ số duy nhất chốt được các ngưỡng ⚠️ ASSUMED ở
-  §6.20.14.6 — thiếu nó thì mọi hằng số trên vẫn là giả định.
-- **H-3**: báo cáo tổng số unit fallback (`untranslated_units.json`) và tỉ lệ trên 384 unit. **Tiêu chí
-  pass đề xuất: ≤ 2%** cho lần chạy đầu tiên; > 5% thì job đã tự fail theo C-2 và phải escalate lại.
-- **H-4 (cost)**: `actual/estimate` phải **≤ 1,0** (§6.11.6). Sau A-4, `estimate` sẽ tăng theo số
-  request — nếu tỉ lệ này lần đầu tiên xuống dưới 1,0 thì đó chính là bằng chứng A-4 đã đóng đúng
-  phần còn lại của C-2.
-- **H-5**: diacritic ratio đo trên **384/384 unit** (mục tiêu 3 vòng QA trước chưa lần nào đạt vì job
-  chưa từng chạy xong) — tiêu chí giữ nguyên: 0 unit thoả `letters ≥ 40 và ratio < 0,02`.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.14.9. Gate release cho vòng QA kế tiếp (cộng vào §6.20.10 và §6.2"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.20.15. Bug #EPUB-5 — chuẩn hoá markup rác (K-1) + sửa phép đo runaway đang abort nhầm (K-2..K-5)
 
@@ -6869,17 +5550,7 @@ Làm riêng K-1 KHÔNG sửa được job nào.
 
 ##### Nguồn xác thực (R5-01)
 
-| # | Claim | Nguồn |
-|---|---|---|
-| S1 | Payload gửi LLM là `unit.text` = inner-HTML **nguyên trạng**, không có bước strip markup nào | `src/core/job_orchestrator.py:2372` (`payload = [{"id": str(i), "html": u.text} ...]`); `src/services/epub_document.py:786` (`text=_inner_html(own)` → `Tag.decode_contents()`) |
-| S2 | Contract X4 **yêu cầu model tái tạo** `span` đúng số lượng/vị trí | `src/core/prompt_builder.py:418-419` (điều 3, `span` nằm trong danh sách) |
-| S3 | Model **đã tái tạo đúng** koboSpan trong bản dịch | `data/processing/781b59b0-…/chunk_0/units.json` — mỗi giá trị dịch vẫn chứa `<span class="koboSpan" id="kobo.N.1" xmlns="…">` |
-| S4 | `EPUB_REQUEST_CHAR_BUDGET` đo bằng **text thuần** (strip tag), không đo payload thật | `src/core/chunking.py:268-275` (`_plain_char_len()` = `_TAG_RE.sub("", unit.text)`) |
-| S5 | `output_tokens` = `usage.completion_tokens` | `src/services/openai_provider.py:116` (DeepSeekProvider kế thừa, `deepseek_provider.py:29`) |
-| S6 | DeepSeek V4 Flash: **thinking BẬT mặc định, effort mặc định `high`**; tắt bằng `{"thinking": {"type": "disabled"}}` (OpenAI format) | doc chính thức đã fetch 2026-09-11: <https://api-docs.deepseek.com/guides/thinking_mode/> — *"Thinking mode is enabled by default, with the default effort being `high`"* |
-| S7 | Có `usage.completion_tokens_details.reasoning_tokens` để tách token thinking | doc chính thức DeepSeek (fetch 2026-09-11). **Chưa tự đọc field này trên response thật** → xem K-2 ⚠️ |
-| S8 | 0 tham chiếu `href`/`idref`/`src` nào trỏ tới `id="kobo.*"` trong toàn bộ zip | quét thật `Sourdough Culture.epub`: 0/7.616 |
-| S9 | Số đo phân bố `ratio` / `chars-per-output-token` | `data/processing/*/chunk_*/requests.jsonl` + `units.json` (797 request, 55 chunk, 3 sách) — số liệu ở design-log |
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Nguồn xác thực (R5-01)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### K-1 — Chuẩn hoá markup rác ở TẦNG PARSE (`epub_document.py`) — ✅ ĐÃ CHỐT (HOI-05, 2026-09-11)
 
@@ -7028,16 +5699,7 @@ phép đo đúng **kể cả khi** một provider khác bật thinking mà ta kh
 
 ##### K-4 — Hiệu chỉnh lại hằng số, chỉ SAU khi có số đo hậu-K-2/K-3
 
-`CHARS_PER_TOKEN_VI = 2.0` hiện **sai nặng**: đo thật trên 55 chunk cho **0,23–0,66 ký tự/token**
-(median ~0,32) — và đây còn là **cận trên** (mẫu số bỏ qua token của retry). Nhưng **CẤM sửa hằng số
-này trong cùng lượt với K-2/K-3**: số đo hiện tại đã bị ô nhiễm bởi token thinking, hiệu chỉnh theo
-nó là khoá cứng cái sai vào hằng số. Thứ tự bắt buộc:
-
-1. Làm K-2 (+K-3), chạy live **1 cuốn**, thu `requests.jsonl` có `answer_tokens`.
-2. Tính `chars_per_answer_token` thật; cập nhật `CHARS_PER_TOKEN_VI` **và** `VI_CHAR_EXPANSION`,
-   ghi số đo + ngày vào §6.20.15 này (không để ⚠️ ASSUMED trần).
-3. Chỉ khi đó mới xét lại `EPUB_RUNAWAY_OUTPUT_FACTOR = 3.0`. Tiêu chí giữ nguyên §6.20.13.3b:
-   **max ratio của lần chạy lành mạnh phải ≤ 1,5×**; nếu không, ngưỡng vẫn sai.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.15 K-4 — lý do cấm hiệu chỉnh hằng số trước khi có số đo hậu K-2/K-3"**.
 
 Assertion chống tái diễn im lặng (K-1 phần đo): `run_epub_job()` log WARNING khi
 `sum(len(u.text)) / doc.total_chars > EPUB_INLINE_MARKUP_FACTOR` — tức khi công thức cost gate
@@ -7055,27 +5717,7 @@ $0,588 / 2.043.387 token (input + output cộng dồn), well trong `max_cost_per
 
 **Quyết định KHÔNG đổi `CHARS_PER_TOKEN_VI`/`VI_CHAR_EXPANSION`/`EPUB_RUNAWAY_OUTPUT_FACTOR` ở lượt
 này** (khác kỳ vọng ban đầu của mục K-4 khi viết — quyết định này CÓ SỐ ĐO, không phải bỏ qua bước):
-- Số đo live ở trên chỉ cho ra **1 tỉ số gộp** `chars_per_answer_token`
-  (= `CHARS_PER_TOKEN_VI / VI_CHAR_EXPANSION` theo đúng công thức `epub_expected_output_tokens()`),
-  KHÔNG tách được thành 2 hằng số độc lập — tách bằng cách "đoán" 1 trong 2 rồi suy hằng số kia là
-  đúng loại suy diễn Protocol 5 cấm.
-- `VI_CHAR_EXPANSION` là hằng số **DÙNG CHUNG** với `estimate_job_cost_v2()` (ước lượng chi phí
-  TỔNG QUÁT cho cả PDF, Architecture.md 6.11.4), đo gốc từ **ký tự văn bản thuần** (`total_chars`
-  tiếng Anh nguồn / tiếng Việt dịch, S1 6.11.2). `payload_chars` ở phép đo K-4 này là
-  `len(payload_json)` — ĐÃ GỒM markup HTML + overhead cấu trúc JSON (`{"id":...,"html":...}`), KHÔNG
-  phải ký tự văn bản thuần. Ghi đè `VI_CHAR_EXPANSION` bằng tỉ số đo trên cơ sở khác sẽ làm sai lệch
-  `estimate_job_cost_v2()` (rủi ro ước lượng SAI cho các job PDF không liên quan gì tới K-2/K-3/K-5)
-  — đúng loại lỗi tổng quát hoá nhầm ngữ cảnh mà Protocol 8 R8-02 cảnh báo.
-- Bản thân công thức HIỆN TẠI đã an toàn: `max_ratio=0,9119 < 1,5×` (tiêu chí bước 3) VÀ
-  `<< EPUB_RUNAWAY_OUTPUT_FACTOR=3,0` — không có bằng chứng false-positive nào cần sửa gấp. Vì phép
-  đo gộp không tách được 2 hằng số mà không suy đoán, giữ nguyên cả 3 hằng số là lựa chọn AN TOÀN
-  HƠN (tránh làm hỏng `VI_CHAR_EXPANSION` dùng chung) so với sửa dựa trên suy diễn.
-- Backlog cho lần đo sau (nếu muốn tách chính xác 2 hằng số): cần đo riêng
-  `len(translated_plain_text) / len(source_plain_text)` (cho `VI_CHAR_EXPANSION`, từ `units.json` +
-  `doc.units[i].text` đã strip tag, KHÔNG dùng `payload_json`) và
-  `len(translated_plain_text) / answer_tokens` (cho `CHARS_PER_TOKEN_VI`) riêng biệt — chưa làm ở
-  lượt này vì không nằm trong phạm vi brief S4 (chỉ có `requests.jsonl`, không map ngược được sang
-  `units.json` theo từng request slice mà không đọc lại toàn bộ `EpubDocument`).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.20.15 K-4 — 4 lý do giữ nguyên 3 hằng số"**.
 
 ##### K-5 — R-b không được là "abort khi thiếu bất kỳ id nào"
 
@@ -7086,24 +5728,11 @@ Với ≤ 2 id thiếu, thang cứu hộ C-1 (retry từng-id) rẻ và có tỉ
 
 ##### Thứ tự implement bắt buộc
 
-1. **Spike R5-02** (K-2/K-3): 1 request thật, capture `usage` → golden file. **Chặn** K-2, K-3.
-2. K-5 (thuần logic, không phụ thuộc spike) → K-2 → K-3.
-3. Chạy live 1 cuốn, thu số đo.
-4. K-1 (độc lập hoàn toàn, có thể song song, nhưng **không** được báo là "fix Bug #EPUB-5").
-5. K-4 cuối cùng, dựa trên số đo bước 3.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Thứ tự implement bắt buộc"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### Gate release (cộng vào §6.20.10/§6.20.13.10/§6.20.14.9, không thay thế)
 
-- **G-1**: golden file `usage` thật tồn tại, có `reasoning_tokens` (R5-03).
-- **G-2**: sau K-2/K-3/K-5, chạy hết **1 cuốn** (`Sourdough Culture`, 66 chunk) không abort vì R-b;
-  ghi `max(runaway_ratio)` vào `test-report.md`.
-- **G-3** (R6-02): test assert `write_translated()` và `load()` dùng **cùng** hàm unwrap — cụ thể
-  mở file output và assert `koboSpan` không còn xuất hiện, **và** `len(guard_doc.units) ==
-  len(source_doc.units)`.
-- **G-4** (R6-03): mở EPUB output thật, xác nhận có chữ tiếng Việt CÓ DẤU, không chỉ tin
-  `status = completed`.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"Gate release (cộng vào §6.20.10/§6.20.13.10/§6.20.14.9, không thay thế"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ### 6.21. Giữ chuẩn công thức toán/lý/hoá khi chiếu sang Markdown (yêu cầu xuyên suốt của user, 2026-09-08)
 
@@ -7247,22 +5876,7 @@ tồn tại để chặn.
 
 #### 6.21.4. Gate bắt buộc (§6.15.6 mục 5 trỏ tới đây)
 
-5 case dưới đây phải xanh trước khi US-15 hoặc US-22 được `ready_for_release`. Mỗi case là một lỗi
-**đã đo được trên dữ liệu thật**, không phải case tưởng tượng.
-
-| # | Case | Kỳ vọng | Chặn cái gì |
-|---|---|---|---|
-| F-1 | 5 dòng `<sup>1</sup>/<sub>3</sub> cup …` của `chapter01.html` | `1/3 cup …` | rule `extract()` cũ (ra `/ 3 cup`) |
-| F-2 | Dòng `1<sup>1</sup>/<sub>3</sub> cups unbleached white flour` | **`1 1/3 cups …`** | `markdownify` mặc định (ra `11/3`) — **case quan trọng nhất, và là case duy nhất phân biệt được thiết kế đúng với đề xuất của Expert** |
-| F-3 | `x<sup>2</sup>`, `10<sup>-6</sup>` | `x²`, `10⁻⁶` | mất số mũ (ra `x2`, `10-6` — đọc thành phép trừ) |
-| F-4 | `H<sub>2</sub>O`, `Ca(OH)<sub>2</sub>`, `SO<sub>4</sub><sup>2-</sup>` | `H₂O`, `Ca(OH)₂`, `SO₄²⁻` | mất chỉ số dưới |
-| F-5 | **US-22**: dịch 1 chunk chứa 6 dòng `<sup>` rồi mở lại file EPUB output | 6 dòng vẫn có **đúng 6 `<sup>` và 6 `<sub>`**, con số không đổi | LLM tự ý "dọn dẹp" markup; và rule `extract()` nếu Dev quên xoá |
-
-F-5 phải chạy **trên file EPUB output thật**, không phải trên chuỗi trả về của LLM — đúng tinh thần
-R6-03 ("mở file ra xem chữ thật"). Đây cũng là case duy nhất bắt được nếu `write_translated()` ghi
-đúng nhưng LLM sửa markup.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.21.4 — gate bắt buộc cho §6.21 (đã chạy xong cùng US-15)"**.
 
 ### 6.22. BL-04 — Phát hiện babeldoc bỏ đoạn VÌ KHÔNG VỪA KHUNG (paragraph drop, kênh 1/3) và báo cáo như một QA finding
 
@@ -7360,54 +5974,7 @@ với B9-05 là *cơ chế* drop (composition rỗng), và chính cơ chế đó
 
 #### 6.22.3. Tín hiệu quan sát được (Bước 2) — 3 phương án đã cân đo
 
-**(a) Log ra stdout — CÓ, đã đo thật.**
-`pdf_creater.py:831-835` (bên trong `PDFCreater.render_paragraph_to_char`):
-
-```python
-if not chars and paragraph.unicode and paragraph.debug_id:
-    logger.error(
-        f"Unable to export paragraphs that have "
-        f"not yet been formatted: {paragraph}",
-    )
-```
-
-Đây **chính xác** là điều kiện drop ở 6.22.2 (composition rỗng → `chars` rỗng, nhưng `unicode` vẫn
-còn bản dịch). Cấu hình log: `main.py:918-920` — `logging.basicConfig(level=logging.INFO,
-handlers=[RichHandler()])`, và `RichHandler` mặc định ghi ra **stdout** (đo thật, xem dưới) — cùng
-đường với tín hiệu rate-limit mà 6.12/6.14.3 đã dùng.
-
-Đo thật (chạy bằng chính interpreter của tool env babeldoc, dựng lại đúng `basicConfig` + `logger`
-name + một `PdfParagraph` thật, rồi tách stdout/stderr):
-
-- `stderr` rỗng **0 byte**; toàn bộ dòng nằm ở `stdout`. ✅
-- Ở bề rộng mặc định (80 cột) rich **bẻ dòng và cắt cả giữa token** — câu sentinel bị xé thành
-  `Unable to` / `export paragraphs that have not yet` / `been formatted:`. Neo theo cụm từ sẽ HỎNG.
-- Ở `COLUMNS=200` — đúng giá trị `BabeldocRunner` **đã set sẵn** (`babeldoc_runner.py:374`:
-  `env = {**os.environ, **service.envs, "COLUMNS": "200"}`) — cụm sentinel
-  `Unable to export paragraphs that have not yet been formatted:` **nằm trọn trên 1 dòng**; chỉ
-  phần `repr(paragraph)` phía sau bị wrap sang các dòng tiếp theo (và có thể cắt giữa từ tiếng
-  Việt).
-
-⇒ stdout dùng được để **ĐẾM** số lần drop, nhưng **không** dùng được để trích payload
-(`unicode`, `box`, `debug_id`) một cách tin cậy, và **không** chứa số trang.
-
-**(b) Structure/metadata trả về từ Python — KHÔNG có đường trực tiếp.**
-App gọi babeldoc bằng `asyncio.create_subprocess_exec` ở một venv `uv tool` riêng
-(`babeldoc_runner.py:392-398`), không import babeldoc trong process app. CLI không có flag nào xuất
-báo cáo drop; `PDFCreater.write()` trả về đường dẫn file, không trả thống kê.
-**NHƯNG** repo này đã có sẵn cơ chế can thiệp hợp lệ: **shim `PYTHONPATH`**
-(`src/babeldoc_shim/sitecustomize.py`, 744 dòng — dựng cho Bug #7 và Bug #10), gồm meta-path finder
-+ loader bọc từng module babeldoc, có **version gate** (`_EXPECTED_BABELDOC_VERSION = "0.6.4"`) và
-fail-safe (patch lỗi → log cảnh báo, chạy hành vi gốc). Đây là đường lấy dữ liệu **có cấu trúc**,
-đúng tiền lệ đã qua review của chính project.
-
-**(c) Heuristic gián tiếp trên PDF output — có nhưng KHÔNG chọn làm nguồn chính.**
-So độ dài text input/output (PyMuPDF) chỉ cho tín hiệu mức trang, lẫn với nhiều nguyên nhân khác
-(chữ xoay bị bỏ — đã có `overlay_rotated_text` xử lý; text trong ảnh; tiếng Việt ngắn/dài hơn bản
-gốc). Không phân biệt được "drop vì không fit" với "dịch cô đọng hơn". Giữ làm ghi chú, không
-implement.
-
-**Chốt**: nguồn chính = **(b) shim**, nguồn đối chiếu = **(a) đếm sentinel trên stdout**.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.3. Tín hiệu quan sát được (Bước 2) — 3 phương án đã cân đo"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.22.4. Thiết kế — patch quan sát (observer) trong shim + file sidecar JSONL
 
@@ -7830,19 +6397,7 @@ babeldoc có **ít nhất 3 kênh** làm mất nội dung. Thiết kế này qua
 địa chỉ đổi. Ở `ActiveILCreater`, `on_lt_char` (`:1423-1427`) chỉ là **vỏ** gọi
 `project_native_char` — ai định patch phải patch `project_native_char`, không phải `on_lt_char`.
 
-Kênh (2) **không phải giả thuyết — đã ĐO trên output thật** (Domain Expert, job
-`1ee1fdee-746e-4d3b-a54c-d27f7f2aa763`, Le Cordon Bleu 418 trang, chạy 2026-09-09 bằng babeldoc sau
-khi Bug #9 tắt `font_shrink`):
-
-- Trang 19 nguồn có 2 block: `'1'` (ngang) và `'History of Pâtisserie in France'`
-  (bbox `(599.4, 156.4, 633.0, 528.3)`, `dir = (0.0, 1.0)` theo `page.get_texttrace()`, 31pt).
-  Trang 19 **output chỉ còn `'1'`**.
-- Trang 31: y hệt — mất `'A Life and Career in the Pastry Kitchen'` (bbox `(591.4, 156.4, 625.0, 643.7)`).
-- Quy mô: **52/418 trang** của cuốn này có chữ dọc; tổng ký tự dọc nguồn **2.303** → output **1.327**.
-- Và `layout_qa_findings` cho job đó = **0 row**, dù `babeldoc_rotated_text_overlay` mặc định `True`
-  (`src/core/config.py:208`) và bước overlay đã tồn tại từ commit `b9c8952` ngày **2026-09-07**, tức
-  **trước** ngày chạy job. ⇒ `overlay_rotated_text` **không phủ hết** kênh (2), và nó cũng không
-  luôn để lại cờ khi không phủ được.
+> 📎 Nhật ký (số đo một lần / phương án đã loại / ứng viên thiết kế cho backlog) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.6.1 — số đo kênh (2) trên job Le Cordon Bleu"**.
 
 **Hệ quả phải ghi thẳng vào hợp đồng — không được mập mờ**:
 
@@ -7865,63 +6420,16 @@ babeldoc drop report: job=<id> chunk=<i> pages=199-240 observed=42/42
     co che nay (Architecture.md 6.22.6.1)
 ```
 
-**Quyết định về "đếm luôn ký tự bị loại ở `on_lt_char`" — KHÔNG làm trong BL-04 (R8-02
-deny-by-default)**. Đã cân nhắc 3 cách và bác cả 3 **có lý do đo được**, không phải bác cho nhanh:
+**Quyết định: KHÔNG đếm ký tự bị loại ở `ActiveILCreater` trong phạm vi BL-04** (R8-02
+deny-by-default) — 3 cách đã cân nhắc đều bị bác có lý do đo được. Kênh (2)/(3) chuyển thành backlog
+**BL-08**; ứng viên thiết kế đã khảo sát sẵn (hook `ActiveILCreater.on_page_end`, điều kiện tiên quyết
+phải đo biên độ nhiễu 2 bộ trích xuất TRƯỚC khi đặt ngưỡng) nằm ở design-log — ai nhận BL-08 đọc ở đó.
 
-| Cách | Vì sao KHÔNG làm trong BL-04 |
-|---|---|
-| Patch `ActiveILCreater.project_native_char` (`il_creater_active.py:1292`), tự tính lại `get_rotation_angle(char.matrix)` rồi so với 2 khoảng chấp nhận | Phải **chép lại predicate của babeldoc** (2 khoảng + hằng số) thành nguồn sự thật thứ hai, trên **hàm nóng nhất của parser** — `project_native_char` chạy **mỗi ký tự** (~100k lời gọi/chunk 42 trang). Đúng khuôn hai-bản-sao-sẽ-lệch mà project này đã có sẹo (Bug #5, Bug #9) |
-| Đếm theo **kết quả**: so `len(self._page_valid_chars_buffer)` trước/sau mỗi lời gọi | Nhiễu **không tách được**: `_collect_valid_char` (`il_creater_active.py:1439-1466`, đã đọc) còn tự loại thêm theo `unicodedata.category ∈ {Cc,Cs,Co,Cn}`, chuỗi chứa `"(cid:"`, và `font_mapper.has_char()` — những ca này **không** phải mất chữ do góc xoay. Một counter không phân biệt được 2 nguyên nhân là một counter sẽ bị bỏ qua sau vài lần báo động giả |
-| Đếm ký tự trong IL tại chính hook đang có (`create_render_units_for_page`) rồi so với trang nguồn | **Sai điểm đo**: hook chạy **sau** dịch, ký tự ở đó là bản **VI**, không so được với nguồn EN. Muốn đếm ký tự IL *trước dịch* thì phải hook `ActiveILCreater` — quay lại 2 dòng trên |
-
-⇒ Kênh (2)/(3) được ghi nhận thành backlog **BL-08**, kèm **ứng viên thiết kế đã khảo sát sẵn** để
-người sau không phải làm lại phân tích: hook **`ActiveILCreater.on_page_end`**
-(`<BD>/format/pdf/document_il/frontend/il_creater_active.py:386-407` — **1 lời gọi/trang**, không
-phải mỗi ký tự, nên rẻ) đọc `self._page_valid_chars_buffer` (khởi tạo `:230`, gán `[]` ở `:384`, bị
-clear ở `:407`) **trước khi** nó bị clear, so với số ký tự của trang nguồn qua PyMuPDF.
-
-🚨 **Địa chỉ hook này đã được SỬA 2026-09-11 (Domain Expert X1)**. Bản trước ghi ứng viên là
-`ILCreater.on_page_end` (`il_creater.py:641-664`). Patch class đó trong luồng dịch là **no-op**:
-không ném lỗi, không ghi gì, và người implement sẽ kết luận sai *"đã đo, không ký tự nào bị lọc"* —
-một **false negative im lặng**, đúng khuôn Bug #9. Ai nhận BL-08 phải patch bản `_active`; xem
-self-correction R5-05 ở §6.22.1 để biết vì sao.
-
-**Điều kiện tiên quyết của BL-08**: phải **đo trước** biên độ nhiễu giữa 2 bộ trích xuất (pdfminer
-của babeldoc vs PyMuPDF) và nhiễu của `_collect_valid_char` (`il_creater_active.py:1439-1466`) trên
-tài liệu thật, **rồi mới** đặt ngưỡng — cấm đặt ngưỡng từ suy đoán.
+> 📎 Nhật ký (số đo một lần / phương án đã loại / ứng viên thiết kế cho backlog) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.6.1 — 3 cách đếm ký tự bị lọc đã bác + ứng viên thiết kế cho BL-08"**.
 
 ##### 6.22.6.1.a. BL-08 — thứ tự ưu tiên và điểm khởi đầu (Domain Expert X6, 2026-09-11)
 
-**BL-08 KHÔNG phải mục "nice to have" treo vô thời hạn trong backlog.** Ghi vào hợp đồng để quyết
-định này không tồn tại dưới dạng nhật ký:
-
-- **Quy mô đo được của kênh (2) LỚN HƠN kênh (1) mà BL-04 đang vá** — trên cùng cuốn Le Cordon Bleu
-  (job `1ee1fdee`, 418 trang): kênh (2) làm mất **~976 ký tự dọc** trên **52/418 trang** (2.303 ký
-  tự dọc nguồn → 1.327 ở output), **gồm 2 tiêu đề chương thật** (trang 19: *"History of Pâtisserie
-  in France"*; trang 31: *"A Life and Career in the Pastry Kitchen"*). Kênh (1) mà BL-04 vá: **614
-  ký tự**, 1 đoạn (trang 230).
-- BL-04 vẫn đi trước vì kênh (1) hiện **hoàn toàn không có cơ chế nào** phát hiện, còn kênh (2) có
-  `overlay_rotated_text` phủ **một phần**. Nhưng điều đó có nghĩa: sau BL-04, **BL-08 là hạng mục
-  ưu tiên cao nhất còn lại của mảng mất-chữ**. Xếp **ngay sau BL-04**.
-- Nếu BL-08 bị đẩy lùi sau một hạng mục khác, **phải ghi lý do vào `docs/design-log.md`** — không
-  được im lặng trôi xuống cuối backlog.
-
-**Điểm khởi đầu đã có sẵn — đừng bắt đầu từ số 0** (đã verify, Domain Expert X6c):
-`run_layout_qa_gate()` (`src/services/layout_qa.py:386`) đã chứa sẵn `_check_rotated_text_prescan()`
-(`:278-310`) — quét **file GỐC**, bắt mọi dòng chữ xoay kèm `bbox` + text đầy đủ, severity
-`blocker`, có test (`tests/test_layout_qa.py:116+`). Nhưng nó là **dead code trong production**:
-`grep -rn "run_layout_qa_gate" src/ web/ scripts/` (tự chạy lại 2026-09-11) chỉ trả về **đúng 1
-dòng — chính định nghĩa hàm** (`layout_qa.py:386`), **0 call site**; người gọi duy nhất là
-`tests/test_layout_qa.py:30`. Đó là lý
-do **thứ hai** (ngoài "overlay không phủ hết") khiến job `1ee1fdee` có 0 row `layout_qa_findings`:
-bộ dò đã tồn tại nhưng **không nằm trên đường chạy**.
-
-⚠️ **KHÔNG được bật nguyên trạng hàm đó — kể cả trong BL-08, kể cả "cho nhanh"**: trên cuốn này nó
-sẽ sinh **≥52 finding `blocker`/cuốn** cho **mọi** dòng chữ xoay, kể cả những dòng
-`overlay_rotated_text` đã khôi phục thành công ⇒ đúng loại báo động giả có hệ thống mà QA sẽ học
-cách bỏ qua. Việc thật của BL-08 là biến *"có chữ xoay"* thành *"chữ xoay **bị mất**"* (đối chiếu
-gốc ↔ dịch) và đặt ngưỡng **sau khi** đo nhiễu. **BL-04 không bật, không sửa, không gọi
-`run_layout_qa_gate()`.**
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.6.1.a. BL-08 — thứ tự ưu tiên và điểm khởi đầu (Domain Expert X6,"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ##### 6.22.6.2. Đường đọc: ai thật sự nhìn thấy finding này (F4)
 
@@ -8025,150 +6533,11 @@ test babeldoc quên set thuộc tính sẽ chạy nhầm nhánh và vẫn PASS (
 
 #### 6.22.8. Vị trí sửa (spec cho Dev — CHƯA implement)
 
-| File | Việc |
-|---|---|
-| `src/babeldoc_shim/sitecustomize.py` | thêm `_PDF_CREATER_MODULE_NAME`, `_drop_report_enabled()`, `_build_patched_create_render_units_for_page()`, `_apply_pdf_creater_patch()`, và **1 lời gọi `_install_patch_hook(...)` thứ ba** trong `_install_hook_if_version_matches()` |
-| `src/babeldoc_shim/drop_report.py` (mới) | hàm thuần: predicate `_has_rendered_chars`, dựng dict record `header`/`page`/`drop`, ghi append 1 dòng JSONL. Tách module để test được không cần babeldoc — cùng pattern `word_wrap.py`/`line_split.py` |
-| `src/core/chunking.py` | **mới**: `surviving_page_range(chunk, *, is_first_in_merge)` + Protocol `_ChunkLike` (6.22.5.1). Đặt ở đây vì đây là module định nghĩa luật chồng lấn (`calculate_chunks`); dùng structural typing nên **không** import `src.models.chunk`. `page_start`/`page_end` khai **`int \| None`** khớp model nullable, và **raise `ValueError`** khi gặp `None` (X2) |
-| `src/postprocess/chunk_merge.py` | thay khối `:85-91` bằng lời gọi `surviving_page_range(...)` (**giữ nguyên hành vi**, **giữ nguyên guard `overlap_* is not None`**); **KHÔNG** chuyển phần kẹp `end` theo `chunk_doc.page_count` (`:95-107`) vào hàm chung — X3; thêm `logger.warning` khi `position != chunk.chunk_index` (bất biến ở 6.22.5.1) |
-| `src/services/babeldoc_runner.py` | 2 dataclass mới (`BabeldocDroppedParagraph`, `BabeldocDropReport` — shape đầy đủ ở 6.22.5); `drop_report_enabled` trong `__init__`; set 2 env var; **tạo `drop_report_path` TRONG `output_dir`** (ràng buộc 6.22.4); parse file sau `process.wait()` (không giả định vị trí dòng header, đếm `malformed_line_count`); đếm sentinel; thêm `drop_report` vào `BabeldocResult`; `reports_own_paragraph_drops: ClassVar[bool] = True` |
-| `src/services/pdf2zh_runner.py` | `reports_own_paragraph_drops: ClassVar[bool] = False` |
-| `src/services/layout_qa.py` | 3 hằng số `check_type` mới + **3 khoá mới trong `_SEVERITY_BY_CHECK`** (`:76-84`) — F6, nguồn sự thật duy nhất cho severity |
-| `src/core/job_orchestrator.py` | property `_reports_own_paragraph_drops` (đặt ngay sau `_needs_font_shrink`); trong `_process_chunk()`, **sau** khối `OverflowReport` hiện có: lọc dải trang sống sót (6.22.5.1) → đối chiếu `observed_pages` (6.22.6 trạng thái 3) → map sang `LayoutQaFindingData` (severity tra từ `_SEVERITY_BY_CHECK`) → `persist_findings(...)` → **log R-1**; trong `run_job()` Bước 10 thêm **log R-2** trước `job.status = "completed"` (`:807`), đếm bằng **1 câu `SELECT COUNT` trên DB** — **KHÔNG** đếm từ list in-memory (X7, xem 6.22.6.2). Toàn bộ bọc `try/except` best-effort giống `:749-770` |
-| `src/core/config.py` | `babeldoc_drop_report_enabled: bool = True` |
-
-**KHÔNG sửa**: `src/postprocess/font_shrink.py`, `src/models/overflow.py`, schema `overflow_reports`,
-và **vòng `for page_num in range(chunk.page_start - 1, …)` tại `job_orchestrator.py:1901`** (lỗi
-chồng lấn cùng loại của nhánh pdf2zh — backlog BL-07, xem 6.22.5.1). `layout_qa_findings` **không
-cần migration** (`check_type` là cột `str` tự do).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.8. Vị trí sửa (spec cho Dev — CHƯA implement)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.22.9. Gate kiểm thử
 
-**Unit / integration (R6-02 — assert giá trị, không assert "đã gọi")**:
-1. `test_drop_report_parse`: từ **golden file** JSONL (`tests/fixtures/babeldoc/drop_report_v2.jsonl`,
-   sinh từ lần chạy thật ở E2E dưới, **không viết tay**) → assert đúng số record, đúng
-   `page_number`, đúng `text_excerpt`, đúng `observed_pages`.
-2. `test_drop_report_unavailable`: file không tồn tại → `available=False` → orchestrator ghi **đúng
-   1** finding `babeldoc_drop_report_unavailable` và **0** finding drop. Test chống silent failure.
-3. `test_drop_report_incomplete` (**mới, F2**): golden file bị **cắt bớt** record `type="page"` của
-   vài trang → `observed_pages != expected_pages` → ghi đúng 1 finding
-   `babeldoc_drop_report_incomplete` với `detail["missing"]` đúng danh sách trang thiếu, **đồng
-   thời** vẫn ghi các finding drop đã quan sát được. Đây là test chứng minh "patch đã cài" không bị
-   nhầm thành "đã quan sát".
-4. `test_overlap_pages_filtered` (**mới, F1**): chunk `page_start=39, page_end=80, overlap_end=40`,
-   `chunk_index=1`, drop report có record ở trang 39, 40 **và** 55 → chỉ **1** finding được ghi, và
-   `page_number == 55`. Assert cả `suppressed_overlap_count == 2`.
-5. `test_surviving_range_shared` (**mới, F1**): `surviving_page_range()` cho toàn bộ chunk plan của
-   một tài liệu 418 trang → các dải **rời nhau và hợp lại đúng `[1, 418]`**; và với mỗi chunk, giá
-   trị `start` trả về **bằng đúng `actual_start`** mà `merge_chunk_pdfs()` tính ra (đảm bảo bằng
-   cách refactor cho `merge_chunk_pdfs` gọi chính hàm chung, không chép công thức vào test).
-   ⚠️ **KHÔNG** assert dải này bằng số trang thực sự được `insert_pdf` vào file merge — X3: phần
-   kẹp `end` theo `chunk_doc.page_count` (`chunk_merge.py:95-107`) **ở lại** `chunk_merge.py` và
-   **không** thuộc phạm vi hàm chung, nên hai con số có thể khác nhau một cách hợp lệ khi file
-   chunk ngắn hơn dự kiến.
-6. `test_lineage`: `persist_findings` được gọi với finding có `page_number` bắt nguồn từ **đúng file
-   sidecar** mà runner đã truyền qua env — không phải giá trị hằng trong test.
-7. `test_pdf2zh_branch_untouched`: `pdf_translate_engine="pdf2zh"` → 0 finding `babeldoc_*`, và
-   `OverflowReport` **vẫn** được ghi như cũ (hồi quy Bug #9).
-8. `test_capability_guard`: `AsyncMock(spec=BabeldocRunner)` không set
-   `reports_own_paragraph_drops` → `pytest.raises(TypeError)`.
-9. `test_sentinel_mismatch_one_way` (**mới, F5**): `stdout_sentinel_count < len(dropped)` → **0**
-   finding `babeldoc_drop_report_mismatch` (EvictQueue làm sentinel ≤ structured là bình thường);
-   `>` → đúng 1 finding.
-10. `test_severity_from_registry` (**mới, F6**): monkeypatch `_SEVERITY_BY_CHECK` → severity của
-    finding đổi theo; chứng minh orchestrator **không** hardcode chuỗi severity.
-11. `test_r2_counts_from_db_on_resume` (**mới, X7**): dựng job có 2 chunk, chunk 0 đã
-    `status="completed"` với **3** row `layout_qa_findings` `babeldoc_*` sẵn trong DB (mô phỏng lần
-    chạy trước đã crash sau chunk 0), chunk 1 chạy trong lần này sinh **1** finding → log R-2 phải
-    báo **4**, không phải 1. Đây là test chứng minh R-2 đếm từ DB chứ không từ list in-memory; nếu
-    ai đó đổi ngược lại thành accumulator, test này đỏ.
-12. `test_checksum_mismatch_triggers_incomplete` (**mới, X5**): golden file có
-    `page.dropped_count = 2` nhưng chỉ **1** dòng `drop` cho trang đó, **và** `observed_pages ==
-    expected_pages` → vẫn ghi đúng 1 finding `babeldoc_drop_report_incomplete` với
-    `detail["checksum_mismatch_pages"] == [<trang đó>]`, `detail["missing"] == []`. Chứng minh
-    checksum không rơi vào hư không khi đủ trang.
-
-**Live E2E (R5-03 + R6-03)** — bắt buộc trước `ready_for_release`.
-
-⚠️ **Mục tiêu E2E đã ĐỔI (2026-09-11)**: bản trước nhắm "chunk 0 — 40 trang đầu Le Cordon Bleu".
-**Sai mục tiêu** — Domain Expert đã đo toàn bộ 418 trang của job `1ee1fdee` và xác nhận **chunk 0
-không có ca drop kiểu (1) nào** (tỉ lệ ký tự out/src trên 40 trang: min 0.80 tại trang 17 với vỏn
-vẹn 30 ký tự; ứng viên "mất chữ" với `src > 300` ký tự và tỉ lệ `< 0.75`: **0**). Chạy gate trên
-chunk 0 sẽ ra `available=True, dropped=[]` và **không chứng minh được gì**.
-
-**Ca drop thật, đã đo, dùng làm gate**:
-
-| Hạng mục | Giá trị |
-|---|---|
-| Tài liệu | `data/uploads/f07b3194-4d26-…-Le-Cordon-Bleu-Patisserie-and-Baking-Foundations (1).pdf` (418 trang) |
-| Chunk | **chunk 5**, `--pages 199-240` (42 trang) |
-| Trang có drop | **230** (1-based, tài liệu nguồn) |
-| Đoạn bị mất | sidebar EN, bbox `(61.5, 223.6, 332.3, 466.6)` ⇒ khung **271 × 243 pt**, 13 dòng, font `BernhardModernStd-Roman` **12 pt**, **614 ký tự**: *"The term feuilletage appeared in the 15th century and some attribute its invention to Feuillet, the pâtissier to the Marshall of Conde. … including Carême who innovated the fifth turn of the dough!"* |
-| Bằng chứng | đọc **toàn văn** output trang 230 (1.126 ký tự) — không chứa bất kỳ dấu vết nào của đoạn này (không "feuilletage" theo nghĩa lịch sử, không Feuillet / Conde / Le Lorrain / Médicis / Carême), trong khi **mọi** block khác của trang đều có bản dịch |
-| Vì sao chắc đây là kênh (1) chứ không phải co ngót dịch | tỉ lệ ký tự **ngang** 2318 → 1440 = **0.62**, trong khi 6 trang "mất nhiều nhất" còn lại của cả cuốn đều 0.84–0.88 và đã kiểm là số block nguồn/đích khớp, không block nào vắng mặt |
-
-🚨 **BẪY BẮT BUỘC TRÁNH — không được cắt nhỏ dải trang cho rẻ**: phải chạy **đúng `--pages 199-240`**
-(42 trang), **KHÔNG** cắt lấy 2-3 trang quanh 230. Lý do có nguồn xác thực (đã tự đọc
-`typesetting.py:919-935`): `preprocess_document` gom `optimal_scale` của **mọi** paragraph trên
-**toàn bộ tập trang của chính lần gọi đó**, lấy `statistics.multimode(...)` rồi **hạ** mọi giá trị
-lớn hơn mode xuống mode. Tập trang khác ⇒ mode khác ⇒ đoạn ở trang 230 có thể **fit** và ca drop
-**biến mất**. Đây cũng chính là lý do kỹ thuật của bộ lọc chồng lấn ở 6.22.5.1.
-
-**Harness bắt buộc (X8, 2026-09-11) — KHÔNG chạy qua `run_job()`, KHÔNG chạy CLI thủ công**: gate
-này là một **integration test gọi THẲNG `JobOrchestrator._process_chunk()`** với `BabeldocRunner`
-**thật** (không mock), DB session thật, và một `Chunk` thật
-(`chunk_index=5, page_start=199, page_end=240, overlap_start=199, overlap_end=200`).
-
-Lý do phải ghi rõ, thay vì để QA tự chọn: ba yêu cầu của gate chỉ **đồng thời thoả** ở đúng tầng
-này — assertion 1-3 cần `BabeldocRunner` thật chạy babeldoc thật; assertion 5 cần bộ lọc dải trang
-sống sót nằm **trong** `_process_chunk()`; assertion 6 cần log R-1 cũng nằm trong `_process_chunk()`;
-và lời hứa *"chi phí 42 trang thay vì 418"* chỉ đúng khi **không** đi qua `run_job()` (chạy
-`run_job()` sẽ dịch cả 418 trang — tốn tiền thật, và biên chunk lại phụ thuộc trạng thái thích ứng,
-xem assertion 0).
-
-⚠️ **Harness này KHÔNG phủ 2 thứ — nói ra để QA không tưởng là đã phủ**: (a) log **R-2** (nó nằm ở
-`run_job()` Bước 10, không chạy trong harness này) và (b) `merge_chunk_pdfs()`. Hai thứ đó vẫn phải
-được phủ bằng test ở mục "Unit / integration" trên (R-2: test riêng với DB có sẵn finding của 2 lần
-chạy giả lập resume — đúng ca X7; merge: test 5).
-
-**Assertion cho gate (R6-02 — assert giá trị, không đếm suông)**:
-0. **TIỀN ĐIỀU KIỆN — kiểm TRƯỚC khi tin bất cứ assertion nào phía dưới**: `job.chunk_size_used == 40`
-   **và** chunk đang đo có `page_start == 199 and page_end == 240`. Lý do có nguồn xác thực:
-   `chunk_size_used` là **thích ứng**, `COLD_START_CHUNK_SIZE = 20` hoặc `WARM_CHUNK_SIZE = 40`
-   (`job_orchestrator.py:112-113`), chọn tại `:550-561` theo
-   `state.observation_count >= 3 and state.consecutive_successes >= 3`. Đo thật bảng
-   `concurrency_state` ngày 2026-09-11: `('babeldoc','deepseek','deepseek:deepseek-v4-flash',
-   consecutive_successes=95, observation_count=133)` ⇒ **đang warm**, sẽ ra 40. **Nhưng
-   `consecutive_successes` về 0 sau MỘT lần fail** ⇒ chunk_size 20 ⇒ chunk 5 thành `99-120`, trang
-   230 rơi sang chunk khác, **và** tập trang đổi ⇒ dính đúng cái bẫy mode-scale cảnh báo ngay trên.
-   Một dòng assert này cứu trọn một vòng chạy thật.
-1. `drop_report.available is True` **và** `observed_pages == set(range(199, 241))` (42/42 trang).
-2. Tồn tại record với `page_number_1based == 230`.
-3. `text_excerpt` của record đó là bản dịch VI của đoạn feuilletage (soi tay **một** lần, rồi chốt
-   vào golden file `tests/fixtures/babeldoc/drop_report_v2.jsonl`).
-4. **Mở `translated_vi.pdf` trang 230 và xác nhận đoạn đó thật sự vắng** — không chỉ tin số đếm
-   (R6-03).
-5. **KHÔNG** có finding nào ở trang **199-200** (2 trang chồng lấn bị `merge_chunk_pdfs` vứt bỏ) —
-   đây là assertion chứng minh bộ lọc F1 hoạt động trên dữ liệu thật.
-6. Dòng log R-1 (6.22.6.2) xuất hiện, đúng định dạng có `observed=42/42`, `checksum_mismatch=…` và
-   câu PHAM VI.
-
-Lần chạy này **là** nguồn sinh golden file cho test 1/3/4. Chi phí: 42 trang thay vì 418.
-
-**Nếu không tái hiện được** (bản dịch lần này ngắn hơn, vừa khung): **không** kết luận thiết kế sai.
-Theo thứ tự ưu tiên: (a) chạy lại nguyên cuốn với **cùng model/prompt** như job `1ee1fdee`
-(`deepseek`) — cuốn này nhiều sidebar khung hẹp nên xác suất ra ít nhất 1 ca drop là cao;
-(b) dựng tài liệu ép drop **sao chép đúng hình học đã đo**: 1 trang, **một** text box ~270 × 240 pt,
-~650 ký tự EN ở 12 pt. (b) **không phải "bịa ca test"** — nó là bản sao hình học của một ca thật đã
-đo trên trang 230.
-
-⚠️ **Vẫn chưa verify tại thời điểm viết**: bản thân **cơ chế đo** (shim + sidecar) chưa chạy
-end-to-end lần nào — mọi kết luận ở 6.22.1–6.22.4 là từ đọc source + đo log thật. Khác với bản
-trước, **sự tồn tại của một ca drop thật thì KHÔNG còn là giả thuyết** (trang 230 đã đo trên output
-có sẵn). Điều chưa verify còn lại, hẹp hơn nhiều: chạy **lại** babeldoc trên `--pages 199-240` có
-drop **đúng đoạn đó** không — dịch máy không tất định.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.22.9. Gate kiểm thử"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ### 6.23. BL-10 — Chi phí ĐO THẬT cho nhánh PDF/babeldoc (`cost_source = 'metered'`)
 
@@ -8440,51 +6809,7 @@ chạy nguyên xi** khi parse trượt.
 
 #### 6.23.7. Gate kiểm thử
 
-**R5-02 — spike BẮT BUỘC trước khi viết regex chính thức.** Đây là increment ĐẦU TIÊN app dựa vào
-contract *"babeldoc in token ra stdout"*; trước đây app chỉ dựa vào contract *"babeldoc in cảnh
-báo rate-limit ra stdout"*. Dev **phải** làm trước khi implement:
-1. Chạy babeldoc thật qua đúng đường app gọi (1 file PDF ngắn, `--pages` 1 trang, API key thật,
-   **có** `--no-auto-extract-glossary`), redirect stdout ra file (non-tty), rồi
-   `grep -n "Total tokens" <file>`.
-2. So đúng 4 dòng thu được với 6.23.1 T4/T7. **Lệch bất kỳ điểm nào** (mất tiền tố
-   `INFO:babeldoc.main:`, đổi nhãn, có dấu phân cách nghìn, in nhiều lần) ⇒ **escalate Tech Lead**,
-   không tự sửa regex theo phỏng đoán (R5-02).
-3. Lưu stdout thu được thành **golden file** `tests/fixtures/babeldoc/token_usage_stdout.txt`
-   (đã khử API key nếu có). Mọi test dưới đây đọc từ golden file này — **cấm viết tay** chuỗi
-   stdout theo mô tả trong Architecture.md (Protocol 5 mục 3: mock viết tay = test tự xác nhận
-   giả định).
-
-**Unit / integration (R6-02 — assert GIÁ TRỊ, không assert "đã gọi"):**
-1. `test_parse_token_usage_golden`: từ golden file → `total_tokens`/`prompt_tokens`/
-   `completion_tokens`/`cache_hit_prompt_tokens` **bằng đúng** các số trong file.
-2. `test_parse_token_usage_no_cache_hit_confusion`: stdout chứa `Prompt tokens: 111` **và**
-   `Cache hit prompt tokens: 999` → `prompt_tokens == 111` (chống bẫy 6.23.2 mục 1).
-3. `test_parse_token_usage_missing_lines`: stdout không có dòng nào (hoặc chỉ có `Total tokens:`)
-   → trả `None`, **không raise**.
-4. `test_metered_chunk_lineage` (**test trung tâm, R6-02**): mock `BabeldocRunner` trả
-   `BabeldocResult(..., real_token_usage=BabeldocTokenUsage(total=30925, prompt=20000,
-   completion=10925, cache_hit_prompt=0))` → sau `_process_chunk()`:
-   `chunk.api_tokens_used == 30925` **VÀ** `chunk.cost_source == "metered"` **VÀ**
-   `chunk.api_cost == pytest.approx(provider.estimate_cost(20000, 10925))` (tính lại bằng chính
-   provider, **không** hard-code số tiền — bảng giá sẽ đổi ở task khác, 6.23.8).
-5. `test_estimated_fallback_when_no_token_line`: cùng mock nhưng `real_token_usage=None` →
-   `chunk.cost_source == "estimated"` và `chunk.api_tokens_used` **bằng đúng** kết quả
-   `estimate_chunk_cost()` như trước ⇒ chứng minh **không silent-break** test hiện có.
-6. `test_pdf2zh_never_metered`: runner có `reports_token_usage = False` →
-   `chunk.cost_source == "estimated"`, và `parse_babeldoc_token_usage` **không** được gọi.
-7. `test_reports_token_usage_guard`: `AsyncMock(spec=BabeldocRunner)` không set thuộc tính →
-   property raise `TypeError` (cùng khuôn test đã có cho `needs_font_shrink`).
-8. `test_rollup_cost_source`: 3 chunk metered → job `'metered'`; 2 metered + 1 estimated →
-   job **`'estimated'`**; 0 chunk có `api_cost` → `'estimated'`.
-
-**Live E2E (R5-03 + R6-03 — bắt buộc trước release):** chạy **1 job PDF thật** (≥2 chunk) với
-`pdf_translate_engine=babeldoc`, rồi mở DB kiểm **nội dung**, không chỉ `status`:
-- mọi `chunks.cost_source == 'metered'`, `api_tokens_used > 0` (trừ trường hợp cache-hit toàn
-  phần của babeldoc → `0`, hợp lệ, xem 6.23.8);
-- `jobs.cost_source == 'metered'` và `actual_cost == sum(chunks.api_cost)`;
-- đối chiếu `sum(chunks.api_tokens_used)` với **tổng 4 dòng token in trong log của từng chunk**
-  (đọc log app) — 2 con số phải **khớp tuyệt đối**, đây là phép kiểm lineage cuối cùng;
-- chạy lại **1 job PDF bằng pdf2zh** xác nhận vẫn `'estimated'` (chống hồi quy).
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.23.7. Gate kiểm thử"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.23.8. Giới hạn đã biết (phải đưa vào PRD / tooltip UI)
 
@@ -8511,44 +6836,14 @@ báo rate-limit ra stdout"*. Dev **phải** làm trước khi implement:
 
 #### 6.23.9. Vị trí sửa (spec cho Dev — CHƯA implement)
 
-| File | Việc |
-|---|---|
-| `src/services/babeldoc_runner.py` | `BabeldocTokenUsage` (dataclass frozen), `_TOKEN_LINE_RES`, `parse_babeldoc_token_usage()`; gọi parse ngay sau `drop_sentinel_count` (`:577`); thêm `real_token_usage` vào `BabeldocResult`; `reports_token_usage: ClassVar[bool] = True` |
-| `src/services/pdf2zh_runner.py` | `reports_token_usage: ClassVar[bool] = False` (chỉ 1 dòng + docstring) |
-| `src/core/job_orchestrator.py` | property `_reports_token_usage` (đặt ngay sau `_reports_own_paragraph_drops`, **có** guard `isinstance`); thay khối `:2202-2214` bằng 2 nhánh ở 6.23.4; `rollup_cost_source()` + áp tại `:848` và `:1022`; sửa câu `error_message` nhánh cost-cap theo 6.23.5; `_process_epub_chunk()` ghi thêm `chunk.cost_source = "metered"` |
-| `src/models/chunk.py` | `cost_source: str = Field(default="estimated")` kèm docstring trỏ 6.23 |
-| `src/models/database.py` | thêm `("chunks", "cost_source", "TEXT NOT NULL DEFAULT 'estimated'")` vào `_NEW_NULLABLE_COLUMNS` (`:61-77`) — SQLite cho phép `ADD COLUMN NOT NULL` khi có DEFAULT hằng; sửa comment của list cho khớp ("cột mới: nullable **hoặc** có DEFAULT hằng") |
-| `tests/fixtures/babeldoc/token_usage_stdout.txt` | golden file sinh từ spike R5-02, **không viết tay** |
-
-**KHÔNG sửa**: `src/services/deepseek_provider.py` (bảng giá — task riêng),
-`estimate_chunk_cost()`/`estimate_job_cost_v2()`, pre-flight gate Lớp 2, `RATE_LIMIT_LINE_RE`,
-`font_shrink_page()`, và mọi đường ghi của nhánh EPUB ngoài 1 dòng `chunk.cost_source` nêu trên.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.23.9. Vị trí sửa (spec cho Dev — CHƯA implement)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 ### 6.24. S5 — UI hint "chọn thư mục tải về" (không code logic, dựa hoàn toàn vào browser)
 
 Quyết định: KHÔNG dùng File System Access API (`showSaveFilePicker`, chỉ Chromium desktop). Chỉ thêm
 1 hint tĩnh cạnh link download ở `web/index.html` và `web/history.html` — browser tự lo chọn + nhớ thư mục.
 
-Tên setting đã verify (nguồn thật, fetch 2026-09-12):
-- **Chrome**: Settings → Downloads → **"Ask where to save each file before downloading"** — nhãn UI trích
-  từ https://support.google.com/chrome/answer/95759 (fetch 2026-09-12).
-- **Firefox**: Settings → General → Downloads → **"Ask where to save files before downloading"** —
-  nhãn hiện hành (`download-always-ask-where2`) trong mozilla-central
-  `browser/locales/en-US/browser/preferences/preferences.ftl:617-618`. Nhãn cũ "Always ask you where to
-  save files" đã đổi; **không** dùng wording cũ trong hint.
-
-Hành vi "nhớ thư mục lần trước" — **ĐÚNG cho cả 2**, verify bằng source, không suy đoán:
-- Chrome/Chromium `chrome/browser/download/download_target_determiner.cc:333-336` — khi cần prompt, thư mục
-  khởi tạo lấy từ `download_prefs_->SaveFilePath()` kèm comment *"If the user is going to be prompted and the
-  user has been prompted before, then always prefer the last directory that the user selected"*; thư mục user
-  vừa chọn được ghi lại tại cùng file `:757` (`SetSaveFilePath(virtual_path_.DirName())`).
-- Firefox `toolkit/mozapps/downloads/HelperAppDlg.sys.mjs:356-365` — `picker.displayDirectory` mặc định là
-  thư mục tải mặc định, rồi **ghi đè bằng `lastDir`** nếu hợp lệ; thư mục vừa chọn lưu lại ở `:399`
-  (`gDownloadLastDir.setFile(...)`). Lưu ý: `browser.download.lastDir.savePerSite` mặc định `true`
-  (`toolkit/mozapps/downloads/DownloadLastDir.sys.mjs:86-91`) → Firefox nhớ **theo từng site**; với app này
-  (cùng 1 origin) hiệu quả vẫn là "nhớ thư mục lần trước".
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.24 — nguồn xác thực hành vi nhớ thư mục tải của Chrome/Firefox"**.
 
 Kết luận wording: ĐƯỢC phép claim "browser sẽ mở lại thư mục bạn chọn lần trước", nhưng phải nói rõ điều kiện
 (phải bật setting) và không hứa cho mọi browser/mọi chế độ — private/incognito không lưu lại (Firefox
@@ -8643,16 +6938,7 @@ lớp nguồn file phổ biến, **chắc chắn tái diễn**, không phải s�
 
 #### 6.25.6. Test bắt buộc khi implement
 
-- Fixture EPUB tối thiểu **có `mimetype` nén DEFLATED** (sinh bằng `zipfile`, không viết tay) —
-  assert `write_translated()` **thành công** và output có `infolist()[0].filename == "mimetype"`,
-  `compress_type == ZIP_STORED`, `extra == b""`.
-- Fixture EPUB có `mimetype` **KHÔNG phải entry đầu** → output vẫn phải đưa `mimetype` lên đầu.
-- Fixture thiếu `mimetype` / sai nội dung → `EpubDocument.load()` raise `EpubParseError`
-  (L1), và `POST` route tương ứng trả **400**, chứ không phải fail ở merge.
-- R6-02: assert output của merge nằm ở `merged_path` được sinh từ `doc` đã `load(job.file_path)`
-  — giữ nguyên các assert lineage sẵn có của §6.20.
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.25.6 — test bắt buộc khi implement BL-12 (đã implement + QA PASS)"**.
 
 ### 6.26. S7 — Dịch FR→VI bên cạnh EN→VI (auto-detect ngôn ngữ nguồn, PDF + EPUB)
 
@@ -8819,16 +7105,7 @@ trước khi Dev bắt đầu implement.
 
 #### 6.26.8. Test bắt buộc khi implement
 
-- **R6-02 (lineage, không chỉ "đã gọi")**: `translator_runner.translate_pages.assert_called_with(..., lang_in="fr", ...)`
-  cho job có `source_lang="fr"`, và `lang_in="en"` cho `source_lang=None` (job cũ). Assert
-  `prompt_path.read_text()` chứa `"tieng Phap"` — tức prompt file thật sự sinh **từ** `job.source_lang`.
-- Regression EN: 6 tài liệu EN trong `data/uploads/` (danh sách ở §6.26.3) phải cho `detect == "en"`.
-- Byte-identical: prompt `source_lang="en"` khớp chuỗi cũ (§6.26.6).
-- Bước #13: job `source_lang="fr"` ⇒ `extract_and_store_terms` **không** được gọi.
-- Bước #1: với `pdf_scan` FR, assert `mineru_runner.parse_document` được gọi với `lang="en"` —
-  **không** phải `"fr"` (nếu truyền `"fr"` MinerU raise, §6.26.1).
-- **R6-03 (live E2E)**: ít nhất 1 lần chạy xuyên suốt 1 PDF FR thật + 1 EPUB FR thật, mở file output
-  kiểm tra **có chữ Việt thật**, không chỉ tin `status == "completed"`.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.26.8 — test bắt buộc khi implement S7 (đã implement)"**.
 
 #### 6.26.9. Ngoài phạm vi v1
 
@@ -8845,16 +7122,7 @@ tài liệu **trộn** EN+FR (detector trả 1 nhãn cho cả tài liệu — s�
 
 #### 6.27.1. Trạng thái trước fix (sự thật đo được 2026-09-16)
 
-`src/core/term_extraction_service.py:74-83` raise `TermExtractionSourceError` cho **mọi** job
-`file_type == epub`, với lý do "US-22 chưa implement nên nhánh này không thể bị gọi". US-22 đã lên
-production 2026-09-10 (commit `27d7daa`, v1.3.0) → tiền đề của guard **hết hiệu lực** nhưng guard
-không ai gỡ. Lỗi bị nuốt tại `src/api/routes/jobs.py:545-548` (`except Exception: logger.exception`
-— **đúng theo BR-TERM-01/§6.18.6**, không phải lỗi ở đây), nên job vẫn `completed` và panel "Các từ
-mới" rỗng, không có bất kỳ tín hiệu nào tới user.
-
-Đo trên `data/bb_translation.db` (2026-09-16): **8 job EPUB `completed`, 0 dòng `suggested_terms`**
-(so với `pdf_digital`: 9 job có dữ liệu, 18.359 dòng). Trong 8 job đó, **2 là sách thật của user**
-(`Sourdough Discard Recipes Cookbook`, `Sourdough Every Day`), 6 là fixture QA.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) của mục này đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.27.1. Trạng thái trước fix (sự thật đo được 2026-09-16)"**. Hợp đồng hiện hành giữ nguyên tại các § còn lại.
 
 #### 6.27.2. Hợp đồng lineage EPUB (không đổi §6.18.5 — chỉ thi hành đúng nó)
 
@@ -9173,20 +7441,7 @@ im lặng thừa hưởng giả định của 2 engine hiện tại — đúng c
 
 ##### 6.28.6.1. Bản đồ tham chiếu đo thật (nền tảng của mọi quyết định bên dưới)
 
-| Sách thật | Doc bản quyền | OPF `item`/`itemref` | NCX `content` | NCX `pageTarget` | nav doc `<a>` | Content doc khác trỏ tới |
-|---|---|---|---|---|---|---|
-| `Baking with Sourdough` | `ops/xhtml/copyright.html` | ✔ | ✔ | — | — | — |
-| `Sourdough Culture` | `OEBPS/xhtml/04_Copyright01.xhtml` | ✔ | ✔ | ✔ (`#page_iv`) | ✔ (2, có `#page_iv`) | — |
-| `Sourdough Discard` (EPUB) | `index_split_001.html` | ✔ | — | — | — | — |
-| `Sourdough Every Day` | `OEBPS/cop.xhtml` | ✔ | ✔ | — | ✔ (2, có `epub:type`) | **✔ `OEBPS/mini_toc.xhtml`** |
-| `Sourdough by Science` | `OEBPS/xhtml/Copyright.xhtml` | ✔ | ✔ | ✔ | ✔ (2) | — |
-| `Bread-A-Global-History` | `04_copy.xhtml` | ✔ | ✔ | — | — | — |
-
-Hai điều bắt buộc rút ra: (a) href trong tham chiếu là **tương đối theo thư mục của file chứa nó**
-(nav ở gốc ghi `OEBPS/cop.xhtml`, nav trong `OEBPS/xhtml/` ghi `Copyright.xhtml`) ⇒ phải
-`posixpath.normpath(posixpath.join(posixpath.dirname(referrer), href))` rồi mới so; (b) href có thể
-kèm **fragment** (`#page_iv`) ⇒ phải cắt `#...` trước khi so. Bỏ qua 1 trong 2 điều này = để lại
-link chết = lỗi cấu trúc kiểu BL-12.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.28.6.1 — bản đồ tham chiếu đo thật trên 2 EPUB mẫu"**.
 
 ##### 6.28.6.2. Lineage EPUB (R6-01)
 
@@ -9302,34 +7557,7 @@ R5-06: cả 5 mục **phải** có entry trong `backlog[]` (`project_state.json`
 
 #### 6.28.9. Test bắt buộc khi implement
 
-- **Golden theo tài liệu thật** (Protocol 5 tinh thần "không mock viết tay"): test tham số hoá chạy
-  `scan_units()` trên các file thật trong `data/uploads/` và assert **đúng bảng §6.28.2** — gồm cả 2
-  ca âm bắt buộc: `[Baking Heaven]` (score 8, 884 từ → **không xoá**) và `Better_For_You` (© mọi
-  trang → **không xoá**). Nếu file thật không có trên máy CI, test `skip` có lý do, nhưng phải chạy
-  xanh ở máy Dev trước khi đóng task.
-- **R6-02 lineage PDF** (không chỉ "đã gọi"):
-  `translator_runner.translate_pages.assert_called_with(input_path=pruned_path, page_range="1-40", ...)`
-  với `pruned_path` là file cắt **sinh ra từ** `translation_source_path`, và assert
-  `fitz.open(pruned_path).page_count == total_pages_goc - len(removed)`.
-- **Chống lặp lại Bug #9 ở bước cũ**: assert `create_bilingual_pdf` được gọi với
-  `en_pdf_path=original_pruned_path`, **không** phải `job.file_path`; và assert file song ngữ có số
-  trang = 2 × số trang bản dịch, trang chẵn/lẻ đúng cặp (mở bằng PyMuPDF, so text).
-- **Đối xứng 2 engine**: chạy đúng bộ test lineage trên với `pdf_translate_engine="pdf2zh"` **và**
-  `"babeldoc"` (parametrize), assert cả 2 nhận CÙNG `input_path` và CÙNG `page_range`.
-- **pdf_scan**: assert Step 2b chạy **sau** `_build_ocr_bridge` — quét trên text của cầu nối, và
-  `original_pruned.pdf` được cắt từ `job.file_path` với **cùng tập chỉ số**.
-- **Resume**: job có sẵn `copyright_removed_json` + Chunk rows ⇒ `scan_units` **không** được gọi lại
-  (`assert_not_called`), `total_pages` không đổi.
-- **EPUB cấu trúc**: trên EPUB thật `Sourdough Every Day` (ca khó nhất — nav + mini_toc + NCX):
-  output không còn entry `OEBPS/cop.xhtml`, OPF không còn `item`/`itemref`, **không entry nào còn
-  chuỗi `cop.xhtml`**, `EpubDocument.load(output)` chạy được, `mimetype` vẫn `ZIP_STORED` ở vị trí
-  đầu. Và 1 test cho nhánh `structural="skipped"` (fixture có `<img src>` trỏ vào doc bản quyền) ⇒
-  file output **giống hệt** nhánh không xoá.
-- **Kill-switch**: `copyright_page_removal_enabled=False` ⇒ output byte-identical với hành vi trước
-  S8 (không tạo thư mục `pruned/`, không ghi `copyright_removed_json`).
-- **R6-03 live E2E**: ít nhất 1 PDF thật + 1 EPUB thật chạy xuyên suốt, **mở file output** xác nhận
-  (a) không còn trang bản quyền, (b) trang kế tiếp trang bị xoá vẫn còn đủ chữ tiếng Việt, (c) bản
-  song ngữ ghép đúng cặp — không chỉ tin `status == "completed"`.
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"6.28.9 — test bắt buộc khi implement S8 (đã implement)"**.
 
 #### 6.28.10. Ngoài phạm vi v1
 
@@ -9659,35 +7887,7 @@ docker compose --profile ocr up -d
 
 ### 9.2. Cloud Migration Path (v2.0+)
 
-Khi chuyen len cloud (VPS/AWS/GCP), can thay doi:
-
-| Component | Local (v1.0) | Cloud (v2.0+) |
-|-----------|-------------|---------------|
-| **Database** | SQLite file | PostgreSQL (nhieu user dong thoi) |
-| **Task Queue** | asyncio in-process | Celery + Redis (distributed workers) |
-| **File Storage** | Docker volume | S3 / GCS (scalable, CDN) |
-| **Auth** | Khong co | JWT + OAuth (multi-user) |
-| **Container** | docker-compose | Kubernetes hoac ECS |
-| **Monitoring** | Log file | Prometheus + Grafana |
-| **OCR** | MinerU container | GPU instance (A10G) cho throughput cao |
-| **Concurrency** | Semaphore(3) | Celery worker pool, auto-scale |
-| **Cost tracking** | Per-job SQLite | Billing system, per-user quotas |
-
-**Nhung gi KHONG doi**:
-- FastAPI API layer (chi them auth middleware)
-- Translation pipeline logic
-- Prompt templates
-- Post-processing (font shrink, merge)
-- Frontend (them login page)
-
-**Migration steps**:
-1. Thay SQLite → PostgreSQL (SQLModel ho tro ca hai, chi doi connection string)
-2. Thay asyncio queue → Celery (tach job_orchestrator thanh Celery tasks)
-3. Thay local file storage → S3 (abstract FileStorage interface tu dau)
-4. Them auth middleware (FastAPI dependency injection)
-5. Deploy tren Kubernetes voi Helm chart
-
----
+> 📎 Nhật ký (RCA / điều tra / phản biện / số đo một lần / gate đã chạy xong) đã chuyển sang `docs/design-log.md` — mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"**, tiểu mục **"9.2 — Cloud Migration Path v2.0+ (định hướng, không phải hợp đồng đang chạy)"**.
 
 ## 10. Security & Configuration
 
@@ -9726,18 +7926,24 @@ Khi chuyen len cloud (VPS/AWS/GCP), can thay doi:
 
 | # | Tiêu đề gốc | Vị trí mới |
 |---|---|---|
-| 1 | Root Cause Analysis: Line-break/List Regression (2026-09-06) | [`docs/design-log.md`](design-log.md#root-cause-analysis-line-breaklist-regression-2026-09-06) |
-| 2 | Đánh giá hướng Post-Processing cho lỗi gộp dòng Numbered List (2026-09-06) | [`docs/design-log.md`](design-log.md#đánh-giá-hướng-post-processing-cho-lỗi-gộp-dòng-numbered-list-2026-09-06) |
-| 3 | Đo lại F1 trên nhiều trang — kết quả live A/B/C (2026-09-06) | [`docs/design-log.md`](design-log.md#đo-lại-f1-trên-nhiều-trang-kết-quả-live-abc-2026-09-06) |
-| 4 | US-16 — Nén ảnh sau khi ghép (`compress_pdf_images`) — thiết kế (2026-09-06) | [`docs/design-log.md`](design-log.md#us-16-nén-ảnh-sau-khi-ghép-compress_pdf_images-thiết-kế-2026-09-06) |
-| 5 | Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order trên trang layout phức tạp (2026-09-07) | [`docs/design-log.md`](design-log.md#root-cause-analysis-text-overlap-content-loss-reading-order-trên-trang-layout-phức-tạp-2026-09-07) |
-| 6 | Final Decision: Babeldoc Layout Bug Fix Roadmap (sau phản biện Domain Expert, 2026-09-07) | [`docs/design-log.md`](design-log.md#final-decision-babeldoc-layout-bug-fix-roadmap-sau-phản-biện-domain-expert-2026-09-07) |
-| 7 | US-16 v2 — Mở rộng phạm vi sang ảnh `/FlateDecode` (2026-09-08) | [`docs/design-log.md`](design-log.md#us-16-v2-mở-rộng-phạm-vi-sang-ảnh-flatedecode-2026-09-08) |
-| 8 | US-16 v2 — Phản biện của Domain Expert (2026-09-08) | [`docs/design-log.md`](design-log.md#us-16-v2-phản-biện-của-domain-expert-2026-09-08) |
-| 9 | US-16 v2 — Final Decision sau phản biện Domain Expert (2026-09-08) | [`docs/design-log.md`](design-log.md#us-16-v2-final-decision-sau-phản-biện-domain-expert-2026-09-08) |
-| 10 | Bug #9 — `font_shrink_page()` phá output của babeldoc: tắt hẳn cho engine `babeldoc` (2026-09-08) | [`docs/design-log.md`](design-log.md#bug-9-font_shrink_page-phá-output-của-babeldoc-tắt-hẳn-cho-engine-babeldoc-2026-09-08) |
-| 11 | Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng (`_get_width_before_next_break_point` đếm đôi bề rộng ký tự hiện tại) — thiết kế bản vá (Tech Lead, 2026-09-09) | [`docs/design-log.md`](design-log.md#bug-10-babeldoc-cắt-ngang-từ-tiếng-việt-giữa-chừng-_get_width_before_next_break_point-đếm-đôi-bề-rộng-ký-tự-hiện-tại-thiết-kế-bản-vá-tech-lead-2026-09-09) |
+| 1 | Root Cause Analysis: Line-break/List Regression (2026-09-06) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#root-cause-analysis-line-breaklist-regression-2026-09-06) |
+| 2 | Đánh giá hướng Post-Processing cho lỗi gộp dòng Numbered List (2026-09-06) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#đánh-giá-hướng-post-processing-cho-lỗi-gộp-dòng-numbered-list-2026-09-06) |
+| 3 | Đo lại F1 trên nhiều trang — kết quả live A/B/C (2026-09-06) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#đo-lại-f1-trên-nhiều-trang-kết-quả-live-abc-2026-09-06) |
+| 4 | US-16 — Nén ảnh sau khi ghép (`compress_pdf_images`) — thiết kế (2026-09-06) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#us-16-nén-ảnh-sau-khi-ghép-compress_pdf_images-thiết-kế-2026-09-06) |
+| 5 | Root Cause Analysis: Text Overlap, Content-Loss & Reading-Order trên trang layout phức tạp (2026-09-07) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#root-cause-analysis-text-overlap-content-loss-reading-order-trên-trang-layout-phức-tạp-2026-09-07) |
+| 6 | Final Decision: Babeldoc Layout Bug Fix Roadmap (sau phản biện Domain Expert, 2026-09-07) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#final-decision-babeldoc-layout-bug-fix-roadmap-sau-phản-biện-domain-expert-2026-09-07) |
+| 7 | US-16 v2 — Mở rộng phạm vi sang ảnh `/FlateDecode` (2026-09-08) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#us-16-v2-mở-rộng-phạm-vi-sang-ảnh-flatedecode-2026-09-08) |
+| 8 | US-16 v2 — Phản biện của Domain Expert (2026-09-08) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#us-16-v2-phản-biện-của-domain-expert-2026-09-08) |
+| 9 | US-16 v2 — Final Decision sau phản biện Domain Expert (2026-09-08) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#us-16-v2-final-decision-sau-phản-biện-domain-expert-2026-09-08) |
+| 10 | Bug #9 — `font_shrink_page()` phá output của babeldoc: tắt hẳn cho engine `babeldoc` (2026-09-08) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#bug-9-font_shrink_page-phá-output-của-babeldoc-tắt-hẳn-cho-engine-babeldoc-2026-09-08) |
+| 11 | Bug #10 — babeldoc cắt ngang từ tiếng Việt giữa chừng (`_get_width_before_next_break_point` đếm đôi bề rộng ký tự hiện tại) — thiết kế bản vá (Tech Lead, 2026-09-09) | [`docs/archive/design-log-until-2026-09-09.md`](archive/design-log-until-2026-09-09.md#bug-10-babeldoc-cắt-ngang-từ-tiếng-việt-giữa-chừng-_get_width_before_next_break_point-đếm-đôi-bề-rộng-ký-tự-hiện-tại-thiết-kế-bản-vá-tech-lead-2026-09-09) |
 | 12 | Bug #EPUB-3 — Quét job mồ côi (orphan) lúc server startup (Tech Lead, 2026-09-10) | [`docs/design-log.md`](design-log.md#bug-epub-3-quét-job-mồ-côi-orphan-lúc-server-startup-tech-lead-2026-09-10) |
+
+**Rotate lần 2 (2026-09-18)**: thêm **76 khối nhật ký** (RCA, điều tra sự cố, phản biện,
+số đo một lần, gate kiểm thử đã chạy xong, "cần PM/user quyết định" đã có quyết định) được tách
+khỏi §5–§9 sang `docs/design-log.md` mục **"Rotate Protocol C.3 lần 2 (2026-09-18)"** — mỗi chỗ cũ
+giữ tiêu đề § + 1 dòng 📎 trỏ về đúng tiểu mục. Architecture.md: 9.747 → 7.947 dòng. Cùng lượt,
+mục 1–11 của bảng trên đã rotate tiếp sang `docs/archive/design-log-until-2026-09-09.md`.
 
 **Quy tắc từ 2026-09-10**:
 - Nội dung mô tả **hợp đồng hiện hành** (schema, API, flow, hằng số đang chạy) → viết vào §1–10 của
