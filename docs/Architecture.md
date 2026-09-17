@@ -4640,7 +4640,7 @@ chỗ khác nhau. Đây đúng dạng lỗi Bug #5 (đọc nhầm `job.file_path
 |---|---|---|
 | `pdf_digital` | `_extract_full_text(Path(job.file_path))` | — |
 | `pdf_scan` | `_extract_full_text(Path(job.ocr_bridge_path))` — file searchable PDF do §6.10 dựng | ❌ `job.file_path` (ảnh scan, 0 ký tự → danh sách gợi ý rỗng, im lặng) |
-| `epub` | `EpubDocument.load(job.file_path).full_text()` (§6.20.5) — `full_text()` trả **text thuần đã strip tag**, KHÔNG phải inner-HTML của `EpubUnit.source_html` | ❌ `_extract_full_text()` (PyMuPDF không mở được EPUB); ❌ `"\n".join(u.source_html)` — sẽ sinh ứng viên `strong strong strong` |
+| `epub` | `EpubDocument.load(job.file_path).full_text()` (`src/services/epub_document.py:885`) — text thuần đã strip tag, KHÔNG phải inner-HTML `EpubUnit.text`. **Thi hành từ BL-20, xem §6.27** (từ 2026-09-10 tới 2026-09-16 code raise lỗi ở nhánh này) | ❌ `_extract_full_text()` (PyMuPDF không mở được EPUB); ❌ `"\n".join(u.text)` — sẽ sinh ứng viên `strong strong strong` |
 | `parse_only` bất kỳ | `Path(job.output_path).parent / "document.md"` — **SỬA 2026-09-08**: `job.output_path` của parse_only nay trỏ tới `parse_result.zip` (S15-4 đã sửa), không phải `.md` | ❌ đọc thẳng `job.output_path` (sẽ đọc phải bytes của file ZIP) |
 
 Chuỗi đầy đủ:
@@ -8665,6 +8665,80 @@ trước khi Dev bắt đầu implement.
 Glossary FR riêng (cột `term_fr`); dropdown chọn ngôn ngữ thủ công; ngôn ngữ nguồn thứ 3; dịch
 tài liệu **trộn** EN+FR (detector trả 1 nhãn cho cả tài liệu — sách trộn nặng sẽ rơi vào
 `lang is None` ⇒ fallback `"en"`, đúng hành vi hiện hành).
+
+---
+
+### 6.27. BL-20 — US-20 "Các từ mới" cho EPUB: nối đúng nguồn `source_text` (guard hết hạn ngầm)
+
+> RCA đầy đủ: `docs/design-log.md`, mục "2026-09-16 — RCA BL-20". Mục này chỉ ghi **hợp đồng hiện
+> hành** sau fix.
+
+#### 6.27.1. Trạng thái trước fix (sự thật đo được 2026-09-16)
+
+`src/core/term_extraction_service.py:74-83` raise `TermExtractionSourceError` cho **mọi** job
+`file_type == epub`, với lý do "US-22 chưa implement nên nhánh này không thể bị gọi". US-22 đã lên
+production 2026-09-10 (commit `27d7daa`, v1.3.0) → tiền đề của guard **hết hiệu lực** nhưng guard
+không ai gỡ. Lỗi bị nuốt tại `src/api/routes/jobs.py:545-548` (`except Exception: logger.exception`
+— **đúng theo BR-TERM-01/§6.18.6**, không phải lỗi ở đây), nên job vẫn `completed` và panel "Các từ
+mới" rỗng, không có bất kỳ tín hiệu nào tới user.
+
+Đo trên `data/bb_translation.db` (2026-09-16): **8 job EPUB `completed`, 0 dòng `suggested_terms`**
+(so với `pdf_digital`: 9 job có dữ liệu, 18.359 dòng). Trong 8 job đó, **2 là sách thật của user**
+(`Sourdough Discard Recipes Cookbook`, `Sourdough Every Day`), 6 là fixture QA.
+
+#### 6.27.2. Hợp đồng lineage EPUB (không đổi §6.18.5 — chỉ thi hành đúng nó)
+
+§6.18.5 đã quy định từ 2026-09-08 và **vẫn là hợp đồng đúng**:
+
+| `job.file_type` | Nguồn `source_text` BẮT BUỘC | Tuyệt đối KHÔNG đọc |
+|---|---|---|
+| `epub` | `EpubDocument.load(Path(job.file_path)).full_text()` | ❌ `_extract_full_text()` (PyMuPDF không mở EPUB); ❌ `"\n".join(u.text for u in doc.units)` (inner-HTML → ứng viên `strong strong strong`); ❌ file EPUB **đã dịch** `job.output_path` (US-20 cần văn bản **nguồn tiếng Anh**) |
+
+Nguồn xác thực cho `full_text()` (R5-01): `src/services/epub_document.py:885-894` — nối
+`unit.text` của mọi `EpubUnit`, mỗi unit qua `BeautifulSoup(...).get_text(" ", strip=True)`, join
+bằng `"\n\n"` (⇒ không sinh n-gram bắc cầu qua 2 unit rời nhau).
+
+`_extract_source_text_for_terms()` phải chuyển `EpubParseError` (`epub_document.py`, raise bởi
+`load()` khi zip hỏng/thiếu `container.xml`/DRM) thành `TermExtractionSourceError` — nếu để lọt
+nguyên, `POST /api/jobs/{id}/extract-terms` trả **500 mơ hồ** thay vì 400 có thông báo (§6.18.6
+đã chốt 400 cho lỗi lineage).
+
+**Chi phí đo thật** (chạy `.venv/bin/python` trên chính 2 sách của user, 2026-09-16):
+`load() + full_text()` = **0,2s / 0,4s** cho 198.514 / 202.274 ký tự ⇒ giữ gọi đồng bộ, **không**
+cần `asyncio.to_thread` (cùng cách nhánh `pdf_digital` đang gọi `_extract_full_text`, §6.18.6
+"công việc mili-giây"). Kết quả: 2.816 / 2.709 ứng viên trước khi lọc glossary.
+
+#### 6.27.3. Audit R8-01 — các bước có SẴN trong `extract_and_store_terms()` áp cho biến thể EPUB
+
+| Bước hiện có | Tồn tại để giải quyết vấn đề gì (biến thể PDF) | EPUB có cùng vấn đề không → quyết |
+|---|---|---|
+| `job.status != "completed"` → raise | BR-TERM-01: không trích xuất bản dịch dở | Có, như nhau → **GIỮ** |
+| `settings.term_extraction_enabled` kill-switch | Tắt toàn cục | Không phụ thuộc file_type → **GIỮ** |
+| `(job.source_lang or "en") != "en"` → return 0 (§6.26.5 bước #13) | `en_function_words.txt` không lọc hư từ FR → ứng viên rác | Có, y hệt (EPUB FR đi cùng `extract_terms`) → **GIỮ**. Hệ quả: EPUB FR vẫn **không** có "Các từ mới" — đúng chủ ý, không phải BL-20 |
+| `_collect_existing_glossary_forms(session, job.batch_id)` | BR-GLOSS-06 scope global+project | Không phụ thuộc file_type → **GIỮ** |
+| `extract_terms(source_text, ...)` (n-gram trên text thuần) | — | Input đã là text thuần (`full_text()` strip tag) → **GIỮ**, không cần bước làm sạch riêng cho EPUB |
+| Xoá `pending` cũ / giữ `status != pending` | Idempotent re-run | Không phụ thuộc file_type → **GIỮ** |
+
+Không có bước nào phải SKIP cho EPUB (R8-02 không kích hoạt).
+
+#### 6.27.4. Chống tái diễn "guard hết hạn ngầm"
+
+1. Test `test_lineage_epub_not_yet_supported_raises_clearly`
+   (`tests/integration/test_term_extraction_service.py:158-167`) **phải bị thay**, không chỉ xoá:
+   thay bằng test lineage dương — `_extract_source_text_for_terms(job_epub)` trả về text thuần có
+   chứa một câu biết trước của EPUB fixture, và **không** chứa chuỗi `"<p"`/`"<strong"` (R6-02:
+   assert giá trị thật, không chỉ "đã gọi").
+2. Test R6-02 cho `_run_job_background`: job EPUB `completed` ⇒ `suggested_terms` có ≥1 dòng — nối
+   output bước dịch với input bước trích xuất, thay vì `assert_awaited()`.
+3. **Luật chung (R5-06 mở rộng)**: mọi guard dạng "tính năng X chưa có nên nhánh này không thể bị
+   gọi" viết trong `src/` **bắt buộc** có 1 mục `backlog[]` trong `project_state.json` với `source`
+   là role chịu trách nhiệm gỡ, tham chiếu đúng US/step mở khoá nó. Guard không có chủ sở hữu =
+   guard sẽ sống lâu hơn lý do tồn tại của nó.
+
+#### 6.27.5. Backfill 2 sách thật
+
+Sau fix: `POST /api/jobs/{job_id}/extract-terms` cho `88e897af…` và `217097fd…` (đã kiểm:
+`jobs.file_path` của cả 2 **còn tồn tại** trên đĩa). Không cần migration, không đụng DB thủ công.
 
 ---
 

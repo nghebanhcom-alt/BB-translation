@@ -25,6 +25,7 @@ from src.core.term_extraction_service import (
     _extract_source_text_for_terms,
     extract_and_store_terms,
 )
+from src.models.database import _create_composite_indexes
 from src.models.glossary import Glossary, GlossaryEntry
 from src.models.job import Job
 from src.models.suggested_term import SuggestedTerm
@@ -39,9 +40,16 @@ _REAL_GLOSSARY_PATH = (
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
+    # Reviewer BL-20 rerun-bug review (2026-09-17): must share the same
+    # index-creation code path as init_db() (_create_composite_indexes),
+    # not just create_all() — otherwise the test DB is missing the
+    # UNIQUE (job_id, term_en) constraint production always has, and a
+    # rerun test can pass without ever hitting the IntegrityError it's
+    # meant to guard against.
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _create_composite_indexes(conn)
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as s:
@@ -156,12 +164,78 @@ async def test_lineage_parse_only_missing_document_md_raises(tmp_path: Path) -> 
         await _extract_source_text_for_terms(job)
 
 
-@pytest.mark.asyncio
-async def test_lineage_epub_not_yet_supported_raises_clearly() -> None:
-    """US-22 hasn't shipped `EpubDocument.full_text()` yet — this branch
-    must fail loudly (not silently return empty text) if ever reached.
+def _build_epub(path: Path, paragraphs: list[str]) -> Path:
+    """Real EPUB bytes written directly with `zipfile` (same pattern as
+    `tests/integration/test_epub_job_source_lang.py::_build_epub`) — NOT a
+    hand-written mock of `EpubDocument`, so `EpubDocument.load()` parses a
+    genuine zip/OPF/spine structure (R5-03).
     """
-    job = _make_job(file_type="epub", file_path="book.epub")
+    container_xml = (
+        '<?xml version="1.0"?>\n'
+        '<container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+        '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+        'media-type="application/oebps-package+xml"/></rootfiles></container>'
+    )
+    opf = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" '
+        'unique-identifier="bookid">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:title>Test Book</dc:title><dc:language>en</dc:language>"
+        '<dc:identifier id="bookid">urn:uuid:test-book</dc:identifier>'
+        "</metadata>"
+        '<manifest><item id="chap0" href="chap0.xhtml" media-type="application/xhtml+xml"/>'
+        "</manifest>"
+        '<spine><itemref idref="chap0"/></spine></package>'
+    )
+    body = "".join(f"<p>{p}</p>" for p in paragraphs)
+    xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 0</title></head>'
+        f"<body>{body}</body></html>"
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        mimetype_info = zipfile.ZipInfo("mimetype")
+        mimetype_info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(mimetype_info, "application/epub+zip")
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/chap0.xhtml", xhtml)
+    return path
+
+
+@pytest.mark.asyncio
+async def test_lineage_epub_reads_full_text_not_inner_html(tmp_path: Path) -> None:
+    """BL-20 (Architecture.md §6.27.2): must read
+    `EpubDocument.load(job.file_path).full_text()` — plain text with inline
+    tags stripped, NOT `EpubUnit.text` (inner-HTML), and NOT
+    `job.output_path` (the translated file).
+    """
+    epub_path = tmp_path / "book.epub"
+    _build_epub(
+        epub_path,
+        ["Laminated <strong>dough</strong> rests overnight in the fridge."],
+    )
+    job = _make_job(file_type="epub", file_path=str(epub_path))
+
+    text = await _extract_source_text_for_terms(job)
+
+    assert "Laminated dough rests overnight in the fridge." in text
+    assert "<strong" not in text
+    assert "<p" not in text
+
+
+@pytest.mark.asyncio
+async def test_lineage_epub_bad_file_raises_term_extraction_source_error(tmp_path: Path) -> None:
+    """`EpubDocument.load()` raises `EpubParseError` for a corrupt file —
+    the lineage function must wrap it as `TermExtractionSourceError` so
+    `POST /api/jobs/{id}/extract-terms` returns 400, not an unwrapped 500
+    (Architecture.md §6.18.6/§6.27.2).
+    """
+    bad_path = tmp_path / "book.epub"
+    bad_path.write_bytes(b"not a real zip file")
+    job = _make_job(file_type="epub", file_path=str(bad_path))
 
     with pytest.raises(TermExtractionSourceError):
         await _extract_source_text_for_terms(job)
@@ -183,6 +257,39 @@ async def test_extract_and_store_terms_writes_pending_rows(
     _make_pdf(pdf_path, text)
 
     job = _make_job(id="job1", file_type="pdf_digital", file_path=str(pdf_path))
+    session.add(job)
+    await session.commit()
+
+    written = await extract_and_store_terms("job1", session, Settings())
+
+    assert written > 0
+    rows = (await session.exec(select(SuggestedTerm).where(SuggestedTerm.job_id == "job1"))).all()
+    assert len(rows) == written
+    assert all(row.status == "pending" for row in rows)
+    keys = {row.match_key for row in rows}
+    assert "laminated dough" in keys
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_terms_writes_pending_rows_for_completed_epub_job(
+    tmp_path: Path, session: AsyncSession
+) -> None:
+    """BL-20 (Architecture.md §6.27, design-log "RCA BL-20" mục 6 #2): R6-02
+    end-to-end at the level `_run_job_background()` (`src/api/routes/jobs.py`)
+    calls after a job reaches `status == "completed"` — asserts the SPECIFIC
+    value (`suggested_terms` rows derived from the real EPUB source text),
+    not just that the call happened.
+    """
+    epub_path = tmp_path / "book.epub"
+    _build_epub(
+        epub_path,
+        [
+            "Laminated dough rests overnight in the fridge.",
+            "Laminated dough needs careful folding technique.",
+            "Laminated dough is used for croissants here.",
+        ],
+    )
+    job = _make_job(id="job1", file_type="epub", file_path=str(epub_path))
     session.add(job)
     await session.commit()
 
@@ -290,6 +397,48 @@ async def test_extract_and_store_terms_rerun_preserves_decided_rows_refreshes_pe
     dismissed_rows = [r for r in rows_after if r.match_key == "laminated dough"]
     assert len(dismissed_rows) == 1
     assert dismissed_rows[0].status == "dismissed"
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_terms_rerun_with_all_rows_still_pending_does_not_raise(
+    tmp_path: Path, session: AsyncSession
+) -> None:
+    """QA test-report.md "BL-20 — QA gate cuoi (2026-09-17)": calling
+    `extract_and_store_terms()` a 2nd time while EVERY existing row is still
+    `pending` (nobody accepted/dismissed anything yet — the common case for a
+    plain "extract again" rerun) must NOT raise `sqlite3.IntegrityError` on
+    the `(job_id, term_en)` UNIQUE constraint. The older rerun test above
+    dismisses its target row before rerunning, which accidentally sidesteps
+    this exact conflict — this test deliberately leaves every row `pending`.
+    """
+    pdf_path = tmp_path / "book.pdf"
+    text = (
+        "Laminated dough rests overnight in the fridge. "
+        "Laminated dough needs careful folding technique. "
+        "Laminated dough is used for croissants here."
+    )
+    _make_pdf(pdf_path, text)
+    job = _make_job(id="job1", file_path=str(pdf_path))
+    session.add(job)
+    await session.commit()
+
+    first_written = await extract_and_store_terms("job1", session, Settings())
+    assert first_written > 0
+    first_rows = (
+        await session.exec(select(SuggestedTerm).where(SuggestedTerm.job_id == "job1"))
+    ).all()
+    assert all(row.status == "pending" for row in first_rows)
+
+    second_written = await extract_and_store_terms("job1", session, Settings())
+
+    assert second_written == first_written
+    rows_after = (
+        await session.exec(select(SuggestedTerm).where(SuggestedTerm.job_id == "job1"))
+    ).all()
+    assert len(rows_after) == second_written
+    assert all(row.status == "pending" for row in rows_after)
+    keys = {row.match_key for row in rows_after}
+    assert "laminated dough" in keys
 
 
 @pytest.mark.asyncio

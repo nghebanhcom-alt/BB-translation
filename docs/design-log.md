@@ -6875,3 +6875,133 @@ ngôn ngữ nguồn đã detect (EN/FR)** trên UI danh sách job (`web/index.ht
 UI). Lý do: auto-detect có thể sai (xem BL-15, ngưỡng detect chiều FR chưa verify) — user cần thấy
 hệ thống đã nhận diện gì để phát hiện detect sai sớm, thay vì chỉ biết sau khi đọc bản dịch. Không
 đổi thiết kế backend, chỉ thêm hiển thị — gộp vào cùng phạm vi implement S7, không tách step riêng.
+
+---
+
+## 2026-09-16 — RCA BL-20: "Các từ mới" rỗng cho MỌI job EPUB từ 2026-09-10 (Tech Lead)
+
+**Nguồn phát hiện**: QA, `docs/test-report.md` mục "S7 — Dịch FR→VI … QA live E2E" (2026-09-16).
+Phát hiện **tình cờ** khi test S7 — không phải lỗi do S7 gây ra. Hợp đồng sau fix: Architecture.md
+**§6.27** (và §6.18.5 đã được sửa lại cho khớp).
+
+### 1. Triệu chứng
+
+Job EPUB chạy xong, `status = "completed"`, file dịch đúng, nhưng panel "Các từ mới" **luôn rỗng**.
+Không log lỗi nào tới mắt user, không cờ nào trên UI.
+
+### 2. Chuỗi nguyên nhân (trace tay, R6-04)
+
+1. `src/core/term_extraction_service.py:74-83` — nhánh `if job.file_type == FileType.EPUB:` raise
+   `TermExtractionSourceError` **vô điều kiện**, kèm comment:
+   *"US-22 chua implement (job_orchestrator.py rejects EPUB truoc khi toi status=completed) nen
+   nhanh nay KHONG THE bi goi qua duong di binh thuong hien tai."*
+2. Comment đó **đúng tại thời điểm viết**: commit `0dc7663` (2026-09-08, US-20) — xác minh bằng
+   `git log -L 74,84:src/core/term_extraction_service.py`.
+3. US-22 (dịch EPUB) lên production **2026-09-10**, commit `27d7daa` (v1.3.0) — 2 ngày sau. Tiền đề
+   của guard hết hiệu lực; từ giờ phút đó mọi job EPUB `completed` đều đi thẳng vào nhánh raise.
+4. Lỗi bị nuốt tại `src/api/routes/jobs.py:545-548`:
+   `except Exception: logger.exception("Trich xuat tu moi that bai cho job %s — job VAN completed")`.
+   **Đây KHÔNG phải chỗ sai** — đó chính là BR-TERM-01/§6.18.6 ("không tồn tại đường nào khiến lỗi
+   trích xuất đổi được `job.status`"). Nhưng nó biến một lỗi lineage thành **im lặng tuyệt đối** với
+   user: chỉ còn dấu vết trong log server mà không ai đọc.
+5. Đường thủ công `POST /api/jobs/{id}/extract-terms` (`jobs.py:825-828`) **có** trả 400 rõ ràng —
+   nhưng user không có lý do gì để bấm, vì UI không nói tính năng đã lỗi.
+
+### 3. Root cause thật — KHÔNG phải Bug #5, là "guard hết hạn ngầm"
+
+Câu hỏi PM đặt ra ("có phải kiểu code viết cho PDF trước, EPUB thêm sau nhưng chưa nối đúng nguồn
+dữ liệu không?") — **gần đúng về hình dạng, sai về cơ chế**, và khác biệt này quyết định cách chống
+tái diễn:
+
+- Bug #5: hợp đồng lineage **chưa từng được viết**, ai cũng tưởng có người nối.
+- BL-20: hợp đồng lineage **đã được viết đúng từ đầu** — §6.18.5 (2026-09-08) ghi chính xác
+  `EpubDocument.load(job.file_path).full_text()`, và `full_text()` **đã tồn tại thật** trong code từ
+  US-22 (`src/services/epub_document.py:885`). Không ai phải nghĩ ra gì mới. Cái sai là **code cố ý
+  lệch khỏi hợp đồng bằng một guard tạm, kèm lời hứa "sửa khi US-22 lên production" không có chủ
+  sở hữu** — đúng dạng lỗi quy trình mà R5-06 mô tả (chỉ thị "phải làm lại sau" không nằm trong
+  `backlog[]` thì không bao giờ được thực thi).
+
+**Yếu tố làm nó sống lâu**: có một test **bảo vệ chính cái bug** —
+`test_lineage_epub_not_yet_supported_raises_clearly`
+(`tests/integration/test_term_extraction_service.py:158-167`), docstring:
+*"US-22 hasn't shipped `EpubDocument.full_text()` yet"*. Suite xanh liên tục qua 6 ngày và nhiều
+đợt Reviewer/QA, vì test khẳng định đúng cái giả định đã chết. Đây là biến thể của cùng một cơ chế
+Protocol 5 đã chỉ ra ở sự cố MinerU: **test chứng minh code khớp với giả định, không chứng minh giả
+định còn đúng** — lần này giả định không sai lúc viết, nó **hết hạn** sau đó.
+
+Nó cũng là một ca Protocol 8 nhìn từ phía ngược lại: R8-01 lo "bước CŨ không được audit khi thêm
+biến thể MỚI". Ở đây biến thể mới (EPUB/US-22) đi vào một bước cũ (`extract_and_store_terms`) mà
+không ai audit — chỉ khác là bước cũ *tự khai báo* rằng nó chưa hỗ trợ, và lời khai báo đó bị tin
+mãi mãi.
+
+### 4. Mức độ ảnh hưởng — đo thật, không ước lượng
+
+Query `data/bb_translation.db` (2026-09-16):
+
+| Nhóm | Job `completed` | Job có `suggested_terms` | Tổng dòng |
+|---|---|---|---|
+| `epub` | **8** | **0** | **0** |
+| `pdf_digital` | 19 | 9 | 18.359 |
+| `pdf_scan` | 1 | 0 | 0 |
+
+Trong 8 job EPUB: **2 là sách thật của user** (`Sourdough Discard Recipes Cookbook` — 2.793 unit;
+`Sourdough Every Day` — 1.951 unit), 6 còn lại là fixture QA (`qa_s7_*`, `qa_bl12_*`, 3-7 unit).
+⇒ Thiệt hại thật: **2 cuốn sách**, tính năng "Các từ mới" mất trắng. Không mất bản dịch, không mất
+dữ liệu — chỉ mất một cơ hội làm giàu glossary, và **có thể lấy lại 100%** (mục 5).
+
+### 5. Phương án fix — chọn (A), không chọn (B)
+
+**(A) Nối đúng nguồn (KHUYẾN NGHỊ)**: thay 4 dòng raise bằng
+`EpubDocument.load(Path(job.file_path)).full_text()`, bắt `EpubParseError` → bọc thành
+`TermExtractionSourceError` (để endpoint thủ công vẫn trả 400, không 500).
+
+Đã **verify thật trước khi đề xuất** (không suy đoán), chạy `.venv/bin/python` trên chính 2 sách
+của user:
+
+| Sách | `len(full_text())` | Thời gian `load()+full_text()` | Ứng viên `extract_terms()` |
+|---|---|---|---|
+| Sourdough Discard Recipes | 198.514 ký tự | **0,2s** | 2.816 (top: `sourdough discard`, `sourdough waste`, `cup sourdough waste`) |
+| Sourdough Every Day | 202.274 ký tự | **0,4s** | 2.709 (top: `active sourdough starter`, `floured work surface`, `plastic wrap`) |
+
+Chất lượng ứng viên **tương đương nhánh PDF** (cùng thuật toán, cùng bộ lọc glossary phía sau) —
+đủ để kết luận đây là fix thật, không phải fix hình thức. Chi phí 0,2-0,4s đồng bộ là chấp nhận
+được, giữ đúng cách `pdf_digital` đang gọi `_extract_full_text` (không cần `asyncio.to_thread`).
+
+**(B) Tắt hẳn tính năng cho EPUB kèm thông báo — BÁC BỎ**: chỉ hợp lý nếu nguồn text không tồn tại
+hoặc chất lượng không dùng được. Cả hai điều kiện đều đã bị bác bằng số đo ở trên: nguồn có sẵn,
+rẻ, kết quả tốt. Tắt tính năng ở đây là trả giá bằng chức năng cho một lỗi 4 dòng.
+
+**Không thuộc BL-20 (đừng gộp vào)**: EPUB `source_lang = "fr"` vẫn **không** có "Các từ mới" — đó
+là guard cố ý của §6.26.5 bước #13 (hư từ FR chưa lọc được, R8-02 deny-by-default). Fix BL-20
+không được phép gỡ guard đó.
+
+**Backfill**: đã kiểm `jobs.file_path` của cả 2 sách còn tồn tại trên đĩa ⇒ sau fix chỉ cần
+`POST /api/jobs/{id}/extract-terms` 2 lần. Không migration, không sửa DB tay.
+
+### 6. Chống tái diễn (chi tiết ở §6.27.4)
+
+1. Test khẳng định-bug phải bị **thay bằng test lineage dương** (R6-02), không chỉ xoá.
+2. Thêm test R6-02 mức `_run_job_background`: job EPUB completed ⇒ `suggested_terms` ≥ 1 dòng.
+3. **Luật mới**: guard dạng "tính năng X chưa có nên nhánh này không thể bị gọi" trong `src/` bắt
+   buộc có mục `backlog[]` với `source` là role chịu trách nhiệm gỡ. Đây là R5-06 áp cho **code**,
+   không chỉ cho `⚠️ ASSUMED` trong Architecture.md — cùng một root cause: chỉ thị "sửa lại sau"
+   không có chủ sở hữu thì không bao giờ được thực thi.
+
+### 7. Câu hỏi cho Hiếu (Protocol B — gộp 1 lượt, không hỏi lẻ)
+
+| # | Câu hỏi | Chặn bước nào | Đề xuất mặc định |
+|---|---|---|---|
+| 1 | Sau fix có tự động backfill 2 cuốn sách thật (chạy lại trích xuất) không? | Không chặn implement, chặn việc đóng BL-20 | **Có** — 2 lời gọi API, không rủi ro, không ghi đè gì (re-run giữ nguyên dòng user đã duyệt/bỏ qua) |
+| 2 | Có muốn UI báo "trích xuất từ mới thất bại" thay vì im lặng (thêm cột `jobs.term_extraction_error`) không? | Không chặn fix BL-20 — là hạng mục riêng | **Tách backlog riêng, chưa làm ngay**: fix (A) làm nguyên nhân biến mất; thêm cột = migration + đổi API + đổi UI cho một trạng thái sau fix gần như không còn xảy ra. Nhưng nếu Hiếu muốn "không bao giờ im lặng nữa" thành nguyên tắc, đây là chỗ đúng để làm |
+
+Câu #2 là quyết định **sản phẩm** (đánh đổi độ ồn vs độ minh bạch), Tech Lead không tự chốt.
+
+### 8. Final Decision (Hiếu, 2026-09-17, qua PM/AskUserQuestion)
+
+- **Câu 1: Có** (= mặc định) — sau khi fix, backfill lại "Các từ mới" cho 2 job thật (Sourdough
+  Discard Recipes, Sourdough Every Day) qua `POST /api/jobs/{id}/extract-terms`.
+- **Câu 2: Tách backlog riêng, làm sau** (= mặc định) — KHÔNG thêm `jobs.term_extraction_error`
+  cùng đợt fix BL-20. Ghi backlog mới (BL-22) cho hạng mục UI báo lỗi minh bạch, chưa có owner
+  thời điểm nào implement.
+
+Dev implement fix theo §6.27 + backfill 2 job thật ngay trong cùng task.

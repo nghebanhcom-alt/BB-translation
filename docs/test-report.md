@@ -3081,3 +3081,275 @@ tay.
 3. Backlog A-1..A-4 (`BL-14`..`BL-17`) đã có entry đúng R5-06 — mục 4 ở trên bổ sung 1 điểm dữ liệu
    thật cho `BL-16` (OCR confidence 0.99 trên FR có dấu, mẫu nhỏ) nhưng KHÔNG đủ để đóng backlog đó
    (cần scan thật từ máy quét/ảnh chụp, không phải PDF render sạch từ PyMuPDF).
+
+---
+
+## BL-20 — QA gate cuối (2026-09-17)
+
+Brief: verify qua đúng đường API thật `POST /api/jobs/{id}/extract-terms` (Dev chỉ mới backfill 2
+job thật bằng cách gọi thẳng hàm nội bộ vì lúc đó server đang chạy code cũ, chưa qua HTTP thật —
+xem `docs/CHANGELOG.md` mục BL-20 "Backfill 2 sách thật"). Đọc trước `docs/review-report.md` mục
+BL-20 (Reviewer APPROVE) và `docs/design-log.md` "2026-09-16 — RCA BL-20" (Final Decision Hiếu
+2026-09-17).
+
+### 1. Restart server an toàn
+
+- `sqlite3 data/bb_translation.db "select id, status from jobs where status in
+  ('processing','translating')"` → **0 dòng**. Kiểm thêm `select status, count(*) from jobs group
+  by status` → chỉ `completed` (28) và `failed` (2), không có job đang chạy. An toàn để restart,
+  không cần báo PM chặn.
+- `ps` xác nhận server đang chạy được start lúc `22:15:23` (2026-09-16), TRƯỚC commit `dbf9306`
+  (22:50:13) và `40764de` (22:50:24) — đúng như CHANGELOG đã tự flag, server đang chạy code cũ.
+- Dùng đúng script chuẩn của repo (`scripts/pipeline_toggle.sh`, toggle stop/start
+  uvicorn+mineru-api, có `wait_for_health`) — không tự bịa lệnh riêng: gọi lần 1 → `STOPPED`, gọi
+  lần 2 → `STARTED`. `curl /health` → `{"status":"ok"}` ngay sau restart.
+- **Lưu ý quan trọng cho lineage**: `git status --short` cho thấy
+  `src/core/term_extraction_service.py` + test đi kèm vẫn **uncommitted** (fix BL-20 chưa
+  `git commit`, mới nằm trên working tree) — nhưng uvicorn đọc thẳng file trên đĩa (không phải từ
+  snapshot git), nên restart vẫn nạp đúng code fix. Đã `git diff` xác nhận nội dung trên đĩa khớp
+  đúng mô tả CHANGELOG (guard EPUB cũ bị gỡ, thay bằng `EpubDocument.load(...).full_text()` +
+  bọc `EpubParseError`). Ghi nhận cho PM: nhớ `git add`+`commit` fix này, hiện đang là uncommitted
+  change chạy trên server thật — rủi ro nếu ai đó `git checkout`/`stash` nhầm.
+
+### 2. Gọi thật qua HTTP — job Sourdough Discard Recipes Cookbook
+
+`job_id = 88e897af-e19f-470c-9248-922fbc79596f` (đã có 2.765 dòng `suggested_terms` từ lần backfill
+gọi thẳng hàm của Dev).
+
+```
+curl -X POST http://localhost:8000/api/jobs/88e897af-e19f-470c-9248-922fbc79596f/extract-terms
+→ "Internal Server Error"  (HTTP 500)
+```
+
+Log `/tmp/bb-app.log`:
+```
+sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed:
+suggested_terms.job_id, suggested_terms.term_en
+[SQL: INSERT INTO suggested_terms (...) VALUES (...)]
+```
+
+**Đây là bug thật, tái hiện được, KHÔNG phải lỗi thao tác của QA — chặn release.** Chi tiết điều
+tra:
+
+- `sqlite3 ... "select count(*) from suggested_terms where job_id='88e897af...'"` **trước và sau**
+  request đều = **2765** — transaction rollback sạch, không mất/không lặp dữ liệu, DB không bị hỏng.
+  `curl /health` sau đó vẫn `{"status":"ok"}` — server không crash, chỉ request đó fail.
+- Tự chạy lại `extract_terms()` (thuật toán thuần, không qua DB) trên đúng text đã trích từ EPUB
+  này: `2816` candidate, **0 term_en trùng lặp trong chính batch candidate** — vậy không phải lỗi
+  thuật toán sinh trùng key.
+- Đọc `src/core/term_extraction_service.py:174-200` (`extract_and_store_terms`): hàm `select` hết
+  `SuggestedTerm` có `status="pending"` của job, gọi `session.delete(row)` cho từng dòng (chỉ đánh
+  dấu xoá, chưa flush), rồi vòng `for candidate in candidates: session.add(SuggestedTerm(...))` với
+  `term_en` — **trùng với chính những `term_en` vừa đánh dấu xoá** (vì thuật toán y hệt chạy trên
+  cùng nguồn văn bản, ra lại đúng bộ ứng viên cũ) — rồi mới `session.commit()`. SQLAlchemy flush
+  unit-of-work theo mặc định emit **INSERT trước DELETE** cho các instance khác class/không có FK
+  phụ thuộc nhau (xác nhận bằng traceback: `save_obj`/`_emit_insert_statements` xuất hiện trước khi
+  gặp lỗi, không thấy `delete_obj` nào chạy trước nó) → INSERT dòng `term_en` mới va đúng UNIQUE
+  constraint `(job_id, term_en)` của dòng cũ **chưa kịp bị xoá thật trong DB**.
+- **Root cause: thiếu `await session.flush()` giữa vòng `delete` và vòng `add`** (hoặc dùng bulk
+  `DELETE` SQL trực tiếp trước khi insert) — không phải lỗi logic nghiệp vụ, là lỗi thứ tự flush.
+
+**Tái hiện thêm, loại trừ khả năng "chỉ do EPUB/chỉ do 2 job backfill cũ"**:
+- Job EPUB **FR** (`e3be4dce-4bf3-430d-9916-cbfd667cfd23`, guard §6.26.5 #13): gọi thật →
+  `{"job_id":"e3be4dce...","written":0}` HTTP 200 — **guard FR vẫn đúng, không bị fix BL-20 hay bug
+  này ảnh hưởng** (đúng gate BL-20 yêu cầu, xem mục 3 bên dưới).
+- Job EPUB EN **chưa từng có `suggested_terms`** (`27d764e8-05cc-404c-88cf-11b504831272`, fixture
+  QA S7 cũ): gọi lần 1 → **HTTP 200**, `written: 31` — đúng, chứng minh bug KHÔNG nằm ở việc đọc
+  EPUB hay ở fix BL-20 (lineage EPUB→`full_text()` hoạt động đúng, có nội dung thật). Gọi lại lần 2
+  (job giờ đã có 31 dòng pending) → **HTTP 500, cùng lỗi UNIQUE constraint** — xác nhận bug là
+  **tổng quát cho MỌI job** (không riêng EPUB, không riêng 2 sách backfill), chỉ kích hoạt khi job
+  đã có sẵn dòng `pending` trùng `term_en` với lần chạy mới.
+- Job **PDF digital** có sẵn `suggested_terms` (`1ee1fdee-746e-4d3b-a54c-d27f7f2aa763`, 4962 dòng,
+  không liên quan EPUB/BL-20 chút nào): gọi lại → **cùng lỗi HTTP 500**. Xác nhận dứt khoát đây là
+  bug **pre-existing** trong `extract_and_store_terms()`, có từ trước BL-20, không phải regression
+  do fix BL-20 gây ra — nhưng BL-20 (+ backfill 2 sách thật) là thứ khiến bug này **chắc chắn sẽ bị
+  user gặp ngay lần đầu bấm "trích xuất lại"** cho 2 sách thật, vì cả 2 đã có sẵn hàng nghìn dòng
+  pending.
+- Job PDF FR (guard §6.26.5 #13 nhánh PDF, không phải EPUB) không test lại riêng lần này — đã PASS
+  ở đợt QA S7 trước (xem mục 5 phần S7 phía trên), không nằm trong phạm vi BL-20.
+
+**Vì sao test suite hiện có không bắt được**: đọc
+`test_extract_and_store_terms_rerun_preserves_decided_rows_refreshes_pending`
+(`tests/integration/test_term_extraction_service.py:358-388`) — test rerun DUY NHẤT hiện có tự đưa
+dòng `term_en` duy nhất trong fixture (`"laminated dough"`) sang `status="dismissed"` TRƯỚC khi
+rerun, nên khi rerun: `decided_terms` chứa sẵn `"laminated dough"` → bị loại khỏi vòng `add` (không
+insert lại), và `pending_rows` (chỉ lọc `status="pending"`) rỗng → vòng `delete` không chạy gì cả.
+Test này **vô tình đi vòng đúng tổ hợp không bao giờ đụng conflict INSERT/DELETE** — không phải do
+mock sai, mà do fixture chỉ có 1 term duy nhất và nó bị chuyển trạng thái trước rerun. Đây đúng tinh
+thần Protocol 5/R6-02: test pass không chứng minh hành vi đúng cho trường hợp phổ biến nhất (rerun
+khi CHƯA ai quyết định gì, tức mọi dòng vẫn `pending` — chính xác là trạng thái 2 job Sourdough thật
+đang ở).
+
+### 3. Guard EPUB FR — không bị fix BL-20 ảnh hưởng
+
+Đã gọi thật ở mục 2: `POST /api/jobs/e3be4dce-4bf3-430d-9916-cbfd667cfd23/extract-terms` →
+`{"written": 0}` HTTP 200, không lỗi 500. Đúng theo guard `(job.source_lang or "en") != "en"` ở
+`term_extraction_service.py:147-161`, khớp thiết kế §6.26.5 #13 — fix BL-20 chỉ chạm nhánh
+`_extract_source_text_for_terms()`, không chạm guard này. **PASS.**
+
+### 4. `/health` — xác nhận server chạy đúng code
+
+Endpoint `GET /health` **đã tồn tại** (không phải thiếu như brief giả định) — trả `{"status":"ok"}`,
+nhưng KHÔNG có `git_commit`/version nào để QA đối chiếu trực tiếp là đang chạy đúng code mới hay
+không (đã tự đối chiếu gián tiếp bằng `ps -o lstart` so với `git log --format=%ci`, xem mục 1).
+Đây đúng là khoảng hở đã ghi nhận ở đợt QA S7 trước (mục "Quy trình" #2, đề xuất thêm
+`git_commit`/mtime vào `/health`) — liên quan **BL-21**, không tự thêm vì ngoài phạm vi BL-20.
+
+### 5. Đối chiếu checklist bắt buộc
+
+- **R5-03**: N/A cho tính năng chính của BL-20 — `EpubDocument`/`term_extraction_service` là thư
+  viện nội bộ Python thuần (đúng phạm vi loại trừ Protocol 5 mà Reviewer đã ghi ở review-report.md
+  mục 7). Nhưng **đã có ≥1 lần gọi thật qua HTTP thật** (không mock) theo đúng yêu cầu brief — hạng
+  mục backfill/manual-rerun không còn ở trạng thái "chỉ verify qua gọi hàm trực tiếp" nữa.
+- **R6-03**: pipeline (EPUB parse → trích xuất → ghi DB) đã chạy xuyên suốt với dữ liệu thật qua
+  đúng route HTTP, và **đã mở/kiểm tra nội dung cuối cùng** (không chỉ tin `written`/status): job
+  EN mới (`27d764e8...`) trả `written: 31` **và** `sqlite3` xác nhận đúng 31 dòng thật nằm trong
+  `suggested_terms` — không chỉ tin response JSON.
+- **R6-02**: đã assert giá trị cụ thể (đếm dòng DB trước/sau, không chỉ status code) — và chính
+  cách làm này (không chỉ tin `"written": N"` của response mà còn tin cả trường hợp response KHÔNG
+  trả về, tức lỗi 500) là thứ phát hiện ra bug ở mục 2.
+- Không có chi phí LLM nào phát sinh (term-extraction là thuật toán n-gram thuần, không gọi LLM).
+
+### Kết luận BL-20
+
+**`ready_for_release: NO`.**
+
+Lineage fix chính của BL-20 (đọc đúng `EpubDocument.load(...).full_text()` thay vì raise vô điều
+kiện) đã **verify đúng qua đường API thật** — PASS, không có vấn đề gì (mục 2, job EN mới +
+mục 3, guard FR). Nhưng đúng lúc verify qua HTTP thật (thay vì gọi thẳng hàm như Dev đã làm), lộ ra
+1 bug **blocking, pre-existing, tổng quát cho mọi job (không riêng EPUB)**: `POST
+/api/jobs/{id}/extract-terms` luôn trả **HTTP 500** khi job đã có sẵn dòng `suggested_terms` với
+`status="pending"` trùng `term_en` với lần chạy mới — tức **chính xác là trường hợp của 2 job thật
+vừa backfill** (`88e897af...`, `217097fd...`) và mọi job PDF cũ đã từng chạy US-20 trước đó. Đây
+không phải lỗi lineage EPUB (Bug #5-dạng) — là lỗi thứ tự flush SQLAlchemy (INSERT trước DELETE)
+trong `extract_and_store_terms()` (`src/core/term_extraction_service.py:174-200`), tồn tại từ trước
+BL-20, nhưng BL-20 + backfill 2 sách thật là thứ khiến user **chắc chắn** gặp lỗi 500 ngay lần đầu
+bấm nút "trích xuất lại" cho 2 cuốn sách thật này trên UI.
+
+**Đề xuất cho Dev (không tự sửa — ngoài vai QA)**: thêm `await session.flush()` ngay sau vòng
+`session.delete(row)` (dòng 182), trước khi bắt đầu vòng `session.add(...)` (dòng 188) — hoặc đổi
+sang bulk `DELETE` SQL executed trực tiếp. Thêm test mới **không đi vòng qua tổ hợp né bug** như
+test rerun hiện có: rerun trên job mà TOÀN BỘ dòng cũ vẫn `status="pending"` (không dismiss/accept
+gì trước đó) và tập `term_en` mới trùng ≥1 phần tập cũ — đúng mô phỏng 2 job thật.
+
+**Việc còn lại trước khi đóng BL-20**:
+1. Dev fix bug flush-order ở trên, Reviewer review lại (vòng Dev↔Reviewer/QA tính theo Protocol 3,
+   không tính vi phạm Protocol 5/7 nên không bị trừ quota).
+2. QA re-run lại đúng 2 job thật (`88e897af...`, `217097fd...`) qua HTTP thật sau khi fix — xác
+   nhận `written` trả về hợp lý (không rỗng) và không còn 500.
+3. `git add` + commit fix BL-20 hiện đang **uncommitted** trên đĩa (mục 1) — PM lưu ý trước khi ai
+   đó `git stash`/`checkout` nhầm làm mất fix đang chạy thật trên server.
+
+## BL-20 — QA gate cuối, lần 2 (2026-09-17, sau fix rerun IntegrityError)
+
+Phạm vi: xác nhận lại lần CUỐI cho BL-20 sau khi Dev fix bug rerun (`UNIQUE constraint failed:
+suggested_terms.job_id, suggested_terms.term_en`) phát hiện ở lượt QA trước (mục ngay phía trên,
+`ready_for_release: NO`), và Reviewer đã REJECT rồi APPROVE 2 vòng (`docs/review-report.md`,
+"Review lần 2 — Fix theo Reviewer REJECT, test rerun BL-20 (2026-09-17)"). Fix gồm: (a) thêm
+`await session.flush()` giữa vòng `session.delete()`/`session.add()` trong
+`src/core/term_extraction_service.py`, (b) factor `_create_composite_indexes()` dùng chung giữa
+`init_db()` (`src/models/database.py`) và fixture test, để test DB có đúng UNIQUE constraint như
+production.
+
+### 1. Kiểm tra an toàn trước khi động vào server
+
+`sqlite3 data/bb_translation.db "select status, count(*) from jobs group by status"` →
+`completed|28`, `failed|2` — **không có job `processing`/`translating`**. An toàn để restart.
+
+Phát hiện thêm (không có trong brief, tự kiểm): server uvicorn đang chạy (PID 2486, start
+08:56:54) trong khi `src/core/term_extraction_service.py` có mtime **08:59:08 — SAU thời điểm
+server start**. `uvicorn` chạy không có `--reload` (xác nhận qua `ps -o command=`), nên process
+đang chạy vẫn giữ code **cũ hơn** bản fix hiện có trên đĩa. Đây đúng dạng rủi ro Reviewer đã cảnh
+báo ở review-report.md lần 1 ("uncommitted change chạy trên server thật"). Đã restart lại bằng
+đúng script chuẩn của repo:
+
+```
+bash scripts/pipeline_toggle.sh   # → STOPPED
+bash scripts/pipeline_toggle.sh   # → STARTED
+```
+
+Server mới lên (PID 2810, start 09:03) — SAU mtime file fix (08:59:08), `curl /health` →
+`{"status":"ok"}`. Từ đây các lệnh gọi HTTP bên dưới chắc chắn chạy đúng code fix mới, không phải
+code cũ trong bộ nhớ.
+
+### 2. Gọi thật qua HTTP 2 lần liên tiếp — 3 job độc lập, đều đang ở trạng thái `pending` (không
+dismiss trước)
+
+Trước khi gọi, xác nhận cả 3 job đều `completed` và có `suggested_terms` toàn `pending`:
+
+```
+job 27d764e8-05cc-404c-88cf-11b504831272 | completed | en | pending=31
+job 1ee1fdee-746e-4d3b-a54c-d27f7f2aa763 | completed |    | pending=4935
+job 88e897af-e19f-470c-9248-922fbc79596f | completed |    | pending=2765
+```
+
+`27d764e8...` là job Dev/Reviewer dùng; `1ee1fdee...` (PDF digital, 4935 dòng) và
+`88e897af...` (job đã gây HTTP 500 ở lượt QA trước) chọn thêm để có góc nhìn độc lập, đặc biệt
+`88e897af...` chính là job tái hiện được bug gốc.
+
+```
+POST .../27d764e8.../extract-terms  → 200 {"job_id":"27d764e8...","written":31}
+POST .../27d764e8.../extract-terms  → 200 {"job_id":"27d764e8...","written":31}
+POST .../1ee1fdee.../extract-terms  → 200 {"job_id":"1ee1fdee...","written":4933}
+POST .../1ee1fdee.../extract-terms  → 200 {"job_id":"1ee1fdee...","written":4933}
+POST .../88e897af.../extract-terms  → 200 {"job_id":"88e897af...","written":2765}
+POST .../88e897af.../extract-terms  → 200 {"job_id":"88e897af...","written":2765}
+```
+
+**Toàn bộ 6 request: HTTP 200, không request nào 500/IntegrityError** — kể cả job `88e897af...`
+từng gây lỗi 500 100% tái hiện được ở lượt QA trước. `written` ổn định giữa 2 lần gọi liên tiếp
+trên cùng job (31/31, 4933/4933, 2765/2765) — không tăng/giảm bất thường (2 dòng lệch của
+`1ee1fdee` so với `pending=4935` trước gọi là do 2 candidate bị lọc bởi logic nghiệp vụ hiện có,
+không phải dấu hiệu lỗi — nhất quán giữa 2 lần gọi liên tiếp).
+
+`grep -i "error\|exception\|traceback" /tmp/bb-app.log` sau toàn bộ 6 request → **rỗng**, không có
+exception nào trong log server.
+
+### 3. Query DB xác nhận không có duplicate `(job_id, term_en)` — toàn bộ jobs, không chỉ job vừa
+test
+
+```sql
+select job_id, term_en, count(*) from suggested_terms group by job_id, term_en having count(*) > 1;
+```
+
+→ **rỗng**. Không có duplicate ở bất kỳ job nào trong `data/bb_translation.db`.
+
+Job status không đổi trước/sau (`completed|28`, `failed|2`) — không có job nào bị chuyển trạng thái
+lạ do các request test.
+
+### 4. Test suite
+
+```
+pytest tests/integration/test_term_extraction_service.py -q
+```
+
+→ **17 passed** (đúng số Reviewer đã xác nhận ở review lần 2, bao gồm cả test rerun mới đã được
+verify fail-then-pass độc lập bởi Reviewer — không lặp lại thao tác gỡ `flush()` ở đây vì Reviewer
+đã làm và QA không có lý do nghi ngờ thêm sau khi tự verify HTTP thật ở mục 2 cho kết quả nhất
+quán).
+
+### 5. Đối chiếu checklist bắt buộc
+
+- **R5-03**: N/A cho phần lõi thuật toán (thư viện nội bộ Python thuần, đúng phạm vi loại trừ
+  Protocol 5) — nhưng đã có **6 lần gọi thật qua HTTP** (không mock) trên 3 job độc lập, thoả điều
+  kiện xác nhận cuối cùng.
+- **R6-03**: đã mở/kiểm tra **nội dung cuối cùng** (số dòng `suggested_terms` thật trong DB qua
+  `sqlite3`), không chỉ tin response JSON hay status code — đặc biệt đã tự kiểm tra không có
+  duplicate trên TOÀN BỘ bảng, không chỉ job vừa gọi.
+- **R6-02**: assert giá trị cụ thể (đếm dòng pending trước/sau, `written` ổn định giữa 2 lần gọi
+  liên tiếp, duplicate count = 0) — không chỉ `assert_called()`/status code.
+- Không phát sinh chi phí LLM (term-extraction là thuật toán n-gram thuần).
+
+### Kết luận BL-20 (lần 2 — CUỐI)
+
+**`ready_for_release: YES`.**
+
+Cả 2 phần của BL-20 đã pass verify độc lập qua HTTP thật:
+1. **Lineage fix gốc** (đọc đúng `EpubDocument.load(...).full_text()` cho EPUB): đã PASS ở lượt QA
+   trước (mục "BL-20 — QA gate cuối (2026-09-17)" phía trên) và không bị đổi lại ở fix rerun này.
+2. **Fix rerun IntegrityError** (`session.flush()` + `_create_composite_indexes()` dùng chung): đã
+   verify lại độc lập lần này — gọi thật 6 lần trên 3 job (bao gồm đúng job từng tái hiện bug 100%
+   ở lượt trước), toàn bộ 200, không duplicate DB, không exception trong log, test suite 17/17
+   pass.
+
+Không còn issue blocking nào. BL-20 đủ điều kiện release.

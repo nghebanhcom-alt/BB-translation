@@ -25,6 +25,7 @@ from src.core.term_extractor import extract_terms
 from src.models.glossary import Glossary, GlossaryEntry
 from src.models.job import Job
 from src.models.suggested_term import SuggestedTerm
+from src.services.epub_document import EpubDocument, EpubParseError
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +73,16 @@ async def _extract_source_text_for_terms(job: Job) -> str:
         return _extract_full_text(Path(job.file_path))
 
     if job.file_type == FileType.EPUB:
-        # US-22 chua implement (job_orchestrator.py rejects EPUB truoc khi
-        # toi status=completed) nen nhanh nay KHONG THE bi goi qua duong di
-        # binh thuong hien tai. Giu ro rang thay vi doc nham file — khi
-        # US-22 len production (EpubDocument.load(...).full_text()), sua
-        # DUNG cho nhanh nay, KHONG doan.
-        raise TermExtractionSourceError(
-            f"Job {job.id}: file_type=epub chua co nguon source_text cho US-20 "
-            "(cho US-22 hoan thien EpubDocument.full_text(), Architecture.md 6.18.5)"
-        )
+        # BL-20 fix (Architecture.md §6.27.2): US-22 len production tu
+        # 2026-09-10 (commit 27d7daa) — EpubDocument.full_text() da ton tai
+        # that. `full_text()` noi text thuan cua moi unit (da qua
+        # BeautifulSoup(...).get_text()), KHONG phai inner-HTML unit.text.
+        try:
+            return EpubDocument.load(Path(job.file_path)).full_text()
+        except EpubParseError as exc:
+            raise TermExtractionSourceError(
+                f"Job {job.id}: khong doc duoc EPUB '{job.file_path}' cho US-20: {exc}"
+            ) from exc
 
     raise TermExtractionSourceError(f"Job {job.id}: file_type khong xac dinh: {job.file_type!r}")
 
@@ -178,6 +180,13 @@ async def extract_and_store_terms(
     ).all()
     for row in pending_rows:
         await session.delete(row)
+
+    # Rerun bug (QA test-report.md "BL-20 — QA gate cuoi 2026-09-17"): SQLAlchemy's
+    # unit-of-work mac dinh emit INSERT truoc DELETE trong cung 1 flush, nen mot
+    # candidate trung term_en voi row pending vua xoa se dung UNIQUE constraint
+    # (job_id, term_en) truoc khi DELETE kip chay. Flush rieng o day de ep DELETE
+    # thuc thi that su truoc khi cac SuggestedTerm moi duoc add.
+    await session.flush()
 
     written = 0
     for candidate in candidates:

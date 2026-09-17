@@ -3546,3 +3546,443 @@ dụng):**
    chạy — bắt buộc QA chạy trước khi release theo R5-03, hoặc QA phải ghi rõ "release blocked pending
    live verification" trong `test-report.md` nếu môi trường QA cũng không có pdf2zh/babeldoc/MinerU/API
    key thật.
+
+---
+
+## BL-20 — Fix guard hết hạn ngầm chặn "Các từ mới" cho job EPUB (Reviewer, 2026-09-17)
+
+Phạm vi: `src/core/term_extraction_service.py`, `tests/integration/test_term_extraction_service.py`.
+Đọc trước khi review: `docs/Architecture.md` §6.27 (8671-8747), `docs/design-log.md` mục "2026-09-16 —
+RCA BL-20" (6881-6987, gồm Final Decision Hiếu 2026-09-17), `docs/CHANGELOG.md` đoạn BL-20
+(8420-8481).
+
+### 1. Guard EPUB FR (§6.26.5 #13) — có bị gỡ nhầm cùng lúc không? (yêu cầu quan trọng nhất)
+
+Đọc trực tiếp `src/core/term_extraction_service.py:147-161` — guard
+`if (job.source_lang or "en") != "en": ... return 0` **VẪN CÒN NGUYÊN**, đúng vị trí (trong
+`extract_and_store_terms()`, không phải riêng ở `jobs.py`), đúng comment tham chiếu §6.26.5 #13 +
+R8-02. `git diff HEAD -- src/core/term_extraction_service.py` xác nhận hunk sửa CHỈ nằm ở nhánh
+`if job.file_type == FileType.EPUB:` (dòng 75-85, trong `_extract_source_text_for_terms()`) — không
+chạm dòng 147-161. Test `test_extract_and_store_terms_skips_for_source_lang_fr` (đã có từ trước, PDF
+fixture) tự chạy xanh không cần sửa, xác nhận độc lập việc guard FR không bị ảnh hưởng. **Đạt.**
+
+### 2. Test khẳng-định-bug đã bị xoá thật chưa?
+
+`grep -rn "test_lineage_epub_not_yet_supported_raises_clearly\|US-22 hasn't shipped" tests/ src/` →
+0 kết quả. Không còn tồn tại dưới bất kỳ hình thức nào (không đổi tên, không `@pytest.mark.skip`,
+không comment-out). **Đạt.**
+
+### 3. 3 test mới — assert cụ thể, không chỉ "đã gọi"
+
+Đọc trực tiếp `tests/integration/test_term_extraction_service.py`:
+
+- `test_lineage_epub_reads_full_text_not_inner_html` (dòng 200-218): dựng EPUB thật bằng `zipfile`
+  (không mock `EpubDocument` — đúng R5-03), có `<strong>` trong đoạn văn; assert text trả về **có**
+  câu thật `"Laminated dough rests overnight in the fridge."` VÀ **không** chứa `"<strong"`/`"<p"`.
+  Đây là assert giá trị cụ thể, phân biệt được đọc `full_text()` (text thuần) với đọc
+  `EpubUnit.text` (inner-HTML) — đúng tinh thần R6-02.
+- `test_lineage_epub_bad_file_raises_term_extraction_source_error` (220-233): file zip hỏng →
+  assert raise đúng `TermExtractionSourceError` (không phải `EpubParseError` lộ ra ngoài).
+- `test_extract_and_store_terms_writes_pending_rows_for_completed_epub_job` (265-295): EPUB thật 3
+  đoạn lặp "Laminated dough" → gọi `extract_and_store_terms()` (mức tương đương route thật gọi),
+  assert `written > 0`, VÀ assert `"laminated dough" in {row.match_key for row in rows}` — đúng như
+  Dev báo, đây chính là assert R6-02 mức end-to-end (không chỉ `assert_awaited()`).
+
+Cả 3 test đã tự chạy xanh (mục 6). **Đạt.**
+
+### 4. Correctness `EpubDocument.load()` + xử lý `EpubParseError`
+
+`_extract_source_text_for_terms()` dòng 75-85: `try: return EpubDocument.load(Path(job.file_path)
+).full_text() except EpubParseError as exc: raise TermExtractionSourceError(...) from exc`. Bọc
+đúng loại exception cụ thể (`EpubParseError`, không phải `except Exception` chụp bừa), giữ
+`from exc` cho traceback gốc không mất khi debug log. Route `POST /{job_id}/extract-terms`
+(`src/api/routes/jobs.py:815-828`) chỉ bắt `TermExtractionSourceError` → 400 — khớp đúng, không có
+exception lạ nào khác từ `EpubDocument.load()` có thể lọt ra ngoài để rơi vào nhánh 500 mặc định của
+FastAPI, vì mọi lỗi parse hợp lệ của thư viện đã được chuẩn hoá thành `EpubParseError` ở tầng dưới
+(đã đọc `src/services/epub_document.py`, `load()` không raise loại exception nào khác ngoài
+`EpubParseError`/`FileNotFoundError` — `FileNotFoundError` cho path không tồn tại KHÔNG được bọc,
+nhưng đây là hành vi đã có từ trước BL-20 cho mọi `file_type` khác (`pdf_digital`/`pdf_scan` cũng
+không bọc `FileNotFoundError` của `_extract_full_text`), không phải regression riêng của fix này —
+ghi non-blocking bên dưới thay vì blocking, vì phạm vi brief BL-20 là guard EPUB, không phải audit
+lại toàn bộ exception handling của 4 nhánh `file_type`). **Đạt** cho phạm vi BL-20.
+
+### 5. Backfill — script gọi thẳng `extract_and_store_terms()` có tương đương đường API thật không?
+
+Đọc `src/api/routes/jobs.py:815-828` (`extract_terms_manual`): route CHỈ làm 2 việc ngoài gọi hàm —
+(a) `settings = await get_effective_settings(session)` (KHÔNG phải `get_settings()`/`Settings()`
+mặc định — `get_effective_settings` layer thêm override lưu trong bảng `settings` DB lên trên
+`.env`, xem `src/core/config.py:385-405`), (b) bọc `TermExtractionSourceError` → HTTP 400. Không có
+side-effect nào khác ở tầng route (không ghi audit log riêng, không đổi `job.status`, response chỉ
+là `{job_id, written}`).
+
+Vấn đề: `term_extraction_enabled` **NẰM TRONG** `SETTINGS_DB_OVERRIDABLE_FIELDS`
+(`src/core/config.py:362`) — nghĩa là nếu user từng tắt tính năng này qua UI settings (ghi vào bảng
+`settings` DB), `get_effective_settings(session)` sẽ trả `False`, còn `Settings()`/`get_settings()`
+mặc định (chỉ đọc `.env`) sẽ KHÔNG thấy override đó, vẫn trả `True`. CHANGELOG mô tả backfill "chạy
+bằng script gọi thẳng `extract_and_store_terms(job_id, session, settings)`" nhưng **không nêu rõ
+`settings` được tạo bằng `get_effective_settings(session)` hay `Settings()` mặc định**, và script đó
+**không được lưu lại trong repo** (không tìm thấy file nào khớp `*backfill*`/`*bl20*` ngoài
+`docs/`) — không thể tự đọc source để xác nhận độc lập, chỉ có thể xác nhận KẾT QUẢ: đã tự
+`sqlite3 data/bb_translation.db "select job_id, count(*) from suggested_terms where job_id in
+(...) group by job_id"` → đúng khớp CHANGELOG (`88e897af…` = 2765, `217097fd…` = 2650) — nghĩa là
+trên thực tế `term_extraction_enabled` đã là `True` dù script dùng nguồn settings nào, nên kết quả
+lần này không sai. Nhưng đây vẫn là một **khoảng hở audit thật**: nếu DB có override khác `.env`
+sau này (ví dụ `default_provider`, dù không ảnh hưởng `extract_and_store_terms` hiện tại), một
+script backfill viết tay không tái sử dụng đúng `get_effective_settings()` có thể âm thầm lệch khỏi
+hành vi API thật. Ghi non-blocking bên dưới — không block APPROVE vì (a) phạm vi hiện tại
+(`term_extraction_enabled`) đã verify bằng kết quả thật khớp, (b) đây là kỷ luật cho backfill script
+tương lai, không phải lỗi trong code đã review.
+
+### 6. Tự chạy lại test — không chỉ tin số Dev báo
+
+```
+.venv/bin/python -m pytest tests/integration/test_term_extraction_service.py -q
+  → 16 passed, 272 warnings in 1.47s
+
+.venv/bin/python -m pytest -q   (toàn repo)
+  → 883 passed, 1199 warnings in 107.69s
+```
+
+Khớp đúng số Dev báo trong CHANGELOG (16 passed / 883 passed). `.venv/bin/ruff check` +
+`.venv/bin/ruff format --check` trên 2 file đã sửa: sạch, không vi phạm.
+
+Backfill DB (tự query độc lập, không tin CHANGELOG):
+`sqlite3 data/bb_translation.db` → `suggested_terms` có đúng 2765 dòng cho
+`88e897af-e19f-470c-9248-922fbc79596f` và 2650 dòng cho `217097fd-6d72-4560-949d-439a4dbc60ec`, cả
+2 job đều `file_type=epub, status=completed` — khớp chính xác CHANGELOG.
+
+### 7. Checklist bắt buộc theo brief Reviewer (CLAUDE.md)
+
+- **R5-04**: `term_extraction_service.py` không phải `*_runner.py`/`*_provider.py` (gọi tool bên thứ
+  3 qua subprocess/HTTP) — nó gọi `EpubDocument.load()` là thư viện nội bộ Python thuần (không phải
+  external network/subprocess service, đúng "Phạm vi áp dụng" Protocol 5 loại trừ tường minh case
+  này). → **N/A**.
+- **R6-04**: đây không phải `*_orchestrator.py` gọi tuần tự nhiều service — `extract_and_store_terms()`
+  đọc source text rồi trích n-gram trong cùng 1 hàm, không có bước N+1 nhận input từ return value của
+  1 external call trước đó theo nghĩa Protocol 6. Đã tự trace tay việc `source_text` (return của
+  `_extract_source_text_for_terms`) được truyền thẳng vào `extract_terms(source_text, ...)` ở dòng
+  163-165 — đúng lineage, không đứt gãy kiểu Bug #5. → **Đạt** (không N/A hoàn toàn vì vẫn có 1 mối nối
+  nội bộ đáng trace, đã trace xong).
+- **R8-01**: EPUB không phải "biến thể mới đi qua pipeline dùng chung" theo nghĩa Protocol 8 (engine
+  dịch/provider mới) — đây là nhánh `file_type` đã tồn tại trong bảng lineage từ §6.18.5, chỉ bị
+  guard tạm chặn sai thời điểm. Tech Lead đã tự làm đúng dạng audit R8-01 ở §6.27.3 (liệt kê đủ 6
+  bước có sẵn trong `extract_and_store_terms()`, kết luận không bước nào cần SKIP cho EPUB) — đã đọc
+  và xác nhận bảng đó đầy đủ, khớp code thật. → **Đạt**.
+- **Protocol 5 R5-03**: không có mock nào cho `EpubDocument` trong 2 test EPUB mới — cả 2 dùng
+  `_build_epub()` dựng zip/OPF/spine thật bằng `zipfile` (cùng pattern
+  `test_epub_job_source_lang.py::_build_epub`, không viết tay theo giả định) → `EpubDocument.load()`
+  parse dữ liệu thật. Backfill (mục 5) dùng `data/bb_translation.db` + file EPUB thật trên đĩa, không
+  phải mock. → **Đạt**, không có mock nào cần golden file backing riêng cho tăng này.
+
+### Kết luận
+
+**APPROVE.** Guard EPUB FR không bị đụng (mục 1, verify bằng đọc code + `git diff` trực tiếp). Test
+khẳng-định-bug đã xoá sạch (mục 2). 3 test mới có assert giá trị cụ thể đúng R6-02 (mục 3).
+`EpubParseError` được bọc đúng thành `TermExtractionSourceError`, khớp hợp đồng 400 (mục 4). Backfill
+2 sách thật verify độc lập qua query DB, số dòng khớp chính xác CHANGELOG (mục 5, 6). Toàn bộ 883 test
+tự chạy lại xanh, ruff sạch. Không có blocking issue.
+
+**Backlog / non-blocking (PM đưa vào `project_state.json` `backlog[]` nếu áp dụng):**
+
+1. **Script backfill không được lưu lại trong repo** (`scripts/` hoặc tương đương) — không thể audit
+   độc lập việc nó dùng `get_effective_settings(session)` hay `Settings()` mặc định khi gọi
+   `extract_and_store_terms()`. Lần này không gây sai lệch (verify bằng kết quả DB thật, mục 5), nhưng
+   là thói quen nên sửa: mọi script backfill chạm production DB nên được lưu vào `scripts/` (dù chỉ
+   chạy 1 lần, xoá sau) để có thể review/audit như code thường, tránh lặp lại kiểu "không ai đọc được
+   nó đã làm gì" — nhất là khi hàm mục tiêu (`extract_and_store_terms`) phụ thuộc `Settings` có thể có
+   override DB. `source: "dev"`.
+2. `_extract_source_text_for_terms()` không bọc `FileNotFoundError` thành `TermExtractionSourceError`
+   cho bất kỳ nhánh `file_type` nào (kể cả nhánh EPUB mới sửa) — nếu `job.file_path` bị xoá khỏi đĩa
+   sau khi job `completed` (ví dụ user dọn dẹp thủ công), `POST /extract-terms` sẽ trả 500 thay vì 400
+   có thông báo. Đây là hành vi đã có từ trước BL-20 cho mọi nhánh, không phải regression của tăng
+   này, nhưng đáng gộp vào cùng 1 lần dọn dẹp lineage error-handling nếu Tech Lead thấy đáng làm.
+   `source: "tech-lead"`.
+3. Server uvicorn dev chưa được restart để xác nhận thêm qua đường HTTP thật
+   (`POST /api/jobs/{id}/extract-terms`) — Dev đã tự flag đúng trong CHANGELOG, không tự nhận đã verify
+   trọn vẹn qua route. Không block APPROVE (đã verify tương đương qua gọi hàm trực tiếp + kết quả DB),
+   nhưng PM/Hiếu nên quyết định thời điểm restart an toàn để có 1 lần xác nhận qua route thật, đúng
+   tinh thần R5-03 "tối thiểu 1 lần gọi thật".
+
+## Fix — rerun `extract_and_store_terms()` UNIQUE constraint (2026-09-17), review vòng 2 dev-qa cho BL-20
+
+Reviewer review fix của Dev cho bug QA phát hiện khi verify BL-20 (`docs/test-report.md` mục
+"BL-20 — QA gate cuối (2026-09-17)"): `POST /api/jobs/{id}/extract-terms` gọi lần 2 (rerun) trên
+job đã có `suggested_terms` toàn `pending` → HTTP 500 `IntegrityError` UNIQUE
+`(job_id, term_en)` do SQLAlchemy emit INSERT trước DELETE trong cùng 1 flush. Đọc trước
+`docs/CHANGELOG.md` mục "Fix — rerun `extract_and_store_terms()` UNIQUE constraint (2026-09-17)"
+(đoạn Dev vừa append cuối file, trước section này).
+
+### 1. Vị trí `session.flush()` — đúng chỗ, có tác dụng thực
+
+Đọc `src/core/term_extraction_service.py:174-207` (`extract_and_store_terms()`): vòng lặp
+`for row in pending_rows: await session.delete(row)` (dòng 181-182) chạy xong, `await
+session.flush()` (dòng 189) đặt ngay sau, TRƯỚC vòng lặp `for candidate in candidates: ...
+session.add(SuggestedTerm(...))` (dòng 192-207). Không có early-return, `continue`, hay nhánh
+điều kiện nào giữa 2 vòng lặp có thể khiến `flush()` bị bỏ qua trong đường đi bình thường (đường
+đi sớm-return duy nhất, kill switch `term_extraction_enabled=False`, đã return ở dòng 145, TRƯỚC
+cả vòng lặp delete — không đụng đoạn này). `flush()` ép SQLAlchemy emit SQL DELETE thật xuống
+SQLite ngay tại điểm gọi thay vì gộp chung 1 lượt unit-of-work lúc `commit()` cuối hàm (dòng 209)
+— đúng cơ chế fix mô tả trong CHANGELOG, verify bằng đọc code trực tiếp, không chỉ tin comment.
+Comment dòng 184-188 giải thích đúng root cause, khớp với hành vi SQLAlchemy thật (unit-of-work
+mặc định sắp INSERT trước DELETE trong cùng 1 flush — đây là hành vi ORM core đã biết, không phải
+claim cần verify nguồn ngoài).
+
+### 2. Test mới — KHÔNG thực sự tái hiện được bug (blocking, phát hiện bằng verify độc lập)
+
+Đọc `tests/integration/test_term_extraction_service.py:359-433`, cả 2 test khác nhau đúng ở điểm
+Dev mô tả (test cũ dismiss 1 row trước khi rerun nên `decided_terms` chặn candidate trùng tên
+không cho `session.add()`; test mới để mọi row `pending`, không chặn gì) — về mặt LOGIC ứng dụng,
+mô tả trong CHANGELOG đúng.
+
+Nhưng tự verify độc lập bằng cách tạm bỏ dòng `await session.flush()` (copy file, sửa, chạy lại,
+restore ngay sau) và chạy lại đúng 2 test rerun này:
+
+```
+pytest tests/integration/test_term_extraction_service.py -q -k rerun
+```
+
+→ **2 passed** — kể cả KHÔNG có `flush()`, test mới `test_extract_and_store_terms_rerun_with_all_
+rows_still_pending_does_not_raise` vẫn PASS. Test này không hề tái hiện được `IntegrityError` mà cả
+CHANGELOG lẫn tên test đều khẳng định nó bảo vệ.
+
+**Root cause của việc này (đã trace tiếp, không dừng ở "lạ")**: `UNIQUE (job_id, term_en)` —
+đúng constraint gây bug gốc — được tạo bằng raw SQL trong `init_db()`
+(`src/models/database.py:184-188`, `CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_terms_job_term
+ON suggested_terms(job_id, term_en)`), comment dòng 179-183 giải thích rõ: `SuggestedTerm` là bảng
+mới nên phần cột được tạo bởi `SQLModel.metadata.create_all()`, nhưng 2 index tổng hợp (kể cả
+UNIQUE này) phải tạo riêng bằng raw SQL "vì SQLModel không có declarative composite-index/unique-
+constraint pattern nào khác trong repo để theo". Fixture `session` của file test
+(`tests/integration/test_term_extraction_service.py:40-50`) chỉ gọi
+`await conn.run_sync(SQLModel.metadata.create_all)` — **không bao giờ gọi `init_db()`** hay tạo
+riêng index này. Tự chạy 1 script độc lập xác nhận: DB in-memory dựng đúng kiểu fixture có
+`SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%suggested_terms%'` → **rỗng**,
+0 index nào trên bảng `suggested_terms` trong toàn bộ test suite của file này. Nghĩa là UNIQUE
+constraint mà production DB (qua `init_db()` lúc app khởi động) chắc chắn có, **không hề tồn tại
+trong bất kỳ test nào của file này** — kể cả 15 test cũ đã pass từ trước. Đây không phải regression
+riêng của fix này, nhưng chính nó là lý do bug gốc (BL-20 QA phát hiện) không hề bị bắt bởi 883 test
+cũ, và giờ là lý do test "chứng minh fix" mới cũng vô tác dụng ở tầng DB constraint.
+
+### 3. Side-effect của `flush()` giữa transaction
+
+`flush()` chỉ đẩy SQL xuống connection hiện tại trong cùng transaction đang mở, KHÔNG commit —
+transaction SQLite vẫn chưa kết thúc, chưa release lock, chưa ghi WAL checkpoint bền vững. Nếu có
+exception giữa `flush()` (dòng 189) và `commit()` (dòng 209) — ví dụ lỗi validate dữ liệu candidate
+bất ngờ trong vòng lặp add — session vẫn ở trạng thái "dirty", chưa commit. Truy vết vòng đời
+session: `src/models/database.py:49-52` (`get_session()`) dùng `async with session_factory() as
+session: yield session` — `AsyncSession.__aexit__` khi có exception sẽ gọi `close()`, và
+`close()` của SQLAlchemy Session/AsyncSession discard connection kèm rollback bất kỳ transaction
+chưa commit nào (hành vi core của SQLAlchemy, không phải hành vi cần verify riêng theo Protocol 5
+vì đây là thư viện Python thuần import trực tiếp — đúng phạm vi loại trừ). Route caller
+(`src/api/routes/jobs.py:815-830`, `extract_terms_manual`) chỉ bắt riêng
+`TermExtractionSourceError` để trả 400; exception khác (kể cả lỗi giữa flush/commit) đi lên thành
+500 — nhưng vì `close()` đã rollback DELETE đã flush, DB không bị để lại ở trạng thái nửa vời
+(dòng đã xoá mất, dòng mới chưa thêm). Không có vấn đề rollback nào bị bỏ sót.
+
+### 4. Verify độc lập qua DB thật
+
+Không tin lời Dev, tự chạy:
+
+```
+select job_id, term_en, count(*) from suggested_terms group by job_id, term_en having count(*) > 1
+```
+
+trên `data/bb_translation.db` (bảng có `suggested_terms`, `data/outputs/bb_translation.db` không
+có bảng này, bỏ qua) → **rỗng**, không có duplicate. Lưu ý: brief PM mô tả Dev "đã tự verify qua
+HTTP thật (gọi endpoint 2 lần liên tiếp, cả 2 đều `200 {"written":31}`)" — đọc lại
+`docs/CHANGELOG.md` mục fix này (đoạn "Chưa làm / cần theo dõi") thì Dev **KHÔNG** claim đã verify
+qua HTTP thật, mà ghi rõ: "Chưa tự verify lại qua HTTP thật (server có thể cần restart để chạy code
+fix mới) — để PM quyết định thời điểm restart an toàn". Số `written: 31` tìm thấy trong repo
+(`docs/test-report.md:3157,3206`) là kết quả QA verify lúc **phát hiện bug** (trước fix), không
+phải Dev verify **sau fix**. → **Brief PM không khớp với báo cáo thật của Dev** — không phải lỗi
+của Dev, nhưng cần PM lưu ý: chưa có xác nhận HTTP thật nào cho fix này, chỉ có xác nhận qua gọi
+hàm Python trực tiếp (test integration) + query DB.
+
+### 5. Test suite + lint
+
+- `pytest tests/integration/test_term_extraction_service.py -q` → 17 passed.
+- `pytest -q` (toàn repo) → **884 passed**, khớp đúng Dev báo trong CHANGELOG.
+- `ruff check src/core/term_extraction_service.py tests/integration/test_term_extraction_service.py`
+  → All checks passed.
+- `ruff format --check` cùng 2 file → đã format sẵn (2 files already formatted).
+
+### 6. Checklist bắt buộc theo brief Reviewer (CLAUDE.md)
+
+- **R5-04**: `term_extraction_service.py` không phải `*_runner.py`/`*_provider.py` — không gọi
+  external tool qua subprocess/HTTP trong đoạn fix này (chỉ gọi `session.flush()`/`session.delete()`
+  của SQLAlchemy, thư viện nội bộ). → **N/A**.
+- **R6-04**: fix này không phải `*_orchestrator.py` gọi tuần tự service — chỉ là thứ tự
+  flush/delete/add trong 1 transaction DB nội bộ, không có lineage giữa external call. → **N/A**.
+- **R8-01**: không có biến thể/engine mới nào đi qua pipeline trong fix này — bug tổng quát cho mọi
+  `file_type` (PDF lẫn EPUB đều bị, theo đúng mô tả CHANGENLOG root cause), không phải case
+  biến-thể-mới-dùng-chung-pipeline-cũ theo nghĩa Protocol 8. → **N/A**.
+- **Protocol 5 R5-03**: test mới không mock gì (dùng `_make_pdf`, PDF thật ghi ra `tmp_path`, DB
+  session thật qua fixture `session`) — không có mock cần golden file backing. → **Đạt**.
+
+### Kết luận
+
+**REJECT.** `session.flush()` đặt đúng vị trí, khớp cơ chế SQLAlchemy mô tả trong CHANGELOG, và
+nhiều khả năng đúng là fix hợp lý cho bug gốc (mục 1, mục 3 không có vấn đề side-effect nào). Tự
+verify DB production thật cũng không thấy duplicate (mục 4). Nhưng **blocking issue ở mục 2**: test
+mới `test_extract_and_store_terms_rerun_with_all_rows_still_pending_does_not_raise` — chính test
+được CHANGELOG dẫn ra làm bằng chứng fix đúng — **không tái hiện được bug**, xác nhận bằng cách tự
+gỡ tạm `flush()` và chạy lại: test vẫn PASS. Nguyên nhân: fixture `session` của file test không gọi
+`init_db()`, nên `UNIQUE (job_id, term_en)` (tạo bằng raw SQL riêng trong `init_db()`, không phải
+`SQLModel.metadata.create_all()`) không tồn tại trong DB test — test không có cách nào gặp
+`IntegrityError` dù code có bug hay không. Đây đúng dạng lỗi Protocol 6 R6-02 cảnh báo ("mock/test tự
+nhất quán với chính nó, không nhất quán với ràng buộc DB thật") ở mức nghiêm trọng hơn: không phải
+mock sai giả định, mà là **thiếu hẳn 1 phần schema thật** trong toàn bộ test suite của file này —
+tất cả 17 test cũ + mới trong file đều chạy trên DB thiếu UNIQUE constraint mà production luôn có.
+Vì lý do gate cuối của bug này (BL-20 QA phát hiện) chính là do gọi HTTP thật trên DB thật — nơi có
+constraint — nên "test xanh" trong CHANGELOG không chứng minh được gì về fix, chỉ chứng minh code
+không tự crash khi không có constraint nào cản.
+
+Fix bản thân `flush()` gần như chắc chắn đúng hướng (chuẩn SQLAlchemy, đúng root cause đọc từ code),
+nhưng theo đúng tinh thần Protocol 5/6 của repo ("test pass chỉ chứng minh code khớp giả định, không
+chứng minh giả định đúng thực tế") — reject để Dev fix lại TEST trước khi coi fix là "xong", không
+phải vì nghi ngờ đúng-sai của chính đoạn code fix.
+
+**Việc Dev cần làm (không tính vòng lặp riêng theo Protocol 5/6 — xem "Quyền reject không tính vòng
+lặp" trong brief Reviewer, vì đây là reject do vi phạm nguyên tắc test/verify, không phải lỗi logic
+thường)**:
+
+1. Sửa fixture `session` (`tests/integration/test_term_extraction_service.py:40-50`) để DB test có
+   đúng `UNIQUE (job_id, term_en)` như production — cách đơn giản nhất: gọi thẳng
+   `src.models.database.init_db()`-style raw SQL (hoặc factor phần tạo 2 index đó ra 1 hàm dùng
+   chung giữa `init_db()` và fixture, tránh lệch nhau lần sau) thay vì chỉ
+   `SQLModel.metadata.create_all()`.
+2. Xác nhận lại: gỡ tạm `flush()`, chạy lại `test_extract_and_store_terms_rerun_with_all_rows_
+   still_pending_does_not_raise` — PHẢI fail (`IntegrityError`) lần này; khôi phục `flush()`, chạy
+   lại — phải pass. Ghi rõ 2 kết quả này vào CHANGELOG lần fix tiếp theo, không chỉ ghi "N passed".
+3. Chạy lại toàn bộ 17 test trong file + toàn repo — với UNIQUE constraint giờ có thật trong test
+   DB, có khả năng lộ ra thêm chỗ khác trong 15 test cũ từng "pass" nhờ thiếu constraint này; nếu
+   có test nào fail mới, xử lý luôn trong cùng lần sửa.
+4. Vẫn nên có 1 lần xác nhận qua HTTP thật (`POST /api/jobs/{id}/extract-terms` gọi 2 lần liên tiếp
+   trên job completed) trước khi đóng BL-20 hẳn — xem mục 4, brief PM mô tả Dev đã làm việc này
+   nhưng CHANGELOG cho thấy chưa, cần PM đính chính khi báo lại Hiếu.
+
+**Non-blocking (giữ nguyên, không đổi do reject ở test, không phải ở đoạn logic này)**:
+
+1. Đây là vòng dev-qa thứ 2 cho BL-20 (bug do QA phát hiện ở gate cuối, Dev fix, Reviewer reject vì
+   test không tái hiện được bug) — trong giới hạn Protocol 3 (max 5), và theo brief Reviewer "Quyền
+   reject không tính vòng lặp" cũng áp dụng được ở đây (reject do vi phạm nguyên tắc verify của
+   Protocol 6 R6-02, tương tự tinh thần Protocol 5) — PM cân nhắc không tính vòng này vào giới hạn 3
+   của Dev↔Reviewer.
+
+## Review lần 2 — Fix theo Reviewer REJECT, test rerun BL-20 (2026-09-17)
+
+Phạm vi: `src/models/database.py` (hàm `_create_composite_indexes()` mới, `init_db()` refactor gọi
+hàm này), `tests/integration/test_term_extraction_service.py` (fixture `session` dòng ~40-53 gọi
+thêm `_create_composite_indexes(conn)`), `src/core/term_extraction_service.py` (giữ nguyên
+`flush()` từ lần trước). Đọc lại mục REJECT ngay phía trên (lần review trước) và mục CHANGELOG
+"Fix theo Reviewer REJECT — test rerun BL-20..." trước khi bắt đầu, đúng brief PM.
+
+### 1. Tự verify độc lập fail-then-pass (không tin lời Dev)
+
+Copy `src/core/term_extraction_service.py` ra backup, tự sửa để gỡ đúng đoạn `await session.flush()`
+(dòng 189 cũ) trước vòng lặp `for candidate in candidates:`, chạy:
+
+```
+pytest tests/integration/test_term_extraction_service.py -q -k rerun
+```
+
+→ **1 failed, 1 passed** — `test_extract_and_store_terms_rerun_with_all_rows_still_pending_does_not_raise`
+FAIL đúng với:
+
+```
+sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed:
+suggested_terms.job_id, suggested_terms.term_en
+```
+
+Khôi phục lại file bằng backup, `diff` xác nhận **giống hệt bản gốc** (không sai sót khi restore),
+chạy lại cùng lệnh → **2 passed, 15 deselected**. Khớp chính xác với 2 khối log Dev dán trong
+CHANGELOG (cả message lỗi lẫn số lượng test). **Xác nhận: test mới giờ tái hiện đúng bug thật —
+điểm blocking của lần review trước đã được giải quyết.**
+
+### 2. `_create_composite_indexes()` — đối chiếu với `init_db()` production
+
+Đọc `git diff src/models/database.py`: đây là phép chuyển nguyên văn (copy-paste), không đổi 1 ký
+tự nào trong 3 câu lệnh raw SQL (`idx_glossary_entries_term_nocase`, `idx_suggested_terms_job_term`
+UNIQUE trên đúng `(job_id, term_en)`, `idx_suggested_terms_status_rank`) — chỉ khác vị trí đặt code
+(tách thành hàm riêng, gọi ở cuối `init_db()` thay vì inline). Thứ tự gọi trong `init_db()` không
+đổi tương đối so với các bước khác (`create_all` → `_migrate_concurrency_state_engine_key` →
+`_migrate_chunks_unit_columns` → `_add_missing_columns` → `PRAGMA journal_mode=WAL` →
+`_create_composite_indexes`, đúng thứ tự cũ, chỉ 5 dòng cuối gộp thành 1 lời gọi hàm). Không có
+thay đổi hành vi production — xác nhận bằng đọc diff trực tiếp, không chỉ tin comment Dev viết.
+
+Fixture `session` (test file, dòng ~40-53) gọi đúng `_create_composite_indexes(conn)` sau
+`create_all()` — cùng 1 hàm, cùng 1 nguồn sự thật với `init_db()`, không có khả năng lệch tên
+cột/bảng giữa test và production nữa (đúng yêu cầu #1 của lần reject trước).
+
+### 3. Ảnh hưởng tới test khác trong repo
+
+`pytest -q` toàn repo → **884 passed** (không giảm/tăng số test so với báo cáo của Dev, và khớp con
+số 884 mà lần review trước đã ghi nhận trước khi có fix này — nghĩa là việc thêm UNIQUE constraint
+thật vào DB test của riêng file `test_term_extraction_service.py` không làm lộ ra lỗi tiềm ẩn nào ở
+15 test cũ trong cùng file, đúng như Dev báo ở CHANGELOG mục "Việc Dev cần làm #3" — đã kiểm tra
+thật, không suy đoán). Các file test khác không đụng `_create_composite_indexes` (không import,
+không dùng fixture `session` của file này) nên không có đường ảnh hưởng nào khác cần xét thêm.
+
+### 4. Verify độc lập qua DB thật
+
+```
+sqlite3 data/bb_translation.db "select job_id, term_en, count(*) from suggested_terms group by job_id, term_en having count(*) > 1;"
+```
+
+→ **rỗng**, không có duplicate `(job_id, term_en)` nào trong DB production hiện tại.
+
+### 5. Đoạn CHANGELOG về verify HTTP thật — đối chiếu nhất quán
+
+Lần trước Reviewer phát hiện brief PM nói "Dev đã verify HTTP" trong khi CHANGENLOG ghi đúng sự
+thật là "chưa verify" — không phải Dev sai, mà brief PM lệch với báo cáo thật của Dev. Lần này đọc
+kỹ mục "Verify qua HTTP thật — ĐÃ LÀM lần này" trong CHANGELOG: liệt kê tuần tự 5 bước cụ thể (check
+không có job đang chạy → kill/restart uvicorn để nạp code fix mới → gọi `POST .../extract-terms` 2
+lần liên tiếp trên cùng 1 job đã có sẵn 31 `suggested_terms` pending, không dismiss trước → query DB
+xác nhận không tăng số dòng + không duplicate → đọc log server không có exception). Không có câu nào
+mơ hồ kiểu "chắc đã ổn" — mọi khẳng định đều kèm bằng chứng cụ thể (status code, body JSON, số dòng
+DB, tên file log). Đây đúng là lần đầu trong chuỗi fix BL-20 có xác nhận HTTP thật SAU KHI fix áp
+dụng — nhất quán với chính CHANGELOG tự nhận ("các lần trước chỉ có xác nhận qua integration
+test/query DB tĩnh"). **Không phát hiện mâu thuẫn nào giữa các đoạn CHANGENLOG lần này.**
+
+Lưu ý cho PM (không phải lỗi Dev, chỉ ghi lại theo đúng CHANGELOG mục "Chưa làm / cần theo dõi"):
+Dev tự restart server uvicorn đang chạy để verify — đây là thay đổi chạm môi trường thật
+(Protocol E, đối tượng có thể tính là "code fix mới đã áp dụng lên môi trường chạy thật"). Dev tự
+ghi rõ mình không có quyền ghi `project_state.json`/`infra_pending[]` theo phân công tool hiện tại
+(Protocol F) và đã bàn giao đúng cho PM — cần PM xác nhận có cần thêm entry `infra_pending[]` hay
+không trước khi coi bước này là đóng.
+
+### 6. Test suite + lint (tự chạy lại, không tin số Dev báo)
+
+- `pytest tests/integration/test_term_extraction_service.py -q -k rerun` → 2 passed (mục 1).
+- `pytest -q` toàn repo → 884 passed, khớp đúng Dev báo trong CHANGELOG.
+- `ruff check src/models/database.py tests/integration/test_term_extraction_service.py
+  src/core/term_extraction_service.py` → All checks passed!
+- `ruff format --check` cùng 3 file → 3 files already formatted.
+
+### 7. Checklist bắt buộc theo brief Reviewer (CLAUDE.md)
+
+- **R5-04**: không có `*_runner.py`/`*_provider.py` nào trong phạm vi fix này — chỉ
+  `src/models/database.py` (raw SQL nội bộ SQLite qua SQLAlchemy, thư viện Python thuần import trực
+  tiếp) và test fixture. → **N/A**.
+- **R6-04**: không có `*_orchestrator.py` nào gọi tuần tự nhiều external service trong phạm vi fix
+  này. → **N/A**.
+- **R8-01**: không có biến thể/engine mới nào đi qua pipeline trong fix này. → **N/A**.
+- **Protocol 5 R5-03**: test không mock gì liên quan tới fix (PDF thật, DB in-memory thật qua
+  fixture `session`, giờ có đúng schema production nhờ dùng chung `_create_composite_indexes`). →
+  **Đạt**.
+
+### Kết luận
+
+**APPROVE.** Điểm blocking duy nhất của lần review trước (test không tái hiện được bug do fixture
+thiếu UNIQUE constraint) đã được xử lý đúng cách: factor phần tạo index/constraint ra hàm dùng
+chung `_create_composite_indexes()`, cả `init_db()` production lẫn fixture test giờ đi qua đúng 1
+nguồn sự thật — không còn khả năng lệch nhau giữa "constraint test có" và "constraint production
+có" như đã gây ra lỗ hổng lần trước. Tự verify độc lập (không tin lời Dev) xác nhận đúng
+fail-then-pass: gỡ `flush()` → FAIL với `IntegrityError` y hệt bug gốc; khôi phục `flush()` → PASS.
+`git diff` xác nhận refactor `database.py` là copy nguyên văn, không đổi hành vi `init_db()`
+production. 884 test toàn repo pass, DB production thật không có duplicate, `ruff` sạch. Đoạn
+CHANGELOG về verify HTTP thật lần này rõ ràng, có bằng chứng cụ thể từng bước, không mơ hồ như lần
+trước.
+
+Duy nhất 1 điểm PM cần xử lý ngoài phạm vi Reviewer (không phải điều kiện approve/reject): xác nhận
+Protocol E có áp dụng cho việc Dev tự restart server production để verify hay không, và thêm
+`infra_pending[]` tương ứng nếu cần.

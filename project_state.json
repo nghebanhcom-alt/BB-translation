@@ -301,16 +301,37 @@
     },
     {
       "id": "BL-20",
-      "text": "QUAN TRỌNG (không riêng FR) — term_extraction_service.py:73-82 raise lỗi cho MỌI job EPUB (cả EN/FR), bị nuốt nên job vẫn completed. 'Các từ mới' rỗng cho toàn bộ EPUB từ US-22 tới giờ",
+      "text": "term_extraction_service.py raise lỗi cho MỌI job EPUB, bị nuốt nên job vẫn completed. Fix xong: lineage + rerun IntegrityError bug, Reviewer APPROVE (2 vòng), QA PASS — CHỜ commit",
       "source": "qa",
-      "ref": "docs/test-report.md 'S7 — Dịch FR→VI ... QA live E2E' (2026-09-16)",
-      "status": "open"
+      "ref": "docs/test-report.md 'BL-20 — QA gate cuối, lần 2' (2026-09-17)",
+      "status": "done"
     },
     {
       "id": "BL-21",
       "text": "Quy trình — lần 2 trong ngày QA/Dev vô tình test nhầm code cũ vì server production không tự restart (không --reload). Đề xuất thêm /health trả về git_commit hiện tại để phát hiện nhanh thay vì dựa note thủ công",
       "source": "qa",
       "ref": "docs/test-report.md 'S7 — Dịch FR→VI ... QA live E2E' (2026-09-16), tương tự ghi nhận ở BL-12",
+      "status": "open"
+    },
+    {
+      "id": "BL-22",
+      "text": "Sản phẩm: thêm cột jobs.term_extraction_error để UI báo rõ khi trích xuất 'Các từ mới' thất bại, thay vì im lặng như BL-20 — tách riêng, Hiếu chưa quyết thời điểm làm",
+      "source": "tech-lead",
+      "ref": "docs/design-log.md — Final Decision BL-20 2026-09-17, câu 2",
+      "status": "open"
+    },
+    {
+      "id": "BL-23",
+      "text": "Script backfill BL-20 không lưu vào repo (scripts/) — không audit độc lập được dùng get_effective_settings hay Settings() mặc định, có thể lệch nếu user đổi setting qua UI",
+      "source": "dev",
+      "ref": "docs/review-report.md — review BL-20 2026-09-17, non-blocking",
+      "status": "open"
+    },
+    {
+      "id": "BL-24",
+      "text": "FileNotFoundError (file gốc bị xoá khỏi đĩa sau khi job completed) không được bọc thành TermExtractionSourceError ở bất kỳ file_type nào — có từ trước BL-20, không phải regression nhưng đáng dọn",
+      "source": "tech-lead",
+      "ref": "docs/review-report.md — review BL-20 2026-09-17, non-blocking",
       "status": "open"
     }
   ],
@@ -393,6 +414,14 @@
       "item": "S2",
       "count": 2,
       "limit": 3,
+      "escalated_at": null,
+      "reset_reason": null
+    },
+    {
+      "pair": "dev-qa",
+      "item": "BL-20",
+      "count": 1,
+      "limit": 5,
       "escalated_at": null,
       "reset_reason": null
     }

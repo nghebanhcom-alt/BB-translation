@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     async_sessionmaker,
     create_async_engine,
@@ -160,6 +161,42 @@ async def _migrate_chunks_unit_columns(conn) -> None:
     await conn.execute(text("DROP TABLE chunks_old"))
 
 
+async def _create_composite_indexes(conn: AsyncConnection) -> None:
+    """Raw-SQL indexes/constraints SQLModel has no declarative pattern for.
+
+    Factored out of `init_db()` (Reviewer BL-20 rerun-bug review, 2026-09-17)
+    so tests can build a schema with the SAME `UNIQUE (job_id, term_en)`
+    constraint production gets via `init_db()` — a test DB built only from
+    `SQLModel.metadata.create_all()` is missing this constraint entirely,
+    which let a rerun test pass without ever hitting the IntegrityError it
+    was meant to guard against.
+    """
+    # BR-GLOSS-02: case-insensitive EN term matching.
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_glossary_entries_term_nocase "
+            "ON glossary_entries(term_en COLLATE NOCASE)"
+        )
+    )
+    # Architecture.md 6.18.3 (US-20): suggested_terms is a brand-new
+    # table (created by create_all()) but its 2 composite indexes
+    # need the same raw-SQL pattern as idx_glossary_entries_term_nocase
+    # (SQLModel has no declarative composite-index/unique-constraint
+    # usage elsewhere in this codebase to follow instead).
+    await conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_terms_job_term "
+            "ON suggested_terms(job_id, term_en)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_suggested_terms_status_rank "
+            "ON suggested_terms(status, rank_score DESC)"
+        )
+    )
+
+
 async def init_db() -> None:
     """Create tables and enable WAL mode. Idempotent — safe to call on every startup."""
     engine = get_engine()
@@ -169,27 +206,4 @@ async def init_db() -> None:
         await _migrate_chunks_unit_columns(conn)
         await _add_missing_columns(conn)
         await conn.execute(text("PRAGMA journal_mode=WAL"))
-        # BR-GLOSS-02: case-insensitive EN term matching.
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS idx_glossary_entries_term_nocase "
-                "ON glossary_entries(term_en COLLATE NOCASE)"
-            )
-        )
-        # Architecture.md 6.18.3 (US-20): suggested_terms is a brand-new
-        # table (created above by create_all()) but its 2 composite indexes
-        # need the same raw-SQL pattern as idx_glossary_entries_term_nocase
-        # (SQLModel has no declarative composite-index/unique-constraint
-        # usage elsewhere in this codebase to follow instead).
-        await conn.execute(
-            text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_terms_job_term "
-                "ON suggested_terms(job_id, term_en)"
-            )
-        )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS idx_suggested_terms_status_rank "
-                "ON suggested_terms(status, rank_score DESC)"
-            )
-        )
+        await _create_composite_indexes(conn)
