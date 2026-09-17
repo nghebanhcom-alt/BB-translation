@@ -249,10 +249,10 @@
     },
     {
       "id": "BL-11",
-      "text": "Protocol C.3: Architecture.md 8.711 dòng (vượt trần 8.000, +9%) và design-log.md 6.616 dòng — cần rotate/tách trước khi vượt xa hơn",
+      "text": "Protocol C.3: Architecture.md/CHANGELOG.md/review-report.md/design-log.md vượt trần — đã rotate xong 2026-09-18 (commit 30d4c6d), tất cả dưới ngân sách",
       "source": "tech-lead",
-      "ref": "scripts/validate_state.py cảnh báo — không chặn, nhưng PM phải lên lịch xử lý theo nhiều lượt (Protocol C.3)",
-      "status": "open"
+      "ref": "scripts/validate_state.py không còn cảnh báo",
+      "status": "done"
     },
     {
       "id": "BL-12",
