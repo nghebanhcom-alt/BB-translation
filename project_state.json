@@ -465,7 +465,8 @@
       "owner_role": "tech-lead",
       "status": "done",
       "blocked_by": [],
-      "output": "Dev implement, Reviewer APPROVE, QA phát hiện bug blocking S8-B1 (total_pages/units không cập nhật sau cắt) → Tech Lead quyết phương án c → Dev fix → Reviewer APPROVE → QA PASS toàn bộ. ready_for_release YES. 5 mục [UNVERIFIED] BL-25..29 còn mở (không chặn release)"
+      "output": "Dev implement, Reviewer APPROVE, QA phát hiện bug blocking S8-B1 (total_pages/units không cập nhật sau cắt) → Tech Lead quyết phương án c → Dev fix → Reviewer APPROVE → QA PASS toàn bộ. ready_for_release YES. 5 mục [UNVERIFIED] BL-25..29 còn mở (không chặn release)",
+      "closed_commit": "813837b"
     }
   ],
   "loops": [
