@@ -67,6 +67,7 @@ def _fake_runner_returning(result_factory) -> Pdf2zhRunner:
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False  # BL-10 (6.23.3)
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(input_path, output_dir, page_range, service, **kwargs):
         with fitz.open(input_path) as source_doc:

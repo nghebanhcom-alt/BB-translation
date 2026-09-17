@@ -82,6 +82,9 @@ _NEW_NULLABLE_COLUMNS: list[tuple[str, str, str]] = [
     # Architecture.md 6.26.2 (S7 — dich FR->VI): 'en' | 'fr' | NULL, xem
     # docstring day du o src/models/job.py.
     ("jobs", "source_lang", "TEXT"),
+    # Architecture.md 6.28.3 (S8 — loai bo trang claim ban quyen): xem
+    # docstring day du o src/models/job.py.
+    ("jobs", "copyright_removed_json", "TEXT"),
 ]
 
 

@@ -8742,6 +8742,433 @@ Sau fix: `POST /api/jobs/{job_id}/extract-terms` cho `88e897af…` và `217097fd
 
 ---
 
+### 6.28. S8 — Tự động loại bỏ trang claim bản quyền trước khi dịch (PDF + EPUB)
+
+Quyết định nền (HOI-10, Hiếu chốt 2026-09-16, không hỏi lại): **auto-detect bằng heuristic từ khoá**
+(không LLM, không thư viện ngoài); **cả PDF và EPUB**; **không có bước preview/xác nhận thủ công ở
+v1**, chấp nhận rủi ro false positive/negative và ghi backlog cải thiện.
+
+Mục tiêu kép, theo đúng thứ tự ưu tiên: (1) trang bản quyền **không xuất hiện trong file dịch**;
+(2) trang đó **không bao giờ được gửi cho LLM** — tức bước loại bỏ phải nằm **TRƯỚC** bước lập chunk
+và trước mọi lời gọi engine dịch, không phải "dịch xong rồi xoá".
+
+#### 6.28.1. Nguồn xác thực (Protocol 5 R5-01)
+
+| Câu hỏi | Kết luận | Nguồn |
+|---|---|---|
+| `--pages` của pdf2zh đánh số theo file input nào, 1-based hay 0-based? | **1-based, tính trên CHÍNH file truyền vào `input_path`**: `"5-8"` → `pages.extend(range(int(start) - 1, int(end)))`, rồi lọc bằng `if pages and (pageno not in pages)` với `pageno` là chỉ số enumerate trên `PDFPage.create_pages(doc)` của file input | Đọc source đã cài `pdf2zh v1.9.11`: `~/.local/share/uv/tools/pdf2zh/lib/python3.12/site-packages/pdf2zh/pdf2zh.py:208-217`; `pdf2zh/high_level.py:111-122` |
+| `--pages` của babeldoc? | **Cũng 1-based trên chính file input**: `parse_pages()` trả `[(start, end)]` nguyên văn số người dùng nhập; `should_translate_page(page_number)` được gọi với `pageno + 1` / `page.page_number + 1` — tức số trang 1-based của file đang parse | Đọc source đã cài `babeldoc 0.6.4`: `babeldoc/format/pdf/translation_config.py:394-405` (`parse_pages`), `:408-422` (`should_translate_page`), call site `babeldoc/format/pdf/legacy_parse.py:83`, `babeldoc/format/pdf/new_parser/prepared_page_execution.py:17-22`, `babeldoc/format/pdf/high_level.py:761` |
+| ⇒ Cắt trang TRƯỚC khi gọi engine có an toàn cho cả 2 engine không? | **CÓ, đối xứng hoàn toàn**: cả 2 engine chỉ biết tới file được truyền vào `input_path` và đánh số 1-based trên chính file đó. Không engine nào đọc lại file gốc hay giữ ánh xạ số trang gốc | 2 dòng trên |
+| Cầu nối OCR (`pdf_scan`) có giữ nguyên số trang/thứ tự so với file gốc không? | **CÓ, 1:1**. `build_searchable_pdf()` mở chính `source_pdf`, sửa **tại chỗ** từng `doc[page_idx]` rồi `doc.save(output_path)` — không thêm/xoá/đảo trang nào | Source nội bộ: `src/preprocess/searchable_pdf.py:81-134` |
+| Cấu trúc tham chiếu tới 1 file XHTML trong EPUB thật gồm những gì? | Đo trên **6 EPUB thật** trong `data/uploads/` (xem §6.28.6.1): luôn có `<item>` + `<itemref>` trong OPF; **5/6** có `<content src>` trong NCX; **2/6** thêm `<pageTarget>` (page-list) trong NCX; **3/6** có `<li><a href>` trong nav doc EPUB3 (có cả biến thể `epub:type=` và href kèm fragment `#page_iv`); **1/6** (`Sourdough Every Day`) còn bị 1 **content doc thường** (`OEBPS/mini_toc.xhtml`) trỏ tới | Đo thật 2026-09-17 bằng `zipfile` trên 6 file EPUB thật, xem bảng §6.28.6.1 |
+| PyMuPDF có API xoá trang giữ nguyên nội dung trang còn lại không? | `Document.delete_pages()` / `Document.select()` — thư viện Python import trực tiếp, **ngoài phạm vi Protocol 5** (xem "Phạm vi áp dụng" ở CLAUDE.md), nhưng vẫn phải có smoke test đếm trang sau khi cắt | `pymupdf` đã dùng khắp `src/postprocess/` |
+
+#### 6.28.2. Bộ nhận diện — `src/core/copyright_detector.py` (module MỚI, thuần Python)
+
+**Một bộ chấm điểm DUY NHẤT dùng chung cho cả PDF và EPUB** (cùng tinh thần §6.14.7: mỗi chỗ rẽ
+nhánh là một cơ hội để 2 luồng lệch nhau). Khác biệt PDF/EPUB chỉ nằm ở *ai cung cấp danh sách
+text* và *cửa sổ quét*, không nằm ở luật chấm điểm.
+
+```python
+@dataclass(frozen=True)
+class PageVerdict:
+    ref: str            # "6" (so trang 1-based) hoac "OEBPS/cop.xhtml" (doc_href)
+    score: int
+    word_count: int
+    matched: tuple[str, ...]
+    is_copyright: bool
+
+@dataclass(frozen=True)
+class CopyrightScanResult:
+    removed: tuple[str, ...]          # rong = khong xoa gi
+    verdicts: tuple[PageVerdict, ...] # MOI ung vien da cham diem (de audit)
+    aborted_reason: str | None        # "too_many_candidates" | None
+
+def scan_units(refs: Sequence[str], texts: Sequence[str], *,
+               head: int, tail: int, max_removed: int) -> CopyrightScanResult: ...
+```
+
+Luật chấm điểm (`text` được `" ".join(text.lower().split())` trước khi khớp — gộp xuống dòng, vì
+trang bản quyền PDF hay bị PyMuPDF trả về nhiều dòng ngắn):
+
+| Nhóm | Điểm | Từ khoá (EN + FR, dùng CHUNG cho mọi `source_lang` — không phụ thuộc §6.26) |
+|---|---|---|
+| Mạnh | 2 | `all rights reserved`, `no part of this`, `library of congress`, `cataloging-in-publication`, `isbn`, `tous droits réservés`, `tous droits reserves`, `aucune partie de`, `dépôt légal`, `depot legal`, `droits d'auteur`, `reproduction interdite`, `achevé d'imprimer` |
+| Mạnh (regex) | 2 | `copyright\s*©` hoặc `©\s*\d{4}` hoặc `copyright\s+\d{4}` hoặc `©\s*\w+.{0,40}\d{4}` — bắt "All contents copyright © Penny Williams … 2015", loại footer `©` trơ trọi |
+| Yếu | 1 | `copyright`, `©`, `published by`, `first published`, `printed in`, `publisher`, `publié par`, `imprimé en`, `éditions`, `éditeur`, `editeur` |
+
+Cố ý **KHÔNG** đưa `edition` vào danh sách yếu: đo thật cho thấy nó bắn trúng trang nội dung nói về
+"second edition"/"previous editions" (`Le Cordon Bleu` trang 2) mà không tăng được ca dương thật nào.
+
+Kết luận `is_copyright` khi thoả **CẢ 3**:
+
+| Hằng số | Giá trị | Cơ sở (đo thật 2026-09-17 trên 13 PDF + 7 EPUB thật trong `data/uploads/`) |
+|---|---|---|
+| `MIN_SCORE` | **5** | Ca dương thật thấp nhất = **5** (`Faster Artisan Breads II` trang 5). Ca âm cao nhất = **4** (`sample2_Bread-A-Global-History` → `17_Photo_Acknowledgements.xhtml`, 140 từ, trang ghi công ảnh) và **3** (`Le Cordon Bleu` trang 2 — ghi chú bản điện tử). Ngưỡng 5 tách sạch 100% mẫu đo được |
+| `MAX_WORDS` | **600** | `[Baking Heaven] tạp chí` trang 6 đạt **score 8** nhưng là trang **mục lục công thức** có kèm đoạn bản quyền (884 từ) — ĐÂY là ca false positive nguy hiểm nhất tìm được và chỉ có trần số từ chặn được nó. Ca dương thật dài nhất = 521 từ (`Le Cordon Bleu` trang 6) ⇒ còn dư 15% |
+| `MIN_WORDS` | **5** | chặn trang trắng/bìa chỉ có logo `©` |
+| `MAX_REMOVED` | **3** | Mọi sách thật đo được cho **đúng 0 hoặc 1** ứng viên. Nếu > 3 ứng viên trong 1 tài liệu ⇒ heuristic đang hiểu sai tài liệu ⇒ **huỷ toàn bộ việc xoá cho job đó** (`aborted_reason="too_many_candidates"`), KHÔNG "lấy 3 cái điểm cao nhất" (R8-02 deny-by-default — xoá nhầm nội dung thật không thể hoàn tác từ phía user) |
+
+Cửa sổ quét (`head`/`tail`) — quét **đầu VÀ cuối**, không chỉ đầu:
+
+| Định dạng | `head` | `tail` | Cơ sở |
+|---|---|---|---|
+| PDF | **10** trang đầu | **5** trang cuối | Trang bản quyền thật nằm ở trang 2–6 trong 8/8 sách PDF đo được (xa nhất: trang 6) ⇒ dư 1,6 lần. Cửa sổ cuối: 0 dương thật, 0 âm-tính-giả trong mẫu PDF — giữ cho đối xứng với EPUB, chi phí bằng 0 |
+| EPUB | **6** spine item đầu | **3** spine item cuối | Hiếu nói "thường ở đầu sách" và đúng cho 4/6 sách (spine index 2–4). Nhưng **2/6 sách thật đặt trang bản quyền ở CUỐI**: `Sourdough by Science` (index 40/41) và `Sourdough Every Day` (`cop.xhtml`, index 79/80). Không quét đuôi ⇒ bỏ sót 33% sách EPUB thật của chính user |
+
+Kết quả đo đầy đủ (dùng làm golden expectation cho test — xem §6.28.9):
+
+| Tài liệu thật | Phát hiện | score / số từ |
+|---|---|---|
+| `Figoni — How Baking Works` (25/415/65 trang, 3 bản) | trang 6 | 17 / 397 |
+| `Le Cordon Bleu Pâtisserie` + `001-030.pdf` | trang 6 | 14 / 521 |
+| `Bo Friberg — Professional Pastry Chef` | trang 6 | 16 / 335 |
+| `Ken Forkish — Flour Water Salt Yeast` | trang 4 | 12 / 110 |
+| `Buehler — Bread Science` | trang 3 | 12 / 107 |
+| `Sourdough Discard Recipes Cookbook` (PDF) | trang 3 | 9 / 64 |
+| `Faster Artisan Breads II` | trang 5 | **5 / 95** (biên mỏng nhất) |
+| `Cauvain — Woodhead Publishing` | trang 2 | 9 / 326 |
+| `Better_For_You_Packaged_Food` (© ở footer MỌI trang) | **không xoá gì** ✅ | max 1 |
+| `[Baking Heaven] tạp chí` | **không xoá gì** ✅ | 8 nhưng 884 từ |
+| `Sourdough Panettone` (PDF quét, text nhiễu) | không xoá gì (âm tính thật) | 0 |
+| `Baking with Sourdough` (EPUB, 2 bản) | `ops/xhtml/copyright.html` | 11 / 220 |
+| `Sourdough Culture` (EPUB) | `OEBPS/xhtml/04_Copyright01.xhtml` | 16 / 201 |
+| `Sourdough Discard Recipes Cookbook` (EPUB) | `index_split_001.html` | 9 / 64 |
+| `Sourdough by Science` (EPUB) | `OEBPS/xhtml/Copyright.xhtml` (**index 40/41 — đuôi**) | 10 / 164 |
+| `Sourdough Every Day` (EPUB) | `OEBPS/cop.xhtml` (**index 79/80 — đuôi**) | 14 / 124 |
+| `sample2_Bread-A-Global-History` (EPUB) | `04_copy.xhtml` | 13 / 128 |
+| `sample2` → `17_Photo_Acknowledgements.xhtml` | **không xoá** ✅ (score 4 < 5) | 4 / 140 |
+
+**Tỷ lệ đo được: 16/16 dương thật đúng, 0 false positive trên toàn bộ tài liệu thật đang có.**
+
+#### 6.28.3. Kill-switch + data model
+
+- `Settings.copyright_page_removal_enabled: bool = True` (`COPYRIGHT_PAGE_REMOVAL_ENABLED`) —
+  đường lùi bằng cấu hình, cùng khuôn `babeldoc_rotated_text_overlay`. Tắt ⇒ pipeline chạy y hệt
+  trước S8, không cắt trang nào. Đổi `.env` ⇒ Protocol E: ghi `infra_pending[]` trong 24h.
+- `jobs.copyright_removed_json TEXT NULL` — cột mới qua `_NEW_NULLABLE_COLUMNS`
+  (`src/models/database.py:62`), **không tạo lại DB**. `NULL` = chưa quét (job trước S8, hoặc
+  kill-switch tắt, hoặc job tạo ngoài API). Nội dung:
+
+```json
+{"version": 1, "mode": "pdf_pages",
+ "removed": ["6"],
+ "verdicts": [{"ref": "6", "score": 17, "words": 397, "matched": ["all rights reserved", "isbn"]}],
+ "structural": null,
+ "aborted_reason": null}
+```
+
+  Ví dụ nhánh EPUB (`structural` là **dict theo từng `doc_href`**, vì `MAX_REMOVED = 3` cho phép
+  nhiều doc bị loại trong cùng 1 job và mỗi doc có kết quả hậu kiểm riêng):
+
+```json
+{"version": 1, "mode": "epub_docs",
+ "removed": ["OEBPS/cop.xhtml"],
+ "verdicts": [{"ref": "OEBPS/cop.xhtml", "score": 14, "words": 121, "matched": ["isbn"]}],
+ "structural": {"OEBPS/cop.xhtml": "full"},
+ "aborted_reason": null}
+```
+
+  `mode`: `"pdf_pages"` (ref = số trang 1-based **của `translation_source_path` TRƯỚC khi cắt**) hoặc
+  `"epub_docs"` (ref = `doc_href`). `structural` chỉ dùng cho EPUB:
+  `dict[doc_href, "full" | "skipped"]` (§6.28.6.3), luôn `null` cho `mode = "pdf_pages"`.
+- **Ghi đúng MỘT LẦN rồi giữ nguyên qua mọi lần resume/retry** — cùng khuôn `chunk_size_used`/
+  `source_lang` (§6.26.2). Lý do bắt buộc: `chunks.page_start/page_end` đã ghi cho job này được đánh
+  số theo file **đã cắt**; quét lại và ra kết quả khác giữa chừng chính là Bug #5 phiên bản S8.
+- `JobDetailResponse` thêm `copyright_removed: list[str] | None` (chỉ đọc) để UI/QA thấy được đã xoá
+  gì mà không phải mở SQLite.
+- **`cost_gate.py` KHÔNG bị S8 đụng vào.** Lớp 2 tiếp tục ước trên file đầy đủ (chưa cắt) ⇒ ước
+  **DƯ** đúng phần trang bị cắt (~0,5% một cuốn 400 trang) — đúng chiều an toàn §6.11.6 ("được ước
+  dư, cấm ước thiếu"), và giữ bán kính thay đổi của S8 nhỏ nhất có thể. Nhánh EPUB cũng vậy: số
+  request thật sau khi loại unit chỉ có thể **ít hơn** con số `plan_epub_chunks()` mà cost_gate đếm,
+  nên ràng buộc §6.20.14.2 A-4 (cấm ước thấp) vẫn được giữ.
+
+#### 6.28.4. PDF — điểm chèn và data lineage (R6-01)
+
+Bước mới = **Step 2b**, nằm **sau** cầu nối OCR (Step 2) và **trước** Step 3:
+
+```
+Step 2   file_path ──(pdf_scan)──► _build_ocr_bridge() ──► searchable.pdf
+                  └─(pdf_digital)────────────────────────► (chinh file_path)
+                                    ▼  translation_source_path (truoc cat)
+Step 2b  copyright_detector.scan_units(page_texts)  ──► removed = ["6"]
+         ├─► processing/{job_id}/pruned/source_pruned.pdf      (cat tu translation_source_path)
+         ├─► processing/{job_id}/pruned/original_pruned.pdf    (cat tu file_path GOC, CUNG chi so)
+         └─► job.copyright_removed_json, job.total_pages = so trang SAU khi cat
+                                    ▼
+Step 3   translation_source_path := source_pruned.pdf   ◄── TU DAY MOI BUOC CHI BIET FILE NAY
+Step 6   plan_chunks(job.total_pages)  ⇒ khong chunk nao chua trang da xoa
+Step 7   translate_pages(input_path=translation_source_path, page_range="1-40")
+Step 9   create_bilingual_pdf(merged_path, bilingual_source_path)  ◄── original_pruned.pdf
+```
+
+Hợp đồng lineage tường minh (R6-01) — **bước N tạo artifact gì, bước N+1 đọc gì**:
+
+| Bước | Đọc | Tạo |
+|---|---|---|
+| Step 2b | `translation_source_path` (kết quả Step 2), `file_path` (gốc) | `source_pruned.pdf`, `original_pruned.pdf`, `job.copyright_removed_json`, `job.total_pages` |
+| Step 3 (glossary filter + fallback detect `source_lang`) | `_extract_full_text(translation_source_path)` = **file ĐÃ cắt** | `full_text` |
+| Step 6 `plan_chunks` | `job.total_pages` = **số trang SAU cắt** | `chunks.page_start/page_end` (đánh số trên file đã cắt) |
+| Step 7 `_process_chunk` | `source_path == translation_source_path` = **file đã cắt** | `chunk.output_path` |
+| Step 8 `overlay_rotated_text` | `source_pdf_path=translation_source_path` — **tự động đúng** vì S8 gán lại chính biến này, không tạo biến thứ hai | `merged_path` có chữ xoay |
+| Step 9 `create_bilingual_pdf` | `merged_path` + **`bilingual_source_path`** (= `original_pruned.pdf` nếu có cắt, ngược lại `file_path`) | `bilingual_vi_en.pdf` |
+
+Bốn luật cứng khi implement:
+
+0. **`job.total_pages` được ghi BÊN TRONG `_apply_copyright_removal()`, không phải ở `run_job()`**
+   (S8-B1, QA live E2E 2026-09-17 — xem `docs/design-log.md` mục cùng ngày). Guard
+   `if job.total_pages is None` ở `run_job()` (`job_orchestrator.py:941`) **không bao giờ đúng trên
+   đường chạy thật** vì `POST /api/jobs` (`src/api/routes/jobs.py:648`) đã gán
+   `total_pages=upload.page_count` ngay lúc tạo Job row. Hợp đồng đúng:
+   - Trong nhánh **thực sự có cắt** của `_apply_copyright_removal()`: ghi **vô điều kiện**
+     `job.total_pages = len(keep_indices)` (= số trang của `source_pruned.pdf`) + commit, ngay trước
+     khi return cặp path đã cắt. Không kèm `is None`.
+   - Guard `is None` ở `run_job()`/`run_parse_only()` **GIỮ NGUYÊN**: nó là đường
+     compute-if-missing cho job KHÔNG đi qua cắt (kill-switch off, `parse_only`, job tạo trực tiếp
+     trong test). `is None` ở đó **không phải** bất biến ngữ nghĩa.
+   - **Cấm** sửa `routes/jobs.py:648,652` để bỏ gán `total_pages`/`total_units` lúc tạo job:
+     `GET /api/jobs/{id}/cost-estimate` trả **400** khi field còn NULL (`routes/jobs.py:935-940`),
+     `web/js/app.js:135-140` hiển thị `total_units` ngay sau khi tạo job, và `web/js/history.js:43`
+     dùng `total_pages == NULL` làm **dấu hiệu nhận biết job EPUB** (US-19/BR-HIST-02).
+   - Idempotent qua resume: `removed` đọc lại từ `copyright_removed_json` (ghi 1 lần, §6.28.3),
+     `keep_indices` tính lại từ cùng file gốc ⇒ mọi lần chạy lại ghi đúng cùng con số.
+   - EPUB: đối xứng — `job.total_units = len(doc.units_excluding(removed))` ghi bên trong
+     `_apply_epub_copyright_removal()` khi có loại doc; guard `is None` ở `run_epub_job()`
+     (`:1388`) giữ nguyên.
+
+1. **Gán lại chính biến `translation_source_path`**, KHÔNG tạo biến mới song song. Toàn bộ phòng
+   tuyến chống Bug #5 của §6.10.5 dựa trên bất biến "chỉ có MỘT biến chỉ nguồn nội dung".
+2. **`create_bilingual_pdf()` đổi tham số thứ 2 sang `bilingual_source_path`.** Đây là chỗ *duy
+   nhất* trong pipeline hiện tại còn đọc thẳng `file_path` sau Step 2 (`job_orchestrator.py:1070`),
+   và nó ghép **trang i của bản VI với trang i của bản gốc** (`bilingual_merge.py:18-21`). Nếu để
+   nguyên, mọi trang sau trang bị cắt sẽ lệch cặp — bản song ngữ sai từ trang bản quyền trở đi mà
+   job vẫn báo `completed`. **Đây là rủi ro nghiêm trọng nhất của S8** và nó nằm ở một bước CŨ,
+   đúng loại chỗ Bug #9 đã lọt.
+3. **Không cắt khi không an toàn** (mỗi điều kiện đều ghi `aborted_reason` và log):
+   - `copyright_page_removal_enabled` = False — **nhưng kill-switch chỉ gate QUYẾT ĐỊNH MỚI (lần
+     quét đầu), KHÔNG gate việc replay một quyết định đã cam kết**: nếu job đã có Chunk row VÀ
+     `copyright_removed_json.removed` khác rỗng thì **vẫn cắt** dù kill-switch đang tắt, vì
+     `chunks.page_start/page_end` (PDF) / `unit_start/unit_end` (EPUB) đã được đánh số theo file ĐÃ
+     cắt — bỏ cắt lúc đó mới là silent corruption. Ý nghĩa "job mới chạy y hệt trước S8" không đổi
+     (job chưa có Chunk row ⇒ return sớm như cũ). Muốn huỷ hẳn một job đã cắt: xoá job và tạo lại;
+     lật kill-switch giữa chừng KHÔNG phải cơ chế đó;
+   - job đã có Chunk row nhưng `copyright_removed_json` còn `NULL` (job cũ trước S8 đang resume) —
+     cắt lúc này sẽ làm `page_start/page_end` đã ghi trỏ sai trang;
+   - `aborted_reason = "too_many_candidates"` (> `MAX_REMOVED`);
+   - số trang còn lại sau cắt < 1;
+   - `self._translator_runner.page_numbers_relative_to_input` là False (xem §6.28.5);
+   - `job.job_type == "parse_only"` (US-15 Markdown) — **ngoài phạm vi v1, SKIP** (R8-02): nhánh đó
+     không đi qua `run_job()` Step 2b và chưa ai đo heuristic trên output Markdown.
+
+#### 6.28.5. Protocol 8 audit (R8-01) — TỪNG bước hiện có, kể cả bước có TRƯỚC S8
+
+Biến thể mới ở đây không phải "engine mới" mà là **input mới** (file đã cắt trang) chảy qua đúng
+pipeline dùng chung của `pdf2zh` **và** `babeldoc`. Câu hỏi R8-01 được diễn giải thành: *bước này
+tồn tại để giải quyết vấn đề gì, và nó có ngầm giả định "file đang xử lý có đúng số trang/đúng cách
+đánh số như file gốc" không?*
+
+| # | Bước (vị trí) | Giả định ngầm về số trang | pdf2zh | babeldoc | Quyết định |
+|---|---|---|---|---|---|
+| 1 | `_build_ocr_bridge()` (`job_orchestrator.py:1877`) | Chạy **TRƯỚC** Step 2b, trên file gốc | — | — | **GIỮ NGUYÊN**, không đổi thứ tự. Cắt trước OCR sẽ làm mất cơ hội phát hiện (scan chưa có text layer) |
+| 2 | `_run_rotated_text_probe()` (trong bridge) | Đọc `file_path` gốc + `middle.json` gốc | — | — | **GIỮ NGUYÊN** — chạy xong trước khi cắt, không tiêu thụ số trang sau cắt |
+| 3 | Step 3 `_extract_full_text` (lọc glossary) + fallback `detect_source_lang` | Không giả định gì về số trang | ✔ | ✔ | **GIỮ BẬT** trên file đã cắt. Hệ quả duy nhất: vài từ trên trang bản quyền không còn tham gia lọc glossary — không có thuật ngữ bánh nào ở đó |
+| 4 | Step 5 prompt file | Không liên quan trang | ✔ | ✔ | **GIỮ BẬT** |
+| 5 | Step 6 `plan_chunks(job.total_pages, ...)` | **CÓ** — giả định `total_pages` là số trang của file sẽ được truyền cho engine | ✔ | ✔ | **GIỮ BẬT** với `total_pages` = số trang **sau cắt**. Đây là lý do `total_pages` phải được gán sau Step 2b, không phải Step 2 |
+| 6 | Step 7 `translate_pages(input_path, page_range)` | **CÓ** — `page_range` đánh số theo file `input_path` | ✔ 1-based trên input (`pdf2zh.py:208-217`) | ✔ 1-based trên input (`translation_config.py:394-422`, `legacy_parse.py:83`) | **GIỮ BẬT — đối xứng hoàn toàn**, verified bằng source của cả 2 tool. Không cần rẽ nhánh nào |
+| 7 | `font_shrink_page()` (gated `Runner.needs_font_shrink`) | Không — đo bề rộng glyph trên chính trang output | ✔ (bật) | ✔ (tắt sẵn, Bug #9) | **KHÔNG ĐỔI GÌ** — S8 không chạm tới capability này |
+| 8 | `_map_babeldoc_drop_report_to_findings()` (gated `_reports_own_paragraph_drops`) | Số trang trong finding là số trang **của file gửi cho babeldoc** | n/a | ✔ | **GIỮ BẬT**. Số trang trong finding từ nay là số trang trên file ĐÃ CẮT — **trùng với số trang trong file output mà QA mở ra soi**, tức vẫn tra cứu được. Phải ghi rõ trong log để QA không đối chiếu nhầm với file gốc |
+| 9 | Đo token thật (`_reports_token_usage`) | Không | n/a | ✔ | **GIỮ BẬT** |
+| 10 | `merge_chunk_pdfs()` + `surviving_page_range()` | **CÓ** — dựa vào `chunk.page_start/page_end` và `page_count` thật của từng file chunk | ✔ | ✔ | **GIỮ BẬT**: cả plan lẫn output đều đã ở hệ quy chiếu "file đã cắt", nhất quán. `chunk_merge.py:71-74` vốn tự nhận diện scheme theo `chunk_doc.page_count` nên không có hằng số nào phải sửa |
+| 11 | Guard BR-OCR-03 (bản dịch 0 ký tự) | Không | ✔ | ✔ | **GIỮ BẬT** — càng cần thiết hơn, vì nó cũng bắt được ca "cắt nhầm gần hết sách" |
+| 12 | `overlay_rotated_text(source_pdf_path=...)` (babeldoc + flag) | **CÓ** — so từng trang nguồn với từng trang của `merged_path` | n/a | ✔ | **GIỮ BẬT**, và nó **tự đúng** vì đã đọc biến `translation_source_path`. Cấm đổi tham số này sang `file_path` |
+| 13 | `compress_pdf_images()` | Không | n/a | ✔ | **GIỮ BẬT** |
+| 14 | **`create_bilingual_pdf(merged_path, file_path)`** | **CÓ — VÀ ĐANG SAI SAU S8** | ✔ | ✔ | **PHẢI SỬA** sang `bilingual_source_path` (§6.28.4 luật 2). Bước cũ, có từ trước S8, không rẽ nhánh theo engine ⇒ đúng hình dạng Bug #9 |
+| 15 | Step 10 `rollup_cost_source` / Lớp 3 cost accumulator / cancel / resume | Không | ✔ | ✔ | **GIỮ BẬT** |
+| 16 | US-19 "số trang" trong lịch sử (`job.total_pages`) | Hiển thị `total_pages` | ✔ | ✔ | **GIỮ BẬT**, đổi **ý nghĩa**: từ nay là "số trang đã dịch", không phải "số trang file gốc". Đây là con số đúng để đối chiếu với chi phí và với file output |
+| 17 | US-20 "Các từ mới" (`extract_and_store_terms` đọc `job.file_path`) | Đọc **file gốc**, không qua Step 2b | ✔ | ✔ | **GIỮ NGUYÊN, KHÔNG sửa**: nó cần văn bản nguồn, không cần khớp số trang với output; vài từ trên trang bản quyền bị lọc bởi glossary/tần suất sẵn có. Ghi backlog nếu sau này thấy rác |
+| 18 | `run_parse_only()` (US-15 Markdown), `run_epub_job()` | Pipeline riêng | — | — | `parse_only`: **SKIP** (R8-02). EPUB: có thiết kế riêng §6.28.6 |
+
+**R8-03 — hiện thực bằng capability, không rẽ nhánh cứng**: khai báo trên **cả hai** class runner
+
+```python
+class Pdf2zhRunner:   page_numbers_relative_to_input: bool = True   # pdf2zh.py:208-217
+class BabeldocRunner: page_numbers_relative_to_input: bool = True   # translation_config.py:394-422
+```
+
+Step 2b hỏi `self._translator_runner.page_numbers_relative_to_input` trước khi cắt; `False` ⇒ SKIP
+cắt (deny-by-default). Engine thứ 3 trong tương lai **buộc phải tự khai báo** giá trị này thay vì
+im lặng thừa hưởng giả định của 2 engine hiện tại — đúng cơ chế mà §6.14.7 + R8-03 hướng tới.
+
+#### 6.28.6. EPUB — loại bỏ spine item
+
+##### 6.28.6.1. Bản đồ tham chiếu đo thật (nền tảng của mọi quyết định bên dưới)
+
+| Sách thật | Doc bản quyền | OPF `item`/`itemref` | NCX `content` | NCX `pageTarget` | nav doc `<a>` | Content doc khác trỏ tới |
+|---|---|---|---|---|---|---|
+| `Baking with Sourdough` | `ops/xhtml/copyright.html` | ✔ | ✔ | — | — | — |
+| `Sourdough Culture` | `OEBPS/xhtml/04_Copyright01.xhtml` | ✔ | ✔ | ✔ (`#page_iv`) | ✔ (2, có `#page_iv`) | — |
+| `Sourdough Discard` (EPUB) | `index_split_001.html` | ✔ | — | — | — | — |
+| `Sourdough Every Day` | `OEBPS/cop.xhtml` | ✔ | ✔ | — | ✔ (2, có `epub:type`) | **✔ `OEBPS/mini_toc.xhtml`** |
+| `Sourdough by Science` | `OEBPS/xhtml/Copyright.xhtml` | ✔ | ✔ | ✔ | ✔ (2) | — |
+| `Bread-A-Global-History` | `04_copy.xhtml` | ✔ | ✔ | — | — | — |
+
+Hai điều bắt buộc rút ra: (a) href trong tham chiếu là **tương đối theo thư mục của file chứa nó**
+(nav ở gốc ghi `OEBPS/cop.xhtml`, nav trong `OEBPS/xhtml/` ghi `Copyright.xhtml`) ⇒ phải
+`posixpath.normpath(posixpath.join(posixpath.dirname(referrer), href))` rồi mới so; (b) href có thể
+kèm **fragment** (`#page_iv`) ⇒ phải cắt `#...` trước khi so. Bỏ qua 1 trong 2 điều này = để lại
+link chết = lỗi cấu trúc kiểu BL-12.
+
+##### 6.28.6.2. Lineage EPUB (R6-01)
+
+```
+run_epub_job()
+  doc = EpubDocument.load(file_path)                       # DUY NHAT 1 LAN (E1, §6.20.8)
+  scan  = scan_units(doc.spine_hrefs, plain text moi doc)  # text lay TU CHINH doc nay
+  dropped = set(scan.removed)                              # -> job.copyright_removed_json
+  units = doc.units_excluding(dropped)                     # HAM DUY NHAT, dung o MOI noi
+  job.total_units = len(units)                             # ghi 1 lan, giu qua resume
+  plan_epub_chunks(units, ...)                             # unit bi loai KHONG vao chunk nao
+  ...
+  doc.write_translated(translations, output_path, drop_doc_hrefs=dropped, ...)
+```
+
+- Text để chấm điểm mỗi spine doc = ghép `unit.text` của các unit thuộc `doc_href` đó rồi **bỏ thẻ**
+  (`re.sub(r"<[^>]+>", " ", ...)`) — đúng nguồn mà bảng đo §6.28.2 đã dùng. KHÔNG đọc lại zip lần
+  hai, KHÔNG `load()` lần hai (§6.20.8 E1).
+- `units_excluding()` là **một hàm duy nhất** trên `EpubDocument`; cấm viết bộ lọc list-comprehension
+  rải rác ở orchestrator — đó chính là cách 2 chỗ lệch nhau (§6.20.14.2 A-4).
+- Unit bị loại **không** được đưa vào `untranslated_ids`: chúng sẽ biến mất khỏi file (hoặc giữ
+  nguyên tiếng Anh nếu `structural="skipped"`), không phải "đã thử dịch mà thất bại".
+- Guard `_check_epub_output_guard()` (BR-EPUB-05) đếm trên tập unit **đã loại**, không phải
+  `doc.units` — nếu không, mọi job EPUB có trang bản quyền sẽ báo thiếu bản dịch.
+
+##### 6.28.6.3. Hợp đồng xoá cấu trúc — `write_translated(..., drop_doc_hrefs: set[str])`
+
+Mở rộng đúng hàm hiện có (`epub_document.py:900`), **không** viết đường ghi thứ hai — §6.25 đã chốt
+"sửa ở bước GHI". `EpubDocument` lưu thêm `opf_href: str` tại `load()` (hiện chỉ giữ `opf_dir`,
+`:781-783`).
+
+Với mỗi `href` trong `drop_doc_hrefs`, **tiền kiểm** (precheck) toàn bộ zip, phân loại mọi tham
+chiếu sau khi resolve + cắt fragment:
+
+| Lớp | Xử lý |
+|---|---|
+| (a) OPF `<item href=...>` | xoá thẻ |
+| (b) OPF `<itemref idref=...>` khớp `id` của (a) | xoá thẻ |
+| (c) OPF `<reference href=...>` trong `<guide>` / `<a>` trong `landmarks` | xoá thẻ / xoá `<li>` chứa nó |
+| (d) NCX `<navPoint>` có `<content src=...>` | xoá `navPoint` **nếu là lá**; có `navPoint` con ⇒ **huỷ xoá doc này** |
+| (e) NCX `<pageTarget>` | xoá thẻ |
+| (f) `<a href=...>` trong nav doc **hoặc** trong content doc thường (ca `mini_toc.xhtml`) | xoá `<li>`/`<p>` bao quanh **nếu** thẻ bao đó không chứa link nào khác và không chứa `<ol>`/`<ul>` con; ngược lại **unwrap** `<a>` giữ lại text. **Ngoại lệ bắt buộc**: nếu doc chứa tham chiếu đó **có đóng góp `EpubUnit`** (doc đang được dịch, không phải nav-only — ví dụ `mini_toc.xhtml`) thì **LUÔN unwrap, không bao giờ xoá cả container**, bất kể có link/nested-list khác hay không. Lý do: xoá container làm đổi SỐ LƯỢNG candidate node của chính doc đó ⇒ `units_excluding()` (đếm TRƯỚC khi ghi) lệch với số unit đọc lại được SAU khi ghi — đúng hình dạng Bug #5 (hai phép đếm ra hai con số). Nguồn: `src/services/epub_document.py:1106-1115` (docstring) + `:1231-1242` (nhánh `unit_producing_hrefs`), verify trên EPUB thật `Sourdough Every Day` |
+| (g) **Bất kỳ dạng khác** (`<img src>`, `<link href>`, `<iframe>`, `<object>`, `<script>`, `<a>` không nằm trong thẻ khối nào) | **huỷ xoá doc này** (R8-02 deny-by-default) |
+
+`structural` ghi vào `copyright_removed_json` là **dict theo từng `doc_href`** (§6.28.3):
+`"full"` (đã xoá) hoặc `"skipped"` (gặp (d) có con hoặc (g)) — mỗi href độc lập, 1 href `"skipped"`
+không dừng cả batch. **Quan trọng — khi `structural="skipped"`, unit của doc đó VẪN bị loại khỏi tập dịch**:
+tiền vẫn được tiết kiệm, file vẫn hợp lệ, trang bản quyền chỉ đơn giản là còn nguyên bản tiếng Anh.
+
+Sau khi dựng xong `tmp_path` và **TRƯỚC** `tmp_path.replace(output_path)` — hậu kiểm bắt buộc
+(bài học BL-12: validate ở bước ghi, không từ chối ở bước cuối):
+
+1. Mọi entry XML đã sửa qua `_validate_wellformed()` (cơ chế sẵn có).
+2. `EpubDocument.load(tmp_path)` chạy được, `spine_hrefs` không rỗng và không chứa href đã xoá.
+3. Quét lại toàn bộ entry của `tmp_path`: **không còn bất kỳ tham chiếu nào** (sau resolve + cắt
+   fragment) trỏ tới href đã xoá — không chấp nhận link chết.
+4. `mimetype` vẫn là entry đầu tiên, `ZIP_STORED` (§6.25.1 — cơ chế sẵn có, chỉ nêu để audit đủ).
+
+Hậu kiểm fail ⇒ **ghi lại output KHÔNG xoá gì** (gọi lại đường ghi cũ với `drop_doc_hrefs=set()`),
+ghi `structural="skipped"` + log `warning`. Job vẫn thành công với 1 file EPUB đúng cấu trúc. Tuyệt
+đối không xuất file đã xoá mà chưa qua được 4 kiểm tra trên.
+
+Không thu gom tài nguyên mồ côi (ảnh/CSS chỉ được doc đã xoá dùng): giữ lại vài KB thừa an toàn hơn
+nhiều so với xoá nhầm file dùng chung.
+
+##### 6.28.6.4. Protocol 8 audit cho nhánh EPUB (R8-01)
+
+| Bước hiện có trong `run_epub_job()` | Giả định ngầm | Quyết định |
+|---|---|---|
+| `EpubDocument.load()` 1 lần (E1) | — | GIỮ. Quét bản quyền dùng đúng instance này |
+| `job.total_units` | = `len(doc.units)` | **ĐỔI** thành `len(units_excluding(dropped))` — nếu không, progress và `_check_epub_output_guard` đều lệch. Ghi **bên trong `_apply_epub_copyright_removal()`, vô điều kiện** khi có doc bị loại (S8-B1, §6.28.4 luật 0) — KHÔNG dựa vào guard `if job.total_units is None` ở `run_epub_job()`, vì `POST /api/jobs` (`routes/jobs.py:652`) đã gán sẵn từ `cost_estimate.total_units` |
+| `build_system_prompt(only_terms_present_in=doc.full_text())` | Lọc glossary theo toàn văn | GIỮ `doc.full_text()` (toàn văn, kể cả doc sẽ xoá) — chỉ có thể làm glossary **rộng hơn**, không hụt; giữ khớp với cách `cost_gate` đang ước (§6.28.3) |
+| `plan_epub_chunks(units)` | Danh sách unit = tập sẽ dịch | **ĐỔI** sang `units_excluding(dropped)` |
+| Resume `_load_or_create_epub_chunks` (BR-CHUNK-05) | `unit_start/unit_end` đánh số theo danh sách unit lúc plan | GIỮ, nhưng bắt buộc `copyright_removed_json` ghi 1 lần (§6.28.3): quét lại ra kết quả khác giữa chừng ⇒ chỉ số unit lệch |
+| `_check_epub_output_guard()` (BR-EPUB-05, `:471`) | So unit gốc ≠ unit dịch | GIỮ BẬT, chạy trên tập unit đã loại |
+| Guard tỷ lệ dấu tiếng Việt (`text_quality`) | Độc lập | GIỮ BẬT |
+| `write_translated()` (§6.25 mimetype/OCF) | Copy nguyên infolist | **MỞ RỘNG** theo §6.28.6.3, giữ nguyên toàn bộ luật §6.25 |
+| US-20 `extract_and_store_terms` (đọc `EpubDocument.load(job.file_path).full_text()`, §6.27.2) | Đọc **file nguồn**, không phải output | **GIỮ NGUYÊN** — không phụ thuộc việc xoá; nguồn vẫn là file gốc còn đủ doc |
+| Phát hiện job trùng theo `file_hash` | Hash file gốc | GIỮ |
+
+#### 6.28.7. Giới hạn đã biết (Hiếu đã chấp nhận khi chốt HOI-10 — không phải lỗi thiết kế)
+
+1. **False positive**: một trang nội dung thật viết dày đặc ngôn ngữ bản quyền (ví dụ lời tựa nói về
+   "bản quyền công thức gia đình", trang ghi công ảnh) mà lại **ngắn dưới 600 từ** và đạt ≥ 5 điểm
+   sẽ bị xoá. Trên toàn bộ tài liệu thật đang có: **0 ca**; ca sát nhất là `17_Photo_Acknowledgements`
+   (4 điểm). Không có preview/undo ở v1 — user chỉ có thể tắt `COPYRIGHT_PAGE_REMOVAL_ENABLED` rồi
+   dịch lại.
+2. **False negative**: trang bản quyền viết khác thường sẽ bị bỏ sót và được dịch bình thường. Đã
+   gặp **1 ca thật**: `Sourdough Every Day` → `OEBPS/cpn.xhtml` ("The author and publisher have
+   provided this e-book to you for your personal use only…", 2 điểm) — may mắn là trang bản quyền
+   *chính* của cùng cuốn sách (`cop.xhtml`) vẫn bị bắt ở cửa sổ đuôi. FN là **chiều an toàn**: mất
+   tiền dịch 1 trang, không mất nội dung.
+3. **Chỉ quét đầu + cuối**: trang bản quyền nằm giữa sách (tuyển tập nhiều nguồn) sẽ bị bỏ sót.
+4. **PDF quét chất lượng thấp**: nếu OCR không đọc nổi trang bản quyền (ví dụ `Sourdough Panettone`,
+   text nhiễu nặng), heuristic không có gì để chấm ⇒ bỏ sót.
+5. **Không xử lý trang bản quyền nằm chung trang với nội dung thật** (hay gặp ở tạp chí: masthead +
+   mục lục cùng một trang). Trần 600 từ cố tình **ưu tiên giữ lại** ca này.
+6. **EPUB `structural="skipped"`**: khi tham chiếu tới doc quá phức tạp, trang bản quyền vẫn nằm
+   trong file output (nguyên văn tiếng Anh, không dịch).
+7. Nhánh `parse_only` (US-15 Markdown) **không** được cắt trang ở v1.
+
+#### 6.28.8. Mục ⚠️ ASSUMED và backlog bắt buộc (R5-01 + R5-06)
+
+| # | Mục | Vì sao chưa chắc | Phải làm ở lần chạy live đầu tiên | Owner |
+|---|---|---|---|---|
+| S8-A1 | `MIN_SCORE = 5` | Ca dương thật thấp nhất đúng bằng 5 (`Faster Artisan` = 5) ⇒ **biên bằng 0** ở chiều dương | Log `score/words/matched` của MỌI ứng viên ≥ 3 điểm cho mọi job. Nếu xuất hiện trang bản quyền thật rơi vào 3–4 điểm ⇒ hạ ngưỡng hoặc thêm từ khoá; nếu xuất hiện FP ≥ 5 ⇒ nâng | tech-lead |
+| S8-B1 | `MAX_WORDS = 600` | Chặn FP dựa trên **1 ca** đo được (884 từ) và ca dương dài nhất 521 từ | Đối chiếu phân bố `words` thật sau 10 job đầu | tech-lead |
+| S8-C1 | Cửa sổ `head=10/tail=5` (PDF), `6/3` (EPUB) | Đo trên 13 PDF + 7 EPUB — đều là sách nghề bánh EN; chưa có sách FR thật nào có trang bản quyền đọc được | Ghi log số trang/index của mọi ứng viên; nếu có ca sát mép cửa sổ ⇒ nới | tech-lead |
+| S8-D1 | ⚠️ ASSUMED — từ khoá **tiếng Pháp** (`tous droits réservés`, `dépôt légal`, `achevé d'imprimer`…) **chưa verify trên tài liệu FR thật**: 4 file FR trong `data/uploads/` đều là fixture QA do team tự sinh, không có trang bản quyền thật | Không có sách FR thật | Chạy 1 sách FR thật, kiểm bảng `verdicts` | tech-lead |
+| S8-E1 | Hành vi reader khi EPUB mất 1 spine item (dù không còn link chết) | Chưa mở file output bằng reader thật | Mở file EPUB đã xoá bằng ít nhất 1 reader thật (Apple Books/Calibre) + `epubcheck` nếu cài được | qa |
+
+R5-06: cả 5 mục **phải** có entry trong `backlog[]` (`project_state.json`) trước khi Dev bắt đầu.
+
+#### 6.28.9. Test bắt buộc khi implement
+
+- **Golden theo tài liệu thật** (Protocol 5 tinh thần "không mock viết tay"): test tham số hoá chạy
+  `scan_units()` trên các file thật trong `data/uploads/` và assert **đúng bảng §6.28.2** — gồm cả 2
+  ca âm bắt buộc: `[Baking Heaven]` (score 8, 884 từ → **không xoá**) và `Better_For_You` (© mọi
+  trang → **không xoá**). Nếu file thật không có trên máy CI, test `skip` có lý do, nhưng phải chạy
+  xanh ở máy Dev trước khi đóng task.
+- **R6-02 lineage PDF** (không chỉ "đã gọi"):
+  `translator_runner.translate_pages.assert_called_with(input_path=pruned_path, page_range="1-40", ...)`
+  với `pruned_path` là file cắt **sinh ra từ** `translation_source_path`, và assert
+  `fitz.open(pruned_path).page_count == total_pages_goc - len(removed)`.
+- **Chống lặp lại Bug #9 ở bước cũ**: assert `create_bilingual_pdf` được gọi với
+  `en_pdf_path=original_pruned_path`, **không** phải `job.file_path`; và assert file song ngữ có số
+  trang = 2 × số trang bản dịch, trang chẵn/lẻ đúng cặp (mở bằng PyMuPDF, so text).
+- **Đối xứng 2 engine**: chạy đúng bộ test lineage trên với `pdf_translate_engine="pdf2zh"` **và**
+  `"babeldoc"` (parametrize), assert cả 2 nhận CÙNG `input_path` và CÙNG `page_range`.
+- **pdf_scan**: assert Step 2b chạy **sau** `_build_ocr_bridge` — quét trên text của cầu nối, và
+  `original_pruned.pdf` được cắt từ `job.file_path` với **cùng tập chỉ số**.
+- **Resume**: job có sẵn `copyright_removed_json` + Chunk rows ⇒ `scan_units` **không** được gọi lại
+  (`assert_not_called`), `total_pages` không đổi.
+- **EPUB cấu trúc**: trên EPUB thật `Sourdough Every Day` (ca khó nhất — nav + mini_toc + NCX):
+  output không còn entry `OEBPS/cop.xhtml`, OPF không còn `item`/`itemref`, **không entry nào còn
+  chuỗi `cop.xhtml`**, `EpubDocument.load(output)` chạy được, `mimetype` vẫn `ZIP_STORED` ở vị trí
+  đầu. Và 1 test cho nhánh `structural="skipped"` (fixture có `<img src>` trỏ vào doc bản quyền) ⇒
+  file output **giống hệt** nhánh không xoá.
+- **Kill-switch**: `copyright_page_removal_enabled=False` ⇒ output byte-identical với hành vi trước
+  S8 (không tạo thư mục `pruned/`, không ghi `copyright_removed_json`).
+- **R6-03 live E2E**: ít nhất 1 PDF thật + 1 EPUB thật chạy xuyên suốt, **mở file output** xác nhận
+  (a) không còn trang bản quyền, (b) trang kế tiếp trang bị xoá vẫn còn đủ chữ tiếng Việt, (c) bản
+  song ngữ ghép đúng cặp — không chỉ tin `status == "completed"`.
+
+#### 6.28.10. Ngoài phạm vi v1
+
+Preview/xác nhận thủ công trước khi xoá; undo sau khi dịch; xoá trang bản quyền trong nhánh
+`parse_only`; quét toàn bộ tài liệu thay vì 2 cửa sổ; nhận diện bằng LLM; thu gom tài nguyên mồ côi
+trong EPUB; xoá các trang rác khác (trang quảng cáo nhà xuất bản, trang "cũng của tác giả này").
+
+---
+
 ## 7. Docker Setup
 
 ### 7.1. docker-compose.yml

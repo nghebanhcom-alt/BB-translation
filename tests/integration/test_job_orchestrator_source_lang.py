@@ -97,6 +97,7 @@ def _fake_pdf2zh_runner() -> Pdf2zhRunner:
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -253,6 +254,7 @@ async def test_babeldoc_prompt_file_contains_tieng_phap_for_fr_job(
     runner.needs_font_shrink = False
     runner.reports_own_paragraph_drops = True
     runner.reports_token_usage = True
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -400,6 +402,7 @@ async def test_source_lang_survives_resume_after_chunk_failure(
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs

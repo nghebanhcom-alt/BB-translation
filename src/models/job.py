@@ -102,6 +102,16 @@ class Job(SQLModel, table=True):
     # duoc doi ngon ngu nguon, vi prompt file/cache key cua cac chunk da xong
     # da sinh theo gia tri cu. Cot moi, them qua `_NEW_NULLABLE_COLUMNS`
     # (src/models/database.py) — GIU DU LIEU DB hien co, khong xoa/tao lai.
+    copyright_removed_json: str | None = Field(default=None)
+    # Architecture.md 6.28.3 (S8 — loai bo trang claim ban quyen): JSON
+    # `{"version":1,"mode":"pdf_pages"|"epub_docs","removed":[...],
+    # "verdicts":[...],"structural":null|{href:"full"|"skipped"},
+    # "aborted_reason":str|None}`. NULL = chua quet (job truoc S8, kill-switch
+    # tat, hoac job tao ngoai API). Ghi DUNG MOT LAN roi giu nguyen qua moi
+    # lan resume/retry — cung khuon voi chunk_size_used/source_lang o tren:
+    # `chunks.page_start/page_end`/`unit_start/unit_end` da ghi cho job nay
+    # duoc danh so theo file/danh sach unit DA CAT; quet lai giua chung se
+    # lam lech (dung shape Bug #5).
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
     finished_at: datetime | None = Field(default=None)

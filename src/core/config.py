@@ -207,6 +207,13 @@ class Settings(BaseSettings):
     # needing a UI round-trip.
     babeldoc_rotated_text_overlay: bool = True
 
+    # S8 (Architecture.md 6.28.3): kill-switch cho tinh nang tu dong loai bo
+    # trang claim ban quyen truoc khi dich (PDF+EPUB) — cung khuon rollback
+    # tuc thi voi `babeldoc_rotated_text_overlay` o tren. Tat -> pipeline
+    # chay y het truoc S8, khong cat trang nao, khong tao thu muc `pruned/`,
+    # khong ghi `jobs.copyright_removed_json`.
+    copyright_page_removal_enabled: bool = True
+
     # Bug #7 fix (Architecture.md "Bug #7/#8 — Final Decision sau phản biện
     # Domain Expert", X5 D7-2): `sitecustomize.py` shim (`src/babeldoc_shim/`)
     # vá `ParagraphFinder._split_paragraph_into_lines` cua babeldoc 0.6.4 qua

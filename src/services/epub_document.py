@@ -92,6 +92,9 @@ from src.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+#: S8 (Architecture.md 6.28.6.2) — bo the cho `EpubDocument.doc_plain_texts()`.
+_STRIP_TAGS_RE = re.compile(r"<[^>]+>")
+
 #: Quy tắc chọn unit dùng CHUNG với §6.15 S15-8 (Architecture.md 6.20.5).
 UNIT_TAG_NAMES: tuple[str, ...] = (
     "p",
@@ -748,6 +751,11 @@ def _apply_translation(
 class EpubDocument:
     path: Path
     opf_dir: str
+    #: S8 (Architecture.md 6.28.6.3) — duong dan DAY DU (trong zip) toi file
+    #: .opf, can de doc/sua manifest/spine khi loai bo doc ban quyen.
+    #: `load()` truoc day chi giu `opf_dir` (dirname), khong du de mo lai
+    #: chinh file OPF.
+    opf_href: str = ""
     _units: list[EpubUnit] = field(default_factory=list)
     #: §6.15.7 muc A — `doc_href` theo DUNG thu tu spine, tinh ĐÚNG MỘT LẦN
     #: trong `load()` (khong giu lai soup nao — `to_markdown()` mo lai zip
@@ -784,7 +792,7 @@ class EpubDocument:
             except Exception as exc:  # ebooklib raises assorted exceptions
                 raise EpubParseError(f"ebooklib khong doc duoc EPUB '{path}': {exc}") from exc
 
-            doc = cls(path=path, opf_dir=opf_dir)
+            doc = cls(path=path, opf_dir=opf_dir, opf_href=opf_full_path)
             units: list[EpubUnit] = []
             spine_hrefs: list[str] = []
             for idref, _linear in book.spine:
@@ -836,6 +844,26 @@ class EpubDocument:
     @property
     def spine_hrefs(self) -> list[str]:
         return self._spine_hrefs
+
+    def units_excluding(self, dropped: set[str]) -> list[EpubUnit]:
+        """S8 (Architecture.md 6.28.6.2) — HAM DUY NHAT dung o MOI noi can
+        "danh sach unit se dich" (`job.total_units`, `plan_epub_chunks()`,
+        guard BR-EPUB-05) khi co doc bi loai vi la trang ban quyen. Cam viet
+        bo loc list-comprehension rieng re o tung noi goi — do chinh la cach
+        2 cho lech nhau (§6.20.14.2 A-4)."""
+        if not dropped:
+            return self._units
+        return [unit for unit in self._units if unit.doc_href not in dropped]
+
+    def doc_plain_texts(self) -> dict[str, str]:
+        """S8 (Architecture.md 6.28.6.2) — text de cham diem MOI doc trong
+        spine: ghep `unit.text` (inner-HTML) cua cac unit thuoc CUNG
+        `doc_href` roi bo the bang regex (dung nguon ma bang do §6.28.2 da
+        dung). KHONG doc lai zip lan hai, KHONG `load()` lan hai (E1)."""
+        grouped: dict[str, list[str]] = {}
+        for unit in self._units:
+            grouped.setdefault(unit.doc_href, []).append(unit.text)
+        return {href: _STRIP_TAGS_RE.sub(" ", " ".join(texts)) for href, texts in grouped.items()}
 
     def to_markdown(self, images_out_dir: Path) -> str:
         """US-15 nhanh EPUB->Markdown (Architecture.md §6.15.7 muc A/B/C):
@@ -903,7 +931,8 @@ class EpubDocument:
         output_path: Path,
         bilingual: bool = False,
         untranslated_ids: set[str] | None = None,
-    ) -> None:
+        drop_doc_hrefs: set[str] | None = None,
+    ) -> dict[str, str]:
         """Ghi đè tại chỗ bằng `zipfile` (B-07) — KHÔNG dùng
         `epub.write_epub()` (§6.20.5/6.20.12: nó dời đường dẫn + ghi lại mọi
         entry, phá tinh thần "giữ nguyên cấu trúc gốc" của BR-EPUB-01).
@@ -916,6 +945,13 @@ class EpubDocument:
         (không chèn node mới, không bọc `<span>`) — KHÔNG được lẫn với
         `translations` (2 tập này rời nhau theo thiết kế: 1 unit hoặc có bản
         dịch, hoặc bị đánh dấu fallback, không bao giờ cả hai).
+
+        `drop_doc_hrefs` (S8, Architecture.md §6.28.6.3): tập `doc_href` cần
+        loại khỏi CẤU TRÚC file output (trang claim bản quyền). Trả về
+        `{doc_href: "full" | "skipped"}` — `"skipped"` khi tham chiếu quá
+        phức tạp/không phân loại được (R8-02 deny-by-default): doc đó VẪN
+        còn nguyên trong file (chỉ không được dịch — `units_excluding()` đã
+        lo phần đó ở lớp trên, độc lập với hàm này).
         """
         output_path = Path(output_path)
         units_by_id = {unit.unit_id: unit for unit in self._units}
@@ -1017,6 +1053,262 @@ class EpubDocument:
                     out_zf.writestr(new_info, data)
 
         tmp_path.replace(output_path)
+
+        if not drop_doc_hrefs:
+            return {}
+
+        unit_producing_hrefs = {unit.doc_href for unit in self._units}
+        return _apply_structural_drops(
+            output_path,
+            self.opf_dir,
+            self.opf_href,
+            set(drop_doc_hrefs),
+            unit_producing_hrefs=unit_producing_hrefs,
+        )
+
+
+def _resolve_ref(base_dir: str, href: str) -> str:
+    """S8 (Architecture.md 6.28.6.1) — href trong tham chieu EPUB la TUONG
+    DOI theo thu muc cua file CHUA no, va co the kem fragment (`#page_iv`).
+    Bo qua 1 trong 2 dieu nay = de lai link chet (dung hang loi BL-12)."""
+    target, _, _fragment = href.partition("#")
+    if not target:
+        return ""
+    return posixpath.normpath(posixpath.join(base_dir, target))
+
+
+#: S8 — cac tag "khong phan loai duoc" (rule (g), Architecture.md 6.28.6.3):
+#: gap 1 trong nhung tag nay tro toi doc bi loai -> huy xoa doc do (deny-by-
+#: default, R8-02).
+_UNRESOLVABLE_REF_TAGS: tuple[tuple[str, str], ...] = (
+    ("img", "src"),
+    ("link", "href"),
+    ("iframe", "src"),
+    ("object", "data"),
+    ("script", "src"),
+)
+
+_BLOCK_CONTAINER_TAG_NAMES = ("li", "p")
+
+
+def _apply_structural_drops(
+    path: Path,
+    opf_dir: str,
+    opf_href: str,
+    drop_hrefs: set[str],
+    *,
+    unit_producing_hrefs: set[str],
+) -> dict[str, str]:
+    """S8 (Architecture.md 6.28.6.3) — hop dong xoa CAU TRUC cho tung
+    `doc_href` trong `drop_hrefs`, chay TREN `path` (file da ghi ban dich
+    binh thuong). Tra ve `{doc_href: "full"|"skipped"}`.
+
+    `unit_producing_hrefs`: tap `doc_href` co dong gop `EpubUnit` (vd
+    `mini_toc.xhtml` — "content doc thuong" §6.28.6.1). Phat hien SAU khi
+    verify tren EPUB that `Sourdough Every Day`: rule (f) nhanh "xoa ca
+    container" thay doi SO LUONG candidate node cua chinh doc chua tham
+    chieu do — neu doc do CUNG la 1 doc dang dich (khong chi nav-only), xoa
+    container se lam `units_excluding()` (tinh TRUOC khi ghi) lech voi so
+    unit doc lai duoc SAU khi ghi (dung hinh dang Bug #5: 2 phep dem khac
+    nhau ra 2 con so khac nhau). An toan hon: VOI DOC CO DONG GOP UNIT, LUON
+    unwrap (giu nguyen tag container, chi bo <a>) — khong bao gio xoa ca
+    container, bat ke co link/nested-list khac hay khong.
+
+    Tien kiem (precheck) TOAN BO zip cho TUNG href TRUOC khi sua bat ky gi —
+    chi commit sua doi cho href duoc phan loai "full" o CA 7 lop tham chieu
+    (a)-(f); gap (d) navPoint co con hoac (g) tag khong phan loai duoc ->
+    "skipped" cho DUNG href do, KHONG dung ca batch (moi href doc lap).
+    """
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        if opf_href not in names:
+            return dict.fromkeys(drop_hrefs, "skipped")
+
+        soups: dict[str, BeautifulSoup] = {}
+
+        def get_soup(name: str | None) -> BeautifulSoup | None:
+            if not name or name not in names:
+                return None
+            if name in soups:
+                return soups[name]
+            try:
+                soup, _parser_used = _parse_xhtml(zf.read(name))
+            except Exception:  # noqa: BLE001 — bat ky loi parse nao -> khong dung duoc entry nay
+                return None
+            soups[name] = soup
+            return soup
+
+        opf_soup = get_soup(opf_href)
+        if opf_soup is None:
+            return dict.fromkeys(drop_hrefs, "skipped")
+
+        ncx_href: str | None = None
+        for item in opf_soup.find_all("item"):
+            if (item.get("media-type") or "") == "application/x-dtbncx+xml":
+                href_val = item.get("href")
+                if href_val:
+                    ncx_href = _resolve_ref(opf_dir, href_val)
+                break
+        ncx_soup = get_soup(ncx_href)
+        ncx_dir = posixpath.dirname(ncx_href) if ncx_href else ""
+
+        scan_names = [
+            name
+            for name in names
+            if name.endswith((".xhtml", ".html", ".htm", ".xml"))
+            and name not in (opf_href, ncx_href)
+        ]
+
+        result: dict[str, str] = {}
+        planned: dict[str, list[tuple[str, Tag]]] = {}
+
+        for drop_href in drop_hrefs:
+            unresolved = False
+            local_plan: dict[str, list[tuple[str, Tag]]] = {}
+
+            # (a)/(b)/(c) OPF: <item>, <itemref idref=...>, <guide><reference>
+            item_tag = None
+            for item in opf_soup.find_all("item"):
+                href_val = item.get("href")
+                if href_val and _resolve_ref(opf_dir, href_val) == drop_href:
+                    item_tag = item
+                    break
+            if item_tag is not None:
+                item_id = item_tag.get("id")
+                local_plan.setdefault(opf_href, []).append(("remove", item_tag))
+                if item_id:
+                    for itemref in opf_soup.find_all("itemref"):
+                        if itemref.get("idref") == item_id:
+                            local_plan.setdefault(opf_href, []).append(("remove", itemref))
+                for reference in opf_soup.find_all("reference"):
+                    href_val2 = reference.get("href")
+                    if href_val2 and _resolve_ref(opf_dir, href_val2) == drop_href:
+                        local_plan.setdefault(opf_href, []).append(("remove", reference))
+
+            # (d)/(e) NCX: <navPoint><content src=...></navPoint>, <pageTarget>
+            if ncx_soup is not None and ncx_href:
+                for content_tag in ncx_soup.find_all("content"):
+                    src = content_tag.get("src")
+                    if not src or _resolve_ref(ncx_dir, src) != drop_href:
+                        continue
+                    navpoint = content_tag.find_parent("navPoint")
+                    if navpoint is None:
+                        unresolved = True
+                    elif navpoint.find_all("navPoint"):
+                        # navPoint CO CON -> huy xoa (Architecture.md 6.28.6.3 (d))
+                        unresolved = True
+                    else:
+                        local_plan.setdefault(ncx_href, []).append(("remove", navpoint))
+                for page_target in ncx_soup.find_all("pageTarget"):
+                    content_tag = page_target.find("content")
+                    src = content_tag.get("src") if content_tag is not None else None
+                    if src and _resolve_ref(ncx_dir, src) == drop_href:
+                        local_plan.setdefault(ncx_href, []).append(("remove", page_target))
+
+            # (f)/(g) nav doc + moi content doc khac (vd mini_toc.xhtml)
+            for name in scan_names:
+                soup = get_soup(name)
+                if soup is None:
+                    continue
+                entry_dir = posixpath.dirname(name)
+                for tag_name, attr in _UNRESOLVABLE_REF_TAGS:
+                    for tag in soup.find_all(tag_name):
+                        val = tag.get(attr)
+                        if val and _resolve_ref(entry_dir, val) == drop_href:
+                            unresolved = True
+                for anchor in soup.find_all("a"):
+                    href_val3 = anchor.get("href")
+                    if not href_val3 or _resolve_ref(entry_dir, href_val3) != drop_href:
+                        continue
+                    container = None
+                    for ancestor in anchor.parents:
+                        ancestor_name = getattr(ancestor, "name", None)
+                        if ancestor_name in _BLOCK_CONTAINER_TAG_NAMES:
+                            container = ancestor
+                            break
+                        if ancestor_name is None:
+                            break
+                    if container is not None and name not in unit_producing_hrefs:
+                        other_links = [x for x in container.find_all("a") if x is not anchor]
+                        nested_lists = container.find_all(["ol", "ul"])
+                        if not other_links and not nested_lists:
+                            local_plan.setdefault(name, []).append(("remove", container))
+                        else:
+                            local_plan.setdefault(name, []).append(("unwrap", anchor))
+                    else:
+                        # `name` dong gop EpubUnit (vd mini_toc.xhtml) — LUON
+                        # unwrap, khong bao gio xoa ca container (xem
+                        # docstring `_apply_structural_drops`).
+                        local_plan.setdefault(name, []).append(("unwrap", anchor))
+
+            if unresolved:
+                result[drop_href] = "skipped"
+                continue
+            result[drop_href] = "full"
+            for entry_name, actions in local_plan.items():
+                planned.setdefault(entry_name, []).extend(actions)
+
+        fully_dropped_hrefs = {href for href, status in result.items() if status == "full"}
+        if not fully_dropped_hrefs:
+            return result
+
+        for entry_name, actions in planned.items():
+            for mode, tag in actions:
+                if mode == "remove":
+                    tag.decompose()
+                else:
+                    tag.unwrap()
+
+        modified: dict[str, bytes] = {}
+        for entry_name in planned:
+            output_bytes = str(soups[entry_name]).encode("utf-8")
+            try:
+                _validate_wellformed(output_bytes, entry_name)
+            except EpubParseError:
+                # Bat ky loi wellform nao sau khi sua -> huy TOAN BO S8
+                # structural pass, an toan hon xoa nham (6.28.6.3 "hau kiem").
+                return dict.fromkeys(drop_hrefs, "skipped")
+            modified[entry_name] = output_bytes
+
+        infolist = zf.infolist()
+        ordered_infos = [info for info in infolist if info.filename not in fully_dropped_hrefs]
+        tmp2_path = path.with_name(path.name + ".s8tmp")
+        with zipfile.ZipFile(tmp2_path, "w", allowZip64=True) as out_zf:
+            for info in ordered_infos:
+                data = modified.get(info.filename)
+                if data is None:
+                    data = zf.read(info.filename)
+                new_info = zipfile.ZipInfo(filename=info.filename, date_time=info.date_time)
+                new_info.external_attr = info.external_attr
+                new_info.create_system = info.create_system
+                new_info.internal_attr = info.internal_attr
+                new_info.compress_type = (
+                    zipfile.ZIP_STORED if info.filename == "mimetype" else info.compress_type
+                )
+                out_zf.writestr(new_info, data)
+
+    # Hau kiem (Architecture.md 6.28.6.3) — TRUOC khi thay the file that.
+    try:
+        with zipfile.ZipFile(tmp2_path) as check_zf:
+            check_names = set(check_zf.namelist())
+            _check_mimetype_entry(check_zf, check_names, tmp2_path)
+            for name in check_names:
+                raw = check_zf.read(name)
+                for dropped_href in fully_dropped_hrefs:
+                    needle = posixpath.basename(dropped_href).encode("utf-8")
+                    if needle in raw:
+                        raise EpubParseError(f"'{name}' van con chuoi '{dropped_href}'")
+        guard_doc = EpubDocument.load(tmp2_path)
+        if not guard_doc.spine_hrefs:
+            raise EpubParseError("spine rong sau khi xoa cau truc")
+        if set(guard_doc.spine_hrefs) & fully_dropped_hrefs:
+            raise EpubParseError("spine van con tham chieu doc da xoa")
+    except Exception:  # noqa: BLE001 — hau kiem fail o BAT KY buoc nao -> khong xoa gi
+        tmp2_path.unlink(missing_ok=True)
+        return dict.fromkeys(drop_hrefs, "skipped")
+
+    tmp2_path.replace(path)
+    return result
 
 
 def _find_bb_vi_nodes(root: Tag | BeautifulSoup) -> list[Tag]:

@@ -47,6 +47,13 @@ from src.core.concurrency_controller import (
     next_thread_count,
 )
 from src.core.config import Settings, get_settings
+from src.core.copyright_detector import (
+    EPUB_HEAD,
+    EPUB_TAIL,
+    PDF_HEAD,
+    PDF_TAIL,
+    scan_units,
+)
 from src.core.cost_estimator import (
     epub_expected_output_tokens,
     estimate_chunk_cost,
@@ -230,6 +237,25 @@ class BatchResult:
 def _count_pdf_pages(file_path: Path) -> int:
     with fitz.open(file_path) as doc:
         return doc.page_count
+
+
+def _pdf_page_texts(file_path: Path) -> list[str]:
+    """S8 (Architecture.md 6.28.4 Step 2b) — text tung trang, dung lam input
+    cho `copyright_detector.scan_units()`."""
+    with fitz.open(file_path) as doc:
+        return [doc[i].get_text() for i in range(doc.page_count)]
+
+
+def _select_pdf_pages(src_path: Path, keep_indices: list[int], out_path: Path) -> None:
+    """S8 — cat file PDF `src_path` chi giu lai `keep_indices` (0-based, DA
+    sap xep tang dan) roi ghi vao `out_path`. Dung chung cho ca 2 artifact
+    cua Step 2b (`source_pruned.pdf` va `original_pruned.pdf`) — CUNG mot
+    tap chi so cho ca hai, day la diem chong lap lai Bug #9 (Architecture.md
+    6.28.4 luat 2)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with fitz.open(src_path) as doc:
+        doc.select(keep_indices)
+        doc.save(out_path)
 
 
 def _extract_full_text(file_path: Path) -> str:
@@ -469,7 +495,11 @@ def _log_babeldoc_drop_report_r1(
 
 
 def _check_epub_output_guard(
-    source_doc: EpubDocument, merged_path: Path, *, bilingual: bool
+    source_doc: EpubDocument,
+    merged_path: Path,
+    *,
+    bilingual: bool,
+    dropped_doc_hrefs: set[str] | None = None,
 ) -> None:
     """BR-EPUB-05 (Architecture.md 6.20.8, sua tai X3 sau phan bien Domain
     Expert 2026-09-08) — ban EPUB cua BR-OCR-03/`Pdf2zhEmptyOutputError`.
@@ -479,6 +509,11 @@ def _check_epub_output_guard(
     `source_doc`, vi `load()` cua chinh no da tu bo qua node `class="bb-vi"`
     — day la ly do X3 chon `bilingual=True` KHONG lam guard nay vo hieu: so
     unit doc lai van khop so unit goc).
+
+    `dropped_doc_hrefs` (S8, Architecture.md 6.28.6.4): dem tren TAP UNIT DA
+    LOAI (`source_doc.units_excluding(dropped_doc_hrefs)`), khong phai
+    `source_doc.units` — neu khong, moi job EPUB co trang ban quyen se bao
+    thieu ban dich (BR-EPUB-05 hieu nham).
 
     4 dieu kien theo dung bang X3 (Architecture.md 6.20.12):
     - `bilingual=False`: tong ky tu > 0, so unit khop, >=90% unit khac ban goc.
@@ -490,6 +525,7 @@ def _check_epub_output_guard(
       cua Bug #5, chi doi tu "rong" sang "chua dich".
     """
     guard_doc = EpubDocument.load(merged_path)
+    source_units = source_doc.units_excluding(dropped_doc_hrefs or set())
 
     if guard_doc.total_chars <= 0:
         raise EpubEmptyOutputError(
@@ -497,10 +533,10 @@ def _check_epub_output_guard(
             "job that bai thay vi tra ve file rong (BR-EPUB-05)."
         )
 
-    if len(guard_doc.units) != len(source_doc.units):
+    if len(guard_doc.units) != len(source_units):
         raise EpubEmptyOutputError(
             f"File dich '{merged_path.name}' co {len(guard_doc.units)} unit, khac "
-            f"{len(source_doc.units)} unit cua file goc — co the da mat noi dung "
+            f"{len(source_units)} unit cua file goc — co the da mat noi dung "
             "khi ghi (BR-EPUB-05)."
         )
 
@@ -508,17 +544,17 @@ def _check_epub_output_guard(
     # phia 0, khong phai lam tron dung nghia "toi thieu 90%" -- vd N=384:
     # `int(384*0.9)=345` cho phep guard pass khi chi 345/384=89.84% (< 90%
     # yeu cau thuc). `math.ceil()` moi dam bao nguong LUON >= 90% that su.
-    min_required = max(1, math.ceil(len(source_doc.units) * 0.9))
+    min_required = max(1, math.ceil(len(source_units) * 0.9))
 
     if not bilingual:
         differing = sum(
             1
-            for orig, new in zip(source_doc.units, guard_doc.units, strict=True)
+            for orig, new in zip(source_units, guard_doc.units, strict=True)
             if orig.text.strip() != new.text.strip()
         )
         if differing < min_required:
             raise EpubEmptyOutputError(
-                f"Chi {differing}/{len(source_doc.units)} unit khac noi dung ban goc — "
+                f"Chi {differing}/{len(source_units)} unit khac noi dung ban goc — "
                 "duoi 90% yeu cau, co the LLM da tra ve nguyen van tieng Anh (BR-EPUB-05)."
             )
         return
@@ -526,7 +562,7 @@ def _check_epub_output_guard(
     bb_vi_count, differing_pairs = count_bb_vi_pairs(merged_path)
     if bb_vi_count < min_required:
         raise EpubEmptyOutputError(
-            f"File dich chi co {bb_vi_count}/{len(source_doc.units)} node ban dich "
+            f"File dich chi co {bb_vi_count}/{len(source_units)} node ban dich "
             '(lang="vi" + class="bb-vi") — duoi 90% yeu cau, co the da mat noi dung '
             "khi ghi (BR-EPUB-05)."
         )
@@ -683,6 +719,233 @@ class JobOrchestrator:
             )
         return value
 
+    @property
+    def _page_numbers_relative_to_input(self) -> bool:
+        """S8 (Architecture.md 6.28.5 R8-03) — hoi NANG LUC cua engine da
+        chon, khong hoi TEN engine. Cung khuon voi `_needs_font_shrink` o
+        tren: `isinstance` guard la CO CHU DICH — `AsyncMock(spec=...)` chi
+        copy TEN thuoc tinh, khong copy GIA TRI class attribute, nen mot
+        test babeldoc quen set thuoc tinh se am tham bo qua cat trang (0 rui
+        ro) va van PASS neu khong co guard nay.
+        """
+        value = self._translator_runner.page_numbers_relative_to_input
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self._translator_runner).__name__}.page_numbers_relative_to_input "
+                f"phai la bool, nhan duoc {value!r}. Neu day la test dung "
+                "AsyncMock(spec=...), phai set tuong minh "
+                "`runner.page_numbers_relative_to_input = True/False` cho dung nhanh dang "
+                "test (Architecture.md 6.28.5 R8-03)."
+            )
+        return value
+
+    async def _apply_copyright_removal(
+        self,
+        job: Job,
+        file_path: Path,
+        translation_source_path: Path,
+        db_session: AsyncSession,
+    ) -> tuple[Path, Path]:
+        """S8 Step 2b (Architecture.md 6.28.4) — chay SAU cau noi OCR, TRUOC
+        `job.total_pages`/Step 3. Tra ve `(translation_source_path,
+        bilingual_source_path)` — LUON gan lai CHINH bien
+        `translation_source_path` (khong tao bien song song, Architecture.md
+        6.28.4 luat 1). `bilingual_source_path` mac dinh la `file_path` goc,
+        chi doi thanh `original_pruned.pdf` khi that su cat trang — day la
+        artifact thu 2 chan Bug #9 phien ban S8 (§6.28.4 luat 2).
+        """
+        bilingual_source_path = file_path
+
+        if job.job_type == "parse_only":
+            # R8-02 deny-by-default: nhanh parse_only chua di qua run_job()
+            # Step 2b, chua ai do heuristic tren output Markdown (6.28.4
+            # luat 3, 6.28.10 "Ngoai pham vi v1").
+            return translation_source_path, bilingual_source_path
+
+        existing_chunk = (
+            await db_session.exec(select(Chunk).where(Chunk.job_id == job.id).limit(1))
+        ).first()
+
+        committed_removed: tuple[str, ...] | None = None
+        if job.copyright_removed_json is not None:
+            committed_removed = tuple(json.loads(job.copyright_removed_json).get("removed") or [])
+
+        # 6.28.4 luat 3 (c2, S8-B1 fix): kill-switch chi gate QUYET DINH MOI,
+        # KHONG gate replay 1 quyet dinh da cam ket — job da co Chunk row VA
+        # da tung cat that (committed_removed khong rong) thi VAN phai cat
+        # lai du kill-switch dang tat, vi chunks.page_start/page_end da duoc
+        # danh so theo file DA cat tu lan chay truoc.
+        replaying_committed_decision = (
+            existing_chunk is not None
+            and committed_removed is not None
+            and len(committed_removed) > 0
+        )
+
+        if not self._settings.copyright_page_removal_enabled and not replaying_committed_decision:
+            return translation_source_path, bilingual_source_path
+
+        if existing_chunk is not None and job.copyright_removed_json is None:
+            # Job cu (truoc S8) dang resume — CAM cat: page_start/page_end
+            # da ghi se tro sai trang (6.28.4 luat 3).
+            return translation_source_path, bilingual_source_path
+
+        if committed_removed is not None:
+            removed = committed_removed
+        else:
+            if not self._page_numbers_relative_to_input:
+                # R8-02 deny-by-default — engine chua tu khai bao capability
+                # nay. KHONG ghi copyright_removed_json (khong phai 1 quyet
+                # dinh vinh vien — engine co the doi capability o lan sau).
+                return translation_source_path, bilingual_source_path
+
+            page_texts = _pdf_page_texts(translation_source_path)
+            refs = [str(i + 1) for i in range(len(page_texts))]
+            scan = scan_units(refs, page_texts, head=PDF_HEAD, tail=PDF_TAIL)
+            removed = scan.removed
+            aborted_reason = scan.aborted_reason
+            if removed and len(removed) >= len(page_texts):
+                # An toan tuyet doi (6.28.4 luat 3 "so trang con lai < 1").
+                removed = ()
+                aborted_reason = "would_remove_all_pages"
+
+            job.copyright_removed_json = json.dumps(
+                {
+                    "version": 1,
+                    "mode": "pdf_pages",
+                    "removed": list(removed),
+                    "verdicts": [
+                        {
+                            "ref": v.ref,
+                            "score": v.score,
+                            "words": v.word_count,
+                            "matched": list(v.matched),
+                        }
+                        for v in scan.verdicts
+                    ],
+                    "structural": None,
+                    "aborted_reason": aborted_reason,
+                }
+            )
+            db_session.add(job)
+            await db_session.commit()
+
+        if not removed:
+            return translation_source_path, bilingual_source_path
+
+        total_pages = _count_pdf_pages(translation_source_path)
+        removed_0based = {int(ref) - 1 for ref in removed}
+        keep_indices = sorted(set(range(total_pages)) - removed_0based)
+
+        pruned_dir = self._processing_dir / job.id / "pruned"
+        source_pruned_path = pruned_dir / "source_pruned.pdf"
+        original_pruned_path = pruned_dir / "original_pruned.pdf"
+        _select_pdf_pages(translation_source_path, keep_indices, source_pruned_path)
+        _select_pdf_pages(file_path, keep_indices, original_pruned_path)
+
+        # S8-B1 fix (6.28.4 luat 0): ghi VO DIEU KIEN (khong kem `is None`)
+        # ngay khi that su co cat — day la noi DUY NHAT biet `keep_indices`.
+        # Guard `is None` o run_job() (:941) khong bao gio dung tren duong
+        # chay that vi POST /api/jobs da gan san tu upload.page_count.
+        # Idempotent qua resume: `committed_removed` + `keep_indices` tinh
+        # lai tu CUNG file goc moi lan -> luon ra dung cung con so.
+        job.total_pages = len(keep_indices)
+        db_session.add(job)
+        await db_session.commit()
+
+        return source_pruned_path, original_pruned_path
+
+    async def _apply_epub_copyright_removal(
+        self, job: Job, doc: EpubDocument, db_session: AsyncSession
+    ) -> set[str]:
+        """S8 EPUB nhanh (Architecture.md 6.28.6.2) — chay TRUOC
+        `job.total_units`/`plan_epub_chunks()`. Tra ve tap `doc_href` can
+        loai khoi tap dich (`EpubDocument.units_excluding()` — HAM DUY NHAT
+        dung o moi noi, cam viet bo loc rieng, §6.20.14.2 A-4).
+        """
+        existing_chunk = (
+            await db_session.exec(select(Chunk).where(Chunk.job_id == job.id).limit(1))
+        ).first()
+
+        committed_removed: set[str] | None = None
+        if job.copyright_removed_json is not None:
+            committed_removed = set(json.loads(job.copyright_removed_json).get("removed") or [])
+
+        # 6.28.4 luat 3 (c2, S8-B1 fix) — doi xung voi nhanh PDF: kill-switch
+        # chi gate QUYET DINH MOI, khong gate replay quyet dinh da cam ket.
+        replaying_committed_decision = (
+            existing_chunk is not None
+            and committed_removed is not None
+            and len(committed_removed) > 0
+        )
+
+        if not self._settings.copyright_page_removal_enabled and not replaying_committed_decision:
+            return set()
+
+        if existing_chunk is not None and job.copyright_removed_json is None:
+            # Job cu (truoc S8) dang resume — CAM cat: unit_start/unit_end
+            # da ghi se tro sai unit (cung ly do voi nhanh PDF).
+            return set()
+
+        if committed_removed is not None:
+            removed = committed_removed
+            if removed:
+                job.total_units = len(doc.units_excluding(removed))
+                db_session.add(job)
+                await db_session.commit()
+            return removed
+
+        refs = list(doc.spine_hrefs)
+        doc_texts = doc.doc_plain_texts()
+        texts = [doc_texts.get(href, "") for href in refs]
+        scan = scan_units(refs, texts, head=EPUB_HEAD, tail=EPUB_TAIL)
+        removed = scan.removed
+        aborted_reason = scan.aborted_reason
+        if removed and len(removed) >= len(refs):
+            removed = ()
+            aborted_reason = "would_remove_all_units"
+
+        job.copyright_removed_json = json.dumps(
+            {
+                "version": 1,
+                "mode": "epub_docs",
+                "removed": list(removed),
+                "verdicts": [
+                    {
+                        "ref": v.ref,
+                        "score": v.score,
+                        "words": v.word_count,
+                        "matched": list(v.matched),
+                    }
+                    for v in scan.verdicts
+                ],
+                "structural": None,
+                "aborted_reason": aborted_reason,
+            }
+        )
+        db_session.add(job)
+        await db_session.commit()
+
+        removed = set(removed)
+        if removed:
+            # S8-B1 fix (6.28.6.4): ghi VO DIEU KIEN ngay khi that su co
+            # loai doc — doi xung voi nhanh PDF (job.total_pages).
+            job.total_units = len(doc.units_excluding(removed))
+            db_session.add(job)
+            await db_session.commit()
+
+        return removed
+
+    def _record_epub_structural_result(self, job: Job, structural_result: dict[str, str]) -> None:
+        """S8 (Architecture.md 6.28.6.3) — cap nhat `structural` sau khi
+        `write_translated()` tra ve ket qua that (`"full"`/`"skipped"` cho
+        TUNG doc_href), chi biet duoc SAU khi ghi xong, khong phai luc quet.
+        """
+        if not structural_result or job.copyright_removed_json is None:
+            return
+        data = json.loads(job.copyright_removed_json)
+        data["structural"] = structural_result
+        job.copyright_removed_json = json.dumps(data)
+
     async def run_job(self, job_id: str, db_session: AsyncSession) -> JobResult:
         job = await db_session.get(Job, job_id)
         if job is None:
@@ -713,13 +976,25 @@ class JobOrchestrator:
         # (Architecture.md 6.10.5). `translation_source_path` la BIEN DUY NHAT
         # moi buoc doc noi dung sau day phai dung — day la fix cho Bug #5
         # (silent failure: OCR chay dung nhung ket qua khong bao gio toi pdf2zh).
-        if job.total_pages is None:
-            job.total_pages = _count_pdf_pages(file_path)
-
         translation_source_path = file_path  # pdf_digital: khong doi
 
         if job.file_type == FileType.PDF_SCAN:
             translation_source_path = await self._build_ocr_bridge(job, file_path, db_session)
+
+        # Step 2b (S8, Architecture.md 6.28.4): loai bo trang claim ban
+        # quyen — SAU cau noi OCR (can text layer de doc), TRUOC total_pages/
+        # plan_chunks (trang bi cat khong duoc vao chunk nao -> khong bao
+        # gio gui cho LLM). `bilingual_source_path` = artifact thu 2 chan
+        # Bug #9 phien ban S8 — Step 9 duoi day PHAI dung bien nay, KHONG
+        # duoc dung `file_path` truc tiep nua.
+        translation_source_path, bilingual_source_path = await self._apply_copyright_removal(
+            job, file_path, translation_source_path, db_session
+        )
+
+        if job.total_pages is None:
+            # `translation_source_path` (SAU khi cat, neu co) — day la ly do
+            # Step 2b phai dung TRUOC dong nay, khong phai o Step 2 nhu cu.
+            job.total_pages = _count_pdf_pages(translation_source_path)
 
         # Step 3: extract text EN toan file -> dung de LOC glossary (6.6.5).
         # Dung translation_source_path (cau noi neu la pdf_scan), KHONG phai
@@ -1067,7 +1342,7 @@ class JobOrchestrator:
         # Step 9: bilingual output (neu user chon).
         if await self._wants_bilingual(job, db_session):
             bilingual_path = self._output_dir / job.id / "bilingual_vi_en.pdf"
-            await create_bilingual_pdf(merged_path, file_path, bilingual_path)
+            await create_bilingual_pdf(merged_path, bilingual_source_path, bilingual_path)
             job.bilingual_path = str(bilingual_path)
 
         # Step 10: finalize cost. BL-10 (Architecture.md 6.23.5) — suy ra tu
@@ -1157,8 +1432,14 @@ class JobOrchestrator:
         # lai CHINH `doc` nay. R6-02 soi day (2)->(7): load() lan thu hai voi
         # bo loc/trang thai khac se lam unit_id lech, Bug #5 tai sinh dang EPUB.
         doc = EpubDocument.load(file_path)
+
+        # S8 (Architecture.md 6.28.6.2) — SAU E1 (load DUY NHAT), TRUOC
+        # total_units/plan_epub_chunks: unit thuoc doc_href bi loai khong
+        # duoc vao chunk nao -> khong bao gio gui cho LLM.
+        dropped_doc_hrefs = await self._apply_epub_copyright_removal(job, doc, db_session)
+
         if job.total_units is None:
-            job.total_units = len(doc.units)
+            job.total_units = len(doc.units_excluding(dropped_doc_hrefs))
             db_session.add(job)
             await db_session.commit()
 
@@ -1197,7 +1478,7 @@ class JobOrchestrator:
 
         # E4: plan_epub_chunks() + resume-aware Chunk rows (BR-CHUNK-05).
         chunk_plan = plan_epub_chunks(
-            doc.units,
+            doc.units_excluding(dropped_doc_hrefs),
             char_budget=self._settings.epub_chunk_char_budget,
             request_budget=self._settings.epub_request_char_budget,
             request_max_units=self._settings.epub_request_max_units,
@@ -1262,6 +1543,7 @@ class JobOrchestrator:
                         pricing_provider,
                         db_session,
                         cost_budget_remaining=cost_budget_remaining,
+                        dropped_doc_hrefs=dropped_doc_hrefs,
                     )
                 except EpubChunkCostCapExceeded:
                     # `_process_epub_chunk()` da ghi `chunk.api_tokens_used`/
@@ -1440,15 +1722,29 @@ class JobOrchestrator:
         merged_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            doc.write_translated(
+            structural_result = doc.write_translated(
                 translations,
                 merged_path,
                 bilingual=bilingual,
                 untranslated_ids=untranslated_ids,
+                drop_doc_hrefs=dropped_doc_hrefs,
             )
+            self._record_epub_structural_result(job, structural_result)
+            # `structural="skipped"` (R8-02): doc VAN CON nguyen trong file
+            # output (chi khong duoc dich) -> guard PHAI dem no vao
+            # `source_units`, khac voi `structural="full"` (doc da bi xoa
+            # that su khoi output — Architecture.md 6.28.6.3).
+            fully_dropped_doc_hrefs = {
+                href for href, status in structural_result.items() if status == "full"
+            }
             # E9 — Guard BR-EPUB-05 (X3): doc lai CHINH `merged_path` vua ghi,
             # KHONG tin `translations` con trong bo nho.
-            _check_epub_output_guard(doc, merged_path, bilingual=bilingual)
+            _check_epub_output_guard(
+                doc,
+                merged_path,
+                bilingual=bilingual,
+                dropped_doc_hrefs=fully_dropped_doc_hrefs,
+            )
         except Exception as exc:  # noqa: BLE001 — same failure shape as run_job() Step 7/8
             job.status = "failed"
             job.error_message = str(exc)
@@ -2433,6 +2729,7 @@ class JobOrchestrator:
         db_session: AsyncSession,
         *,
         cost_budget_remaining: float | None,
+        dropped_doc_hrefs: set[str] | None = None,
     ) -> None:
         """US-22 buoc 2/3 (Architecture.md 6.20.8 `_process_epub_chunk()`,
         sua boi 6.20.13). Moi lat request trong `chunk_plan.requests` chay
@@ -2457,7 +2754,13 @@ class JobOrchestrator:
         # retry qua 2 helper ben tren) — khong hardcode "en" o bat ky cho nao.
         source_lang = job.source_lang or "en"
 
-        units = doc.units
+        # S8 (Architecture.md 6.28.6.2) — `chunk_plan.unit_start/unit_end`
+        # duoc danh so tren `doc.units_excluding(dropped_doc_hrefs)`
+        # (`plan_epub_chunks()` o `run_epub_job()` da nhan DUNG danh sach
+        # nay), KHONG phai `doc.units` day du — dung sai o day se lam
+        # slice_units[] tro sai unit ngay khi co >=1 doc bi loai (dung shape
+        # Bug #5 phien ban EPUB).
+        units = doc.units_excluding(dropped_doc_hrefs or set())
         translations: dict[str, str] = {}
         total_input_tokens = 0
         total_output_tokens = 0

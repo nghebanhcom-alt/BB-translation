@@ -139,6 +139,7 @@ def _fake_pdf2zh_runner(fail_on_call_index: int | None = None) -> Pdf2zhRunner:
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False  # BL-10 (6.23.3)
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
     call_counter = {"n": 0}
 
     async def _translate_pages(
@@ -170,6 +171,7 @@ def _fake_pdf2zh_runner_with_forced_overflow() -> Pdf2zhRunner:
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False  # BL-10 (6.23.3)
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -202,6 +204,16 @@ class _FakePricingProvider:
 async def _create_job(
     session: AsyncSession, source_pdf: Path, model: str = "deepseek", file_type: str = "pdf_digital"
 ) -> Job:
+    """S8-B1 fix (docs/design-log.md 2026-09-17): `total_pages` gan ngay luc
+    tao job, GIONG HET `POST /api/jobs` (`routes/jobs.py:648`,
+    `total_pages=upload.page_count`) — day la root cause khien bug that lot
+    qua test truoc do (fixture roi vao nhanh `is None` khong bao gio xay ra
+    tren duong chay san xuat, xem test-report.md "Kết luận S8"). Khong dung
+    helper nay se lam sai lech data lineage voi production (R6-02).
+    """
+    with fitz.open(source_pdf) as pdf:
+        page_count = pdf.page_count
+
     job = Job(
         filename="book.pdf",
         file_path=str(source_pdf),
@@ -209,6 +221,7 @@ async def _create_job(
         file_hash="deadbeef",
         file_type=file_type,
         model=model,
+        total_pages=page_count,
     )
     session.add(job)
     await session.commit()
@@ -460,6 +473,7 @@ async def test_run_job_calls_mineru_before_pdf2zh_for_pdf_scan(
     tracked_pdf2zh.needs_font_shrink = True
     tracked_pdf2zh.reports_own_paragraph_drops = False
     tracked_pdf2zh.reports_token_usage = False  # BL-10 (6.23.3)
+    tracked_pdf2zh.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
     tracked_pdf2zh.translate_pages.side_effect = _tracked_translate_pages
     tracked_mineru = AsyncMock(spec=MinerURunner)
     tracked_mineru.parse_document.side_effect = _tracked_parse_document
@@ -525,6 +539,7 @@ def _fake_pdf2zh_runner_empty_output() -> Pdf2zhRunner:
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False  # BL-10 (6.23.3)
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, **kwargs
@@ -595,6 +610,7 @@ def _fake_babeldoc_runner() -> BabeldocRunner:
     # estimate_chunk_cost() (cost_source stays "estimated") unless a test
     # overrides real_token_usage explicitly.
     runner.reports_token_usage = True
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -1095,6 +1111,7 @@ async def test_empty_translation_fails_before_compress_runs(
     babeldoc_runner.needs_font_shrink = False
     babeldoc_runner.reports_own_paragraph_drops = True
     babeldoc_runner.reports_token_usage = True  # BL-10 (6.23.3) — matches real default
+    babeldoc_runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
     async def _translate_pages_empty(
         input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs
@@ -2310,6 +2327,7 @@ async def test_r2_log_counts_from_db_including_resumed_chunk_findings(
         runner.needs_font_shrink = False
         runner.reports_own_paragraph_drops = True
         runner.reports_token_usage = True  # BL-10 (6.23.3) — matches real default
+        runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
 
         async def _translate_pages(
             input_path, output_dir, page_range, service, prompt_file=None, lang_out="vi", **kwargs

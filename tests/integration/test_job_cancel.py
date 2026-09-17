@@ -77,6 +77,7 @@ def _fake_pdf2zh_runner_cancel_after_first_chunk(
     runner.needs_font_shrink = True
     runner.reports_own_paragraph_drops = False
     runner.reports_token_usage = False  # BL-10 (6.23.3)
+    runner.page_numbers_relative_to_input = True  # S8 (6.28.5 R8-03)
     call_counter = {"n": 0}
 
     async def _translate_pages(

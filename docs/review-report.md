@@ -3986,3 +3986,362 @@ trước.
 Duy nhất 1 điểm PM cần xử lý ngoài phạm vi Reviewer (không phải điều kiện approve/reject): xác nhận
 Protocol E có áp dụng cho việc Dev tự restart server production để verify hay không, và thêm
 `infra_pending[]` tương ứng nếu cần.
+
+---
+
+## S8 — Tự động loại bỏ trang claim bản quyền trước khi dịch (PDF + EPUB), Reviewer, 2026-09-17
+
+Phạm vi: `src/core/copyright_detector.py` (mới), `src/core/job_orchestrator.py`,
+`src/services/epub_document.py`, `src/services/pdf2zh_runner.py`, `src/services/babeldoc_runner.py`,
+`src/core/config.py`, `src/models/job.py`, `src/models/database.py`, `src/api/routes/jobs.py`,
+`tests/test_copyright_detector.py`, `tests/integration/test_job_orchestrator_copyright_removal.py`,
+`tests/integration/test_epub_orchestrator_copyright_removal.py`, 4 test mới trong
+`tests/test_epub_document.py`. Đối chiếu với `docs/Architecture.md` §6.28 (toàn bộ), `docs/design-log.md`
+mục "S8 — Loại bỏ trang claim bản quyền (thiết kế, Tech Lead, 2026-09-17)", và
+`docs/CHANGELOG.md` mục "S8 — Tự động loại bỏ trang claim bản quyền trước khi dịch (PDF + EPUB), Dev,
+2026-09-17".
+
+### 1. Chống lặp lại Bug #9 (bước cũ `create_bilingual_pdf`) — điểm quan trọng nhất
+
+Trace tay `job_orchestrator.py`:
+
+- `_apply_copyright_removal()` (dòng 742-829) trả về `(translation_source_path, bilingual_source_path)`.
+  `bilingual_source_path` mặc định = `file_path` gốc (dòng 757), chỉ đổi thành
+  `original_pruned_path` (dòng 825-829) khi thực sự cắt trang — và `original_pruned.pdf` được cắt
+  từ **chính `file_path` gốc** (dòng 827: `_select_pdf_pages(file_path, keep_indices,
+  original_pruned_path)`), dùng **cùng `keep_indices`** với `source_pruned.pdf` (dòng 826) — đúng
+  §6.28.4 luật 2.
+- Dòng 937-939: `translation_source_path, bilingual_source_path = await
+  self._apply_copyright_removal(job, file_path, translation_source_path, db_session)` — gán lại
+  đúng 2 biến, không tạo biến song song thứ ba (đúng luật 1).
+- Dòng 1292: `await create_bilingual_pdf(merged_path, bilingual_source_path, bilingual_path)` —
+  **xác nhận dùng `bilingual_source_path`, KHÔNG phải `job.file_path`/`file_path`**. Đây chính xác
+  là bước cũ mà `docs/design-log.md` mục 3 gọi là "bước duy nhất hỏng thật sự" nếu không sửa.
+- Test `test_create_bilingual_pdf_uses_original_pruned_not_file_path` (tự chạy lại, PASS) không chỉ
+  assert đã gọi mà mở cả 3 file bằng PyMuPDF, so `get_text()` từng cặp trang — chứng minh
+  `bi_doc[2*i]`/`bi_doc[2*i+1]` khớp đúng `vi_doc[i]`/`en_doc[i]`, không lệch cặp.
+
+**Kết luận: đạt yêu cầu #1 của brief, không lặp lại Bug #9.**
+
+### 2. Đối xứng 2 engine (R8-03)
+
+- `Pdf2zhRunner.page_numbers_relative_to_input: ClassVar[bool] = True`
+  (`src/services/pdf2zh_runner.py:103`), `BabeldocRunner.page_numbers_relative_to_input: ClassVar[bool]
+  = True` (`src/services/babeldoc_runner.py:442`) — cả hai khai báo, đúng nguồn đã trích trong
+  Architecture.md §6.28.1 (pdf2zh `pdf2zh.py:208-217`, babeldoc `translation_config.py:394-422`).
+- `job_orchestrator.py` dòng 722-740: property `_page_numbers_relative_to_input` hỏi
+  `self._translator_runner.page_numbers_relative_to_input` qua `isinstance` guard (cùng khuôn
+  `_needs_font_shrink`/`_reports_own_paragraph_drops`) — pipeline hỏi capability, không rẽ nhánh
+  cứng theo tên engine (đúng R8-03).
+- Test `test_copyright_page_pruned_before_translate_pages_both_engines` (tự chạy lại, PASS) chạy
+  parametrize `["pdf2zh", "babeldoc"]`, cả hai assert `call.kwargs["input_path"] == pruned_path` —
+  đúng cùng input, cùng cơ chế.
+
+**Đạt.**
+
+### 3. Resume — guard không quét lại
+
+`_apply_copyright_removal()` dòng 768-774 và `_apply_epub_copyright_removal()` dòng 842-848: cả hai
+đều query `Chunk` đã tồn tại trước, nếu có Chunk row NHƯNG `copyright_removed_json` còn `NULL` (job
+cũ trước S8 đang resume) → return ngay, không cắt. Nếu `copyright_removed_json` đã có giá trị (dòng
+776-777 PDF, dòng 850-851 EPUB) → đọc lại `removed` từ JSON đã lưu, **không gọi lại `scan_units()`**.
+Test `test_resume_does_not_rescan_when_copyright_removed_json_already_set` patch thẳng
+`src.core.job_orchestrator.scan_units` và `mock_scan.assert_not_called()` — tự chạy lại, PASS.
+
+**Đạt, đúng §6.28.3 "ghi đúng MỘT LẦN rồi giữ nguyên qua mọi lần resume/retry".**
+
+### 4. EPUB structural fix của Dev (rule (f) — container đang là EpubUnit đang dịch)
+
+Đọc `_apply_structural_drops()` (`epub_document.py:1094-1311`), đoạn xử lý rule (f)/(g) dòng
+1208-1242: khi tìm container bao quanh `<a>`, nếu `name` (doc chứa container đó) nằm trong
+`unit_producing_hrefs` → **luôn unwrap** (dòng 1238-1242, giữ nguyên container, chỉ gỡ `<a>`), bất
+kể container có link/nested-list khác hay không; chỉ khi doc đó KHÔNG đóng góp unit (ví dụ
+`nav.xhtml` thuần EPUB3) mới xét xoá hẳn container theo luật gốc (dòng 1231-1237).
+
+Đây đúng tinh thần Protocol 6 lineage: nếu container bị xoá hẳn khi nó thuộc 1 doc đang được
+`units_excluding()` tính vào tập dịch, thì số node ứng viên/dịch của chính doc đó lúc tính TRƯỚC
+khi ghi sẽ không khớp số node thực tế còn lại SAU khi ghi — đúng hình dạng "2 phép đếm khác nhau ra
+2 con số khác nhau" của Bug #5. Cách sửa (luôn unwrap cho container thuộc doc đang dịch) loại bỏ
+khả năng lệch số mà không cần thay đổi gì ở phía `units_excluding()`/đếm unit.
+
+Tự chạy `test_units_excluding_matches_write_translated_drop` trên EPUB thật `Sourdough Every Day`
+(ca có `mini_toc.xhtml`, khó nhất theo bảng §6.28.6.1) — PASS. Assertion chặt: không chỉ so số
+lượng, còn xác nhận `all(u.doc_href != "OEBPS/cop.xhtml" for u in units)` trước khi ghi, rồi
+`len(guard_doc.units) == len(units)` sau khi `load()` lại file output thật (không tin bộ nhớ, đúng
+R6-02). Cũng đã chạy `test_write_translated_drop_doc_hrefs_removes_hardest_real_fixture` (PASS) —
+xác nhận `cop.xhtml` bị xoá hẳn khỏi mọi entry (kể cả `mini_toc.xhtml` đã unwrap link, không còn
+chuỗi `cop.xhtml` ở đâu cả), `mimetype` vẫn `ZIP_STORED` ở vị trí đầu.
+
+**Đạt.** Lưu ý non-blocking: `docs/Architecture.md` §6.28.6.3 rule (f) hiện chưa mô tả tường minh
+ngoại lệ "container thuộc doc đang đóng góp unit → luôn unwrap" — hợp đồng viết trong Architecture.md
+và code hiện đã lệch nhau (code đúng hơn, đã có test thật xác nhận). Nên đưa vào backlog để Tech Lead
+cập nhật §6.28.6.3 khớp với implementation đã verify, tránh Dev sau đọc Architecture.md rồi viết lại
+sai theo bản cũ.
+
+### 5. Kill-switch byte-identical
+
+- PDF: `test_kill_switch_disabled_byte_identical_to_pre_s8` — `copyright_page_removal_enabled=False`
+  ⇒ không tạo `pruned/`, `translate_pages` nhận thẳng `input_path == source_pdf` gốc,
+  `job.copyright_removed_json is None`, `job.total_pages == 6` (không đổi). Tự chạy lại, PASS.
+- EPUB: `test_kill_switch_disabled_epub_byte_identical_behavior` — tương tự,
+  `job.total_units == 3` (không loại gì), `copyright.xhtml` vẫn còn trong output. Tự chạy lại, PASS.
+
+**Đạt.**
+
+### 6. Điểm Dev báo lệch khỏi Architecture.md
+
+**#1 — `structural` là `dict[href, status]` thay vì scalar**: hợp lý. §6.28.3 ví dụ JSON viết
+`"structural": "full"` như 1 giá trị đơn cho EPUB, nhưng `MAX_REMOVED=3` (đã ghi rõ trong chính
+§6.28.2) cho phép tối đa 3 doc bị loại trong cùng 1 job, mỗi doc có thể có kết quả hậu kiểm khác
+nhau (ví dụ 1 doc "full", 1 doc "skipped") — 1 giá trị scalar không biểu diễn được, đây thực sự là
+gap trong ví dụ minh hoạ của Architecture.md, không phải Dev tự ý đổi hợp đồng. `mode="pdf_pages"`
+vẫn giữ `structural: None` đúng ví dụ gốc (xác nhận qua code `job_orchestrator.py:809`). Không phá
+vỡ gì ở phía đọc (`src/api/routes/jobs.py` chỉ đọc field `removed`, không đọc `structural`). Đồng ý
+với Dev — cần Tech Lead cập nhật ví dụ JSON trong §6.28.3 cho khớp dict schema thật (non-blocking,
+đưa vào backlog).
+
+**#2 — EPUB structural fix (rule (f) container)**: đã review kỹ ở mục 4 trên — đúng, có test thật
+chứng minh trên EPUB thật khó nhất. Đây là ví dụ tốt của R6-02 bắt được bug TRƯỚC khi chạm production
+(Dev tự phát hiện khi viết test bổ sung ngoài yêu cầu tối thiểu của brief).
+
+### 7. Guard `_check_epub_output_guard` chỉ đếm doc `"full"` (finding Dev tự nêu)
+
+Đọc `job_orchestrator.py` dòng 1684-1693: `fully_dropped_doc_hrefs = {href for href, status in
+structural_result.items() if status == "full"}`, truyền vào `_check_epub_output_guard(...,
+dropped_doc_hrefs=fully_dropped_doc_hrefs)`. Đọc docstring + logic guard (dòng 497-528): guard so
+`len(guard_doc.units)` (unit đọc lại từ file output thật) với `len(source_units)` = 
+`source_doc.units_excluding(dropped_doc_hrefs or set())`.
+
+Đây **đúng ý đồ thiết kế**: doc `structural="skipped"` vẫn còn nguyên trong file output (chỉ không
+được dịch — theo đúng §6.28.6.3 "unit của doc đó VẪN bị loại khỏi tập dịch... trang bản quyền chỉ
+đơn giản còn nguyên bản tiếng Anh"), nên **phải** tính unit của nó vào `source_units` khi so với
+`guard_doc.units` đọc từ output — nếu loại cả `"skipped"` ra khỏi phép đếm, guard sẽ thấy
+`len(guard_doc.units) > len(source_units)` giả tạo (vì doc "skipped" thực tế vẫn còn trong output)
+và báo lỗi sai. Ngược lại `dropped_doc_hrefs` truyền cho `units_excluding()` ở Step E4/`total_units`
+(dòng 1389, 1428) dùng đúng **toàn bộ** `dropped_doc_hrefs` (cả full lẫn skipped) vì unit của cả
+2 loại đều KHÔNG được gửi cho LLM để dịch — 2 tập hợp khác nhau phục vụ 2 mục đích khác nhau, dùng
+đúng chỗ.
+
+**Đạt, không phải bug.**
+
+### 8. Golden test (Protocol 5 mục 3 — không mock viết tay)
+
+Tự chạy `pytest tests/test_copyright_detector.py -v`: **20/20 PASS**, dùng file thật trong
+`data/uploads/` (không skip). Xác nhận đúng 2 ca âm bắt buộc:
+`test_epub_golden_scan_matches_architecture_table[...Baking Heaven...]` và
+`...Better_For_You_Packaged_Food...]` — PASS, khớp bảng "Kết quả đo đầy đủ" §6.28.2. Đây đúng tinh
+thần Protocol 5 mục 3: golden test chạy trên output thật, không phải mock viết tay theo giả định.
+
+### 9. Test suite + lint (tự chạy lại)
+
+- `pytest -q` toàn repo → **916 passed** (151.86s), khớp đúng số Dev báo trong CHANGENLOG (884 cũ +
+  32 mới S8).
+- `pytest tests/test_epub_document.py -k "drop_doc_hrefs or units_excluding" -v` → 3/3 PASS (bao
+  gồm `Sourdough Every Day` thật).
+- `ruff check .` → All checks passed.
+- `ruff format --check .` → 22 file "would be reformatted", nhưng **xác nhận bằng cách kiểm tra
+  từng file trong diff/untracked của S8** (`git status --porcelain`): không file nào trong 20 file
+  Dev đã sửa/tạo cho S8 nằm trong danh sách 22 file chưa format — các file chưa format là nợ kỹ
+  thuật có từ trước (ví dụ file test `gemini_provider`), ngoài phạm vi S8. Kết luận Dev báo đúng
+  cho phạm vi thay đổi của mình.
+
+### 10. Checklist bắt buộc (CLAUDE.md)
+
+- **R5-04**: `src/services/pdf2zh_runner.py`, `src/services/babeldoc_runner.py` chỉ thêm 1 dòng
+  `ClassVar[bool] = True` mỗi file, không viết contract mới nào (CLI flag/endpoint/schema) — nguồn
+  đã được Tech Lead trích dẫn từ trước trong Architecture.md §6.28.1 (đọc source `pdf2zh.py:208-217`,
+  `translation_config.py:394-422`), Dev không tự research lại (đúng ghi nhận trong CHANGELOG). External
+  contract verified against real source: **YES (nguồn: Architecture.md §6.28.1, trích dẫn trực tiếp
+  source code `pdf2zh` v1.9.11 và `babeldoc` 0.6.4 đã cài, do Tech Lead verify trước khi Dev
+  implement)**.
+- **R6-04**: đã trace tay toàn bộ chuỗi `_apply_copyright_removal()` →
+  `translation_source_path`/`bilingual_source_path` → `translate_pages(input_path=...)` →
+  `create_bilingual_pdf(merged_path, bilingual_source_path, ...)` ở mục 1-3 trên — biến truyền vào
+  bước N+1 xác nhận bắt nguồn từ return value bước N, không chỉ xác nhận "gọi đúng tham số riêng".
+- **R8-01**: đã đối chiếu bảng Protocol 8 audit đầy đủ 18 bước của Tech Lead (§6.28.5) qua code thật
+  — xác nhận đúng bước #14 (`create_bilingual_pdf`) là bước CŨ bị sửa, các bước khác giữ nguyên đúng
+  như bảng audit đã quyết định. Không phát hiện bước nào bị bỏ sót audit.
+- **Protocol 5 R5-03**: golden test dùng file PDF/EPUB thật trong `data/uploads/` (không phải mock
+  viết tay) — mục 8 trên. Integration test dùng `scan_units()` thật (không mock detector), chỉ mock
+  `translate_pages`/pricing provider (đúng phạm vi — đây không phải external tool contract, là
+  logic nội bộ). **Đạt.**
+
+### 11. R6-03 live E2E — CHƯA làm, đúng như Dev tự báo
+
+CHANGELOG mục "Test" ghi rõ: "R6-03 (live E2E với PDF/EPUB thật xuyên suốt job thật, không mock)
+CHƯA chạy — để QA làm". Xác nhận đây là phân công đúng theo CLAUDE.md (R6-03 là trách nhiệm QA,
+không phải Reviewer) — không phải thiếu sót của Dev, nhưng **QA không được đánh dấu
+`ready_for_release` cho tới khi làm xong R6-03 + R5-03 mở rộng cho `data/uploads` thật**, và 5 mục
+`⚠️ ASSUMED` (S8-A1..E1, đã có backlog BL-25..BL-29 với owner đúng theo R5-06) cũng cần QA/Tech Lead
+theo dõi ở lần chạy live đầu tiên.
+
+### Kết luận
+
+**APPROVE.**
+
+Không có issue blocking. Toàn bộ 5 yêu cầu review cụ thể trong brief (chống Bug #9, đối xứng 2
+engine, resume guard, EPUB structural fix, kill-switch) đều xác nhận đúng bằng cách trace tay code
+thật + tự chạy lại test thật (không tin lời Dev báo). Golden test 20/20 PASS trên tài liệu thật,
+toàn bộ 916 test repo PASS, `ruff` sạch cho phạm vi S8.
+
+Non-blocking findings (đưa vào `backlog[]`):
+1. `docs/Architecture.md` §6.28.6.3 rule (f) cần cập nhật để mô tả tường minh ngoại lệ "container
+   thuộc doc đang đóng góp unit → luôn unwrap, không bao giờ xoá cả container" — hiện văn bản
+   Architecture.md và code đã lệch nhau (code đúng hơn, có test thật xác nhận), owner: tech-lead.
+2. `docs/Architecture.md` §6.28.3 ví dụ JSON `"structural": "full"` cần đổi thành ví dụ dict
+   `{"href": "full"|"skipped", ...}` để khớp schema thật khi `MAX_REMOVED > 1` doc bị loại cùng lúc,
+   owner: tech-lead.
+3. R6-03 (live E2E PDF+EPUB thật xuyên suốt) và 5 mục `⚠️ ASSUMED` S8-A1..E1 (đã có backlog
+   BL-25..BL-29) là điều kiện bắt buộc trước khi QA release — nhắc lại để không bị bỏ sót ở bước
+   tiếp theo.
+
+---
+
+## 2026-09-17 — Review S8-B1 fix (`jobs.total_pages`/`jobs.total_units` không cập nhật sau cắt trang bản quyền)
+
+**Phạm vi**: fix bug blocking do QA phát hiện qua live E2E (`docs/test-report.md` "Kết luận S8"),
+theo phương án (c) Tech Lead đã chốt (`docs/design-log.md` mục 2026-09-17 "S8-B1"). File review:
+`src/core/job_orchestrator.py::_apply_copyright_removal()`/`_apply_epub_copyright_removal()`,
+helper `_create_job()`/`_create_epub_job()`, 4 test mới (idempotent + kill-switch-replay, PDF+EPUB).
+
+### 1. Ghi `total_pages`/`total_units` vô điều kiện trong nhánh có cắt thật
+
+Đọc trực tiếp `job_orchestrator.py:845-853` (PDF) và `:930-934` (EPUB, cả 2 nhánh: quyết định mới
+`:889-895`+`:932`, replay quyết định cũ `:889-895`). Xác nhận:
+
+- PDF: `job.total_pages = len(keep_indices)` nằm SAU `_select_pdf_pages()` thật, KHÔNG có điều kiện
+  `is None` bao quanh, chỉ chạy khi đã qua nhánh `if not removed: return ...` (tức có cắt thật).
+- EPUB: `job.total_units = len(doc.units_excluding(removed))` xuất hiện ở CẢ HAI nhánh — nhánh
+  replay (`committed_removed is not None`, dòng 889-895) VÀ nhánh quyết định mới (dòng 928-934) —
+  cả hai đều gated bởi `if removed:` (không ghi khi `removed` rỗng). Đối xứng đúng với PDF, không bỏ
+  sót nhánh replay như có thể nhầm khi chỉ đọc lướt.
+
+**Đạt yêu cầu #1.**
+
+### 2. Guard `is None` ở `run_job()`/`run_epub_job()` giữ nguyên
+
+`grep -n "total_pages is None\|total_units is None"` ra 3 chỗ: `:994` (`run_job()`, PDF),
+`:1441` (`run_epub_job()`, EPUB), `:1838` (`run_parse_only()`/`_run_parse_only_pipeline()`, nhánh
+parse_only không liên quan S8). Brief nói `:941`/`:1388` — lệch số dòng do các sửa đổi khác chèn
+thêm dòng phía trên, nhưng đối chiếu nội dung xác nhận đây đúng 2 chỗ Tech Lead chỉ, cả hai **giữ
+nguyên `if ... is None:`**, không có gì bị xoá/đổi logic. **Đạt yêu cầu #2.**
+
+### 3. `routes/jobs.py:648,652` không bị đụng
+
+Đọc trực tiếp — `total_pages=upload.page_count`, `total_units=cost_estimate.total_units if ...`
+còn nguyên như RCA của Tech Lead mô tả, không có diff nào ở file này theo `git diff` phạm vi S8-B1
+(chỉ `job_orchestrator.py` + test files bị đổi, xem CHANGELOG "Code"/"Test"). **Đạt yêu cầu #3.**
+
+### 4. Logic c2 (kill-switch replay) — trace tay từng nhánh + tự nghĩ thêm edge case
+
+Đọc kỹ `:769-790` (PDF) và `:869-887` (EPUB) — cùng khuôn:
+
+```
+replaying_committed_decision = existing_chunk is not None
+    and committed_removed is not None
+    and len(committed_removed) > 0
+
+if not enabled and not replaying_committed_decision: return (no cut)
+if existing_chunk is not None and copyright_removed_json is None: return (no cut, job cũ)
+```
+
+Trace các case:
+- **Kill-switch tắt từ đầu, job chưa từng cắt** (case brief yêu cầu tự nghĩ): `existing_chunk=None`
+  → `replaying=False` → điều kiện đầu `True` → return sớm, KHÔNG cắt. Đúng.
+- **Kill-switch bật, job cũ có `removed=[]`** (lần trước quét không thấy gì — case brief yêu cầu tự
+  nghĩ, để kiểm tra không bị nhầm thành "đang replay"): `committed_removed=()` (tuple/set rỗng,
+  KHÔNG phải None) → `len(committed_removed) > 0` là `False` → `replaying=False`. Vì kill-switch
+  đang BẬT (`not enabled` = False) nên điều kiện đầu False, không return sớm ở đó — nhưng rơi tiếp
+  xuống `if committed_removed is not None: removed = committed_removed` (rỗng) → `if not removed:
+  return` → không cắt. Kết quả đúng ("không cắt"), và quan trọng hơn: **không hề đi qua bất kỳ
+  đường nào gán lại `total_pages`/`total_units`** — không bị nhầm thành "đang replay". Đúng.
+- **Case chính brief nêu — kill-switch tắt SAU khi đã cắt thật + có Chunk row +
+  `removed != []`**: `replaying=True` → điều kiện đầu `False` (không return) → guard "job cũ"
+  cũng `False` (`copyright_removed_json` không None) → rơi xuống nhánh `committed_removed is not
+  None` → `removed` = giá trị đã cam kết (khác rỗng) → chạy tiếp cắt thật (`_select_pdf_pages`
+  PDF / doc.units_excluding EPUB) → ghi `total_pages`/`total_units` vô điều kiện. Đúng theo thiết
+  kế (c2) — đã xác nhận bằng test thật ở mục 5 dưới, không chỉ đọc code suông.
+- Thứ tự 2 guard (kill-switch trước, "job cũ" sau) không gây sai lệch cho bất kỳ case nào ở trên vì
+  2 điều kiện không bao giờ cùng dẫn tới kết quả khác nhau khi hoán đổi thứ tự (đã tự kiểm bằng
+  bảng chân trị 4 tổ hợp `existing_chunk × copyright_removed_json`, không chỉ tin comment code).
+
+**Đạt yêu cầu #4 — logic đúng, kể cả 2 edge case tự nghĩ thêm.**
+
+### 5. Idempotent — tự chạy lại, xác nhận gọi hàm 2 lần thật
+
+Đọc + tự chạy `test_apply_copyright_removal_idempotent_across_resume_calls` và
+`test_kill_switch_disabled_midway_still_replays_committed_decision` (PDF) +
+`test_apply_epub_copyright_removal_idempotent_across_resume_calls` +
+`test_kill_switch_disabled_midway_epub_still_replays_committed_decision` (EPUB): cả 4 test gọi
+`_apply_copyright_removal()`/`_apply_epub_copyright_removal()` **2 lần thật** trên cùng object
+`job`/`session` (không phải gọi 1 lần rồi giả định lần 2), `await session.refresh(job)` giữa 2 lần
+để đọc lại từ DB thật (không đọc object Python cache), và assert **giá trị cụ thể**
+(`job.total_pages == 5`, `job.copyright_removed_json == removed_json_1`, `dropped_2 == dropped_1`)
+— không chỉ `assert_called()`. Đúng tinh thần R6-02. `pytest -q
+tests/integration/test_job_orchestrator_copyright_removal.py
+tests/integration/test_epub_orchestrator_copyright_removal.py -v` → tất cả pass, 2 test mới mỗi
+file thực thi và pass. **Đạt yêu cầu #5.**
+
+### 6. Sửa helper `_create_job()`/`_create_epub_job()` — kiểm tra không che lấp test khác
+
+Helper mới gán `total_pages`/`total_units` giống hệt route thật (đọc trực tiếp code, đúng như
+CHANGELOG mô tả). Tự chạy lại 5 file Dev liệt kê:
+
+```
+pytest -q tests/integration/test_job_orchestrator_chunk_size_cold_start.py \
+  tests/integration/test_job_cancel.py tests/integration/test_job_history_finished_at.py \
+  tests/integration/test_cost_capped_orchestrator.py \
+  tests/integration/test_job_orchestrator_concurrency.py
+→ 30 passed
+```
+
+Không có test nào phụ thuộc `total_pages is None` để làm đường chạy (đã đọc qua các file, không
+thấy assertion nào dựa vào giá trị NULL của 2 field này trước/sau `run_job()`). **Đạt yêu cầu #6** —
+không phát hiện test nào bị che lấp bug.
+
+### 7. Chạy toàn repo
+
+```
+pytest -q  → 920 passed, 1240 warnings in 149.56s   (khớp đúng số Dev báo)
+ruff check .  → All checks passed!
+ruff format --check src/core/job_orchestrator.py tests/integration/test_job_orchestrator.py \
+  tests/integration/test_job_orchestrator_copyright_removal.py \
+  tests/integration/test_epub_orchestrator_copyright_removal.py  → 4 files already formatted
+```
+
+**Đạt yêu cầu #7.** (Không kiểm `ruff format --check .` toàn repo — Dev đã báo rõ 15 file khác lệch
+format từ trước, không thuộc phạm vi S8-B1, đúng như CHANGELOG ghi; không phải việc của review này.)
+
+### Checklist bắt buộc (CLAUDE.md)
+
+- **R5-04**: N/A — `_apply_copyright_removal()`/`_apply_epub_copyright_removal()` không phải wrapper
+  gọi external tool (`*_runner.py`/`*_provider.py`), là logic nội bộ đọc/ghi DB + gọi
+  `scan_units()`/`fitz` nội bộ. Không áp dụng.
+- **R6-04**: đã trace tay ở mục 4 trên — biến `removed`/`keep_indices` dùng để ghi
+  `total_pages`/`total_units` xác nhận bắt nguồn đúng từ `committed_removed` (đọc lại từ
+  `job.copyright_removed_json`, chính là artifact bước quét trước) hoặc từ kết quả `scan_units()`
+  vừa chạy trong cùng lần gọi — không có đường nào ghi giá trị không bắt nguồn từ quyết định cắt
+  thật.
+- **R8-01**: N/A cho lần fix này — không thêm engine/biến thể mới, chỉ sửa lỗi lineage trong 2 hàm
+  đã có.
+- **Protocol 5 R5-03**: N/A — không có external tool call nào trong phạm vi fix này.
+
+### Kết luận
+
+**APPROVE.**
+
+Không phát hiện issue blocking. Cả 7 yêu cầu review trong brief đều xác nhận đúng bằng cách đọc
+code trực tiếp + tự chạy lại test thật (không tin số liệu Dev báo mà không verify). Logic c2 đúng ở
+cả 2 edge case tự nghĩ thêm ngoài case chính brief nêu. `pytest` toàn repo 920 passed khớp báo cáo
+Dev, `ruff` sạch trong phạm vi sửa.
+
+Non-blocking findings (đưa vào `backlog[]`):
+1. Brief trỏ số dòng `:941`/`:1388` cho 2 guard `is None`, thực tế đúng vị trí là `:994`/`:1441` (số
+   dòng đã dịch do các sửa đổi khác chèn thêm ở trên) — không phải lỗi Dev, chỉ là brief PM viết từ
+   thời điểm trước khi Tech Lead viết thêm docstring/comment vào `_apply_copyright_removal()`. Nhắc
+   PM cẩn thận số dòng cụ thể dễ lệch giữa lúc viết brief và lúc Dev thực thi — owner: pm (lưu ý quy
+   trình, không cần action code).
+2. `docs/CHANGELOG.md` "S8-B1 fix" chưa nhắc lại rõ 3 mục non-blocking cũ (Architecture.md
+   §6.28.6.3/§6.28.3, R6-03 chưa chạy) vẫn còn treo từ đợt review S8 trước — không phải lỗi của fix
+   này nhưng cần QA/PM đảm bảo không bị quên khi đóng S8 hẳn — owner: qa/tech-lead (đã có trong mục
+   findings đợt trước, nhắc lại để không lạc mất qua 2 đợt review).

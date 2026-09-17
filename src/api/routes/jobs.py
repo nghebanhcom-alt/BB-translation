@@ -17,6 +17,7 @@ matches a job outliving the HTTP call that started it.
 """
 
 import asyncio
+import json
 import logging
 import shutil
 from datetime import UTC, datetime
@@ -175,6 +176,10 @@ class JobDetail(BaseModel):
     # chua detect (coi nhu "en", xem src/models/job.py) — UI dung field nay
     # de hien badge "FR->VI"/"EN->VI" (web/index.html, web/history.html).
     source_lang: str | None = None
+    # Architecture.md 6.28.3 (S8 — loai bo trang claim ban quyen): chi doc,
+    # de UI/QA thay duoc da xoa gi ma khong phai mo SQLite. None = chua quet
+    # (kill-switch tat, job truoc S8, hoac chua chay toi Step 2b/E4).
+    copyright_removed: list[str] | None = None
 
 
 class JobListResponse(BaseModel):
@@ -267,6 +272,12 @@ def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
     # — updated_at co the dung o lan chunk thanh cong CUOI CUNG, khong phai
     # luc job that bai that).
     finished_at = job.finished_at or job.completed_at
+    copyright_removed: list[str] | None = None
+    if job.copyright_removed_json is not None:
+        try:
+            copyright_removed = json.loads(job.copyright_removed_json).get("removed")
+        except (json.JSONDecodeError, AttributeError):
+            copyright_removed = None
     duration_seconds = (
         (finished_at - job.created_at).total_seconds()
         if finished_at is not None and job.status in _TERMINAL_JOB_STATUSES
@@ -301,6 +312,7 @@ def _to_detail(job: Job, ocr_confidence_threshold: float) -> JobDetail:
         finished_at=job.finished_at,
         duration_seconds=duration_seconds,
         source_lang=job.source_lang,
+        copyright_removed=copyright_removed,
     )
 
 
@@ -381,9 +393,7 @@ async def _estimate_translation_cost_or_400(
     except EpubDrmError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except EpubParseError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"File EPUB khong doc duoc: {exc}"
-        ) from exc
+        raise HTTPException(status_code=400, detail=f"File EPUB khong doc duoc: {exc}") from exc
 
 
 async def _enforce_cost_gate(

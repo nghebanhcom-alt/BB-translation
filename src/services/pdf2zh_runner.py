@@ -96,6 +96,12 @@ class Pdf2zhRunner:
     #: parse. Giu `cost_source='estimated'`.
     reports_token_usage: ClassVar[bool] = False
 
+    #: S8 (Architecture.md 6.28.5 R8-03). VERIFIED tren pdf2zh v1.9.11 da
+    #: cai: `--pages` danh so 1-based tren CHINH file truyen vao `input_path`
+    #: (`pdf2zh/pdf2zh.py:208-217`), khong giu anh xa ve file goc — nen cat
+    #: trang o Step 2b (truoc khi goi engine nay) la an toan.
+    page_numbers_relative_to_input: ClassVar[bool] = True
+
     def __init__(self, executable: str = "pdf2zh") -> None:
         self._executable = executable
 

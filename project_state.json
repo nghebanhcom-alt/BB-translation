@@ -163,6 +163,17 @@
       "status": "answered",
       "answered_in": "Chat 2026-09-16: auto-detect heuristic, PDF+EPUB, chấp nhận rủi ro v1",
       "clarify_rounds": 1
+    },
+    {
+      "id": "HOI-11",
+      "text": "S8-Q1: ca EPUB mà xoá trang bản quyền có nguy cơ hỏng cấu trúc file (doc bị nhiều nơi trỏ tới) — luôn xoá hay giữ nguyên khi không an toàn?",
+      "asked_by": "tech-lead",
+      "origin": "docs/design-log.md §6 — thiết kế S8, ngoài phạm vi HOI-10",
+      "blocks": [],
+      "default": "Không an toàn thì giữ nguyên trang (không dịch nó) thay vì xuất file có nguy cơ hỏng — PM áp dụng mặc định, không chặn Dev, gộp xác nhận với Hiếu ở đợt CLARIFY sau",
+      "status": "answered",
+      "answered_in": "PM áp dụng mặc định 2026-09-17 (không chặn, Protocol B — gộp đợt sau nếu Hiếu muốn đổi)",
+      "clarify_rounds": 1
     }
   ],
   "backlog": [
@@ -333,6 +344,55 @@
       "source": "tech-lead",
       "ref": "docs/review-report.md — review BL-20 2026-09-17, non-blocking",
       "status": "open"
+    },
+    {
+      "id": "BL-25",
+      "text": "⚠️ ASSUMED — S8: MIN_SCORE=5 biên bằng 0 ở chiều dương (ca dương thật thấp nhất đúng = 5). Cần log score/words/matched mọi ứng viên ≥3 điểm ở lần chạy live đầu, hạ/nâng ngưỡng nếu cần",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.28.8 (S8-A1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-26",
+      "text": "⚠️ ASSUMED — S8: MAX_WORDS=600 chỉ dựa trên 1 ca đo được (884 từ). Cần đối chiếu phân bố words thật sau 10 job đầu",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.28.8 (S8-B1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-27",
+      "text": "⚠️ ASSUMED — S8: cửa sổ quét head/tail (10/5 PDF, 6/3 EPUB) đo trên sách EN, chưa có sách FR thật có trang bản quyền. Cần log trang/index mọi ứng viên, nới nếu sát mép",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.28.8 (S8-C1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-28",
+      "text": "⚠️ ASSUMED — S8: từ khoá tiếng Pháp (tous droits réservés, dépôt légal...) chưa verify trên tài liệu FR thật (chỉ có fixture QA tự sinh). Cần chạy 1 sách FR thật, kiểm bảng verdicts",
+      "source": "tech-lead",
+      "ref": "docs/Architecture.md §6.28.8 (S8-D1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-29",
+      "text": "⚠️ ASSUMED — S8: hành vi reader thật khi EPUB mất 1 spine item chưa đo. Cần mở file output bằng Apple Books/Calibre + epubcheck nếu cài được",
+      "source": "qa",
+      "ref": "docs/Architecture.md §6.28.8 (S8-E1)",
+      "status": "open"
+    },
+    {
+      "id": "BL-30",
+      "text": "Architecture.md §6.28.6.3 rule (f) cần cập nhật mô tả ngoại lệ 'container đang đóng góp unit dịch → luôn unwrap, không xoá cả container' — code (Dev tự fix lineage bug) đúng hơn văn bản hiện tại",
+      "source": "tech-lead",
+      "ref": "docs/review-report.md — review S8 2026-09-17, non-blocking",
+      "status": "open"
+    },
+    {
+      "id": "BL-31",
+      "text": "Architecture.md §6.28.3 ví dụ JSON structural:'full' (scalar) cần đổi thành ví dụ dict[href,status] để khớp schema thật khi nhiều doc bị loại cùng lúc",
+      "source": "tech-lead",
+      "ref": "docs/review-report.md — review S8 2026-09-17, non-blocking",
+      "status": "open"
     }
   ],
   "steps": [
@@ -403,9 +463,9 @@
       "id": "S8",
       "title": "Tính năng mới: loại bỏ trang claim bản quyền trước khi xuất file (heuristic, PDF+EPUB)",
       "owner_role": "tech-lead",
-      "status": "todo",
+      "status": "done",
       "blocked_by": [],
-      "output": null
+      "output": "Dev implement, Reviewer APPROVE, QA phát hiện bug blocking S8-B1 (total_pages/units không cập nhật sau cắt) → Tech Lead quyết phương án c → Dev fix → Reviewer APPROVE → QA PASS toàn bộ. ready_for_release YES. 5 mục [UNVERIFIED] BL-25..29 còn mở (không chặn release)"
     }
   ],
   "loops": [
@@ -420,6 +480,14 @@
     {
       "pair": "dev-qa",
       "item": "BL-20",
+      "count": 1,
+      "limit": 5,
+      "escalated_at": null,
+      "reset_reason": null
+    },
+    {
+      "pair": "dev-qa",
+      "item": "S8",
       "count": 1,
       "limit": 5,
       "escalated_at": null,

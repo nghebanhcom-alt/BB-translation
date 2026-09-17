@@ -1579,3 +1579,180 @@ def test_load_raises_parse_error_when_mimetype_content_wrong(tmp_path: Path) -> 
 
     with pytest.raises(EpubParseError, match="mimetype"):
         EpubDocument.load(src)
+
+
+# ---------------------------------------------------------------------------
+# S8 (Architecture.md 6.28.6.3) — `write_translated(..., drop_doc_hrefs=...)`.
+# ---------------------------------------------------------------------------
+
+#: File EPUB that (Protocol 5 muc 3) — ca KHO NHAT do that duoc (§6.28.6.1):
+#: doc ban quyen bi tro toi tu OPF item/itemref, NCX content, nav <a>, VA 1
+#: content doc thuong (`mini_toc.xhtml`).
+SOURDOUGH_EVERY_DAY_PATH = Path(
+    "data/uploads/9343f01a-0808-400e-8a0f-21b343aec8dd_Sourdough Every Day-Hannah Dela Cruz-E.epub"
+)
+
+_s8_pytestmark = pytest.mark.skipif(
+    not SOURDOUGH_EVERY_DAY_PATH.exists(),
+    reason=f"File EPUB that '{SOURDOUGH_EVERY_DAY_PATH}' khong co tren may nay",
+)
+
+
+@_s8_pytestmark
+def test_write_translated_drop_doc_hrefs_removes_hardest_real_fixture(tmp_path: Path) -> None:
+    """§6.28.9 — ca kho nhat bat buoc: `Sourdough Every Day` (nav + mini_toc
+    + NCX content, khong pageTarget). Output khong con entry
+    `OEBPS/cop.xhtml`, OPF khong con item/itemref, KHONG entry nao con chuoi
+    'cop.xhtml', `EpubDocument.load(output)` chay duoc, mimetype van
+    ZIP_STORED o dau."""
+    doc = EpubDocument.load(SOURDOUGH_EVERY_DAY_PATH)
+    dropped = {"OEBPS/cop.xhtml"}
+    units = doc.units_excluding(dropped)
+    translations = {u.unit_id: f"[VI] {u.text}" for u in units[:5]}
+
+    out = tmp_path / "out.epub"
+    structural = doc.write_translated(translations, out, bilingual=False, drop_doc_hrefs=dropped)
+
+    assert structural == {"OEBPS/cop.xhtml": "full"}
+
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        assert "OEBPS/cop.xhtml" not in names
+        for name in names:
+            assert b"cop.xhtml" not in zf.read(name), f"'{name}' van con chuoi 'cop.xhtml'"
+        infolist = zf.infolist()
+        assert infolist[0].filename == "mimetype"
+        assert infolist[0].compress_type == zipfile.ZIP_STORED
+
+    guard_doc = EpubDocument.load(out)
+    assert "OEBPS/cop.xhtml" not in guard_doc.spine_hrefs
+    assert len(guard_doc.spine_hrefs) == len(doc.spine_hrefs) - 1
+
+
+@_s8_pytestmark
+def test_units_excluding_matches_write_translated_drop(tmp_path: Path) -> None:
+    """§6.20.14.2 A-4 — `units_excluding()` la HAM DUY NHAT: so unit sau khi
+    loai phai khop CHINH XAC voi so unit con lai trong file output that."""
+    doc = EpubDocument.load(SOURDOUGH_EVERY_DAY_PATH)
+    dropped = {"OEBPS/cop.xhtml"}
+    units = doc.units_excluding(dropped)
+    dropped_unit_count = len(doc.units) - len(units)
+    assert dropped_unit_count > 0
+    assert all(u.doc_href != "OEBPS/cop.xhtml" for u in units)
+
+    translations = {u.unit_id: f"[VI] {u.text}" for u in units}
+    out = tmp_path / "out.epub"
+    doc.write_translated(translations, out, bilingual=False, drop_doc_hrefs=dropped)
+    guard_doc = EpubDocument.load(out)
+    assert len(guard_doc.units) == len(units)
+
+
+def _build_epub_with_img_ref_to_copyright_doc(path: Path) -> Path:
+    """Fixture toi thieu (Protocol 5: KHONG the tim EPUB that co <img> tro
+    toi trang ban quyen trong data/uploads/ hien co — day la fixture dung de
+    kiem nhanh (g) deny-by-default, khong phai xay lai contract da verify
+    bang file that o test tren) — 2 spine doc: `chap1.xhtml` (noi dung) +
+    `copyright.xhtml` (se bi loai), VA 1 the <img src> trong `chap1.xhtml`
+    tro toi `copyright.xhtml` — dang tham chieu KHONG phan loai duoc (rule
+    (g), Architecture.md 6.28.6.3) -> phai `structural="skipped"`.
+    """
+    opf_dir = "OEBPS"
+    opf_path = f"{opf_dir}/content.opf"
+    chap_href = "xhtml/chap1.xhtml"
+    cop_href = "xhtml/copyright.xhtml"
+    chap_entry = f"{opf_dir}/{chap_href}"
+    cop_entry = f"{opf_dir}/{cop_href}"
+
+    chap_xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<head><title>Chapter 1</title></head>"
+        '<body><p>Noi dung chuong 1.</p><img src="copyright.xhtml"/></body></html>'
+    )
+    cop_xhtml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<head><title>Copyright</title></head>"
+        "<body><p>All rights reserved. No part of this publication. ISBN 000-0. "
+        "Copyright © 2020 Test.</p></body></html>"
+    )
+
+    opf = f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Book</dc:title>
+    <dc:identifier id="bookid">urn:uuid:test-book</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="chap1" href="{chap_href}" media-type="application/xhtml+xml"/>
+    <item id="cop" href="{cop_href}" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="chap1"/>
+    <itemref idref="cop"/>
+  </spine>
+</package>
+"""
+    ncx = f"""<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:uuid:test-book"/></head>
+  <docTitle><text>Test Book</text></docTitle>
+  <navMap>
+    <navPoint id="np1" playOrder="1">
+      <navLabel><text>Chapter 1</text></navLabel>
+      <content src="{chap_href}"/>
+    </navPoint>
+    <navPoint id="np2" playOrder="2">
+      <navLabel><text>Copyright</text></navLabel>
+      <content src="{cop_href}"/>
+    </navPoint>
+  </navMap>
+</ncx>
+"""
+    with zipfile.ZipFile(path, "w") as zf:
+        mimetype_info = zipfile.ZipInfo("mimetype")
+        mimetype_info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(mimetype_info, "application/epub+zip")
+        zf.writestr("META-INF/container.xml", _CONTAINER_XML.format(opf_path=opf_path))
+        zf.writestr(opf_path, opf)
+        zf.writestr(f"{opf_dir}/toc.ncx", ncx)
+        zf.writestr(chap_entry, chap_xhtml)
+        zf.writestr(cop_entry, cop_xhtml)
+    return path
+
+
+def test_write_translated_drop_doc_hrefs_skips_when_reference_unrecognized(
+    tmp_path: Path,
+) -> None:
+    """R8-02 deny-by-default (rule (g), Architecture.md 6.28.6.3): tham
+    chieu `<img src>` toi doc ban quyen KHONG phan loai duoc -> HUY xoa doc
+    do — file output GIONG HET nhanh khong xoa (doc van con nguyen trong
+    file, chi khong duoc dich — do la viec cua `units_excluding()`, doc lap
+    voi ham nay)."""
+    src = tmp_path / "book.epub"
+    _build_epub_with_img_ref_to_copyright_doc(src)
+    doc = EpubDocument.load(src)
+
+    dropped = {"OEBPS/xhtml/copyright.xhtml"}
+    units = doc.units_excluding(dropped)
+    translations = {u.unit_id: f"[VI] {u.text}" for u in units}
+
+    out_skipped = tmp_path / "out_skipped.epub"
+    structural = doc.write_translated(
+        translations, out_skipped, bilingual=False, drop_doc_hrefs=dropped
+    )
+    assert structural == {"OEBPS/xhtml/copyright.xhtml": "skipped"}
+
+    out_baseline = tmp_path / "out_baseline.epub"
+    doc.write_translated(translations, out_baseline, bilingual=False)
+
+    with zipfile.ZipFile(out_skipped) as zf_skipped, zipfile.ZipFile(out_baseline) as zf_base:
+        assert set(zf_skipped.namelist()) == set(zf_base.namelist())
+        assert "OEBPS/xhtml/copyright.xhtml" in zf_skipped.namelist()
+        assert zf_skipped.read("OEBPS/xhtml/copyright.xhtml") == zf_base.read(
+            "OEBPS/xhtml/copyright.xhtml"
+        )
+
+    guard_doc = EpubDocument.load(out_skipped)
+    assert "OEBPS/xhtml/copyright.xhtml" in guard_doc.spine_hrefs

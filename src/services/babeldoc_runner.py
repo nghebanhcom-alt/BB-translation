@@ -433,6 +433,14 @@ class BabeldocRunner:
     #: chunk dich bang engine nay co the dat `cost_source='metered'`.
     reports_token_usage: ClassVar[bool] = True
 
+    #: S8 (Architecture.md 6.28.5 R8-03). VERIFIED tren babeldoc 0.6.4 da
+    #: cai: `parse_pages()` tra nguyen van so nguoi dung nhap, va
+    #: `should_translate_page()` duoc goi voi so trang 1-based CUA CHINH
+    #: file dang parse (`translation_config.py:394-422`, call site
+    #: `legacy_parse.py:83`) — khong giu anh xa ve file goc, doi xung hoan
+    #: toan voi pdf2zh nen cat trang o Step 2b la an toan.
+    page_numbers_relative_to_input: ClassVar[bool] = True
+
     def __init__(
         self,
         executable: str = "babeldoc",

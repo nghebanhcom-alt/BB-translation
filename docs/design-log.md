@@ -7005,3 +7005,194 @@ Câu #2 là quyết định **sản phẩm** (đánh đổi độ ồn vs độ 
   thời điểm nào implement.
 
 Dev implement fix theo §6.27 + backfill 2 job thật ngay trong cùng task.
+
+---
+
+## S8 — Loại bỏ trang claim bản quyền (thiết kế, Tech Lead, 2026-09-17)
+
+> Hợp đồng hiện hành: `docs/Architecture.md` **§6.28**. Mục này chỉ ghi *vì sao* tới được thiết kế đó.
+
+### 1. Đo trước, chọn hằng số sau (không chọn ngưỡng từ trực giác)
+
+Chạy bộ chấm điểm nháp trên **13 PDF + 7 EPUB thật** trong `data/uploads/` trước khi viết một dòng
+hợp đồng nào. Ba điều chỉ lộ ra nhờ đo, không thể suy đoán:
+
+1. **Ca false positive nguy hiểm nhất không phải trang có nhiều từ khoá, mà là trang VỪA có bản
+   quyền VỪA có nội dung thật**: `[Baking Heaven]` tạp chí trang 6 đạt **8 điểm** (đủ mọi từ khoá
+   mạnh) nhưng thực chất là **mục lục công thức** dài 884 từ. Không ngưỡng điểm nào chặn được nó —
+   chỉ **trần số từ** (`MAX_WORDS = 600`) chặn được. Nếu thiết kế theo trực giác "score càng cao càng
+   chắc", đây là trang bị xoá mất.
+2. **`©` ở footer mọi trang là chuyện thường**: `Better_For_You_Packaged_Food` có `©` trên 11/12
+   trang. Vì thế `©` chỉ được 1 điểm, và pattern mạnh phải là `copyright ©` / `© <năm>` cạnh nhau.
+3. **Giả định "trang bản quyền ở đầu sách" SAI với 2/6 EPUB thật của chính user**: `Sourdough by
+   Science` để ở spine index 40/41, `Sourdough Every Day` ở 79/80. Nếu làm đúng theo chữ "thường ở
+   đầu sách" trong HOI-10 thì tính năng hỏng trên 1/3 sách EPUB thật. Đó là lý do §6.28.2 quét **đầu
+   + đuôi**.
+
+Tách sạch ở `MIN_SCORE = 5`: dương thật thấp nhất = 5 (`Faster Artisan Breads II`), âm cao nhất = 4
+(`17_Photo_Acknowledgements.xhtml`). Biên bằng 0 ở chiều dương → ghi thành `⚠️ ASSUMED S8-A1` kèm
+backlog có owner (R5-06), không giấu trong văn xuôi.
+
+Đã cân nhắc rồi **loại** `edition` khỏi danh sách từ khoá yếu: nó chỉ bắn trúng trang nội dung
+("previous editions"), không tăng được ca dương thật nào.
+
+### 2. Vì sao cắt trang ở Step 2b, không phải ở cost gate và cũng không phải sau khi dịch
+
+- **Sau khi dịch là sai mục tiêu**: tiền đã tiêu. Cắt phải xảy ra trước `plan_chunks()`, vì chunk là
+  đơn vị được gửi cho engine — trang không nằm trong chunk nào thì không bao giờ tới LLM.
+- **Trước OCR cũng sai**: file `pdf_scan` chưa có text layer, heuristic không có gì để đọc. Nên
+  Step 2b phải đứng **sau** cầu nối OCR.
+- **Không đụng `cost_gate.py`**: ước dư đúng phần trang bị cắt (~0,5%) là **chiều an toàn** theo
+  §6.11.6, và giữ bán kính thay đổi nhỏ. Sửa cost gate để "ước chính xác hơn" là tự chuốc rủi ro
+  ước THẤP — đúng loại lỗi đã gây sự cố $6.50.
+- Thực tế tiết kiệm được bao nhiêu: **1–2 trang/cuốn**. Nói thẳng ra đây không phải khoản tiết kiệm
+  lớn; giá trị chính là *không trả tiền cho thứ sẽ bị vứt đi* và output sạch. Không tô vẽ con số này.
+
+### 3. Protocol 8 audit — phát hiện đáng giá nhất nằm ở bước CŨ, đúng như Bug #9 đã dạy
+
+Bước duy nhất **hỏng thật sự** vì S8 không phải bước nào mới, mà là `create_bilingual_pdf(merged_path,
+file_path)` (`job_orchestrator.py:1070`) — bước có từ Increment đầu, không rẽ nhánh theo engine, "đã
+chạy ổn từ trước". Nó ghép **trang i bản VI với trang i bản gốc** (`bilingual_merge.py:18-21`). Cắt
+trang ở nguồn dịch mà quên cắt bản gốc ⇒ mọi trang sau trang bản quyền lệch cặp, job vẫn `completed`.
+Đây là lý do §6.28.4 bắt buộc có artifact thứ hai `original_pruned.pdf` và test assert tham số này.
+
+Ngược lại, `overlay_rotated_text()` **tự đúng** — vì nó đã đọc biến `translation_source_path` chứ
+không đọc `file_path`. Bất biến "chỉ có MỘT biến chỉ nguồn nội dung" của §6.10.5 trả cổ tức ở đây:
+bước nào tuân thủ nó thì miễn nhiễm với S8, bước nào đi đường vòng thì hỏng.
+
+Về 2 engine PDF: đọc source cả hai (`pdf2zh/pdf2zh.py:208-217`, `babeldoc/format/pdf/
+translation_config.py:394-422` + call site `legacy_parse.py:83`) xác nhận **cả hai đánh số `--pages`
+1-based trên chính file input**, không engine nào giữ ánh xạ về file gốc ⇒ cắt trước khi gọi là đối
+xứng hoàn toàn, không cần rẽ nhánh. Vẫn khai báo capability `page_numbers_relative_to_input` trên cả
+2 runner (R8-03) để engine thứ 3 buộc phải tự trả lời câu hỏi này thay vì im lặng thừa hưởng.
+
+### 4. EPUB: vì sao không chỉ "xoá file khỏi zip"
+
+Đo thật 6 EPUB: một doc bản quyền được trỏ tới từ **tối đa 5 nơi khác nhau** (OPF item + itemref,
+NCX `content` + `pageTarget`, nav `<li><a>`) — và **1/6 sách** (`Sourdough Every Day`) còn bị một
+**content doc thường** (`mini_toc.xhtml`) trỏ tới. Href là **tương đối theo thư mục file chứa nó** và
+có thể kèm **fragment** (`#page_iv`). Xoá entry mà bỏ qua bất kỳ điểm nào ⇒ link chết / spine trỏ vào
+hư không — đúng hạng lỗi BL-12.
+
+Hai quyết định để không lặp lại BL-12:
+- **Deny-by-default (R8-02)**: gặp tham chiếu không phân loại được (`<img>`, `<iframe>`, navPoint có
+  con) ⇒ `structural="skipped"`, **vẫn loại unit khỏi tập dịch** (tiền vẫn tiết kiệm, file vẫn hợp
+  lệ, trang chỉ còn nguyên tiếng Anh). Tính năng suy giảm mượt, không đánh đổi bằng file hỏng.
+- **Hậu kiểm trước khi `replace()`**: `load()` lại file tạm + quét lại toàn bộ entry để chắc chắn
+  không còn tham chiếu nào tới href đã xoá. Fail ⇒ ghi lại output **không xoá gì**. §6.25 đã chốt
+  "sửa ở bước GHI, không từ chối ở bước cuối"; ở đây là "tự kiểm ở bước ghi, không xuất file chưa
+  qua kiểm".
+
+### 5. Điểm dễ sai khi implement (để Reviewer soi đúng chỗ)
+
+1. `job.total_pages` phải gán **sau** khi cắt, không phải ở Step 2 như hiện tại — nó là input của
+   `plan_chunks()`.
+2. Gán lại **chính** `translation_source_path`, không thêm biến song song.
+3. `create_bilingual_pdf` — tham số thứ 2 (§3 ở trên).
+4. Job cũ đang resume (có Chunk row, `copyright_removed_json` NULL) ⇒ **không cắt**, nếu không
+   `page_start/page_end` đã ghi sẽ trỏ sai trang.
+5. EPUB: `job.total_units` và `plan_epub_chunks()` phải dùng **cùng một** hàm
+   `units_excluding(dropped)` — hai bộ lọc viết rời là công thức lệch nhau (§6.20.14.2 A-4).
+
+### 6. CLARIFY cho Hiếu (Protocol B — 1 câu, ngoài phạm vi HOI-10, đã có mặc định để Dev không bị chặn)
+
+**Câu S8-Q1**: HOI-10 chốt "chấp nhận rủi ro" cho *độ chính xác nhận diện*, nhưng không nói gì về ca
+EPUB mà việc xoá **có nguy cơ làm hỏng cấu trúc file** (doc bản quyền bị ảnh/iframe/navPoint-có-con
+trỏ tới).
+- *Mặc định đã viết vào §6.28.6.3*: xoá **có tiền kiểm + hậu kiểm**; không an toàn ⇒ giữ nguyên
+  trang trong file (không dịch nó) thay vì xuất file có nguy cơ hỏng.
+- *Phương án khác nếu Hiếu muốn triệt để hơn*: luôn xoá, chấp nhận khả năng reader báo lỗi link.
+- *Chặn bước nào nếu không trả lời*: không chặn — Dev implement theo mặc định; đổi ý sau chỉ là đổi
+  1 nhánh trong `write_translated()`.
+
+Không có câu CLARIFY nào khác. Mọi thứ còn lại nằm gọn trong HOI-10 hoặc đã có nguồn đo thật.
+
+---
+
+## 2026-09-17 — S8-B1 (QA blocking): `total_pages`/`total_units` không phản ánh số trang/unit SAU cắt
+
+**Vai**: Tech Lead. **Nguồn**: `docs/test-report.md` "Kết luận S8" (S8-B1), đọc trực tiếp source
+`src/api/routes/jobs.py`, `src/core/job_orchestrator.py`, `src/services/epub_document.py`.
+
+### 1. RCA — vì sao guard `is None` không bao giờ kích hoạt
+
+`POST /api/jobs` (`src/api/routes/jobs.py:648,652`) gán `total_pages=upload.page_count` và
+`total_units=cost_estimate.total_units` **ngay lúc tạo Job row**, trước khi orchestrator chạy. Tới
+`job_orchestrator.py:941` (`if job.total_pages is None`) và `:1388` (`if job.total_units is None`),
+điều kiện luôn False trên đường chạy thật ⇒ dòng ghi lại số sau cắt không bao giờ chạy. Test
+integration PASS vì fixture `_create_job()` không gán 2 field này (nhánh `is None` chỉ sống trong
+test) — đúng hình dạng lỗi R6-02 mô tả.
+
+Điểm quan trọng khi chọn hướng sửa: **`is None` ở 2 dòng đó KHÔNG phải một bất biến ngữ nghĩa**, nó
+chỉ là idiom "compute-if-missing" cho job tạo ngoài API (test, job cũ). Bất biến ngữ nghĩa THẬT nằm
+ở chỗ khác và đã được rà hết:
+
+| Nơi dùng | Ngữ nghĩa đang dựa vào | Ảnh hưởng nếu bỏ gán lúc tạo job (phương án (a)) |
+|---|---|---|
+| `routes/jobs.py:935-940` `GET /{job_id}/cost-estimate` | NULL ⇒ **HTTP 400** "Job chua co total_pages/total_units" | **VỠ**: mọi job mới mất endpoint ước giá |
+| `web/js/app.js:135-140` | `job.total_units` hiển thị ngay sau khi tạo job | **VỠ**: UI trống |
+| `web/js/history.js:43-46` | `total_pages` NULL = job EPUB (US-19/BR-HIST-02) | **VỠ**: job PDF cũng thành NULL ⇒ lịch sử hiển thị "-" |
+| `job_orchestrator.py:3332` `run_batch` (BR-BATCH-04 ngắn-trước) | NULL ⇒ fallback `file_size` | Suy giảm chất lượng sắp xếp |
+| `job_orchestrator.py:1822` `run_parse_only` timeout | `total_pages * 6.0` | Đã có guard riêng `:1785`, không vỡ |
+| `job_orchestrator.py:1593` ngưỡng fallback JOB EPUB (C-3) | `job.total_units or 0` | Nếu NULL lúc chạy ⇒ ngưỡng = max(1,0)=1 ⇒ fail oan |
+
+⇒ **Phương án (a) bị loại**: nó phá 3 hợp đồng đang chạy (cost-estimate 400, 2 chỗ UI) để sửa 1 bug.
+
+### 2. Phản biện phương án (b) "luôn ghi đè sau Step 2b"
+
+(b) đúng hướng nhưng nếu hiện thực bằng cách bỏ `is None` ở `:941`/`:1388` thành ghi đè vô điều
+kiện thì tạo ra 1 đường ghi SAI trong đúng 1 ca resume: kill-switch bị **tắt giữa chừng** sau khi
+job đã cắt và đã tạo Chunk row. Lúc đó `_apply_copyright_removal()` return sớm với path CHƯA cắt
+(`job_orchestrator.py:759-761` — kill-switch check nằm TRƯỚC nhánh đọc `copyright_removed_json`),
+ghi đè vô điều kiện sẽ kéo `total_pages` ngược về số trang gốc trong khi `chunks.page_start/page_end`
+đã đánh số theo file ĐÃ cắt ⇒ hai nguồn số trang lệch nhau vĩnh viễn trong cùng 1 job.
+
+### 3. Final Decision — phương án (c): ghi tại đúng chỗ biết cắt đã xảy ra, + replay quyết định đã cam kết
+
+**(c1)** Việc ghi `job.total_pages`/`job.total_units` sau cắt thuộc về **`_apply_copyright_removal()`
+/ `_apply_epub_copyright_removal()`** — nơi DUY NHẤT biết tập `removed` và path sau cắt — chứ không
+phải 2 dòng guard ở `run_job()`/`run_epub_job()`. Khi (và chỉ khi) có cắt thật sự xảy ra trong lần
+chạy này, ghi **vô điều kiện** (không kèm `is None`):
+- PDF: `job.total_pages = len(keep_indices)` (bằng `_count_pdf_pages(source_pruned_path)`), ngay
+  trước khi return cặp path đã cắt.
+- EPUB: `job.total_units = len(doc.units_excluding(removed))` ngay trước khi return tập href.
+
+Guard `is None` ở `:941` / `:1388` **GIỮ NGUYÊN** — nó vẫn là đường compute-if-missing hợp lệ cho
+job không đi qua cắt (kill-switch off, parse_only, job tạo ngoài API). Không nơi nào khác trong repo
+dựa vào "total_pages == page_count của file gốc" (đã grep toàn `src/`+`web/`, bảng §1 ở trên).
+
+**Idempotent qua resume/retry**: mỗi lần resume, `_apply_copyright_removal()` đọc lại `removed` từ
+`copyright_removed_json` (ghi 1 lần, §6.28.3) và tính lại `keep_indices` từ file gốc ⇒ luôn ra
+**cùng một** con số, ghi đè bằng chính giá trị cũ. Không có drift. Đây là lý do "ghi đè vô điều kiện
+*bên trong nhánh có cắt*" an toàn, khác hẳn "ghi đè vô điều kiện *ở cuối Step 2b*".
+
+**(c2) — sửa kèm, cùng gốc**: kill-switch chỉ được gate **quyết định mới** (lần quét đầu), KHÔNG
+được gate **replay một quyết định đã cam kết**. Đổi thứ tự trong `_apply_copyright_removal()` /
+`_apply_epub_copyright_removal()`: nếu job đã có Chunk row VÀ `copyright_removed_json.removed` khác
+rỗng ⇒ **vẫn cắt** dù `copyright_page_removal_enabled=False`, vì `chunks.page_start/page_end` (hoặc
+`unit_start/unit_end`) đã được đánh số theo file đã cắt — không cắt lúc này mới là silent
+corruption. Kill-switch vẫn giữ nguyên ý nghĩa "job mới chạy y hệt trước S8" (không có Chunk row ⇒
+return sớm như cũ). Muốn huỷ hẳn một job đã cắt: xoá job và tạo lại, không phải lật kill-switch.
+
+### 4. Việc Dev phải làm (kèm test chặn tái diễn)
+
+1. `src/core/job_orchestrator.py` `_apply_copyright_removal()` (~`:740-828`): thêm ghi
+   `job.total_pages` + `db_session.add/commit` trong nhánh có cắt; đổi thứ tự kill-switch theo (c2).
+2. `src/core/job_orchestrator.py` `_apply_epub_copyright_removal()` (~`:829-880`): tương tự với
+   `job.total_units`; hàm cần nhận `doc` (đã có) để gọi `units_excluding`.
+3. **KHÔNG** sửa `:941` / `:1388` (giữ `is None`), **KHÔNG** sửa `routes/jobs.py:648,652`.
+4. Test bắt buộc (chặn đúng lỗi fixture-vs-production đã để lọt): ít nhất 1 integration test tạo Job
+   **có sẵn** `total_pages`/`total_units` giống hệt `POST /api/jobs` (dùng `upload.page_count`), rồi
+   assert sau `run_job()`/`run_epub_job()`: `job.total_pages == số trang file output thật` và
+   `plan_chunks` nhận đúng con số đó. Thêm 1 test resume: chạy 2 lần, assert giá trị không đổi giữa
+   2 lần (idempotent), và 1 test kill-switch-tắt-giữa-chừng (c2) assert vẫn cắt khi đã có Chunk row.
+5. Tốt hơn nữa (không bắt buộc): sửa helper `_create_job()` trong
+   `tests/integration/test_job_orchestrator.py:204` để **mặc định gán** `total_pages` như route
+   thật, ép mọi test cũ chạy đúng nhánh production — đây mới là fix gốc của lý do bug lọt lưới.
+
+### 5. Hai mục non-blocking từ Reviewer — đã đồng bộ cùng lượt
+
+- §6.28.6.3 rule (f): bổ sung ngoại lệ "doc có đóng góp unit ⇒ LUÔN unwrap, không bao giờ xoá cả
+  container" (nguồn: `src/services/epub_document.py:1106-1115`, `:1231-1242`).
+- §6.28.3 ví dụ JSON: `structural` đổi từ scalar sang `dict[doc_href, "full"|"skipped"]` (nguồn:
+  `job_orchestrator.py:_record_epub_structural_result`, `MAX_REMOVED=3` cho phép nhiều doc/job).
