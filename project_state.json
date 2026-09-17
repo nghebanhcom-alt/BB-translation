@@ -319,7 +319,7 @@
     },
     {
       "id": "BL-21",
-      "text": "Quy trình — server production không tự restart, chặn tiến độ nhiều lần. Fix xong: /health mở rộng git_commit + code_stale (fingerprint mtime/size), scripts/restart_server.sh an toàn. Reviewer APPROVE",
+      "text": "Quy trình — server production không tự restart, chặn tiến độ nhiều lần. Fix xong: /health mở rộng git_commit + code_stale (fingerprint mtime/size), scripts/restart_server.sh an toàn. Reviewer APPROVE. Commit 7943970",
       "source": "qa",
       "ref": "docs/review-report.md — review BL-21 2026-09-17",
       "status": "done"
